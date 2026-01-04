@@ -1,0 +1,83 @@
+# Tiny JEPA training config (Imagenette auto-download).
+
+[dataset]
+imagenet_root = "data/imagenette2-160"
+train_dir = "train"
+val_dir = "val"
+prefetch_batches = 2
+prefetch_workers = 4
+cache_decoded = true
+cache_capacity = 512
+
+[dataset.download]
+type = "imagenette"
+variant = "imagenette2-160"
+
+[training]
+batch_size = 8
+max_iters = 200
+log_frequency = 20
+rollout_min_steps = 1
+rollout_max_steps = 4
+
+[optimizer]
+learning_rate = 0.0005
+weight_decay = 0.05
+
+[optimizer.lr_schedule]
+type = "constant"
+
+[vision]
+image_size = 160
+patch_size = 16
+in_channels = 3
+embed_dim = 128
+steps = 4
+n_head = 4
+mlp_internal_dim_multiplier = 4
+dropout = 0.1
+projection_dim = 128
+projection_hidden_dim = 256
+use_cls_token = true
+pos_encoding = "learned2d"
+attention_mode = "row_l1"
+fused_kernels = false
+relu_threshold = 0.0
+
+[mode]
+type = "lejepa"
+lambda = 0.02
+sigreg_knots = 17
+sigreg_t_max = 3.0
+sigreg_proj_dim = 256
+views = 8
+global_views = 2
+local_views = 6
+local_image_size = 96
+local_min_scale = 0.05
+local_max_scale = 0.3
+artifact_every = 1
+artifact_max_images = 4
+artifact_max_views = 2
+
+[augment]
+image_size = 160
+resize_short = 160
+min_scale = 0.08
+max_scale = 1.0
+min_aspect_ratio = 0.75
+max_aspect_ratio = 1.3333334
+flip_prob = 0.5
+color_jitter_prob = 0.8
+brightness = 0.4
+contrast = 0.4
+saturation = 0.2
+hue = 0.1
+grayscale_prob = 0.2
+blur_prob = 0.5
+blur_sigma_min = 0.1
+blur_sigma_max = 2.0
+solarize_prob = 0.2
+solarize_threshold = 128
+normalize_mean = [0.485, 0.456, 0.406]
+normalize_std = [0.229, 0.224, 0.225]

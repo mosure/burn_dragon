@@ -2258,6 +2258,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "burn_dino"
+version = "0.6.0"
+dependencies = [
+ "burn",
+ "console_error_panic_hook",
+ "safetensors 0.6.2",
+ "serde",
+ "wasm-bindgen",
+ "web-sys",
+]
+
+[[package]]
 name = "burn_dragon_hatchling"
 version = "0.3.0"
 dependencies = [
@@ -2270,6 +2282,7 @@ dependencies = [
  "burn-ndarray",
  "burn-train",
  "burn-wgpu",
+ "burn_dino",
  "clap 4.5.53",
  "console_error_panic_hook",
  "criterion",
@@ -2278,10 +2291,12 @@ dependencies = [
  "ctrlc",
  "cubecl",
  "cubecl-runtime",
+ "flate2",
  "futures-intrusive",
  "getrandom 0.2.16",
  "getrandom 0.3.4",
  "hf-hub",
+ "image 0.25.9",
  "indexmap 2.12.1",
  "js-sys",
  "names",
@@ -2294,6 +2309,7 @@ dependencies = [
  "rand 0.8.5",
  "serde",
  "serde_json",
+ "tar",
  "tempfile",
  "toml",
  "tracing",

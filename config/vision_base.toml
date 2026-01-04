@@ -1,0 +1,95 @@
+# Vision distillation config (ImageNet-1k + DINOv3 small features).
+
+[dataset]
+imagenet_root = "data/imagenet1k"
+train_dir = "train"
+val_dir = "val"
+prefetch_batches = 2
+prefetch_workers = 4
+cache_decoded = true
+cache_capacity = 512
+# max_records = 100000
+
+[training]
+batch_size = 64
+epochs = 90
+max_iters = 100000
+log_frequency = 200
+rollout_min_steps = 1
+rollout_max_steps = 6
+
+[optimizer]
+learning_rate = 0.0005
+weight_decay = 0.05
+
+[optimizer.lr_schedule]
+type = "cosine"
+min_lr = 0.00005
+num_iters = 100000
+
+[vision]
+image_size = 224
+patch_size = 14
+in_channels = 3
+embed_dim = 256
+steps = 6
+n_head = 4
+mlp_internal_dim_multiplier = 4
+dropout = 0.1
+projection_dim = 384
+projection_hidden_dim = 512
+use_cls_token = true
+pos_encoding = "learned2d"
+attention_mode = "row_l1"
+fused_kernels = false
+relu_threshold = 0.0
+
+[mode]
+type = "distill"
+
+[mode.teacher]
+type = "features"
+train_cls_path = "data/imagenet1k/features/dinov3_small/train_cls.bin"
+train_patch_path = "data/imagenet1k/features/dinov3_small/train_patch.bin"
+val_cls_path = "data/imagenet1k/features/dinov3_small/val_cls.bin"
+val_patch_path = "data/imagenet1k/features/dinov3_small/val_patch.bin"
+feature_dim = 384
+# patch_tokens = 256
+
+# Example (teacher model instead of feature files):
+# type = "model"
+# checkpoint_path = "data/imagenet1k/features/dinov3_small/dino_teacher.mpk"
+# variant = "vits"
+# register_tokens = 0
+# feature_dim = 384
+# patch_tokens = 256
+
+[mode.loss]
+patch_mse_weight = 1.0
+cls_mse_weight = 0.0
+cls_cosine_weight = 1.0
+rel_weight = 0.0
+rel_tau = 0.07
+# rel_sample_tokens = 128
+
+[augment]
+image_size = 224
+resize_short = 256
+min_scale = 0.08
+max_scale = 1.0
+min_aspect_ratio = 0.75
+max_aspect_ratio = 1.3333334
+flip_prob = 0.5
+color_jitter_prob = 1.0
+brightness = 0.4
+contrast = 0.4
+saturation = 0.0
+hue = 0.1
+grayscale_prob = 0.0
+blur_prob = 0.0
+blur_sigma_min = 0.1
+blur_sigma_max = 2.0
+solarize_prob = 0.0
+solarize_threshold = 128
+normalize_mean = [0.485, 0.456, 0.406]
+normalize_std = [0.229, 0.224, 0.225]

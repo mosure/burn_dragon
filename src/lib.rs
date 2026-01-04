@@ -20,7 +20,12 @@ pub use config::{ContextStrategyConfig, GenerationConfig, ModelOverrides, Traini
 #[cfg(feature = "train")]
 pub use config::{
     DatasetConfig, DatasetSourceConfig, HuggingFaceDatasetConfig, HuggingFaceRecordFormat,
-    LearningRateScheduleConfig, OptimizerConfig, TrainingConfig, load_training_config,
+    ImagenetteVariant, LearningRateScheduleConfig, OptimizerConfig, TrainingConfig,
+    VisionAugmentationConfig, VisionDatasetConfig, VisionDatasetDownloadConfig,
+    VisionDistillConfig, VisionLejepaConfig, VisionModelConfig, VisionTeacherConfig,
+    VisionTeacherFeatureConfig, VisionTeacherModelConfig, VisionTeacherVariant,
+    VisionTrainingConfig, VisionTrainingHyperparameters, VisionTrainingModeConfig,
+    load_training_config, load_vision_training_config,
 };
 #[cfg(feature = "train")]
 pub use dataset::{
@@ -34,6 +39,17 @@ pub use generation::{
 };
 pub use inference::build_model_config;
 pub use kernel::{BlockPattern1d, BlockPattern2d, BlockSparseConfig};
-pub use model::{BDH, BDHConfig, ModelState, language_model_loss};
+pub use model::{
+    BDH, BDHConfig, FusedKernelConfig, ModelState, PatchEmbed, PatchEmbedOutput, PatchGrid,
+    SpatialPositionalEncodingKind, VisionAttentionMode, VisionDragonHatchling,
+    VisionDragonHatchlingConfig, VisionDragonHatchlingOutput, VisionDistillationLossConfig,
+    language_model_loss, vision_distillation_loss,
+};
+#[cfg(feature = "train")]
+pub use model::{
+    CifarBatch, CifarDataLoader, CifarDataset, CifarSplit, CifarType, DinoFeatureStore,
+    ImageNetAugmentations, ImageNetBatch, ImageNetDataLoader, ImageNetDataset,
+    ImageNetDatasetConfig, ImageNetSplit, VisionNormalize,
+};
 pub use positional::RotaryEmbedding;
 pub use tokenizer::char_vocab::CharVocab;

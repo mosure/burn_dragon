@@ -13,7 +13,8 @@ pub use state::LayerVizState;
 pub use state::{LayerState, ModelState};
 pub use vision::{
     PatchEmbed, PatchEmbedOutput, PatchGrid, SpatialPositionalEncodingKind, VisionAttentionMode,
-    VisionDragonHatchling, VisionDragonHatchlingConfig, VisionDragonHatchlingOutput,
+    VisionDragonHatchling, VisionDragonHatchlingConfig, VisionDragonHatchlingOutput, patchify,
+    pool_patch_tokens, unpatchify,
 };
 #[cfg(feature = "train")]
 pub use vision::{

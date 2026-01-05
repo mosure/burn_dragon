@@ -1,3 +1,4 @@
+use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -11,6 +12,68 @@ use crate::model::{FusedKernelConfig, SpatialPositionalEncodingKind, VisionAtten
 use crate::model::VisionDistillationLossConfig;
 
 use super::OptimizerConfig;
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum VisionPyramidMode {
+    Stacked,
+    Laplacian,
+}
+
+impl Default for VisionPyramidMode {
+    fn default() -> Self {
+        Self::Laplacian
+    }
+}
+
+impl fmt::Display for VisionPyramidMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Stacked => write!(f, "stacked"),
+            Self::Laplacian => write!(f, "laplacian"),
+        }
+    }
+}
+
+impl ModuleDisplayDefault for VisionPyramidMode {
+    fn content(&self, content: Content) -> Option<Content> {
+        content.add_formatted(self).optional()
+    }
+}
+
+impl ModuleDisplay for VisionPyramidMode {}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum VisionArtifactOutputMode {
+    Images,
+    Avi,
+    Mp4,
+}
+
+impl Default for VisionArtifactOutputMode {
+    fn default() -> Self {
+        Self::Images
+    }
+}
+
+impl fmt::Display for VisionArtifactOutputMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Images => write!(f, "images"),
+            Self::Avi => write!(f, "avi"),
+            Self::Mp4 => write!(f, "mp4"),
+        }
+    }
+}
+
+impl ModuleDisplayDefault for VisionArtifactOutputMode {
+    fn content(&self, content: Content) -> Option<Content> {
+        content.add_formatted(self).optional()
+    }
+}
+
+impl ModuleDisplay for VisionArtifactOutputMode {}
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct VisionTrainingConfig {
@@ -29,6 +92,8 @@ pub struct VisionTrainingConfig {
 pub enum VisionTrainingModeConfig {
     Distill(VisionDistillConfig),
     Lejepa(VisionLejepaConfig),
+    Mae(VisionMaeConfig),
+    Saccade(VisionSaccadeConfig),
 }
 
 impl Default for VisionTrainingModeConfig {
@@ -135,6 +200,7 @@ pub struct VisionLejepaConfig {
     pub local_image_size: usize,
     pub local_min_scale: f32,
     pub local_max_scale: f32,
+    pub artifact_output: VisionArtifactOutputMode,
     pub artifact_every: usize,
     pub artifact_max_images: usize,
     pub artifact_max_views: usize,
@@ -157,6 +223,7 @@ impl Default for VisionLejepaConfig {
             local_image_size: 96,
             local_min_scale: 0.05,
             local_max_scale: 0.3,
+            artifact_output: VisionArtifactOutputMode::Avi,
             artifact_every: 0,
             artifact_max_images: 4,
             artifact_max_views: 3,
@@ -217,6 +284,7 @@ impl ModuleDisplayDefault for VisionLejepaConfig {
             .add("local_image_size", &self.local_image_size)
             .add("local_min_scale", &self.local_min_scale)
             .add("local_max_scale", &self.local_max_scale)
+            .add("artifact_output", &self.artifact_output)
             .add("artifact_every", &self.artifact_every)
             .add("artifact_max_images", &self.artifact_max_images)
             .add("artifact_max_views", &self.artifact_max_views)
@@ -226,6 +294,192 @@ impl ModuleDisplayDefault for VisionLejepaConfig {
 }
 
 impl ModuleDisplay for VisionLejepaConfig {}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct VisionMaeConfig {
+    pub mask_ratio: f32,
+    pub recon_weight: f32,
+    pub recon_hidden_dim: usize,
+    pub artifact_output: VisionArtifactOutputMode,
+    pub artifact_every: usize,
+    pub artifact_max_images: usize,
+    pub artifact_max_views: usize,
+    pub artifact_overwrite: bool,
+}
+
+impl Default for VisionMaeConfig {
+    fn default() -> Self {
+        Self {
+            mask_ratio: 0.75,
+            recon_weight: 1.0,
+            recon_hidden_dim: 256,
+            artifact_output: VisionArtifactOutputMode::Images,
+            artifact_every: 0,
+            artifact_max_images: 4,
+            artifact_max_views: 3,
+            artifact_overwrite: true,
+        }
+    }
+}
+
+impl<B: Backend> Module<B> for VisionMaeConfig {
+    type Record = ();
+
+    fn collect_devices(&self, devices: burn::module::Devices<B>) -> burn::module::Devices<B> {
+        devices
+    }
+
+    fn fork(self, _device: &B::Device) -> Self {
+        self
+    }
+
+    fn to_device(self, _device: &B::Device) -> Self {
+        self
+    }
+
+    fn visit<Visitor: burn::module::ModuleVisitor<B>>(&self, _visitor: &mut Visitor) {}
+
+    fn map<Mapper: burn::module::ModuleMapper<B>>(self, _mapper: &mut Mapper) -> Self {
+        self
+    }
+
+    fn load_record(self, _record: Self::Record) -> Self {
+        self
+    }
+
+    fn into_record(self) -> Self::Record {}
+}
+
+impl<B: AutodiffBackend> AutodiffModule<B> for VisionMaeConfig {
+    type InnerModule = VisionMaeConfig;
+
+    fn valid(&self) -> Self::InnerModule {
+        self.clone()
+    }
+}
+
+impl ModuleDisplayDefault for VisionMaeConfig {
+    fn content(&self, content: Content) -> Option<Content> {
+        content
+            .add("mask_ratio", &self.mask_ratio)
+            .add("recon_weight", &self.recon_weight)
+            .add("recon_hidden_dim", &self.recon_hidden_dim)
+            .add("artifact_output", &self.artifact_output)
+            .add("artifact_every", &self.artifact_every)
+            .add("artifact_max_images", &self.artifact_max_images)
+            .add("artifact_max_views", &self.artifact_max_views)
+            .add("artifact_overwrite", &self.artifact_overwrite)
+            .optional()
+    }
+}
+
+impl ModuleDisplay for VisionMaeConfig {}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct VisionSaccadeConfig {
+    pub num_eyes: usize,
+    pub trajectory_tokens: usize,
+    pub mip_levels: usize,
+    pub pyramid_mode: VisionPyramidMode,
+    pub lambda: f32,
+    pub sigreg_knots: usize,
+    pub sigreg_t_max: f32,
+    pub sigreg_proj_dim: usize,
+    pub recon_weight: f32,
+    pub recon_mask_ratio: f32,
+    pub recon_hidden_dim: usize,
+    pub artifact_output: VisionArtifactOutputMode,
+    pub artifact_every: usize,
+    pub artifact_max_images: usize,
+    pub artifact_max_views: usize,
+    pub artifact_overwrite: bool,
+}
+
+impl Default for VisionSaccadeConfig {
+    fn default() -> Self {
+        Self {
+            num_eyes: 2,
+            trajectory_tokens: 64,
+            mip_levels: 3,
+            pyramid_mode: VisionPyramidMode::Laplacian,
+            lambda: 0.02,
+            sigreg_knots: 17,
+            sigreg_t_max: 3.0,
+            sigreg_proj_dim: 256,
+            recon_weight: 0.0,
+            recon_mask_ratio: 0.75,
+            recon_hidden_dim: 256,
+            artifact_output: VisionArtifactOutputMode::Avi,
+            artifact_every: 0,
+            artifact_max_images: 4,
+            artifact_max_views: 3,
+            artifact_overwrite: true,
+        }
+    }
+}
+
+impl<B: Backend> Module<B> for VisionSaccadeConfig {
+    type Record = ();
+
+    fn collect_devices(&self, devices: burn::module::Devices<B>) -> burn::module::Devices<B> {
+        devices
+    }
+
+    fn fork(self, _device: &B::Device) -> Self {
+        self
+    }
+
+    fn to_device(self, _device: &B::Device) -> Self {
+        self
+    }
+
+    fn visit<Visitor: burn::module::ModuleVisitor<B>>(&self, _visitor: &mut Visitor) {}
+
+    fn map<Mapper: burn::module::ModuleMapper<B>>(self, _mapper: &mut Mapper) -> Self {
+        self
+    }
+
+    fn load_record(self, _record: Self::Record) -> Self {
+        self
+    }
+
+    fn into_record(self) -> Self::Record {}
+}
+
+impl<B: AutodiffBackend> AutodiffModule<B> for VisionSaccadeConfig {
+    type InnerModule = VisionSaccadeConfig;
+
+    fn valid(&self) -> Self::InnerModule {
+        self.clone()
+    }
+}
+
+impl ModuleDisplayDefault for VisionSaccadeConfig {
+    fn content(&self, content: Content) -> Option<Content> {
+        content
+            .add("num_eyes", &self.num_eyes)
+            .add("trajectory_tokens", &self.trajectory_tokens)
+            .add("mip_levels", &self.mip_levels)
+            .add("pyramid_mode", &self.pyramid_mode)
+            .add("lambda", &self.lambda)
+            .add("sigreg_knots", &self.sigreg_knots)
+            .add("sigreg_t_max", &self.sigreg_t_max)
+            .add("sigreg_proj_dim", &self.sigreg_proj_dim)
+            .add("recon_weight", &self.recon_weight)
+            .add("recon_mask_ratio", &self.recon_mask_ratio)
+            .add("recon_hidden_dim", &self.recon_hidden_dim)
+            .add("artifact_output", &self.artifact_output)
+            .add("artifact_every", &self.artifact_every)
+            .add("artifact_max_images", &self.artifact_max_images)
+            .add("artifact_max_views", &self.artifact_max_views)
+            .add("artifact_overwrite", &self.artifact_overwrite)
+            .optional()
+    }
+}
+
+impl ModuleDisplay for VisionSaccadeConfig {}
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -629,6 +883,7 @@ mod tests {
             local_image_size = 96
             local_min_scale = 0.05
             local_max_scale = 0.3
+            artifact_output = "avi"
             artifact_every = 5
             artifact_max_images = 3
             artifact_max_views = 2
@@ -653,10 +908,151 @@ mod tests {
                 assert_eq!(lejepa.local_image_size, 96);
                 assert!((lejepa.local_min_scale - 0.05).abs() < f32::EPSILON);
                 assert!((lejepa.local_max_scale - 0.3).abs() < f32::EPSILON);
+                assert_eq!(lejepa.artifact_output, VisionArtifactOutputMode::Avi);
                 assert_eq!(lejepa.artifact_every, 5);
                 assert_eq!(lejepa.artifact_max_images, 3);
                 assert_eq!(lejepa.artifact_max_views, 2);
                 assert!(lejepa.artifact_overwrite);
+            }
+            other => panic!("unexpected mode: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mae_mode_parses() {
+        let text = r#"
+            [dataset]
+            imagenet_root = "data/imagenet1k"
+            train_dir = "train"
+            val_dir = "val"
+
+            [training]
+            batch_size = 8
+            max_iters = 10
+            log_frequency = 2
+
+            [optimizer]
+            learning_rate = 0.001
+            weight_decay = 0.1
+
+            [vision]
+            image_size = 224
+            patch_size = 14
+            in_channels = 3
+            embed_dim = 256
+            steps = 4
+            n_head = 4
+            mlp_internal_dim_multiplier = 4
+            dropout = 0.1
+            projection_dim = 384
+            projection_hidden_dim = 512
+            use_cls_token = true
+            pos_encoding = "learned2d"
+            attention_mode = "row_l1"
+            fused_kernels = false
+            relu_threshold = 0.0
+
+            [mode]
+            type = "mae"
+            mask_ratio = 0.8
+            recon_weight = 1.2
+            recon_hidden_dim = 192
+            artifact_output = "images"
+            artifact_every = 3
+            artifact_max_images = 2
+            artifact_max_views = 1
+            artifact_overwrite = true
+        "#;
+
+        let config: VisionTrainingConfig = toml::from_str(text).expect("parse mae config");
+        match config.mode {
+            VisionTrainingModeConfig::Mae(mae) => {
+                assert!((mae.mask_ratio - 0.8).abs() < f32::EPSILON);
+                assert!((mae.recon_weight - 1.2).abs() < f32::EPSILON);
+                assert_eq!(mae.recon_hidden_dim, 192);
+                assert_eq!(mae.artifact_output, VisionArtifactOutputMode::Images);
+                assert_eq!(mae.artifact_every, 3);
+                assert_eq!(mae.artifact_max_images, 2);
+                assert_eq!(mae.artifact_max_views, 1);
+                assert!(mae.artifact_overwrite);
+            }
+            other => panic!("unexpected mode: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn saccade_mode_parses() {
+        let text = r#"
+            [dataset]
+            imagenet_root = "data/imagenet1k"
+            train_dir = "train"
+            val_dir = "val"
+
+            [training]
+            batch_size = 8
+            max_iters = 10
+            log_frequency = 2
+
+            [optimizer]
+            learning_rate = 0.001
+            weight_decay = 0.1
+
+            [vision]
+            image_size = 224
+            patch_size = 14
+            in_channels = 3
+            embed_dim = 256
+            steps = 4
+            n_head = 4
+            mlp_internal_dim_multiplier = 4
+            dropout = 0.1
+            projection_dim = 384
+            projection_hidden_dim = 512
+            use_cls_token = true
+            pos_encoding = "learned2d"
+            attention_mode = "row_l1"
+            fused_kernels = false
+            relu_threshold = 0.0
+
+            [mode]
+            type = "saccade"
+            num_eyes = 2
+            trajectory_tokens = 96
+            mip_levels = 4
+            pyramid_mode = "laplacian"
+            lambda = 0.05
+            sigreg_knots = 9
+            sigreg_t_max = 2.0
+            sigreg_proj_dim = 192
+            recon_weight = 0.9
+            recon_mask_ratio = 0.7
+            recon_hidden_dim = 320
+            artifact_output = "avi"
+            artifact_every = 4
+            artifact_max_images = 3
+            artifact_max_views = 2
+            artifact_overwrite = false
+        "#;
+
+        let config: VisionTrainingConfig = toml::from_str(text).expect("parse saccade config");
+        match config.mode {
+            VisionTrainingModeConfig::Saccade(saccade) => {
+                assert_eq!(saccade.num_eyes, 2);
+                assert_eq!(saccade.trajectory_tokens, 96);
+                assert_eq!(saccade.mip_levels, 4);
+                assert_eq!(saccade.pyramid_mode, VisionPyramidMode::Laplacian);
+                assert!((saccade.lambda - 0.05).abs() < f32::EPSILON);
+                assert_eq!(saccade.sigreg_knots, 9);
+                assert!((saccade.sigreg_t_max - 2.0).abs() < f32::EPSILON);
+                assert_eq!(saccade.sigreg_proj_dim, 192);
+                assert!((saccade.recon_weight - 0.9).abs() < f32::EPSILON);
+                assert!((saccade.recon_mask_ratio - 0.7).abs() < f32::EPSILON);
+                assert_eq!(saccade.recon_hidden_dim, 320);
+                assert_eq!(saccade.artifact_output, VisionArtifactOutputMode::Avi);
+                assert_eq!(saccade.artifact_every, 4);
+                assert_eq!(saccade.artifact_max_images, 3);
+                assert_eq!(saccade.artifact_max_views, 2);
+                assert!(!saccade.artifact_overwrite);
             }
             other => panic!("unexpected mode: {other:?}"),
         }

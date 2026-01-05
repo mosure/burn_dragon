@@ -126,6 +126,9 @@ pub struct VisionLejepaConfig {
     pub sigreg_knots: usize,
     pub sigreg_t_max: f32,
     pub sigreg_proj_dim: usize,
+    pub recon_weight: f32,
+    pub recon_mask_ratio: f32,
+    pub recon_hidden_dim: usize,
     pub views: usize,
     pub global_views: usize,
     pub local_views: usize,
@@ -135,6 +138,7 @@ pub struct VisionLejepaConfig {
     pub artifact_every: usize,
     pub artifact_max_images: usize,
     pub artifact_max_views: usize,
+    pub artifact_overwrite: bool,
 }
 
 impl Default for VisionLejepaConfig {
@@ -144,6 +148,9 @@ impl Default for VisionLejepaConfig {
             sigreg_knots: 17,
             sigreg_t_max: 3.0,
             sigreg_proj_dim: 256,
+            recon_weight: 0.0,
+            recon_mask_ratio: 0.75,
+            recon_hidden_dim: 256,
             views: 4,
             global_views: 0,
             local_views: 0,
@@ -152,7 +159,8 @@ impl Default for VisionLejepaConfig {
             local_max_scale: 0.3,
             artifact_every: 0,
             artifact_max_images: 4,
-            artifact_max_views: 2,
+            artifact_max_views: 3,
+            artifact_overwrite: true,
         }
     }
 }
@@ -200,6 +208,9 @@ impl ModuleDisplayDefault for VisionLejepaConfig {
             .add("sigreg_knots", &self.sigreg_knots)
             .add("sigreg_t_max", &self.sigreg_t_max)
             .add("sigreg_proj_dim", &self.sigreg_proj_dim)
+            .add("recon_weight", &self.recon_weight)
+            .add("recon_mask_ratio", &self.recon_mask_ratio)
+            .add("recon_hidden_dim", &self.recon_hidden_dim)
             .add("views", &self.views)
             .add("global_views", &self.global_views)
             .add("local_views", &self.local_views)
@@ -209,6 +220,7 @@ impl ModuleDisplayDefault for VisionLejepaConfig {
             .add("artifact_every", &self.artifact_every)
             .add("artifact_max_images", &self.artifact_max_images)
             .add("artifact_max_views", &self.artifact_max_views)
+            .add("artifact_overwrite", &self.artifact_overwrite)
             .optional()
     }
 }
@@ -608,6 +620,9 @@ mod tests {
             sigreg_knots = 19
             sigreg_t_max = 2.5
             sigreg_proj_dim = 128
+            recon_weight = 0.7
+            recon_mask_ratio = 0.6
+            recon_hidden_dim = 192
             views = 4
             global_views = 2
             local_views = 6
@@ -617,6 +632,7 @@ mod tests {
             artifact_every = 5
             artifact_max_images = 3
             artifact_max_views = 2
+            artifact_overwrite = true
         "#;
 
         let config: VisionTrainingConfig = toml::from_str(text).expect("parse lejepa config");
@@ -628,6 +644,9 @@ mod tests {
                 assert_eq!(lejepa.sigreg_knots, 19);
                 assert!((lejepa.sigreg_t_max - 2.5).abs() < f32::EPSILON);
                 assert_eq!(lejepa.sigreg_proj_dim, 128);
+                assert!((lejepa.recon_weight - 0.7).abs() < f32::EPSILON);
+                assert!((lejepa.recon_mask_ratio - 0.6).abs() < f32::EPSILON);
+                assert_eq!(lejepa.recon_hidden_dim, 192);
                 assert_eq!(lejepa.views, 4);
                 assert_eq!(lejepa.global_views, 2);
                 assert_eq!(lejepa.local_views, 6);
@@ -637,6 +656,7 @@ mod tests {
                 assert_eq!(lejepa.artifact_every, 5);
                 assert_eq!(lejepa.artifact_max_images, 3);
                 assert_eq!(lejepa.artifact_max_views, 2);
+                assert!(lejepa.artifact_overwrite);
             }
             other => panic!("unexpected mode: {other:?}"),
         }

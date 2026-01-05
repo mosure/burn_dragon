@@ -66,8 +66,10 @@ fn run() -> Result<()> {
 
     #[cfg(feature = "viz")]
     let use_viz = args.viz;
-    #[cfg(not(feature = "viz"))]
+    #[cfg(all(not(feature = "viz"), feature = "cuda"))]
     let use_viz = false;
+    #[cfg(all(not(feature = "viz"), not(feature = "cuda")))]
+    let _use_viz = false;
 
     match args.backend {
         BackendArg::Wgpu => {

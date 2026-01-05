@@ -14,7 +14,7 @@ type = "imagenette"
 variant = "imagenette2-160"
 
 [training]
-batch_size = 8
+batch_size = 32
 max_iters = 200
 log_frequency = 20
 rollout_min_steps = 1
@@ -50,6 +50,9 @@ lambda = 0.02
 sigreg_knots = 17
 sigreg_t_max = 3.0
 sigreg_proj_dim = 256
+recon_weight = 1.0
+recon_mask_ratio = 0.75
+recon_hidden_dim = 256
 views = 8
 global_views = 2
 local_views = 6
@@ -58,7 +61,8 @@ local_min_scale = 0.05
 local_max_scale = 0.3
 artifact_every = 1
 artifact_max_images = 4
-artifact_max_views = 2
+artifact_max_views = 3
+artifact_overwrite = true
 
 [augment]
 image_size = 160

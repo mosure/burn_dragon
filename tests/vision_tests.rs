@@ -44,6 +44,44 @@ fn patch_embed_and_model_shapes() {
 }
 
 #[test]
+fn patch_embed_raw_matches_add_position() {
+    type Backend = NdArray<f32>;
+    let device = <Backend as BackendTrait>::Device::default();
+
+    let config = VisionDragonHatchlingConfig {
+        image_size: 32,
+        patch_size: 8,
+        in_channels: 3,
+        embed_dim: 16,
+        steps: 2,
+        n_head: 4,
+        mlp_internal_dim_multiplier: 2,
+        dropout: 0.0,
+        projection_dim: 8,
+        projection_hidden_dim: 16,
+        use_cls_token: true,
+        pos_encoding: SpatialPositionalEncodingKind::Learned2d,
+        pos_max_height: 4,
+        pos_max_width: 4,
+        attention_mode: VisionAttentionMode::RowL1,
+        fused_kernels: FusedKernelConfig::default(),
+    };
+
+    let images = Tensor::<Backend, 4>::random([2, 3, 32, 32], Distribution::Default, &device);
+    let model = VisionDragonHatchling::<Backend>::new(config, &device);
+    let raw = model.patch_embed_raw(images.clone());
+    let with_pos = model.add_patch_position(raw.tokens.clone(), raw.grid);
+    let embedded = model.patch_embed(images).tokens;
+    let diff = (embedded - with_pos).powf_scalar(2.0).mean();
+    let value = diff
+        .to_data()
+        .convert::<f32>()
+        .into_vec::<f32>()
+        .expect("diff vec")[0];
+    assert!(value < 1e-6);
+}
+
+#[test]
 fn vision_forward_steps_shapes() {
     type Backend = NdArray<f32>;
     let device = <Backend as BackendTrait>::Device::default();

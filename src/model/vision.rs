@@ -531,6 +531,10 @@ impl<B: Backend> VisionDragonHatchling<B> {
         self.patch_embed.forward(images)
     }
 
+    pub fn patch_embed_raw(&self, images: Tensor<B, 4>) -> PatchEmbedOutput<B> {
+        self.patch_embed.forward_raw(images)
+    }
+
     pub fn add_patch_position(&self, tokens: Tensor<B, 3>, grid: PatchGrid) -> Tensor<B, 3> {
         self.patch_embed.add_position(tokens, grid)
     }

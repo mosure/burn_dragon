@@ -1,4 +1,4 @@
-# Tiny JEPA training config (Imagenette auto-download).
+# Tiny saccade training config (Imagenette auto-download).
 
 [dataset]
 imagenet_root = "data/imagenette2-160"
@@ -14,8 +14,8 @@ type = "imagenette"
 variant = "imagenette2-160"
 
 [training]
-batch_size = 32
-max_iters = 2000
+batch_size = 8
+max_iters = 200
 log_frequency = 20
 rollout_min_steps = 1
 rollout_max_steps = 4
@@ -45,31 +45,32 @@ fused_kernels = false
 relu_threshold = 0.0
 
 [mode]
-type = "lejepa"
+type = "saccade"
+# number of parallel foveated streams (eyes) sharing the same recurrent pyramid
+num_eyes = 2
+# number of latent trajectory tokens; each step predicts (x, y, sigma) per token
+trajectory_tokens = 64
+# number of MIP levels (2x downsample per level) used for Gaussian sampling
+mip_levels = 3
+# how pyramid scales are represented: stacked (raw) or laplacian (residual)
+pyramid_mode = "laplacian"
+# LeJEPA-style loss over the feature pyramid (invariance + sigreg)
 lambda = 0.02
 sigreg_knots = 17
 sigreg_t_max = 3.0
 sigreg_proj_dim = 256
-recon_weight = 1.0
-# fraction of patches to mask for the MAE-style reconstruction loss
-recon_mask_ratio = 0.75
+# reconstruction loss is a diagnostic metric by default
+recon_weight = 0.0
+# saccade ignores MAE-style masking (full-image reconstruction)
+recon_mask_ratio = 0.0
 recon_hidden_dim = 256
-# total number of views when global_views/local_views are 0
-views = 8
-# enable multi-crop when > 0 (global views use base augmentations)
-global_views = 2
-# local views use local_* crop settings below
-local_views = 6
-local_image_size = 96
-local_min_scale = 0.05
-local_max_scale = 0.3
 # write artifact images every N validation iterations (0 disables)
 artifact_every = 1
 # artifact output: images (png), avi, or mp4
 artifact_output = "avi"
 # max images per artifact batch (caps batch rows)
 artifact_max_images = 4
-# max views per image (caps number of crops shown)
+# max panels per image (input/recon + extra trajectory overlays)
 artifact_max_views = 3
 # overwrite validation artifacts instead of keeping history
 artifact_overwrite = true

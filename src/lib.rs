@@ -9,6 +9,8 @@ pub mod kernel;
 pub mod model;
 pub mod positional;
 pub mod tokenizer;
+#[cfg(feature = "train")]
+pub mod train;
 #[cfg(feature = "viz")]
 pub mod viz;
 #[cfg(feature = "cli")]
@@ -21,8 +23,9 @@ pub use config::{ContextStrategyConfig, GenerationConfig, ModelOverrides, Traini
 pub use config::{
     DatasetConfig, DatasetSourceConfig, HuggingFaceDatasetConfig, HuggingFaceRecordFormat,
     ImagenetteVariant, LearningRateScheduleConfig, OptimizerConfig, TrainingConfig,
-    VisionAugmentationConfig, VisionDatasetConfig, VisionDatasetDownloadConfig,
-    VisionDistillConfig, VisionLejepaConfig, VisionModelConfig, VisionTeacherConfig,
+    VisionArtifactOutputMode, VisionAugmentationConfig, VisionDatasetConfig,
+    VisionDatasetDownloadConfig, VisionDistillConfig, VisionLejepaConfig, VisionMaeConfig,
+    VisionModelConfig, VisionPyramidMode, VisionSaccadeConfig, VisionTeacherConfig,
     VisionTeacherFeatureConfig, VisionTeacherModelConfig, VisionTeacherVariant,
     VisionTrainingConfig, VisionTrainingHyperparameters, VisionTrainingModeConfig,
     load_training_config, load_vision_training_config,
@@ -43,7 +46,7 @@ pub use model::{
     BDH, BDHConfig, FusedKernelConfig, ModelState, PatchEmbed, PatchEmbedOutput, PatchGrid,
     SpatialPositionalEncodingKind, VisionAttentionMode, VisionDragonHatchling,
     VisionDragonHatchlingConfig, VisionDragonHatchlingOutput, VisionDistillationLossConfig,
-    language_model_loss, vision_distillation_loss,
+    language_model_loss, patchify, pool_patch_tokens, unpatchify, vision_distillation_loss,
 };
 #[cfg(feature = "train")]
 pub use model::{

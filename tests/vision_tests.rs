@@ -1,8 +1,8 @@
 use burn::tensor::backend::Backend as BackendTrait;
 use burn::tensor::{Distribution, Tensor};
 use burn_dragon_hatchling::{
-    FusedKernelConfig, PatchEmbed, SpatialPositionalEncodingKind, VisionAttentionMode,
-    VisionDragonHatchling, VisionDragonHatchlingConfig,
+    FusedKernelConfig, PatchEmbed, PatchGrid, SpatialPositionalEncodingKind,
+    VisionAttentionMode, VisionDragonHatchling, VisionDragonHatchlingConfig, pool_patch_tokens,
 };
 use burn_ndarray::NdArray;
 
@@ -123,6 +123,19 @@ fn vision_forward_steps_shapes() {
     let embed_out = model.forward_tokens_embed_steps(patch.tokens, 2);
     assert_eq!(embed_out.patch_tokens.shape().dims(), [2, 16, 16]);
     assert_eq!(embed_out.cls_token.shape().dims(), [2, 16]);
+}
+
+#[test]
+fn pool_patch_tokens_downsamples() {
+    type Backend = NdArray<f32>;
+    let device = <Backend as BackendTrait>::Device::default();
+
+    let tokens = Tensor::<Backend, 3>::random([1, 4, 8], Distribution::Default, &device);
+    let grid = PatchGrid { height: 2, width: 2 };
+    let (pooled, pooled_grid) = pool_patch_tokens(tokens, grid);
+    assert_eq!(pooled.shape().dims(), [1, 1, 8]);
+    assert_eq!(pooled_grid.height, 1);
+    assert_eq!(pooled_grid.width, 1);
 }
 
 #[cfg(feature = "train")]

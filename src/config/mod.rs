@@ -13,7 +13,8 @@ pub use train::{
 #[cfg(feature = "train")]
 pub use vision::{
     ImagenetteVariant, VisionAugmentationConfig, VisionDatasetConfig, VisionDatasetDownloadConfig,
-    VisionDistillConfig, VisionLejepaConfig, VisionModelConfig, VisionTeacherConfig,
+    VisionArtifactOutputMode, VisionDistillConfig, VisionLejepaConfig, VisionMaeConfig,
+    VisionModelConfig, VisionPyramidMode, VisionSaccadeConfig, VisionTeacherConfig,
     VisionTeacherFeatureConfig, VisionTeacherModelConfig, VisionTeacherVariant,
     VisionTrainingConfig, VisionTrainingHyperparameters, VisionTrainingModeConfig,
     load_vision_training_config,

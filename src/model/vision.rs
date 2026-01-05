@@ -277,6 +277,84 @@ impl<B: Backend> PatchEmbed<B> {
     }
 }
 
+pub fn pool_patch_tokens<B: Backend>(
+    tokens: Tensor<B, 3>,
+    grid: PatchGrid,
+) -> (Tensor<B, 3>, PatchGrid) {
+    let [batch, tokens_len, dim] = tokens.shape().dims::<3>();
+    let grid_h = grid.height;
+    let grid_w = grid.width;
+    if grid_h == 0 || grid_w == 0 || grid_h * grid_w != tokens_len {
+        return (tokens, grid);
+    }
+    let even_h = grid_h - (grid_h % 2);
+    let even_w = grid_w - (grid_w % 2);
+    if even_h == 0 || even_w == 0 {
+        return (tokens, grid);
+    }
+    let tokens = tokens.reshape([batch, grid_h, grid_w, dim]);
+    let tokens = tokens
+        .slice_dim(1, 0..even_h)
+        .slice_dim(2, 0..even_w);
+    let next_h = even_h / 2;
+    let next_w = even_w / 2;
+    let tokens = tokens
+        .reshape([batch, next_h, 2, next_w, 2, dim])
+        .mean_dim(2)
+        .mean_dim(4)
+        .reshape([batch, next_h * next_w, dim]);
+    (
+        tokens,
+        PatchGrid {
+            height: next_h,
+            width: next_w,
+        },
+    )
+}
+
+pub fn patchify<B: Backend>(images: Tensor<B, 4>, patch_size: usize) -> Tensor<B, 3> {
+    let [batch, channels, height, width] = images.shape().dims::<4>();
+    assert!(
+        height.is_multiple_of(patch_size) && width.is_multiple_of(patch_size),
+        "patchify expects height/width divisible by patch size"
+    );
+    let grid_h = height / patch_size;
+    let grid_w = width / patch_size;
+    images
+        .reshape([batch, channels, grid_h, patch_size, grid_w, patch_size])
+        .swap_dims(1, 2)
+        .swap_dims(2, 4)
+        .swap_dims(3, 4)
+        .reshape([
+            batch,
+            grid_h * grid_w,
+            channels * patch_size * patch_size,
+        ])
+}
+
+pub fn unpatchify<B: Backend>(
+    patches: Tensor<B, 3>,
+    patch_size: usize,
+    height: usize,
+    width: usize,
+    channels: usize,
+) -> Tensor<B, 4> {
+    let [batch, tokens, patch_dim] = patches.shape().dims::<3>();
+    assert!(patch_dim > 0, "unpatchify expects non-empty patch dim");
+    let grid_h = height / patch_size;
+    let grid_w = width / patch_size;
+    assert!(
+        grid_h * grid_w == tokens,
+        "unpatchify expects token count to match grid"
+    );
+    patches
+        .reshape([batch, grid_h, grid_w, channels, patch_size, patch_size])
+        .swap_dims(3, 4)
+        .swap_dims(2, 4)
+        .swap_dims(1, 2)
+        .reshape([batch, channels, height, width])
+}
+
 #[derive(Module, Debug)]
 pub struct SpatialPositionalEncoding<B: Backend> {
     kind: SpatialPositionalEncodingKind,

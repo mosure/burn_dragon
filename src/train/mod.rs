@@ -1188,7 +1188,9 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
         &self,
         params: Tensor<B, 3>,
     ) -> (Tensor<B, 3>, Tensor<B, 3>) {
-        let mean = activation::sigmoid(params.clone().slice_dim(2, 0..2));
+        let mean = activation::sigmoid(params.clone().slice_dim(2, 0..2))
+            .mul_scalar(1.0 - 2.0 * SACCADE_EPS)
+            .add_scalar(SACCADE_EPS);
         let sigma = activation::sigmoid(params.slice_dim(2, 2..3))
             .mul_scalar(SACCADE_SIGMA_MAX - SACCADE_SIGMA_MIN)
             .add_scalar(SACCADE_SIGMA_MIN);

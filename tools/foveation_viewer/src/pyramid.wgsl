@@ -40,11 +40,19 @@ fn downsample(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     let src_size_i = vec2<i32>(i32(src_size.x), i32(src_size.y));
     let src_coord = vec2<i32>(i32(x) * 2, i32(y) * 2);
-    let c00 = read_tex(src_fine, src_coord, src_size_i);
-    let c10 = read_tex(src_fine, src_coord + vec2<i32>(1, 0), src_size_i);
-    let c01 = read_tex(src_fine, src_coord + vec2<i32>(0, 1), src_size_i);
-    let c11 = read_tex(src_fine, src_coord + vec2<i32>(1, 1), src_size_i);
-    let color = (c00 + c10 + c01 + c11) * 0.25;
+    var color = vec3<f32>(0.0);
+    for (var ky: i32 = -2; ky <= 2; ky = ky + 1) {
+        let wy = select(6.0, 4.0, ky == -1 || ky == 1);
+        let wy2 = select(wy, 1.0, ky == -2 || ky == 2);
+        for (var kx: i32 = -2; kx <= 2; kx = kx + 1) {
+            let wx = select(6.0, 4.0, kx == -1 || kx == 1);
+            let wx2 = select(wx, 1.0, kx == -2 || kx == 2);
+            let weight = wx2 * wy2;
+            let sample = read_tex(src_fine, src_coord + vec2<i32>(kx, ky), src_size_i);
+            color += sample * weight;
+        }
+    }
+    color *= 1.0 / 256.0;
     textureStore(dst_tex, vec2<i32>(i32(x), i32(y)), vec4<f32>(color, 1.0));
 }
 

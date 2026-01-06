@@ -34,6 +34,7 @@ const OVERLAY_RING_SIZE: usize = 256;
 const OVERLAY_RING_THICKNESS: f32 = 3.0;
 const OVERLAY_RING_OUTER: [u8; 4] = [255, 80, 40, 220];
 const OVERLAY_RING_INNER: [u8; 4] = [60, 200, 255, 220];
+const FOVEA_PARAM_EPS: f32 = 1e-3;
 
 fn main() {
     let mut args = env::args().skip(1);
@@ -139,18 +140,15 @@ pub(crate) fn resolve_foveation_sample(
     settings: &FoveationSettings,
     noise: &FoveationNoiseSample,
 ) -> FoveationSample {
-    if settings.noise {
-        FoveationSample {
-            mean_x: noise.mean_x,
-            mean_y: noise.mean_y,
-            radius_norm: noise.radius_norm,
-        }
+    let (mean_x, mean_y, radius_norm) = if settings.noise {
+        (noise.mean_x, noise.mean_y, noise.radius_norm)
     } else {
-        FoveationSample {
-            mean_x: settings.mean_x,
-            mean_y: settings.mean_y,
-            radius_norm: settings.radius_norm,
-        }
+        (settings.mean_x, settings.mean_y, settings.radius_norm)
+    };
+    FoveationSample {
+        mean_x: mean_x.clamp(FOVEA_PARAM_EPS, 1.0 - FOVEA_PARAM_EPS),
+        mean_y: mean_y.clamp(FOVEA_PARAM_EPS, 1.0 - FOVEA_PARAM_EPS),
+        radius_norm: radius_norm.clamp(FOVEA_PARAM_EPS, 1.0),
     }
 }
 
@@ -1040,7 +1038,7 @@ pub(crate) fn render_patch(
     settings: &FoveationSettings,
     patch_size: usize,
 ) -> Vec<u8> {
-    const SUBSAMPLES: usize = 2;
+    const SUBSAMPLES: usize = 4;
     let patch = patch_size.max(1);
     let width = patch;
     let height = patch;
@@ -1052,6 +1050,7 @@ pub(crate) fn render_patch(
     let mut out = vec![0u8; width * height * 4];
 
     let half = patch as f32 * 0.5;
+    let pixel_du = 1.0 / half;
     for y in 0..height {
         for x in 0..width {
             let base_dx = x as f32 + 0.5 - half;
@@ -1064,8 +1063,15 @@ pub(crate) fn render_patch(
                     let jitter_y = (sy as f32 + 0.5) / SUBSAMPLES as f32 - 0.5;
                     let ux = (base_dx + jitter_x) / half;
                     let uy = (base_dy + jitter_y) / half;
-                    let offset_x = foveated_offset(ux, sigma, radius);
-                    let offset_y = foveated_offset(uy, sigma, radius);
+                    let warp_x = foveated_warp(ux, sigma, radius);
+                    let warp_y = foveated_warp(uy, sigma, radius);
+                    let offset_x = warp_x.offset;
+                    let offset_y = warp_y.offset;
+                    let local_scale = warp_x
+                        .deriv
+                        .abs()
+                        .max(warp_y.deriv.abs())
+                        * pixel_du;
                     let img_x = center_x + offset_x;
                     let img_y = center_y + offset_y;
                     let fx = img_x / source.width as f32;
@@ -1073,25 +1079,27 @@ pub(crate) fn render_patch(
                     let sample = match settings.mode {
                         PyramidMode::Gaussian => sample_gaussian_foveated(
                             &cache.gaussian,
-                    offset_x,
-                    offset_y,
-                    sigma,
-                    sigma,
-                    lod_sigma,
-                    fx,
-                    fy,
-                ),
+                            offset_x,
+                            offset_y,
+                            sigma,
+                            sigma,
+                            local_scale,
+                            lod_sigma,
+                            fx,
+                            fy,
+                        ),
                         PyramidMode::Laplacian => sample_laplacian_foveated(
                             &cache.laplacian,
                             cache.coarse.as_ref(),
-                    offset_x,
-                    offset_y,
-                    sigma,
-                    sigma,
-                    lod_sigma,
-                    fx,
-                    fy,
-                ),
+                            offset_x,
+                            offset_y,
+                            sigma,
+                            sigma,
+                            local_scale,
+                            lod_sigma,
+                            fx,
+                            fy,
+                        ),
                     };
                     color[0] += sample[0];
                     color[1] += sample[1];
@@ -1124,6 +1132,9 @@ const PI: f32 = 3.14159265359;
 const ERF_A: f32 = 0.147;
 
 #[cfg(test)]
+const SQRT_PI_OVER_2: f32 = 0.88622692545;
+
+#[cfg(test)]
 fn erf_approx(x: f32) -> f32 {
     let sign = if x >= 0.0 { 1.0 } else { -1.0 };
     let ax = x.abs();
@@ -1149,14 +1160,26 @@ fn erfinv_approx(x: f32) -> f32 {
 }
 
 #[cfg(test)]
-fn foveated_offset(u: f32, sigma: f32, radius: f32) -> f32 {
+fn foveated_warp(u: f32, sigma: f32, radius: f32) -> FoveaWarp {
     let sigma = sigma.max(1e-3);
     let radius = radius.max(1e-3);
     let k = radius / sigma;
     let u_max = erf_approx(k / SQRT2).min(0.999);
     let u_scaled = u.clamp(-1.0, 1.0) * u_max;
-    sigma * SQRT2 * erfinv_approx(u_scaled)
+    let erf_inv = erfinv_approx(u_scaled);
+    let offset = sigma * SQRT2 * erf_inv;
+    let deriv = sigma * SQRT2 * u_max * SQRT_PI_OVER_2 * (erf_inv * erf_inv).exp();
+    FoveaWarp { offset, deriv }
 }
+
+#[cfg(test)]
+struct FoveaWarp {
+    offset: f32,
+    deriv: f32,
+}
+
+#[cfg(test)]
+const LOD_WINDOW: i32 = 3;
 
 #[cfg(test)]
 pub(crate) fn sample_gaussian_foveated(
@@ -1165,6 +1188,7 @@ pub(crate) fn sample_gaussian_foveated(
     dy: f32,
     sigma_x: f32,
     sigma_y: f32,
+    local_scale: f32,
     lod_sigma: f32,
     fx: f32,
     fy: f32,
@@ -1173,12 +1197,12 @@ pub(crate) fn sample_gaussian_foveated(
         return [0.0, 0.0, 0.0];
     }
     let max_level = (levels.len().saturating_sub(1)) as f32;
-    let lod_center = compute_lod(dx, dy, sigma_x, sigma_y, max_level);
+    let lod_center = compute_lod(dx, dy, sigma_x, sigma_y, max_level, local_scale);
     let mut color = [0.0; 3];
     let mut weight_sum = 0.0;
     let base = lod_center.floor() as i32;
-    let start = (base - 2).max(0);
-    let end = (base + 2).min(levels.len() as i32 - 1);
+    let start = (base - LOD_WINDOW).max(0);
+    let end = (base + LOD_WINDOW).min(levels.len() as i32 - 1);
     for level_idx in start..=end {
         let level = &levels[level_idx as usize];
         let diff = (level_idx as f32 - lod_center) / lod_sigma.max(1e-3);
@@ -1205,6 +1229,7 @@ pub(crate) fn sample_laplacian_foveated(
     dy: f32,
     sigma_x: f32,
     sigma_y: f32,
+    local_scale: f32,
     lod_sigma: f32,
     fx: f32,
     fy: f32,
@@ -1213,12 +1238,12 @@ pub(crate) fn sample_laplacian_foveated(
         return [0.0, 0.0, 0.0];
     };
     let max_level = residuals.len() as f32;
-    let lod_center = compute_lod(dx, dy, sigma_x, sigma_y, max_level);
+    let lod_center = compute_lod(dx, dy, sigma_x, sigma_y, max_level, local_scale);
     let mut color = [0.0; 3];
     let mut weight_sum = 0.0;
     let base = lod_center.floor() as i32;
-    let start = (base - 2).max(0);
-    let end = (base + 2).min(residuals.len() as i32);
+    let start = (base - LOD_WINDOW).max(0);
+    let end = (base + LOD_WINDOW).min(residuals.len() as i32);
     for level_idx in start..=end {
         let diff = (level_idx as f32 - lod_center) / lod_sigma.max(1e-3);
         let weight = (-0.5 * diff * diff).exp();
@@ -1237,17 +1262,27 @@ pub(crate) fn sample_laplacian_foveated(
 }
 
 #[cfg(test)]
-pub(crate) fn compute_lod(dx: f32, dy: f32, sigma_x: f32, sigma_y: f32, max_level: f32) -> f32 {
+pub(crate) fn compute_lod(
+    dx: f32,
+    dy: f32,
+    sigma_x: f32,
+    sigma_y: f32,
+    max_level: f32,
+    local_scale: f32,
+) -> f32 {
     if max_level <= 0.0 {
         return 0.0;
     }
     let sx = sigma_x.max(1e-3);
     let sy = sigma_y.max(1e-3);
     let dist = ((dx * dx) / (sx * sx) + (dy * dy) / (sy * sy)).sqrt();
-    if dist <= 1.0 {
-        return 0.0;
-    }
-    dist.log2().clamp(0.0, max_level)
+    let lod_dist = if dist <= 1.0 { 0.0 } else { dist.log2() };
+    let lod_scale = if local_scale <= 1.0 {
+        0.0
+    } else {
+        local_scale.log2()
+    };
+    lod_dist.max(lod_scale).clamp(0.0, max_level)
 }
 
 #[cfg(test)]
@@ -1318,23 +1353,29 @@ fn downsample(level: &ImageLevel) -> ImageLevel {
     let new_w = (level.width / 2).max(1);
     let new_h = (level.height / 2).max(1);
     let mut data = vec![0.0; new_w * new_h * 3];
+    let weights = [1.0_f32, 4.0, 6.0, 4.0, 1.0];
     for y in 0..new_h {
         for x in 0..new_w {
             let mut accum = [0.0; 3];
-            for dy in 0..2 {
-                for dx in 0..2 {
-                    let sx = (x * 2 + dx).min(level.width - 1);
-                    let sy = (y * 2 + dy).min(level.height - 1);
+            for ky in 0..5 {
+                let wy = weights[ky];
+                let sy = (y * 2).saturating_add(ky).saturating_sub(2);
+                let sy = sy.min(level.height - 1);
+                for kx in 0..5 {
+                    let wx = weights[kx];
+                    let sx = (x * 2).saturating_add(kx).saturating_sub(2);
+                    let sx = sx.min(level.width - 1);
+                    let weight = wx * wy;
                     let sample = get_pixel(level, sx, sy);
-                    accum[0] += sample[0];
-                    accum[1] += sample[1];
-                    accum[2] += sample[2];
+                    accum[0] += sample[0] * weight;
+                    accum[1] += sample[1] * weight;
+                    accum[2] += sample[2] * weight;
                 }
             }
             let idx = (y * new_w + x) * 3;
-            data[idx] = accum[0] * 0.25;
-            data[idx + 1] = accum[1] * 0.25;
-            data[idx + 2] = accum[2] * 0.25;
+            data[idx] = accum[0] / 256.0;
+            data[idx + 1] = accum[1] / 256.0;
+            data[idx + 2] = accum[2] / 256.0;
         }
     }
     ImageLevel {

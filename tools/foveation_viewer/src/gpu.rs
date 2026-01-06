@@ -970,23 +970,29 @@ mod tests {
         let new_w = (level.width / 2).max(1);
         let new_h = (level.height / 2).max(1);
         let mut data = vec![0.0; new_w * new_h * 3];
+        let weights = [1.0_f32, 4.0, 6.0, 4.0, 1.0];
         for y in 0..new_h {
             for x in 0..new_w {
                 let mut accum = [0.0; 3];
-                for dy in 0..2 {
-                    for dx in 0..2 {
-                        let sx = (x * 2 + dx).min(level.width - 1);
-                        let sy = (y * 2 + dy).min(level.height - 1);
+                for ky in 0..5 {
+                    let wy = weights[ky];
+                    let sy = (y * 2).saturating_add(ky).saturating_sub(2);
+                    let sy = sy.min(level.height - 1);
+                    for kx in 0..5 {
+                        let wx = weights[kx];
+                        let sx = (x * 2).saturating_add(kx).saturating_sub(2);
+                        let sx = sx.min(level.width - 1);
+                        let weight = wx * wy;
                         let idx = (sy * level.width + sx) * 3;
-                        accum[0] += level.data[idx];
-                        accum[1] += level.data[idx + 1];
-                        accum[2] += level.data[idx + 2];
+                        accum[0] += level.data[idx] * weight;
+                        accum[1] += level.data[idx + 1] * weight;
+                        accum[2] += level.data[idx + 2] * weight;
                     }
                 }
                 let idx = (y * new_w + x) * 3;
-                data[idx] = accum[0] * 0.25;
-                data[idx + 1] = accum[1] * 0.25;
-                data[idx + 2] = accum[2] * 0.25;
+                data[idx] = accum[0] / 256.0;
+                data[idx + 1] = accum[1] / 256.0;
+                data[idx + 2] = accum[2] / 256.0;
             }
         }
         ImageLevel {
@@ -1722,7 +1728,7 @@ mod tests {
             settings.mean_x.clamp(0.0, 1.0) * image_size.x,
             settings.mean_y.clamp(0.0, 1.0) * image_size.y,
         );
-        let radius = fovea_radius_pixels(settings, source);
+        let radius = fovea_radius_pixels_norm(settings.radius_norm, source);
         let sigma = Vec2::splat(radius * focus_scale(settings.focus));
         let lod_sigma = lod_sigma_from_focus(settings.focus);
         let patch = settings.patch_size.max(1) as f32;

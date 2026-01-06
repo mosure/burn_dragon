@@ -19,6 +19,8 @@ max_iters = 200
 log_frequency = 20
 rollout_min_steps = 1
 rollout_max_steps = 4
+# backprop through the last N rollout steps (TRM-style refinement)
+rollout_backprop_steps = 1
 
 [optimizer]
 learning_rate = 0.0005

@@ -13,11 +13,17 @@ struct FoveationParams {
     _pad2: u32,
 };
 
-const SUBSAMPLES: u32 = 2u;
-const LOD_WINDOW: i32 = 2;
+const SUBSAMPLES: u32 = 4u;
+const LOD_WINDOW: i32 = 3;
 const SQRT2: f32 = 1.41421356237;
 const PI: f32 = 3.14159265359;
 const ERF_A: f32 = 0.147;
+const SQRT_PI_OVER_2: f32 = 0.88622692545;
+
+struct FoveaWarp {
+    offset: f32,
+    deriv: f32,
+};
 
 @group(0) @binding(0) var gaussian_tex: texture_2d<f32>;
 @group(0) @binding(1) var gaussian_sampler: sampler;
@@ -62,13 +68,16 @@ fn erfinv_approx(x: f32) -> f32 {
     return sign * sqrt(result);
 }
 
-fn foveated_offset(u: f32, sigma: f32, radius: f32) -> f32 {
+fn foveated_warp(u: f32, sigma: f32, radius: f32) -> FoveaWarp {
     let sigma_safe = max(sigma, 1e-3);
     let radius_safe = max(radius, 1e-3);
     let k = radius_safe / sigma_safe;
     let u_max = min(erf_approx(k / SQRT2), 0.999);
     let u_scaled = clamp(u, -1.0, 1.0) * u_max;
-    return sigma_safe * SQRT2 * erfinv_approx(u_scaled);
+    let erf_inv = erfinv_approx(u_scaled);
+    let offset = sigma_safe * SQRT2 * erf_inv;
+    let deriv = sigma_safe * SQRT2 * u_max * SQRT_PI_OVER_2 * exp(erf_inv * erf_inv);
+    return FoveaWarp(offset, deriv);
 }
 
 fn sample_gaussian(uv: vec2<f32>, lod_center: f32, lod_sigma: f32, max_level: u32) -> vec3<f32> {
@@ -140,6 +149,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     let half = params.patch_size * 0.5;
+    let pixel_du = 1.0 / half;
     let radius = params.sample_scale * half;
     let max_level = params.pyramid_levels - 1u;
     let lod_sigma = max(params.lod_sigma, 1e-3);
@@ -150,13 +160,18 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             let jitter = (vec2<f32>(f32(sx) + 0.5, f32(sy) + 0.5) / f32(SUBSAMPLES)) - vec2<f32>(0.5, 0.5);
             let ux = (((f32(x) + 0.5) - half) + jitter.x) / half;
             let uy = (((f32(y) + 0.5) - half) + jitter.y) / half;
-            let dx = foveated_offset(ux, params.sigma.x, radius);
-            let dy = foveated_offset(uy, params.sigma.y, radius);
+            let warp_x = foveated_warp(ux, params.sigma.x, radius);
+            let warp_y = foveated_warp(uy, params.sigma.y, radius);
+            let dx = warp_x.offset;
+            let dy = warp_y.offset;
+            let local_scale = max(abs(warp_x.deriv), abs(warp_y.deriv)) * pixel_du;
+            let lod_scale = select(0.0, log2(local_scale), local_scale > 1.0);
             let uv = vec2<f32>(
                 (params.center.x + dx) * params.inv_image_size.x,
                 (params.center.y + dy) * params.inv_image_size.y,
             );
-            let lod = compute_lod(dx, dy, f32(max_level));
+            let lod_dist = compute_lod(dx, dy, f32(max_level));
+            let lod = clamp(max(lod_dist, lod_scale), 0.0, f32(max_level));
             if params.mode == 0u {
                 color += sample_gaussian(uv, lod, lod_sigma, max_level);
             } else {

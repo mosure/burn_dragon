@@ -635,6 +635,16 @@ impl<B: Backend> VisionDragonHatchling<B> {
         self.forward_tokens_steps(patch.tokens, steps)
     }
 
+    pub fn forward_images_steps_rollout(
+        &self,
+        images: Tensor<B, 4>,
+        steps: usize,
+        backprop_steps: usize,
+    ) -> VisionDragonHatchlingOutput<B> {
+        let patch = self.patch_embed.forward(images);
+        self.forward_tokens_steps_rollout(patch.tokens, steps, backprop_steps)
+    }
+
     pub fn forward_patches(
         &self,
         patch_tokens: Tensor<B, 3>,
@@ -670,6 +680,17 @@ impl<B: Backend> VisionDragonHatchling<B> {
         self.split_output(projected)
     }
 
+    pub fn forward_tokens_steps_rollout(
+        &self,
+        tokens: Tensor<B, 3>,
+        steps: usize,
+        backprop_steps: usize,
+    ) -> VisionDragonHatchlingOutput<B> {
+        let tokens = self.encode_tokens_steps_rollout(tokens, steps, backprop_steps);
+        let projected = self.projection.forward(tokens);
+        self.split_output(projected)
+    }
+
     pub fn forward_tokens_embed(&self, tokens: Tensor<B, 3>) -> VisionDragonHatchlingOutput<B> {
         let tokens = self.encode_tokens(tokens);
         self.split_output(tokens)
@@ -684,12 +705,43 @@ impl<B: Backend> VisionDragonHatchling<B> {
         self.split_output(tokens)
     }
 
+    pub fn forward_tokens_embed_steps_rollout(
+        &self,
+        tokens: Tensor<B, 3>,
+        steps: usize,
+        backprop_steps: usize,
+    ) -> VisionDragonHatchlingOutput<B> {
+        let tokens = self.encode_tokens_steps_rollout(tokens, steps, backprop_steps);
+        self.split_output(tokens)
+    }
+
     fn encode_tokens(&self, tokens: Tensor<B, 3>) -> Tensor<B, 3> {
         self.encode_tokens_steps(tokens, self.steps)
     }
 
     fn encode_tokens_steps(&self, tokens: Tensor<B, 3>, steps: usize) -> Tensor<B, 3> {
         let steps = steps.max(1).min(self.steps);
+        self.encode_tokens_steps_inner(tokens, steps, 0)
+    }
+
+    fn encode_tokens_steps_rollout(
+        &self,
+        tokens: Tensor<B, 3>,
+        steps: usize,
+        backprop_steps: usize,
+    ) -> Tensor<B, 3> {
+        let steps = steps.max(1).min(self.steps);
+        let backprop_steps = backprop_steps.max(1).min(steps);
+        let detach_until = steps.saturating_sub(backprop_steps);
+        self.encode_tokens_steps_inner(tokens, steps, detach_until)
+    }
+
+    fn encode_tokens_steps_inner(
+        &self,
+        tokens: Tensor<B, 3>,
+        steps: usize,
+        detach_until: usize,
+    ) -> Tensor<B, 3> {
         let tokens = if self.use_cls_token {
             self.prepend_cls(tokens)
         } else {
@@ -712,7 +764,7 @@ impl<B: Backend> VisionDragonHatchling<B> {
         let fused = self.kernel.enabled;
         let latent_pattern: &BlockPattern1d = &self.kernel.block_sparse.latent;
 
-        for _ in 0..steps {
+        for step_idx in 0..steps {
             let x_sparse = if fused {
                 relu_lowrank::fused_forward(
                     current.clone(),
@@ -758,6 +810,9 @@ impl<B: Backend> VisionDragonHatchling<B> {
             let mlp_out = mlp_flat.reshape([batch, 1, time, self.embed_dim]);
             let mlp_out = self.token_norm.forward(mlp_out);
             current = self.token_norm.forward(current + mlp_out);
+            if step_idx + 1 <= detach_until {
+                current = current.detach();
+            }
         }
 
         current.reshape([batch, time, self.embed_dim])

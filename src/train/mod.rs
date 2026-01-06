@@ -27,7 +27,7 @@ use burn::optim::adaptor::OptimizerAdaptor;
 use burn::optim::{AdamW, AdamWConfig, GradientsParams, LearningRate};
 use burn::tensor::Distribution as TensorDistribution;
 use burn::tensor::activation;
-use burn::tensor::{Int, Tensor, TensorData};
+use burn::tensor::{ElementConversion, Int, Tensor, TensorData};
 use burn::tensor::backend::{AutodiffBackend, Backend as BackendTrait};
 use burn_autodiff::Autodiff;
 use burn_train::metric::{LearningRateMetric, LossMetric};
@@ -321,6 +321,7 @@ impl<B: BackendTrait> VisionLejepaModel<B> {
         &self,
         batch: ImageNetBatch<B>,
         steps: usize,
+        backprop_steps: usize,
         randomize_mask: bool,
     ) -> VisionLejepaLosses<B> {
         let ImageNetBatch {
@@ -352,7 +353,7 @@ impl<B: BackendTrait> VisionLejepaModel<B> {
         let recon_enabled = self.recon.is_some();
 
         if !collected.global.is_empty() {
-            let output = self.forward_view_group(&collected.global, steps);
+            let output = self.forward_view_group(&collected.global, steps, backprop_steps);
             probe_embed = Some(output.embed.clone());
             let [view_count, batch, dim] = output.embed.shape().dims::<3>();
             if view_count > 0 {
@@ -371,7 +372,13 @@ impl<B: BackendTrait> VisionLejepaModel<B> {
 
             if recon_enabled {
                 let (loss_sum, mask_sum, artifacts) =
-                    self.recon_group_loss(&collected.global, steps, true, randomize_mask);
+                    self.recon_group_loss(
+                        &collected.global,
+                        steps,
+                        backprop_steps,
+                        true,
+                        randomize_mask,
+                    );
                 recon_loss_sum = recon_loss_sum + loss_sum;
                 recon_mask_sum = recon_mask_sum + mask_sum;
                 if let Some((views, residual)) = artifacts {
@@ -383,15 +390,20 @@ impl<B: BackendTrait> VisionLejepaModel<B> {
             embed_groups.push(output.embed);
         }
         if !collected.local.is_empty() {
-            let output = self.forward_view_group(&collected.local, steps);
+            let output = self.forward_view_group(&collected.local, steps, backprop_steps);
             if heatmap_source.is_none() {
                 let [_, batch, _] = output.embed.shape().dims::<3>();
                 heatmap_source =
                     Some(output.patch_tokens.clone().slice_dim(0, 0..batch));
             }
             if recon_enabled {
-                let (loss_sum, mask_sum, _) =
-                    self.recon_group_loss(&collected.local, steps, false, randomize_mask);
+                let (loss_sum, mask_sum, _) = self.recon_group_loss(
+                    &collected.local,
+                    steps,
+                    backprop_steps,
+                    false,
+                    randomize_mask,
+                );
                 recon_loss_sum = recon_loss_sum + loss_sum;
                 recon_mask_sum = recon_mask_sum + mask_sum;
             }
@@ -479,6 +491,7 @@ impl<B: BackendTrait> VisionLejepaModel<B> {
         &self,
         views: &[Tensor<B, 4>],
         steps: usize,
+        backprop_steps: usize,
         capture_artifacts: bool,
         randomize_mask: bool,
     ) -> (
@@ -539,7 +552,9 @@ impl<B: BackendTrait> VisionLejepaModel<B> {
             masked_tokens = masked_tokens + token.mul(mask_expanded.clone());
         }
         let masked_tokens = self.model.add_patch_position(masked_tokens, patch.grid);
-        let embed_out = self.model.forward_tokens_embed_steps(masked_tokens, steps);
+        let embed_out =
+            self.model
+                .forward_tokens_embed_steps_rollout(masked_tokens, steps, backprop_steps);
 
         let pred_patches = recon.forward(embed_out.patch_tokens);
         let [total, tokens, patch_dim] = pred_patches.shape().dims::<3>();
@@ -584,12 +599,15 @@ impl<B: BackendTrait> VisionLejepaModel<B> {
         &self,
         views: &[Tensor<B, 4>],
         steps: usize,
+        backprop_steps: usize,
     ) -> ViewGroupOutput<B> {
         let view_count = views.len();
         let [batch, _, _, _] = views[0].shape().dims::<4>();
         let stacked = stack_views(views);
         let patch = self.model.patch_embed(stacked);
-        let embed_out = self.model.forward_tokens_embed_steps(patch.tokens, steps);
+        let embed_out = self
+            .model
+            .forward_tokens_embed_steps_rollout(patch.tokens, steps, backprop_steps);
         let cls_embed = embed_out.cls_token;
         let patch_tokens = embed_out.patch_tokens;
         let [total, embed_dim] = cls_embed.shape().dims::<2>();
@@ -662,12 +680,13 @@ impl<B: BackendTrait> VisionMaeModel<B> {
         &self,
         batch: ImageNetBatch<B>,
         steps: usize,
+        backprop_steps: usize,
         randomize_mask: bool,
         capture_artifacts: bool,
     ) -> VisionMaeLosses<B> {
         let ImageNetBatch { images, labels, .. } = batch;
         let (loss_sum, mask_sum, artifacts) =
-            self.recon_loss(images, steps, randomize_mask, capture_artifacts);
+            self.recon_loss(images, steps, backprop_steps, randomize_mask, capture_artifacts);
         let denom = mask_sum.clone().add_scalar(LEJEPA_EPS);
         let recon = loss_sum / denom;
         let total = recon.clone().mul_scalar(self.config.recon_weight.max(0.0));
@@ -699,6 +718,7 @@ impl<B: BackendTrait> VisionMaeModel<B> {
         &self,
         images: Tensor<B, 4>,
         steps: usize,
+        backprop_steps: usize,
         randomize_mask: bool,
         capture_artifacts: bool,
     ) -> (
@@ -741,7 +761,9 @@ impl<B: BackendTrait> VisionMaeModel<B> {
             .repeat_dim(1, tokens);
         masked_tokens = masked_tokens + token.mul(mask_expanded.clone());
         let masked_tokens = self.model.add_patch_position(masked_tokens, patch.grid);
-        let embed_out = self.model.forward_tokens_embed_steps(masked_tokens, steps);
+        let embed_out =
+            self.model
+                .forward_tokens_embed_steps_rollout(masked_tokens, steps, backprop_steps);
 
         let pred_patches = self.recon.forward(embed_out.patch_tokens);
         let [total, tokens, patch_dim] = pred_patches.shape().dims::<3>();
@@ -1276,18 +1298,34 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
         if from.height == 0 || from.width == 0 || to.height == 0 || to.width == 0 {
             return Tensor::<B, 3>::zeros([batch, to.num_patches().max(1), dim], &tokens.device());
         }
-        if to.height % from.height != 0 || to.width % from.width != 0 {
+        if from.height == to.height && from.width == to.width {
             return tokens;
         }
-        let scale_h = to.height / from.height;
-        let scale_w = to.width / from.width;
-        if scale_h == 0 || scale_w == 0 {
-            return tokens;
-        }
+        let device = tokens.device();
+        let h_indices: Vec<<B as BackendTrait>::IntElem> = (0..to.height)
+            .map(|y| {
+                let src = (y as f32 * from.height as f32 / to.height as f32)
+                    .floor()
+                    .min((from.height - 1) as f32) as usize;
+                <B as BackendTrait>::IntElem::from_elem(src as i64)
+            })
+            .collect();
+        let w_indices: Vec<<B as BackendTrait>::IntElem> = (0..to.width)
+            .map(|x| {
+                let src = (x as f32 * from.width as f32 / to.width as f32)
+                    .floor()
+                    .min((from.width - 1) as f32) as usize;
+                <B as BackendTrait>::IntElem::from_elem(src as i64)
+            })
+            .collect();
+        let h_index =
+            Tensor::<B, 1, Int>::from_data(TensorData::new(h_indices, [to.height]), &device);
+        let w_index =
+            Tensor::<B, 1, Int>::from_data(TensorData::new(w_indices, [to.width]), &device);
         tokens
             .reshape([batch, from.height, from.width, dim])
-            .repeat_dim(1, scale_h)
-            .repeat_dim(2, scale_w)
+            .select(1, h_index)
+            .select(2, w_index)
             .reshape([batch, to.height * to.width, dim])
     }
 
@@ -1469,7 +1507,10 @@ impl<B: AutodiffBackend> TrainStep<ImageNetBatch<B>, VisionTrainItem<B>>
         };
 
         let rollout_steps = self.rollout.sample_steps();
-        let output = self.model.forward_images_steps(images, rollout_steps);
+        let backprop_steps = self.rollout.backprop_steps(rollout_steps);
+        let output = self
+            .model
+            .forward_images_steps_rollout(images, rollout_steps, backprop_steps);
         let loss = vision_distillation_loss(
             output.patch_tokens,
             teacher_patch,
@@ -1513,9 +1554,10 @@ impl<B: BackendTrait> ValidStep<ImageNetBatch<B>, VisionOutput<B>> for VisionDis
             (teacher_patch, teacher_cls)
         };
 
+        let backprop_steps = self.rollout.backprop_steps(self.rollout.max_steps);
         let output = self
             .model
-            .forward_images_steps(images, self.rollout.max_steps);
+            .forward_images_steps_rollout(images, self.rollout.max_steps, backprop_steps);
         let loss = vision_distillation_loss(
             output.patch_tokens,
             teacher_patch,
@@ -1539,7 +1581,8 @@ impl<B: BackendTrait> ValidStep<ImageNetBatch<B>, VisionOutput<B>> for VisionDis
 impl<B: AutodiffBackend> TrainStep<ImageNetBatch<B>, VisionTrainItem<B>> for VisionLejepaModel<B> {
     fn step(&self, batch: ImageNetBatch<B>) -> TrainOutput<VisionTrainItem<B>> {
         let rollout_steps = self.rollout.sample_steps();
-        let losses = self.forward_losses(batch, rollout_steps, true);
+        let backprop_steps = self.rollout.backprop_steps(rollout_steps);
+        let losses = self.forward_losses(batch, rollout_steps, backprop_steps, true);
         let total_for_backprop = losses.total.clone() + losses.probe_loss.clone();
         let grads = total_for_backprop.backward();
 
@@ -1569,7 +1612,8 @@ impl<B: AutodiffBackend> TrainStep<ImageNetBatch<B>, VisionTrainItem<B>> for Vis
 
 impl<B: BackendTrait> ValidStep<ImageNetBatch<B>, VisionOutput<B>> for VisionLejepaModel<B> {
     fn step(&self, batch: ImageNetBatch<B>) -> VisionOutput<B> {
-        let losses = self.forward_losses(batch, self.rollout.max_steps, false);
+        let backprop_steps = self.rollout.backprop_steps(self.rollout.max_steps);
+        let losses = self.forward_losses(batch, self.rollout.max_steps, backprop_steps, false);
 
         VisionOutput::new(
             losses.total,
@@ -1586,7 +1630,8 @@ impl<B: BackendTrait> ValidStep<ImageNetBatch<B>, VisionOutput<B>> for VisionLej
 impl<B: AutodiffBackend> TrainStep<ImageNetBatch<B>, VisionTrainItem<B>> for VisionMaeModel<B> {
     fn step(&self, batch: ImageNetBatch<B>) -> TrainOutput<VisionTrainItem<B>> {
         let rollout_steps = self.rollout.sample_steps();
-        let losses = self.forward_losses(batch, rollout_steps, true, false);
+        let backprop_steps = self.rollout.backprop_steps(rollout_steps);
+        let losses = self.forward_losses(batch, rollout_steps, backprop_steps, true, false);
         let grads = losses.total.clone().backward();
         let zero = Tensor::<B, 1>::zeros([1], &losses.total.device());
 
@@ -1607,7 +1652,8 @@ impl<B: AutodiffBackend> TrainStep<ImageNetBatch<B>, VisionTrainItem<B>> for Vis
 
 impl<B: BackendTrait> ValidStep<ImageNetBatch<B>, VisionOutput<B>> for VisionMaeModel<B> {
     fn step(&self, batch: ImageNetBatch<B>) -> VisionOutput<B> {
-        let losses = self.forward_losses(batch, self.rollout.max_steps, false, true);
+        let backprop_steps = self.rollout.backprop_steps(self.rollout.max_steps);
+        let losses = self.forward_losses(batch, self.rollout.max_steps, backprop_steps, false, true);
         let zero = Tensor::<B, 1>::zeros([1], &losses.total.device());
         VisionOutput::new(
             losses.total,
@@ -1893,8 +1939,8 @@ where
     }
     let rollout = resolve_vision_rollout(training, vision_config.steps)?;
     info!(
-        "vision rollout steps: min={}, max={}",
-        rollout.min_steps, rollout.max_steps
+        "vision rollout steps: min={}, max={}, backprop={}",
+        rollout.min_steps, rollout.max_steps, rollout.backprop_steps
     );
 
     maybe_download_vision_dataset(&config.dataset)?;
@@ -2992,6 +3038,7 @@ where
 struct VisionRollout {
     min_steps: usize,
     max_steps: usize,
+    backprop_steps: usize,
 }
 
 impl VisionRollout {
@@ -3001,6 +3048,10 @@ impl VisionRollout {
         } else {
             thread_rng().gen_range(self.min_steps..=self.max_steps)
         }
+    }
+
+    fn backprop_steps(&self, steps: usize) -> usize {
+        self.backprop_steps.min(steps).max(1)
     }
 }
 
@@ -3436,9 +3487,15 @@ fn resolve_vision_rollout(
     let max_steps = max_steps.max(1);
     let min_steps = training.rollout_min_steps.unwrap_or(max_steps);
     let max_steps_cfg = training.rollout_max_steps.unwrap_or(max_steps);
+    let backprop_steps = training.rollout_backprop_steps.unwrap_or(max_steps_cfg);
     if min_steps == 0 || max_steps_cfg == 0 {
         return Err(anyhow!(
             "vision rollout steps must be > 0 (min={min_steps}, max={max_steps_cfg})"
+        ));
+    }
+    if backprop_steps == 0 {
+        return Err(anyhow!(
+            "vision rollout_backprop_steps must be > 0 (value={backprop_steps})"
         ));
     }
     if min_steps > max_steps_cfg {
@@ -3451,9 +3508,15 @@ fn resolve_vision_rollout(
             "vision rollout_max_steps ({max_steps_cfg}) exceeds vision.steps ({max_steps})"
         ));
     }
+    if backprop_steps > max_steps_cfg {
+        return Err(anyhow!(
+            "vision rollout_backprop_steps ({backprop_steps}) must be <= rollout_max_steps ({max_steps_cfg})"
+        ));
+    }
     Ok(VisionRollout {
         min_steps,
         max_steps: max_steps_cfg,
+        backprop_steps,
     })
 }
 
@@ -4036,6 +4099,7 @@ mod tests {
         let rollout = VisionRollout {
             min_steps: 1,
             max_steps: 2,
+            backprop_steps: 2,
         };
         let recon_patch_dim =
             vision_config.patch_size * vision_config.patch_size * vision_config.in_channels;

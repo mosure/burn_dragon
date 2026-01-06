@@ -562,6 +562,8 @@ pub struct VisionTrainingHyperparameters {
     pub rollout_min_steps: Option<usize>,
     #[serde(default)]
     pub rollout_max_steps: Option<usize>,
+    #[serde(default)]
+    pub rollout_backprop_steps: Option<usize>,
 }
 
 impl Default for VisionTrainingHyperparameters {
@@ -573,6 +575,7 @@ impl Default for VisionTrainingHyperparameters {
             log_frequency: 50,
             rollout_min_steps: None,
             rollout_max_steps: None,
+            rollout_backprop_steps: None,
         }
     }
 }
@@ -782,6 +785,7 @@ mod tests {
             log_frequency = 2
             rollout_min_steps = 2
             rollout_max_steps = 3
+            rollout_backprop_steps = 2
 
             [optimizer]
             learning_rate = 0.001
@@ -820,6 +824,7 @@ mod tests {
         let config: VisionTrainingConfig = toml::from_str(text).expect("parse distill config");
         assert_eq!(config.training.rollout_min_steps, Some(2));
         assert_eq!(config.training.rollout_max_steps, Some(3));
+        assert_eq!(config.training.rollout_backprop_steps, Some(2));
         match config.mode {
             VisionTrainingModeConfig::Distill(distill) => match distill.teacher {
                 VisionTeacherConfig::Features(teacher) => {
@@ -846,6 +851,7 @@ mod tests {
             log_frequency = 2
             rollout_min_steps = 1
             rollout_max_steps = 4
+            rollout_backprop_steps = 1
 
             [optimizer]
             learning_rate = 0.001
@@ -893,6 +899,7 @@ mod tests {
         let config: VisionTrainingConfig = toml::from_str(text).expect("parse lejepa config");
         assert_eq!(config.training.rollout_min_steps, Some(1));
         assert_eq!(config.training.rollout_max_steps, Some(4));
+        assert_eq!(config.training.rollout_backprop_steps, Some(1));
         match config.mode {
             VisionTrainingModeConfig::Lejepa(lejepa) => {
                 assert!((lejepa.lambda - 0.05).abs() < f32::EPSILON);

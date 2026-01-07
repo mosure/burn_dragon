@@ -1048,7 +1048,11 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
                     .repeat_dim(0, batch)
                     .repeat_dim(1, traj_len);
                 let traj_with_eye = traj.clone() + eye_embed.clone();
-                let params = self.saccade_head.forward(traj_with_eye.clone());
+                let traj_summary = traj_with_eye
+                    .clone()
+                    .mean_dim(1)
+                    .reshape([batch, 1, embed_dim]);
+                let params = self.saccade_head.forward(traj_summary);
                 let (mean, sigma) = self.decode_saccade_params(params);
                 if let Some(steps) = &mut step_traj {
                     let mean_step = mean.clone().mean_dim(1).reshape([batch, 2]);
@@ -1071,16 +1075,21 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
                 let fovea_embed = self.fovea_proj.forward(fovea_params);
                 let input_tokens =
                     self.input_proj.forward(input_context) + state_context + fovea_embed;
+                let input_tokens = input_tokens.repeat_dim(1, traj_len);
                 let tokens_in = traj_with_eye + input_tokens;
                 let out_tokens = self
                     .model
                     .forward_tokens_embed_steps(tokens_in, steps)
                     .patch_tokens;
                 let residual = self.residual_proj.forward(out_tokens.clone());
+                let residual_pool = residual
+                    .clone()
+                    .mean_dim(1)
+                    .reshape([batch, 1, embed_dim]);
                 let next_traj = self.saccade_proj.forward(out_tokens);
                 for (update, weights) in updates.iter_mut().zip(weights.iter()) {
                     let update_eye =
-                        self.weighted_sum_tokens(weights.clone().swap_dims(1, 2), residual.clone());
+                        self.weighted_sum_tokens(weights.clone().swap_dims(1, 2), residual_pool.clone());
                     *update = update.clone() + update_eye;
                 }
                 next_trajs.push(next_traj);
@@ -4382,26 +4391,56 @@ mod tests {
             .repeat_dim(0, batch)
             .repeat_dim(1, traj_len);
         let traj_with_eye = base_traj + eye_embed;
-        let params = saccade.saccade_head.forward(traj_with_eye.clone());
-        let (mean, sigma) = saccade.decode_saccade_params(params);
-        let weights = saccade.mip_gaussian_weights(&mip_levels, mean.clone(), sigma.clone());
+        let weights = saccade_weights_for_eye(saccade, traj_with_eye.clone(), &mip_levels, embed_dim);
         let input_context = saccade.mip_weighted_sum(&input_sample_levels, &weights);
         let state_context = saccade.mip_weighted_sum(&state_composed, &weights);
-        let fovea_params = Tensor::cat(vec![mean, sigma], 2);
+        let fovea_params = saccade_fovea_params(saccade, traj_with_eye.clone(), embed_dim);
         let fovea_embed = saccade.fovea_proj.forward(fovea_params);
         let input_tokens = saccade.input_proj.forward(input_context) + state_context + fovea_embed;
+        let input_tokens = input_tokens.repeat_dim(1, traj_len);
         let tokens_in = traj_with_eye + input_tokens;
         let out_tokens = saccade
             .model
             .forward_tokens_embed_steps(tokens_in, steps)
             .patch_tokens;
         let residual = saccade.residual_proj.forward(out_tokens.clone());
+        let residual_pool = residual
+            .clone()
+            .mean_dim(1)
+            .reshape([batch, 1, embed_dim]);
         let next_traj = saccade.saccade_proj.forward(out_tokens);
         let mut updates = Vec::with_capacity(weights.len());
         for weights in &weights {
-            updates.push(weights.clone().swap_dims(1, 2).matmul(residual.clone()));
+            updates.push(
+                saccade.weighted_sum_tokens(weights.clone().swap_dims(1, 2), residual_pool.clone()),
+            );
         }
         (next_traj, updates)
+    }
+
+    fn saccade_fovea_params<B: BackendTrait>(
+        saccade: &VisionSaccadeModel<B>,
+        traj_with_eye: Tensor<B, 3>,
+        embed_dim: usize,
+    ) -> Tensor<B, 3> {
+        let [batch, _, _] = traj_with_eye.shape().dims::<3>();
+        let traj_summary = traj_with_eye.mean_dim(1).reshape([batch, 1, embed_dim]);
+        let params = saccade.saccade_head.forward(traj_summary);
+        let (mean, sigma) = saccade.decode_saccade_params(params);
+        Tensor::cat(vec![mean, sigma], 2)
+    }
+
+    fn saccade_weights_for_eye<B: BackendTrait>(
+        saccade: &VisionSaccadeModel<B>,
+        traj_with_eye: Tensor<B, 3>,
+        mip_levels: &[SaccadeMipLevel<B>],
+        embed_dim: usize,
+    ) -> Vec<Tensor<B, 3>> {
+        let [batch, _, _] = traj_with_eye.shape().dims::<3>();
+        let traj_summary = traj_with_eye.mean_dim(1).reshape([batch, 1, embed_dim]);
+        let params = saccade.saccade_head.forward(traj_summary);
+        let (mean, sigma) = saccade.decode_saccade_params(params);
+        saccade.mip_gaussian_weights(mip_levels, mean, sigma)
     }
 
     #[test]
@@ -4636,6 +4675,47 @@ mod tests {
         let diff = total.add(ones.mul_scalar(-1.0));
         let mse = diff.powf_scalar(2.0).mean();
         assert_mse_below(mse, 1e-6);
+    }
+
+    #[test]
+    fn saccade_fovea_params_are_pooled_over_trajectory_tokens() {
+        type Backend = NdArray<f32>;
+        let device = <Backend as BackendTrait>::Device::default();
+        let (saccade, _vision_config) = make_saccade_model::<Backend>(&device, 1);
+        let embed_dim = saccade.trajectory_token.val().shape().dims::<2>()[1];
+        let traj_len = saccade.config.trajectory_tokens.max(1);
+        assert!(traj_len > 1, "test expects multiple trajectory tokens");
+
+        let base_traj = saccade
+            .trajectory_token
+            .val()
+            .reshape([1, traj_len, embed_dim]);
+        let eye_embed = saccade
+            .eye_token
+            .val()
+            .reshape([1, 1, embed_dim])
+            .repeat_dim(1, traj_len);
+        let traj_with_eye = base_traj + eye_embed;
+        let fovea_params = saccade_fovea_params(&saccade, traj_with_eye.clone(), embed_dim);
+        assert_eq!(fovea_params.shape().dims::<3>(), [1, 1, 3]);
+
+        let levels = vec![
+            SaccadeMipLevel {
+                tokens: Tensor::<Backend, 3>::zeros([1, 4, 3], &device),
+                grid: PatchGrid { height: 2, width: 2 },
+                image: Tensor::<Backend, 4>::zeros([1, 3, 4, 4], &device),
+            },
+            SaccadeMipLevel {
+                tokens: Tensor::<Backend, 3>::zeros([1, 1, 3], &device),
+                grid: PatchGrid { height: 1, width: 1 },
+                image: Tensor::<Backend, 4>::zeros([1, 3, 2, 2], &device),
+            },
+        ];
+        let weights = saccade_weights_for_eye(&saccade, traj_with_eye, &levels, embed_dim);
+        for weight in weights {
+            let shape = weight.shape().dims::<3>();
+            assert_eq!(shape[1], 1, "fovea weights should pool trajectory tokens");
+        }
     }
 
     #[test]

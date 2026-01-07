@@ -49,8 +49,6 @@ relu_threshold = 0.0
 type = "saccade"
 # number of parallel foveated streams (eyes) sharing the same recurrent pyramid
 num_eyes = 2
-# number of latent trajectory tokens processed per eye (fovea params are pooled across tokens)
-trajectory_tokens = 64
 # number of MIP levels (2x downsample per level) used for Gaussian sampling
 mip_levels = 3
 # how pyramid scales are represented: stacked (raw) or laplacian (residual)

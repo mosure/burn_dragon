@@ -380,7 +380,6 @@ impl ModuleDisplay for VisionMaeConfig {}
 #[serde(default)]
 pub struct VisionSaccadeConfig {
     pub num_eyes: usize,
-    pub trajectory_tokens: usize,
     pub mip_levels: usize,
     pub pyramid_mode: VisionPyramidMode,
     pub lambda: f32,
@@ -401,7 +400,6 @@ impl Default for VisionSaccadeConfig {
     fn default() -> Self {
         Self {
             num_eyes: 2,
-            trajectory_tokens: 64,
             mip_levels: 3,
             pyramid_mode: VisionPyramidMode::Laplacian,
             lambda: 0.02,
@@ -460,7 +458,6 @@ impl ModuleDisplayDefault for VisionSaccadeConfig {
     fn content(&self, content: Content) -> Option<Content> {
         content
             .add("num_eyes", &self.num_eyes)
-            .add("trajectory_tokens", &self.trajectory_tokens)
             .add("mip_levels", &self.mip_levels)
             .add("pyramid_mode", &self.pyramid_mode)
             .add("lambda", &self.lambda)
@@ -1024,7 +1021,6 @@ mod tests {
             [mode]
             type = "saccade"
             num_eyes = 2
-            trajectory_tokens = 96
             mip_levels = 4
             pyramid_mode = "laplacian"
             lambda = 0.05
@@ -1045,7 +1041,6 @@ mod tests {
         match config.mode {
             VisionTrainingModeConfig::Saccade(saccade) => {
                 assert_eq!(saccade.num_eyes, 2);
-                assert_eq!(saccade.trajectory_tokens, 96);
                 assert_eq!(saccade.mip_levels, 4);
                 assert_eq!(saccade.pyramid_mode, VisionPyramidMode::Laplacian);
                 assert!((saccade.lambda - 0.05).abs() < f32::EPSILON);

@@ -27,7 +27,7 @@ use burn::optim::adaptor::OptimizerAdaptor;
 use burn::optim::{AdamW, AdamWConfig, GradientsParams, LearningRate};
 use burn::tensor::Distribution as TensorDistribution;
 use burn::tensor::activation;
-use burn::tensor::{ElementConversion, Int, Tensor, TensorData};
+use burn::tensor::{Int, Tensor, TensorData};
 use burn::tensor::backend::{AutodiffBackend, Backend as BackendTrait};
 use burn_autodiff::Autodiff;
 use burn_train::metric::{LearningRateMetric, LossMetric};
@@ -117,7 +117,9 @@ const LEJEPA_EPS: f32 = 1e-6;
 const SACCADE_EPS: f32 = 1e-6;
 const SACCADE_SIGMA_MIN: f32 = 0.03;
 const SACCADE_SIGMA_MAX: f32 = 0.5;
-const SACCADE_LEVEL_TEMP: f32 = 8.0;
+const SACCADE_LN_2: f32 = 0.69314718056;
+const SACCADE_LOD_LOG2_MIN: f32 = -2.0;
+const SACCADE_LOD_LOG2_MAX: f32 = 1.0;
 const SACCADE_RING_WIDTH: f32 = 0.02;
 const SACCADE_RING_INTENSITY: f32 = 2.0;
 
@@ -804,10 +806,12 @@ impl<B: BackendTrait> VisionMaeModel<B> {
 struct VisionSaccadeModel<B: BackendTrait> {
     model: VisionDragonHatchling<B>,
     recon: VisionReconstructionHead<B>,
+    // Learned initial trajectory state for the recurrent rollout.
     trajectory_token: Param<Tensor<B, 2>>,
-    trajectory_query: Param<Tensor<B, 2>>,
+    // Per-eye identity bias to keep multi-eye rollouts disentangled.
     eye_token: Param<Tensor<B, 2>>,
     input_proj: VisionSaccadeProjection<B>,
+    fovea_proj: VisionSaccadeProjection<B>,
     saccade_proj: VisionSaccadeProjection<B>,
     residual_proj: VisionSaccadeProjection<B>,
     saccade_head: VisionSaccadeHead<B>,
@@ -850,11 +854,6 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
             TensorDistribution::Normal(0.0, 0.02),
             device,
         );
-        let trajectory_query = Tensor::<B, 2>::random(
-            [1, embed_dim.max(1)],
-            TensorDistribution::Normal(0.0, 0.02),
-            device,
-        );
         let num_eyes = config.num_eyes.max(1);
         let eye_token = if num_eyes > 1 {
             Tensor::<B, 2>::random(
@@ -866,6 +865,7 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
             Tensor::<B, 2>::zeros([num_eyes, embed_dim.max(1)], device)
         };
         let input_proj = VisionSaccadeProjection::new(embed_dim, embed_dim, device);
+        let fovea_proj = VisionSaccadeProjection::new(3, embed_dim, device);
         let saccade_proj = VisionSaccadeProjection::new(embed_dim, embed_dim, device);
         let residual_proj = VisionSaccadeProjection::new(embed_dim, embed_dim, device);
         let saccade_head = VisionSaccadeHead::new(embed_dim, device);
@@ -873,9 +873,9 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
             model,
             recon,
             trajectory_token: Param::from_tensor(trajectory_token),
-            trajectory_query: Param::from_tensor(trajectory_query),
             eye_token: Param::from_tensor(eye_token),
             input_proj,
+            fovea_proj,
             saccade_proj,
             residual_proj,
             saccade_head,
@@ -973,6 +973,16 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
                 (residuals.clone(), residuals)
             }
         };
+        let patch_levels = if capture_artifacts {
+            Some(
+                mip_levels
+                    .iter()
+                    .map(|level| patchify(level.image.clone(), patch_size).detach())
+                    .collect::<Vec<_>>(),
+            )
+        } else {
+            None
+        };
         let traj_len = self.config.trajectory_tokens.max(1);
         let num_eyes = self.config.num_eyes.max(1);
 
@@ -982,12 +992,6 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
             .reshape([1, traj_len, embed_dim])
             .repeat_dim(0, batch);
         let mut trajs = vec![base_traj; num_eyes];
-        let traj_query = self
-            .trajectory_query
-            .val()
-            .reshape([1, 1, embed_dim])
-            .repeat_dim(0, batch)
-            .repeat_dim(1, traj_len);
         let mut state_levels: Vec<Tensor<B, 3>> = input_residuals
             .iter()
             .map(|level| Tensor::<B, 3>::zeros(level.shape().dims::<3>(), &device))
@@ -1009,6 +1013,7 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
         } else {
             None
         };
+        let mut last_patch_strip = None;
         for step_idx in 0..rollout_steps {
             let state_composed = match self.config.pyramid_mode {
                 VisionPyramidMode::Stacked => state_levels.clone(),
@@ -1019,6 +1024,11 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
                 .map(|level| Tensor::<B, 3>::zeros(level.shape().dims::<3>(), &device))
                 .collect();
             let mut step_traj = if capture_traj || capture_artifacts {
+                Some(Vec::with_capacity(num_eyes))
+            } else {
+                None
+            };
+            let mut step_patches = if capture_artifacts {
                 Some(Vec::with_capacity(num_eyes))
             } else {
                 None
@@ -1041,11 +1051,23 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
                     let sigma_step = sigma.clone().mean_dim(1).reshape([batch, 1]);
                     steps.push((mean_step.detach(), sigma_step.detach()));
                 }
-                let weights = self.mip_gaussian_weights(&mip_levels, mean, sigma);
+                let weights = self.mip_gaussian_weights(&mip_levels, mean.clone(), sigma.clone());
+                if let (Some(patch_levels), Some(step_patches)) =
+                    (patch_levels.as_ref(), step_patches.as_mut())
+                {
+                    if let Some(patch_view) =
+                        self.saccade_patch_view(patch_levels, &weights, patch_size, channels)
+                    {
+                        step_patches.push(patch_view.detach());
+                    }
+                }
                 let input_context = self.mip_weighted_sum(&input_sample_levels, &weights);
                 let state_context = self.mip_weighted_sum(&state_composed, &weights);
-                let input_tokens = self.input_proj.forward(input_context) + state_context;
-                let tokens_in = traj_with_eye + input_tokens + traj_query.clone();
+                let fovea_params = Tensor::cat(vec![mean, sigma], 2);
+                let fovea_embed = self.fovea_proj.forward(fovea_params);
+                let input_tokens =
+                    self.input_proj.forward(input_context) + state_context + fovea_embed;
+                let tokens_in = traj_with_eye + input_tokens;
                 let out_tokens = self
                     .model
                     .forward_tokens_embed_steps(tokens_in, steps)
@@ -1053,7 +1075,8 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
                 let residual = self.residual_proj.forward(out_tokens.clone());
                 let next_traj = self.saccade_proj.forward(out_tokens);
                 for (update, weights) in updates.iter_mut().zip(weights.iter()) {
-                    let update_eye = weights.clone().swap_dims(1, 2).matmul(residual.clone());
+                    let update_eye =
+                        self.weighted_sum_tokens(weights.clone().swap_dims(1, 2), residual.clone());
                     *update = update.clone() + update_eye;
                 }
                 next_trajs.push(next_traj);
@@ -1076,6 +1099,7 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
                     let recon_view =
                         unpatchify(pred_patches, patch_size, height, width, channels);
                     let mut frame = recon_view;
+                    let mut appended_patch = false;
                     for (eye_idx, (mean, sigma)) in step_traj.iter().enumerate() {
                         if let Some(overlay) = saccade_circle_overlay(
                             frame.clone(),
@@ -1084,6 +1108,20 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
                             saccade_eye_color(eye_idx),
                         ) {
                             frame = overlay;
+                        }
+                    }
+                    if let Some(step_patches) = step_patches {
+                        if let Some(patch_strip) =
+                            saccade_patch_strip(step_patches, height, patch_size)
+                        {
+                            last_patch_strip = Some(patch_strip.clone().detach());
+                            frame = Tensor::cat(vec![frame, patch_strip], 3);
+                            appended_patch = true;
+                        }
+                    }
+                    if !appended_patch {
+                        if let Some(patch_strip) = last_patch_strip.clone() {
+                            frame = Tensor::cat(vec![frame, patch_strip], 3);
                         }
                     }
                     frames.push(frame);
@@ -1139,7 +1177,25 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
             });
             let recon_view = unpatchify(pred_first.clone(), patch_size, height, width, channels);
             let residual = pred_first - target_first;
-            let mut views = vec![images.clone(), recon_view];
+            let mut target_width = width;
+            if let Some(patch_strip) = &last_patch_strip {
+                target_width = [
+                    images.shape().dims::<4>()[3],
+                    recon_view.shape().dims::<4>()[3],
+                    patch_strip.shape().dims::<4>()[3],
+                ]
+                .into_iter()
+                .max()
+                .unwrap_or(width);
+            }
+            let images_view = pad_view_width(images.clone(), target_width);
+            let recon_view = pad_view_width(recon_view, target_width);
+            let patch_strip =
+                last_patch_strip.map(|patch_strip| pad_view_width(patch_strip, target_width));
+            let mut views = vec![images_view, recon_view];
+            if let Some(patch_strip) = patch_strip {
+                views.insert(1, patch_strip);
+            }
             if let Some(steps) = traj_steps {
                 let max_extra = self
                     .config
@@ -1157,7 +1213,7 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
                             sigma.clone(),
                             saccade_eye_color(eye_idx),
                         ) {
-                            views.push(view);
+                            views.push(pad_view_width(view, target_width));
                             remaining = remaining.saturating_sub(1);
                         }
                     }
@@ -1170,8 +1226,14 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
                 if frames.is_empty() {
                     return None;
                 }
+                let mut max_width = 0;
+                for frame in &frames {
+                    let width = frame.shape().dims::<4>()[3];
+                    max_width = max_width.max(width);
+                }
                 let mut stacked = Vec::with_capacity(frames.len());
                 for frame in frames {
+                    let frame = pad_view_width(frame, max_width);
                     stacked.push(frame.unsqueeze_dim::<5>(1));
                 }
                 Some(Tensor::cat(stacked, 1))
@@ -1296,39 +1358,37 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
         from: PatchGrid,
         to: PatchGrid,
     ) -> Tensor<B, 3> {
-        let [batch, _, dim] = tokens.shape().dims::<3>();
+        let [batch, tokens_len, dim] = tokens.shape().dims::<3>();
         if from.height == 0 || from.width == 0 || to.height == 0 || to.width == 0 {
+            return Tensor::<B, 3>::zeros([batch, to.num_patches().max(1), dim], &tokens.device());
+        }
+        if tokens_len == 0 || tokens_len != from.num_patches() {
             return Tensor::<B, 3>::zeros([batch, to.num_patches().max(1), dim], &tokens.device());
         }
         if from.height == to.height && from.width == to.width {
             return tokens;
         }
         let device = tokens.device();
-        let h_indices: Vec<<B as BackendTrait>::IntElem> = (0..to.height)
-            .map(|y| {
-                let src = (y as f32 * from.height as f32 / to.height as f32)
-                    .floor()
-                    .min((from.height - 1) as f32) as usize;
-                <B as BackendTrait>::IntElem::from_elem(src as i64)
-            })
-            .collect();
-        let w_indices: Vec<<B as BackendTrait>::IntElem> = (0..to.width)
-            .map(|x| {
-                let src = (x as f32 * from.width as f32 / to.width as f32)
+        let from_tokens = from.num_patches();
+        let to_tokens = to.num_patches();
+        let mut mapping = vec![0.0f32; to_tokens * from_tokens];
+        for ty in 0..to.height {
+            let src_y = (ty as f32 * from.height as f32 / to.height as f32)
+                .floor()
+                .min((from.height - 1) as f32) as usize;
+            for tx in 0..to.width {
+                let src_x = (tx as f32 * from.width as f32 / to.width as f32)
                     .floor()
                     .min((from.width - 1) as f32) as usize;
-                <B as BackendTrait>::IntElem::from_elem(src as i64)
-            })
-            .collect();
-        let h_index =
-            Tensor::<B, 1, Int>::from_data(TensorData::new(h_indices, [to.height]), &device);
-        let w_index =
-            Tensor::<B, 1, Int>::from_data(TensorData::new(w_indices, [to.width]), &device);
-        tokens
-            .reshape([batch, from.height, from.width, dim])
-            .select(1, h_index)
-            .select(2, w_index)
-            .reshape([batch, to.height * to.width, dim])
+                let src_idx = src_y * from.width + src_x;
+                let dst_idx = ty * to.width + tx;
+                mapping[dst_idx * from_tokens + src_idx] = 1.0;
+            }
+        }
+        let weights =
+            Tensor::<B, 2>::from_data(TensorData::new(mapping, [to_tokens, from_tokens]), &device);
+        let weights = weights.unsqueeze_dim::<3>(0).repeat_dim(0, batch);
+        self.weighted_sum_tokens(weights, tokens)
     }
 
     fn pyramid_lejepa_loss(
@@ -1384,16 +1444,15 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
             return Vec::new();
         }
 
-        let level_refs = build_level_sigmas::<B>(level_count, &device);
         let mean_flat = mean.reshape([batch * traj_tokens, 2]);
         let sigma_flat = sigma.reshape([batch * traj_tokens, 1]);
-        let diff = sigma_flat.clone() - level_refs;
-        let level_scores = diff
-            .powf_scalar(2.0)
-            .mul_scalar(-SACCADE_LEVEL_TEMP);
-        let level_weights = activation::softmax(level_scores, 1);
+        let lod_sigma = self
+            .lod_sigma_from_sigma(sigma_flat.clone())
+            .clamp_min(SACCADE_EPS);
+        let max_level = level_count.saturating_sub(1) as f32;
 
-        let mut weights_out = Vec::with_capacity(level_count);
+        let mut total = Tensor::<B, 2>::zeros([batch * traj_tokens, 1], &device);
+        let mut raw_weights = Vec::with_capacity(level_count);
         for (level_idx, level) in levels.iter().enumerate() {
             let coords = build_level_coords::<B>(level.grid, &device);
             let tokens_len = level.tokens.shape().dims::<3>()[1].max(1);
@@ -1408,17 +1467,50 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
                 .powf_scalar(2.0)
                 .add_scalar(SACCADE_EPS)
                 .repeat_dim(1, tokens_len);
-            let scaled = dist2 / sigma2.mul_scalar(2.0);
-            let spatial = activation::softmax(scaled.mul_scalar(-1.0), 1);
-            let spatial = spatial.reshape([batch, traj_tokens, tokens_len]);
-            let level_weight = level_weights
-                .clone()
-                .slice_dim(1, level_idx..level_idx + 1)
-                .reshape([batch, traj_tokens, 1]);
-            weights_out.push(spatial * level_weight);
+            let spatial = (dist2.clone() / sigma2.mul_scalar(2.0))
+                .mul_scalar(-1.0)
+                .exp();
+
+            let sigma_tokens = sigma_flat.clone().repeat_dim(1, tokens_len);
+            let dist = dist2.add_scalar(SACCADE_EPS).sqrt();
+            let dist_norm = dist / sigma_tokens;
+            let lod_center = dist_norm
+                .clamp_min(1.0)
+                .log()
+                .div_scalar(SACCADE_LN_2)
+                .clamp_max(max_level);
+            let lod_sigma = lod_sigma.clone().repeat_dim(1, tokens_len);
+            let diff = lod_center.sub_scalar(level_idx as f32) / lod_sigma;
+            let lod_weight = diff.powf_scalar(2.0).mul_scalar(-0.5).exp();
+
+            let weights = spatial * lod_weight;
+            let sum = weights.clone().sum_dim(1).reshape([batch * traj_tokens, 1]);
+            total = total + sum;
+            raw_weights.push(weights);
         }
 
+        let total = total.add_scalar(SACCADE_EPS);
+        let mut weights_out = Vec::with_capacity(level_count);
+        for (level, weights) in levels.iter().zip(raw_weights.into_iter()) {
+            let tokens_len = level.tokens.shape().dims::<3>()[1].max(1);
+            let denom = total.clone().repeat_dim(1, tokens_len);
+            let weights = (weights / denom).reshape([batch, traj_tokens, tokens_len]);
+            weights_out.push(weights);
+        }
         weights_out
+    }
+
+    fn lod_sigma_from_sigma(&self, sigma: Tensor<B, 2>) -> Tensor<B, 2> {
+        let range = (SACCADE_SIGMA_MAX - SACCADE_SIGMA_MIN).max(SACCADE_EPS);
+        let t = sigma
+            .sub_scalar(SACCADE_SIGMA_MIN)
+            .div_scalar(range)
+            .clamp_min(0.0)
+            .clamp_max(1.0);
+        let log2 = t
+            .mul_scalar(SACCADE_LOD_LOG2_MAX - SACCADE_LOD_LOG2_MIN)
+            .add_scalar(SACCADE_LOD_LOG2_MIN);
+        (log2.mul_scalar(SACCADE_LN_2)).exp()
     }
 
     fn mip_weighted_sum(
@@ -1443,9 +1535,51 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
             .unwrap_or(0);
         let mut context = Tensor::<B, 3>::zeros([batch, traj_tokens, embed_dim.max(1)], &device);
         for (tokens, weights) in levels.iter().zip(weights.iter()) {
-            context = context + weights.clone().matmul(tokens.clone());
+            context = context + self.weighted_sum_tokens(weights.clone(), tokens.clone());
         }
         context
+    }
+
+    fn weighted_sum_tokens(
+        &self,
+        weights: Tensor<B, 3>,
+        tokens: Tensor<B, 3>,
+    ) -> Tensor<B, 3> {
+        let device = weights.device();
+        let [batch, out_tokens, in_tokens] = weights.shape().dims::<3>();
+        let dim = tokens.shape().dims::<3>()[2];
+        if batch == 0 || out_tokens == 0 || in_tokens == 0 || dim == 0 {
+            return Tensor::<B, 3>::zeros(
+                [batch, out_tokens.max(1), dim.max(1)],
+                &device,
+            );
+        }
+        let weights = weights.unsqueeze_dim::<4>(3);
+        let tokens = tokens.unsqueeze_dim::<4>(1);
+        (weights * tokens).sum_dim(2).squeeze_dim::<3>(2)
+    }
+
+    fn saccade_patch_view(
+        &self,
+        patch_levels: &[Tensor<B, 3>],
+        weights: &[Tensor<B, 3>],
+        patch_size: usize,
+        channels: usize,
+    ) -> Option<Tensor<B, 4>> {
+        // Visualization-only: pixel-space approximation of the foveated input using mip weights.
+        let patch_context = self.mip_weighted_sum(patch_levels, weights);
+        let [batch, traj_tokens, patch_dim] = patch_context.shape().dims::<3>();
+        if batch == 0 || traj_tokens == 0 || patch_dim == 0 {
+            return None;
+        }
+        let patch = patch_context.mean_dim(1).reshape([batch, 1, patch_dim]);
+        Some(unpatchify(
+            patch,
+            patch_size,
+            patch_size,
+            patch_size,
+            channels,
+        ))
     }
 
     #[cfg(test)]
@@ -1456,7 +1590,8 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
         residual: Tensor<B, 3>,
     ) {
         for (state, weights) in state_levels.iter_mut().zip(weights.iter()) {
-            let update = weights.clone().swap_dims(1, 2).matmul(residual.clone());
+            let update = self
+                .weighted_sum_tokens(weights.clone().swap_dims(1, 2), residual.clone());
             *state = state.clone() + update;
         }
     }
@@ -3831,16 +3966,6 @@ fn downsample_image<B: BackendTrait>(images: Tensor<B, 4>) -> Option<Tensor<B, 4
     Some(images)
 }
 
-fn build_level_sigmas<B: BackendTrait>(levels: usize, device: &B::Device) -> Tensor<B, 2> {
-    let mut values = Vec::with_capacity(levels);
-    let mut sigma = SACCADE_SIGMA_MIN.max(SACCADE_EPS);
-    for _ in 0..levels {
-        values.push(sigma.min(SACCADE_SIGMA_MAX));
-        sigma *= 2.0;
-    }
-    Tensor::<B, 1>::from_data(TensorData::new(values, [levels]), device).reshape([1, levels])
-}
-
 fn build_level_coords<B: BackendTrait>(grid: PatchGrid, device: &B::Device) -> Tensor<B, 2> {
     let mut coords = Vec::with_capacity(grid.height * grid.width * 2);
     let inv_w = 1.0 / (grid.width.max(1) as f32);
@@ -3934,6 +4059,44 @@ fn saccade_circle_overlay<B: BackendTrait>(
     let inv_mask = ring_mask.mul_scalar(-1.0).add_scalar(1.0);
     let overlay = images.mul(inv_mask) + ring_rgb;
     Some(overlay)
+}
+
+fn saccade_patch_strip<B: BackendTrait>(
+    patches: Vec<Tensor<B, 4>>,
+    target_height: usize,
+    patch_size: usize,
+) -> Option<Tensor<B, 4>> {
+    if patches.is_empty() || target_height == 0 {
+        return None;
+    }
+    let scale = (target_height / patch_size.max(1)).max(1);
+    let mut views = Vec::with_capacity(patches.len());
+    for patch in patches {
+        let mut view = patch;
+        if scale > 1 {
+            view = view.repeat_dim(2, scale).repeat_dim(3, scale);
+        }
+        views.push(view);
+    }
+    let mut out = views.remove(0);
+    for view in views {
+        out = Tensor::cat(vec![out, view], 3);
+    }
+    Some(out)
+}
+
+fn pad_view_width<B: BackendTrait>(view: Tensor<B, 4>, target_width: usize) -> Tensor<B, 4> {
+    let [batch, channels, height, width] = view.shape().dims::<4>();
+    if target_width <= width {
+        return view;
+    }
+    let pad = target_width - width;
+    if pad == 0 {
+        return view;
+    }
+    let device = view.device();
+    let padding = Tensor::<B, 4>::zeros([batch, channels, height, pad], &device);
+    Tensor::cat(vec![view, padding], 3)
 }
 
 #[cfg(test)]
@@ -4197,12 +4360,6 @@ mod tests {
             .val()
             .reshape([1, traj_len, embed_dim])
             .repeat_dim(0, batch);
-        let traj_query = saccade
-            .trajectory_query
-            .val()
-            .reshape([1, 1, embed_dim])
-            .repeat_dim(0, batch)
-            .repeat_dim(1, traj_len);
         let state_levels: Vec<Tensor<B, 3>> = input_residuals
             .iter()
             .map(|level| Tensor::<B, 3>::zeros(level.shape().dims::<3>(), &device))
@@ -4221,11 +4378,13 @@ mod tests {
         let traj_with_eye = base_traj + eye_embed;
         let params = saccade.saccade_head.forward(traj_with_eye.clone());
         let (mean, sigma) = saccade.decode_saccade_params(params);
-        let weights = saccade.mip_gaussian_weights(&mip_levels, mean, sigma);
+        let weights = saccade.mip_gaussian_weights(&mip_levels, mean.clone(), sigma.clone());
         let input_context = saccade.mip_weighted_sum(&input_sample_levels, &weights);
         let state_context = saccade.mip_weighted_sum(&state_composed, &weights);
-        let input_tokens = saccade.input_proj.forward(input_context) + state_context;
-        let tokens_in = traj_with_eye + input_tokens + traj_query;
+        let fovea_params = Tensor::cat(vec![mean, sigma], 2);
+        let fovea_embed = saccade.fovea_proj.forward(fovea_params);
+        let input_tokens = saccade.input_proj.forward(input_context) + state_context + fovea_embed;
+        let tokens_in = traj_with_eye + input_tokens;
         let out_tokens = saccade
             .model
             .forward_tokens_embed_steps(tokens_in, steps)
@@ -4500,6 +4659,27 @@ mod tests {
     }
 
     #[test]
+    fn saccade_upsample_tokens_mismatch_returns_zero() {
+        type Backend = NdArray<f32>;
+        let device = <Backend as BackendTrait>::Device::default();
+        let (saccade, _vision_config) = make_saccade_model::<Backend>(&device, 1);
+
+        let tokens = Tensor::<Backend, 3>::zeros([1, 1, 2], &device);
+        let from = PatchGrid { height: 2, width: 2 };
+        let to = PatchGrid { height: 3, width: 3 };
+        let upsampled = saccade.upsample_tokens(tokens, from, to);
+
+        assert_eq!(upsampled.shape().dims(), [1, 9, 2]);
+        let value = upsampled
+            .sum()
+            .to_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .expect("sum vec")[0];
+        assert_eq!(value, 0.0);
+    }
+
+    #[test]
     fn saccade_step_produces_finite_grads() {
         type Backend = Autodiff<NdArray<f32>>;
         let device = <Backend as BackendTrait>::Device::default();
@@ -4514,11 +4694,11 @@ mod tests {
         let token_grad = grads
             .get::<ValidBackend<Backend>, 2>(saccade.trajectory_token.id)
             .expect("trajectory_token grad");
-        let query_grad = grads
-            .get::<ValidBackend<Backend>, 2>(saccade.trajectory_query.id)
-            .expect("trajectory_query grad");
+        let eye_grad = grads
+            .get::<ValidBackend<Backend>, 2>(saccade.eye_token.id)
+            .expect("eye_token grad");
         assert_tensor_finite(token_grad);
-        assert_tensor_finite(query_grad);
+        assert_tensor_finite(eye_grad);
     }
 }
 

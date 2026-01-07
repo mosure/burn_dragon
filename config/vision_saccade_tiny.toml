@@ -4,8 +4,8 @@
 imagenet_root = "data/imagenette2-160"
 train_dir = "train"
 val_dir = "val"
-prefetch_batches = 8
-prefetch_workers = 8
+prefetch_batches = 2
+prefetch_workers = 4
 cache_decoded = true
 cache_capacity = 512
 
@@ -14,11 +14,11 @@ type = "imagenette"
 variant = "imagenette2-160"
 
 [training]
-batch_size = 64
+batch_size = 32
 max_iters = 2000
 log_frequency = 20
 rollout_min_steps = 1
-rollout_max_steps = 32
+rollout_max_steps = 8
 rollout_backprop_steps = 1
 
 [optimizer]
@@ -33,7 +33,7 @@ image_size = 160
 patch_size = 32
 in_channels = 3
 embed_dim = 128
-steps = 64  # TODO: support infinite streaming
+steps = 32  # TODO: support infinite streaming
 n_head = 4
 mlp_internal_dim_multiplier = 4
 dropout = 0.1
@@ -49,7 +49,7 @@ relu_threshold = 0.0
 type = "saccade"
 # number of parallel foveated streams (eyes) sharing the same recurrent pyramid
 num_eyes = 2
-# number of latent trajectory tokens; each step predicts (x, y, sigma) per token
+# number of latent trajectory tokens processed per eye (fovea params are pooled across tokens)
 trajectory_tokens = 64
 # number of MIP levels (2x downsample per level) used for Gaussian sampling
 mip_levels = 3

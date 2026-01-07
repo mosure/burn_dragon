@@ -56,7 +56,7 @@ train = [
   "dep:tar",
   "dep:burn_dino",
 ]
-cuda = ["burn/cuda", "burn-cuda"]
+cuda = ["burn-cuda"]
 web = ["burn/webgpu", "burn-wgpu/webgpu", "viz"]
 viz = [
   "dep:bevy",
@@ -191,7 +191,6 @@ version = "0.19"
 optional = true
 default-features = false
 features = [
-  "fusion",
   "std",
 ]
 

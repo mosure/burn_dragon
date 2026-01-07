@@ -14,11 +14,12 @@ type = "imagenette"
 variant = "imagenette2-160"
 
 [training]
-batch_size = 8
+batch_size = 64
 max_iters = 200
 log_frequency = 20
 rollout_min_steps = 1
 rollout_max_steps = 4
+rollout_backprop_steps = 1
 
 [optimizer]
 learning_rate = 0.0005
@@ -29,7 +30,7 @@ type = "constant"
 
 [vision]
 image_size = 160
-patch_size = 16
+patch_size = 32
 in_channels = 3
 embed_dim = 128
 steps = 4

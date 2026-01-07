@@ -10,7 +10,7 @@ use image::RgbImage;
 
 use crate::config::VisionArtifactOutputMode;
 
-pub(crate) const ARTIFACT_DEFAULT_FPS: u32 = 8;
+pub(crate) const ARTIFACT_DEFAULT_FPS: u32 = 4;
 
 #[derive(Clone, Debug)]
 pub(crate) struct ArtifactFrame {
@@ -159,6 +159,9 @@ fn write_mp4(path: &Path, frames: &[ArtifactFrame], fps: u32) -> Result<()> {
     let mut cmd = Command::new(ffmpeg);
     cmd.current_dir(temp_path)
         .arg("-y")
+        .arg("-hide_banner")
+        .arg("-nostats")
+        .arg("-nostdin")
         .arg("-loglevel")
         .arg("error")
         .arg("-framerate")
@@ -192,7 +195,11 @@ fn find_ffmpeg() -> Option<PathBuf> {
             return Some(candidate);
         }
     }
-    let status = Command::new("ffmpeg").arg("-version").status();
+    let status = Command::new("ffmpeg")
+        .arg("-version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
     if status.map(|status| status.success()).unwrap_or(false) {
         return Some(PathBuf::from("ffmpeg"));
     }
@@ -236,6 +243,9 @@ fn write_avi_ffmpeg(path: &Path, frames: &[ArtifactFrame], fps: u32) -> Result<(
     let mut cmd = Command::new(ffmpeg);
     cmd.current_dir(temp_path)
         .arg("-y")
+        .arg("-hide_banner")
+        .arg("-nostats")
+        .arg("-nostdin")
         .arg("-loglevel")
         .arg("error")
         .arg("-framerate")
@@ -579,5 +589,13 @@ exit /b 0
             unsafe { env::remove_var("FFMPEG") };
         }
         let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn collect_frames_respects_layout_and_channels() {
+        let data = vec![1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+        let frames = collect_frames(&data, 1, 1, 3, 1, 2, 0, [0.0; 3], [1.0; 3]);
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].rgb, vec![255, 0, 0, 0, 255, 0]);
     }
 }

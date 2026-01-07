@@ -115,6 +115,8 @@ enum BackendArg {
 static FAST_TRAIN: AtomicBool = AtomicBool::new(false);
 const LEJEPA_EPS: f32 = 1e-6;
 const SACCADE_EPS: f32 = 1e-6;
+// Saccade uses a single trajectory token per eye; next fovea params decode from it.
+const SACCADE_TRAJ_TOKENS: usize = 1;
 const SACCADE_SIGMA_MIN: f32 = 0.03;
 const SACCADE_SIGMA_MAX: f32 = 0.5;
 const SACCADE_LN_2: f32 = 0.69314718056;
@@ -812,7 +814,6 @@ struct VisionSaccadeModel<B: BackendTrait> {
     eye_token: Param<Tensor<B, 2>>,
     input_proj: VisionSaccadeProjection<B>,
     fovea_proj: VisionSaccadeProjection<B>,
-    saccade_proj: VisionSaccadeProjection<B>,
     residual_proj: VisionSaccadeProjection<B>,
     saccade_head: VisionSaccadeHead<B>,
     config: VisionSaccadeConfig,
@@ -850,7 +851,7 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
             device,
         );
         let trajectory_token = Tensor::<B, 2>::random(
-            [config.trajectory_tokens.max(1), embed_dim.max(1)],
+            [SACCADE_TRAJ_TOKENS, embed_dim.max(1)],
             TensorDistribution::Normal(0.0, 0.02),
             device,
         );
@@ -866,7 +867,6 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
         };
         let input_proj = VisionSaccadeProjection::new(embed_dim, embed_dim, device);
         let fovea_proj = VisionSaccadeProjection::new(3, embed_dim, device);
-        let saccade_proj = VisionSaccadeProjection::new(embed_dim, embed_dim, device);
         let residual_proj = VisionSaccadeProjection::new(embed_dim, embed_dim, device);
         let saccade_head = VisionSaccadeHead::new(embed_dim, device);
         Self {
@@ -876,7 +876,6 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
             eye_token: Param::from_tensor(eye_token),
             input_proj,
             fovea_proj,
-            saccade_proj,
             residual_proj,
             saccade_head,
             config,
@@ -985,7 +984,7 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
         } else {
             None
         };
-        let traj_len = self.config.trajectory_tokens.max(1);
+        let traj_len = self.trajectory_token.val().shape().dims::<2>()[0].max(1);
         let num_eyes = self.config.num_eyes.max(1);
 
         let base_traj = self
@@ -1086,7 +1085,7 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
                     .clone()
                     .mean_dim(1)
                     .reshape([batch, 1, embed_dim]);
-                let next_traj = self.saccade_proj.forward(out_tokens);
+                let next_traj = out_tokens;
                 for (update, weights) in updates.iter_mut().zip(weights.iter()) {
                     let update_eye =
                         self.weighted_sum_tokens(weights.clone().swap_dims(1, 2), residual_pool.clone());
@@ -1111,18 +1110,19 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
                     let pred_patches = self.recon.forward(state_composed[0].clone());
                     let recon_view =
                         unpatchify(pred_patches, patch_size, height, width, channels);
-                    let mut frame = recon_view;
+                    let mut input_frame = images.clone();
                     let mut appended_patch = false;
                     for (eye_idx, (mean, sigma)) in step_traj.iter().enumerate() {
                         if let Some(overlay) = saccade_circle_overlay(
-                            frame.clone(),
+                            input_frame.clone(),
                             mean.clone(),
                             sigma.clone(),
                             saccade_eye_color(eye_idx),
                         ) {
-                            frame = overlay;
+                            input_frame = overlay;
                         }
                     }
+                    let mut frame = Tensor::cat(vec![input_frame, recon_view], 3);
                     if let Some(step_patches) = step_patches {
                         if let Some(patch_strip) =
                             saccade_patch_strip(step_patches, height, patch_size)
@@ -1207,7 +1207,7 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
                 last_patch_strip.map(|patch_strip| pad_view_width(patch_strip, target_width));
             let mut views = vec![images_view, recon_view];
             if let Some(patch_strip) = patch_strip {
-                views.insert(1, patch_strip);
+                views.push(patch_strip);
             }
             if let Some(steps) = traj_steps {
                 let max_extra = self
@@ -2500,9 +2500,6 @@ where
             )
         }
         VisionTrainingModeConfig::Saccade(saccade) => {
-            if saccade.trajectory_tokens == 0 {
-                return Err(anyhow!("saccade.trajectory_tokens must be > 0"));
-            }
             if saccade.mip_levels == 0 {
                 return Err(anyhow!("saccade.mip_levels must be > 0"));
             }
@@ -4260,7 +4257,6 @@ mod tests {
         let model = VisionDragonHatchling::<B>::new(vision_config.clone(), device);
         let saccade_config = VisionSaccadeConfig {
             num_eyes,
-            trajectory_tokens: 4,
             mip_levels: 3,
             pyramid_mode: VisionPyramidMode::Laplacian,
             lambda: 0.02,
@@ -4369,7 +4365,7 @@ mod tests {
             }
         };
         let embed_dim = patch.tokens.shape().dims::<3>()[2];
-        let traj_len = saccade.config.trajectory_tokens.max(1);
+        let traj_len = saccade.trajectory_token.val().shape().dims::<2>()[0].max(1);
         let base_traj = saccade
             .trajectory_token
             .val()
@@ -4408,7 +4404,7 @@ mod tests {
             .clone()
             .mean_dim(1)
             .reshape([batch, 1, embed_dim]);
-        let next_traj = saccade.saccade_proj.forward(out_tokens);
+        let next_traj = out_tokens;
         let mut updates = Vec::with_capacity(weights.len());
         for weights in &weights {
             updates.push(
@@ -4678,13 +4674,13 @@ mod tests {
     }
 
     #[test]
-    fn saccade_fovea_params_are_pooled_over_trajectory_tokens() {
+    fn saccade_fovea_params_use_single_trajectory_token() {
         type Backend = NdArray<f32>;
         let device = <Backend as BackendTrait>::Device::default();
         let (saccade, _vision_config) = make_saccade_model::<Backend>(&device, 1);
         let embed_dim = saccade.trajectory_token.val().shape().dims::<2>()[1];
-        let traj_len = saccade.config.trajectory_tokens.max(1);
-        assert!(traj_len > 1, "test expects multiple trajectory tokens");
+        let traj_len = saccade.trajectory_token.val().shape().dims::<2>()[0].max(1);
+        assert_eq!(traj_len, SACCADE_TRAJ_TOKENS);
 
         let base_traj = saccade
             .trajectory_token
@@ -4714,7 +4710,7 @@ mod tests {
         let weights = saccade_weights_for_eye(&saccade, traj_with_eye, &levels, embed_dim);
         for weight in weights {
             let shape = weight.shape().dims::<3>();
-            assert_eq!(shape[1], 1, "fovea weights should pool trajectory tokens");
+            assert_eq!(shape[1], 1, "fovea weights should use a single token");
         }
     }
 

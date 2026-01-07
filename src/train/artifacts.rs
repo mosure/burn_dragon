@@ -1,7 +1,7 @@
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::{env, fmt};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -141,6 +141,7 @@ fn video_filename(
 }
 
 fn write_mp4(path: &Path, frames: &[ArtifactFrame], fps: u32) -> Result<()> {
+    let output_path = prepare_output_path(path)?;
     let ffmpeg = find_ffmpeg().ok_or_else(|| anyhow!("ffmpeg not found"))?;
     let temp_dir = create_temp_dir("artifact_frames")?;
     let temp_path = temp_dir.as_path();
@@ -166,7 +167,9 @@ fn write_mp4(path: &Path, frames: &[ArtifactFrame], fps: u32) -> Result<()> {
         .arg("frame_%05d.png")
         .arg("-pix_fmt")
         .arg("yuv420p")
-        .arg(path);
+        .arg(&output_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
     let status = cmd.status().context("run ffmpeg")?;
     let _ = fs::remove_dir_all(temp_path);
     if status.success() {
@@ -208,6 +211,54 @@ fn create_temp_dir(prefix: &str) -> Result<PathBuf> {
 }
 
 fn write_avi(path: &Path, frames: &[ArtifactFrame], fps: u32) -> Result<()> {
+    if let Ok(()) = write_avi_ffmpeg(path, frames, fps) {
+        return Ok(());
+    }
+    write_avi_raw(path, frames, fps)
+}
+
+fn write_avi_ffmpeg(path: &Path, frames: &[ArtifactFrame], fps: u32) -> Result<()> {
+    let output_path = prepare_output_path(path)?;
+    let ffmpeg = find_ffmpeg().ok_or_else(|| anyhow!("ffmpeg not found"))?;
+    let temp_dir = create_temp_dir("artifact_frames")?;
+    let temp_path = temp_dir.as_path();
+    for (idx, frame) in frames.iter().enumerate() {
+        let filename = format!("frame_{idx:05}.png");
+        let frame_path = temp_path.join(filename);
+        let image = RgbImage::from_vec(
+            frame.width as u32,
+            frame.height as u32,
+            frame.rgb.clone(),
+        )
+        .ok_or_else(|| anyhow!("invalid frame buffer"))?;
+        image.save(&frame_path).context("save avi frame")?;
+    }
+    let mut cmd = Command::new(ffmpeg);
+    cmd.current_dir(temp_path)
+        .arg("-y")
+        .arg("-loglevel")
+        .arg("error")
+        .arg("-framerate")
+        .arg(fps.to_string())
+        .arg("-i")
+        .arg("frame_%05d.png")
+        .arg("-c:v")
+        .arg("mjpeg")
+        .arg("-pix_fmt")
+        .arg("yuvj420p")
+        .arg(&output_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let status = cmd.status().context("run ffmpeg")?;
+    let _ = fs::remove_dir_all(temp_path);
+    if status.success() {
+        Ok(())
+    } else {
+        Err(anyhow!("ffmpeg failed"))
+    }
+}
+
+fn write_avi_raw(path: &Path, frames: &[ArtifactFrame], fps: u32) -> Result<()> {
     if frames.is_empty() {
         return Err(anyhow!("no frames to write"));
     }
@@ -243,8 +294,8 @@ fn write_avi(path: &Path, frames: &[ArtifactFrame], fps: u32) -> Result<()> {
     write_u32(&mut buf, 0);
     write_u32(&mut buf, 0x10);
     let avih_frames_pos = buf.len();
-    write_u32(&mut buf, 0);
-    write_u32(&mut buf, 0);
+    write_u16(&mut buf, 0);
+    write_u16(&mut buf, 0);
     write_u32(&mut buf, 1);
     write_u32(&mut buf, frame_size as u32);
     write_u32(&mut buf, width as u32);
@@ -273,16 +324,16 @@ fn write_avi(path: &Path, frames: &[ArtifactFrame], fps: u32) -> Result<()> {
     write_u32(&mut buf, frame_size as u32);
     write_u32(&mut buf, 0xFFFF_FFFF);
     write_u32(&mut buf, 0);
-    write_i32(&mut buf, 0);
-    write_i32(&mut buf, 0);
-    write_i32(&mut buf, width as i32);
-    write_i32(&mut buf, height as i32);
+    write_i16(&mut buf, 0);
+    write_i16(&mut buf, 0);
+    write_i16(&mut buf, clamp_i16(width));
+    write_i16(&mut buf, clamp_i16(height));
 
     write_fourcc(&mut buf, "strf");
     write_u32(&mut buf, 40);
     write_u32(&mut buf, 40);
     write_i32(&mut buf, width as i32);
-    write_i32(&mut buf, -(height as i32));
+    write_i32(&mut buf, height as i32);
     write_u16(&mut buf, 1);
     write_u16(&mut buf, 24);
     write_u32(&mut buf, 0);
@@ -306,15 +357,16 @@ fn write_avi(path: &Path, frames: &[ArtifactFrame], fps: u32) -> Result<()> {
     for frame in frames {
         let chunk_pos = buf.len();
         write_fourcc(&mut buf, "00db");
-        write_u32(&mut buf, frame_size as u32);
         let encoded = encode_bgr(frame, row_stride);
+        let chunk_size = encoded.len();
+        write_u32(&mut buf, chunk_size as u32);
         buf.extend_from_slice(&encoded);
-        if frame_size % 2 != 0 {
+        if chunk_size % 2 != 0 {
             buf.push(0);
         }
         idx_entries.push(AviIndexEntry {
             offset: (chunk_pos - movi_start) as u32,
-            size: frame_size as u32,
+            size: chunk_size as u32,
         });
     }
 
@@ -341,6 +393,18 @@ fn write_avi(path: &Path, frames: &[ArtifactFrame], fps: u32) -> Result<()> {
     Ok(())
 }
 
+fn prepare_output_path(path: &Path) -> Result<PathBuf> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).context("create video output dir")?;
+    }
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
+    } else {
+        let cwd = env::current_dir().context("read current dir")?;
+        Ok(cwd.join(path))
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct AviIndexEntry {
     offset: u32,
@@ -350,9 +414,10 @@ struct AviIndexEntry {
 fn encode_bgr(frame: &ArtifactFrame, row_stride: usize) -> Vec<u8> {
     let mut out = vec![0u8; row_stride * frame.height];
     for y in 0..frame.height {
+        let dst_row = frame.height - 1 - y;
         for x in 0..frame.width {
             let src = (y * frame.width + x) * 3;
-            let dst = y * row_stride + x * 3;
+            let dst = dst_row * row_stride + x * 3;
             out[dst] = frame.rgb[src + 2];
             out[dst + 1] = frame.rgb[src + 1];
             out[dst + 2] = frame.rgb[src];
@@ -369,12 +434,20 @@ fn write_u16(buf: &mut Vec<u8>, value: u16) {
     buf.extend_from_slice(&value.to_le_bytes());
 }
 
+fn write_i16(buf: &mut Vec<u8>, value: i16) {
+    buf.extend_from_slice(&value.to_le_bytes());
+}
+
 fn write_u32(buf: &mut Vec<u8>, value: u32) {
     buf.extend_from_slice(&value.to_le_bytes());
 }
 
 fn write_i32(buf: &mut Vec<u8>, value: i32) {
     buf.extend_from_slice(&value.to_le_bytes());
+}
+
+fn clamp_i16(value: usize) -> i16 {
+    value.min(i16::MAX as usize) as i16
 }
 
 fn patch_u32(buf: &mut Vec<u8>, pos: usize, value: u32) {
@@ -397,6 +470,7 @@ impl fmt::Display for ArtifactWriteOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use avirus::AVI;
 
     fn sample_frames() -> Vec<ArtifactFrame> {
         vec![
@@ -413,14 +487,69 @@ mod tests {
         ]
     }
 
+    fn find_fourcc(bytes: &[u8], tag: &[u8; 4]) -> Option<usize> {
+        bytes.windows(4).position(|window| window == tag)
+    }
+
+    fn read_u32_le(bytes: &[u8], pos: usize) -> u32 {
+        let mut data = [0u8; 4];
+        data.copy_from_slice(&bytes[pos..pos + 4]);
+        u32::from_le_bytes(data)
+    }
+
     #[test]
     fn avi_writer_emits_riff_header() {
         let temp_dir = create_temp_dir("avi_test").expect("temp dir");
         let path = temp_dir.join("sample.avi");
-        write_avi(&path, &sample_frames(), 8).expect("avi write");
+        write_avi_raw(&path, &sample_frames(), 8).expect("avi write");
         let bytes = fs::read(&path).expect("read avi");
         assert!(bytes.starts_with(b"RIFF"));
         assert!(bytes[8..12].starts_with(b"AVI "));
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn avi_writer_idx_offsets_point_to_chunks() {
+        let temp_dir = create_temp_dir("avi_idx").expect("temp dir");
+        let path = temp_dir.join("sample.avi");
+        write_avi_raw(&path, &sample_frames(), 8).expect("avi write");
+        let bytes = fs::read(&path).expect("read avi");
+        let movi_pos = find_fourcc(&bytes, b"movi").expect("movi");
+        let movi_data_start = movi_pos + 4;
+        let idx_pos = find_fourcc(&bytes, b"idx1").expect("idx1");
+        let entry_start = idx_pos + 8;
+        let offset = read_u32_le(&bytes, entry_start + 8) as usize;
+        let size = read_u32_le(&bytes, entry_start + 12) as usize;
+        let chunk_pos = movi_data_start + offset;
+        assert!(chunk_pos + 8 <= bytes.len());
+        assert_eq!(&bytes[chunk_pos..chunk_pos + 4], b"00db");
+        let chunk_size = read_u32_le(&bytes, chunk_pos + 4) as usize;
+        assert_eq!(chunk_size, size);
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn avi_writer_strh_chunk_is_well_formed() {
+        let temp_dir = create_temp_dir("avi_strh").expect("temp dir");
+        let path = temp_dir.join("sample.avi");
+        write_avi_raw(&path, &sample_frames(), 8).expect("avi write");
+        let bytes = fs::read(&path).expect("read avi");
+        let strh_pos = find_fourcc(&bytes, b"strh").expect("strh");
+        let size = read_u32_le(&bytes, strh_pos + 4) as usize;
+        assert_eq!(size, 56);
+        let next_pos = strh_pos + 8 + size;
+        assert!(next_pos + 4 <= bytes.len());
+        assert_eq!(&bytes[next_pos..next_pos + 4], b"strf");
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn avi_writer_roundtrip_parses_with_avirus() {
+        let temp_dir = create_temp_dir("avi_roundtrip").expect("temp dir");
+        let path = temp_dir.join("sample.avi");
+        write_avi_raw(&path, &sample_frames(), 8).expect("avi write");
+        let avi = AVI::new(&path).expect("parse avi");
+        assert!(!avi.frames.meta.is_empty());
         let _ = fs::remove_dir_all(&temp_dir);
     }
 

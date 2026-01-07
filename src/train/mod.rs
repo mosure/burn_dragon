@@ -888,12 +888,13 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
         &self,
         batch: ImageNetBatch<B>,
         steps: usize,
+        backprop_steps: usize,
         randomize_mask: bool,
         capture_artifacts: bool,
     ) -> VisionSaccadeLosses<B> {
         let ImageNetBatch { images, labels, .. } = batch;
         let (loss_sum, mask_sum, inv, sigreg, artifacts) =
-            self.recon_loss(images, steps, randomize_mask, capture_artifacts);
+            self.recon_loss(images, steps, backprop_steps, randomize_mask, capture_artifacts);
         let denom = mask_sum.clone().add_scalar(LEJEPA_EPS);
         let recon = loss_sum / denom;
         let lambda = self.config.lambda.clamp(0.0, 1.0);
@@ -932,6 +933,7 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
         &self,
         images: Tensor<B, 4>,
         steps: usize,
+        backprop_steps: usize,
         randomize_mask: bool,
         capture_artifacts: bool,
     ) -> (
@@ -997,6 +999,8 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
             .map(|level| Tensor::<B, 3>::zeros(level.shape().dims::<3>(), &device))
             .collect();
         let rollout_steps = steps.max(1);
+        let backprop_steps = backprop_steps.max(1).min(rollout_steps);
+        let detach_until = rollout_steps.saturating_sub(backprop_steps);
         let capture_traj = capture_artifacts
             && self
                 .config
@@ -1128,7 +1132,7 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
                 }
             }
             trajs = next_trajs;
-            if step_idx + 1 < rollout_steps {
+            if step_idx + 1 <= detach_until {
                 trajs = trajs.into_iter().map(|traj| traj.detach()).collect();
                 for level in &mut state_levels {
                     *level = level.clone().detach();
@@ -1807,7 +1811,8 @@ impl<B: BackendTrait> ValidStep<ImageNetBatch<B>, VisionOutput<B>> for VisionMae
 impl<B: AutodiffBackend> TrainStep<ImageNetBatch<B>, VisionTrainItem<B>> for VisionSaccadeModel<B> {
     fn step(&self, batch: ImageNetBatch<B>) -> TrainOutput<VisionTrainItem<B>> {
         let rollout_steps = self.rollout.sample_steps();
-        let losses = self.forward_losses(batch, rollout_steps, true, false);
+        let backprop_steps = self.rollout.backprop_steps(rollout_steps);
+        let losses = self.forward_losses(batch, rollout_steps, backprop_steps, true, false);
         let grads = losses.total.clone().backward();
         let zero = Tensor::<B, 1>::zeros([1], &losses.total.device());
 
@@ -1828,7 +1833,8 @@ impl<B: AutodiffBackend> TrainStep<ImageNetBatch<B>, VisionTrainItem<B>> for Vis
 
 impl<B: BackendTrait> ValidStep<ImageNetBatch<B>, VisionOutput<B>> for VisionSaccadeModel<B> {
     fn step(&self, batch: ImageNetBatch<B>) -> VisionOutput<B> {
-        let losses = self.forward_losses(batch, self.rollout.max_steps, false, true);
+        let backprop_steps = self.rollout.backprop_steps(self.rollout.max_steps);
+        let losses = self.forward_losses(batch, self.rollout.max_steps, backprop_steps, false, true);
         let zero = Tensor::<B, 1>::zeros([1], &losses.total.device());
         VisionOutput::new(
             losses.total,
@@ -4429,7 +4435,7 @@ mod tests {
         let images = Tensor::<Backend, 4>::random([2, 3, 8, 8], TensorDistribution::Default, &device);
         let labels = Tensor::<Backend, 1, Int>::zeros([2], &device);
         let batch = ImageNetBatch::new(images, None, None, None, None, labels, None, None);
-        let losses = saccade.forward_losses(batch, 2, true, false);
+        let losses = saccade.forward_losses(batch, 2, 1, true, false);
         let value = losses
             .total
             .to_data()
@@ -4447,7 +4453,7 @@ mod tests {
         let images = Tensor::<Backend, 4>::random([2, 3, 8, 8], TensorDistribution::Default, &device);
         let labels = Tensor::<Backend, 1, Int>::zeros([2], &device);
         let batch = ImageNetBatch::new(images, None, None, None, None, labels, None, None);
-        let losses = saccade.forward_losses(batch, 2, true, false);
+        let losses = saccade.forward_losses(batch, 2, 1, true, false);
         let value = losses
             .total
             .to_data()
@@ -4536,7 +4542,7 @@ mod tests {
             Tensor::<Backend, 4>::random([2, 3, 8, 8], TensorDistribution::Default, &device);
         let labels = Tensor::<Backend, 1, Int>::zeros([2], &device);
         let batch = ImageNetBatch::new(images, None, None, None, None, labels, None, None);
-        let losses = saccade.forward_losses(batch, 1, true, false);
+        let losses = saccade.forward_losses(batch, 1, 1, true, false);
         let grads = GradientsParams::from_grads(losses.total.backward(), &saccade);
 
         let eye_grad = grads
@@ -4688,7 +4694,7 @@ mod tests {
             Tensor::<Backend, 4>::random([2, 3, 8, 8], TensorDistribution::Default, &device);
         let labels = Tensor::<Backend, 1, Int>::zeros([2], &device);
         let batch = ImageNetBatch::new(images, None, None, None, None, labels, None, None);
-        let losses = saccade.forward_losses(batch, 1, true, false);
+        let losses = saccade.forward_losses(batch, 1, 1, true, false);
         let grads = GradientsParams::from_grads(losses.total.backward(), &saccade);
 
         let token_grad = grads

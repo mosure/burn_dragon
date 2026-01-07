@@ -68,7 +68,7 @@ local_max_scale = 0.3
 # write artifact images every N validation iterations (0 disables)
 artifact_every = 1
 # artifact output: images (png), avi, or mp4
-artifact_output = "avi"
+artifact_output = "mp4"
 # max images per artifact batch (caps batch rows)
 artifact_max_images = 4
 # max views per image (caps number of crops shown)

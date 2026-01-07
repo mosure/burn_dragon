@@ -4,8 +4,8 @@
 imagenet_root = "data/imagenette2-160"
 train_dir = "train"
 val_dir = "val"
-prefetch_batches = 2
-prefetch_workers = 4
+prefetch_batches = 8
+prefetch_workers = 8
 cache_decoded = true
 cache_capacity = 512
 
@@ -15,10 +15,10 @@ variant = "imagenette2-160"
 
 [training]
 batch_size = 64
-max_iters = 200
+max_iters = 2000
 log_frequency = 20
 rollout_min_steps = 1
-rollout_max_steps = 4
+rollout_max_steps = 32
 rollout_backprop_steps = 1
 
 [optimizer]
@@ -33,7 +33,7 @@ image_size = 160
 patch_size = 32
 in_channels = 3
 embed_dim = 128
-steps = 4
+steps = 64  # TODO: support infinite streaming
 n_head = 4
 mlp_internal_dim_multiplier = 4
 dropout = 0.1
@@ -68,7 +68,7 @@ recon_hidden_dim = 256
 # write artifact images every N validation iterations (0 disables)
 artifact_every = 1
 # artifact output: images (png), avi, or mp4
-artifact_output = "avi"
+artifact_output = "mp4"
 # max images per artifact batch (caps batch rows)
 artifact_max_images = 4
 # max panels per image (input/recon + extra trajectory overlays)

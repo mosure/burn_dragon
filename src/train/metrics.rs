@@ -800,6 +800,74 @@ mod tests {
     }
 
     #[test]
+    fn artifact_images_overwrite_reuses_filename() {
+        type Backend = NdArray<f32>;
+        let device = <Backend as BackendTrait>::Device::default();
+        let output_dir = tempdir().expect("tempdir");
+        let mut metric = VisionArtifactMetric::<Backend>::new(
+            output_dir.path().to_path_buf(),
+            1,
+            VisionArtifactOutputMode::Images,
+            [0.0, 0.0, 0.0],
+            [1.0, 1.0, 1.0],
+            true,
+        );
+        let views = Tensor::<Backend, 5>::zeros([1, 1, 3, 4, 4], &device);
+        let patch_norms = Tensor::<Backend, 3>::zeros([1, 2, 2], &device);
+        let input = VisionArtifactInput {
+            views: Some(views),
+            frames: None,
+            patch_norms: Some(patch_norms),
+            probe_logits: None,
+            labels: None,
+        };
+        let _ = metric.update(&input, &test_metadata(0));
+        let _ = metric.update(&input, &test_metadata(1));
+        let png_count = fs::read_dir(output_dir.path())
+            .expect("read dir")
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .map(|ext| ext.eq_ignore_ascii_case("png"))
+                    .unwrap_or(false)
+            })
+            .count();
+        assert_eq!(png_count, 1);
+    }
+
+    #[test]
+    fn artifact_images_non_overwrite_uses_iteration_name() {
+        type Backend = NdArray<f32>;
+        let device = <Backend as BackendTrait>::Device::default();
+        let output_dir = tempdir().expect("tempdir");
+        let mut metric = VisionArtifactMetric::<Backend>::new(
+            output_dir.path().to_path_buf(),
+            1,
+            VisionArtifactOutputMode::Images,
+            [0.0, 0.0, 0.0],
+            [1.0, 1.0, 1.0],
+            false,
+        );
+        let views = Tensor::<Backend, 5>::zeros([1, 1, 3, 4, 4], &device);
+        let patch_norms = Tensor::<Backend, 3>::zeros([1, 2, 2], &device);
+        let input = VisionArtifactInput {
+            views: Some(views),
+            frames: None,
+            patch_norms: Some(patch_norms),
+            probe_logits: None,
+            labels: None,
+        };
+        let _ = metric.update(&input, &test_metadata(5));
+        let expected = output_dir
+            .path()
+            .join("lejepa_iter_000005_sample_00.png");
+        assert!(expected.is_file());
+    }
+
+    #[test]
     fn artifact_avi_write_video() {
         type Backend = NdArray<f32>;
         let device = <Backend as BackendTrait>::Device::default();

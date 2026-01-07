@@ -570,6 +570,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "avirus"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0a26999aee4b8602a87ca53a0918b7c824f58cb3099d795e737b27588a18c2cb"
+dependencies = [
+ "byteorder",
+]
+
+[[package]]
 name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2274,6 +2283,7 @@ name = "burn_dragon_hatchling"
 version = "0.3.0"
 dependencies = [
  "anyhow",
+ "avirus",
  "bevy",
  "bevy_burn",
  "burn",

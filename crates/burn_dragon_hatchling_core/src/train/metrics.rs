@@ -1,3 +1,5 @@
+#![cfg_attr(not(feature = "cli"), allow(dead_code))]
+
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
@@ -60,6 +62,7 @@ pub(crate) struct VisionArtifactInput<B: BackendTrait> {
     pub(crate) patch_norms: Option<Tensor<B, 3>>,
     pub(crate) probe_logits: Option<Tensor<B, 2>>,
     pub(crate) labels: Option<Tensor<B, 1, Int>>,
+    pub(crate) legend: Option<Vec<String>>,
 }
 
 impl<B: BackendTrait> VisionArtifactInput<B> {
@@ -70,6 +73,7 @@ impl<B: BackendTrait> VisionArtifactInput<B> {
             patch_norms: None,
             probe_logits: None,
             labels: None,
+            legend: None,
         }
     }
 }
@@ -360,11 +364,49 @@ impl<B: BackendTrait, I: ScalarValue<B> + Send + Sync> burn_train::metric::Numer
 }
 
 #[derive(Clone)]
+pub(crate) struct DeviceMetric {
+    name: Arc<String>,
+    value: Arc<String>,
+}
+
+impl DeviceMetric {
+    pub(crate) fn new(name: &str, value: &str) -> Self {
+        Self {
+            name: Arc::new(name.to_string()),
+            value: Arc::new(value.to_string()),
+        }
+    }
+}
+
+impl burn_train::metric::Metric for DeviceMetric {
+    type Input = ();
+
+    fn name(&self) -> burn_train::metric::MetricName {
+        Arc::clone(&self.name)
+    }
+
+    fn update(
+        &mut self,
+        _item: &Self::Input,
+        _metadata: &burn_train::metric::MetricMetadata,
+    ) -> burn_train::metric::MetricEntry {
+        burn_train::metric::MetricEntry::new(
+            Arc::clone(&self.name),
+            self.value.to_string(),
+            self.value.to_string(),
+        )
+    }
+
+    fn clear(&mut self) {}
+}
+
+#[derive(Clone)]
 pub(crate) struct VisionArtifactMetric<B: BackendTrait> {
     name: Arc<String>,
     output_dir: PathBuf,
     every: usize,
     output_mode: VisionArtifactOutputMode,
+    fps: u32,
     mean: [f32; 3],
     std: [f32; 3],
     overwrite: bool,
@@ -376,6 +418,7 @@ impl<B: BackendTrait> VisionArtifactMetric<B> {
         output_dir: PathBuf,
         every: usize,
         output_mode: VisionArtifactOutputMode,
+        fps: u32,
         mean: [f32; 3],
         std: [f32; 3],
         overwrite: bool,
@@ -385,6 +428,7 @@ impl<B: BackendTrait> VisionArtifactMetric<B> {
             output_dir,
             every,
             output_mode,
+            fps,
             mean,
             std,
             overwrite,
@@ -396,6 +440,24 @@ impl<B: BackendTrait> VisionArtifactMetric<B> {
         let mut value = value * self.std[channel] + self.mean[channel];
         value = value.clamp(0.0, 1.0);
         (value * 255.0).round() as u8
+    }
+
+    fn write_legend(&self, legend: &[String]) {
+        if legend.is_empty() {
+            return;
+        }
+        if fs::create_dir_all(&self.output_dir).is_err() {
+            return;
+        }
+        let mut contents = String::new();
+        for (idx, label) in legend.iter().enumerate() {
+            if idx > 0 {
+                contents.push('\n');
+            }
+            contents.push_str(&format!("Column {}: {}", idx + 1, label));
+        }
+        let path = self.output_dir.join("vision_artifacts_key.txt");
+        let _ = fs::write(path, contents);
     }
 }
 
@@ -443,6 +505,9 @@ impl<B: BackendTrait> burn_train::metric::Metric for VisionArtifactMetric<B> {
                     "0".to_string(),
                 );
             }
+            if let Some(legend) = item.legend.as_ref() {
+                self.write_legend(legend);
+            }
             let frames_vec = match frames_tensor
                 .to_data()
                 .convert::<f32>()
@@ -481,6 +546,7 @@ impl<B: BackendTrait> burn_train::metric::Metric for VisionArtifactMetric<B> {
                     metadata.iteration,
                     batch_idx,
                     &frames,
+                    self.fps,
                 ) {
                     Ok(outcome) => outcome,
                     Err(_) => {
@@ -515,6 +581,9 @@ impl<B: BackendTrait> burn_train::metric::Metric for VisionArtifactMetric<B> {
                 "0".to_string(),
             );
         };
+        if let Some(legend) = item.legend.as_ref() {
+            self.write_legend(legend);
+        }
 
         let [batch, view_count, channels, height, width] = views.shape().dims::<5>();
         if batch == 0 || view_count == 0 || channels == 0 || height == 0 || width == 0 {
@@ -757,6 +826,7 @@ impl<B: BackendTrait> burn_train::metric::Metric for VisionArtifactMetric<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::train::artifacts;
     use burn::data::dataloader::Progress;
     use burn_ndarray::NdArray;
     use burn_train::metric::{Metric, MetricMetadata};
@@ -782,6 +852,7 @@ mod tests {
             output_dir.path().to_path_buf(),
             1,
             VisionArtifactOutputMode::Images,
+            4,
             [0.0, 0.0, 0.0],
             [1.0, 1.0, 1.0],
             true,
@@ -794,9 +865,13 @@ mod tests {
             patch_norms: Some(patch_norms),
             probe_logits: None,
             labels: None,
+            legend: Some(vec!["input".to_string()]),
         };
         let _ = metric.update(&input, &test_metadata(0));
         assert!(output_dir.path().join("sample_00.png").is_file());
+        let key_path = output_dir.path().join("vision_artifacts_key.txt");
+        let key_contents = fs::read_to_string(key_path).expect("legend");
+        assert!(key_contents.contains("Column 1"));
     }
 
     #[test]
@@ -808,6 +883,7 @@ mod tests {
             output_dir.path().to_path_buf(),
             1,
             VisionArtifactOutputMode::Images,
+            4,
             [0.0, 0.0, 0.0],
             [1.0, 1.0, 1.0],
             true,
@@ -820,6 +896,7 @@ mod tests {
             patch_norms: Some(patch_norms),
             probe_logits: None,
             labels: None,
+            legend: None,
         };
         let _ = metric.update(&input, &test_metadata(0));
         let _ = metric.update(&input, &test_metadata(1));
@@ -847,6 +924,7 @@ mod tests {
             output_dir.path().to_path_buf(),
             1,
             VisionArtifactOutputMode::Images,
+            4,
             [0.0, 0.0, 0.0],
             [1.0, 1.0, 1.0],
             false,
@@ -859,6 +937,7 @@ mod tests {
             patch_norms: Some(patch_norms),
             probe_logits: None,
             labels: None,
+            legend: None,
         };
         let _ = metric.update(&input, &test_metadata(5));
         let expected = output_dir
@@ -872,10 +951,14 @@ mod tests {
         type Backend = NdArray<f32>;
         let device = <Backend as BackendTrait>::Device::default();
         let output_dir = tempdir().expect("tempdir");
+        let _guard = artifacts::lock_ffmpeg_env();
+        let original = env::var("FFMPEG").ok();
+        unsafe { env::remove_var("FFMPEG") };
         let mut metric = VisionArtifactMetric::<Backend>::new(
             output_dir.path().to_path_buf(),
             1,
             VisionArtifactOutputMode::Avi,
+            4,
             [0.0, 0.0, 0.0],
             [1.0, 1.0, 1.0],
             true,
@@ -887,12 +970,21 @@ mod tests {
             patch_norms: None,
             probe_logits: None,
             labels: None,
+            legend: Some(vec!["frame".to_string()]),
         };
         let _ = metric.update(&input, &test_metadata(0));
         let path = output_dir.path().join("sample_00.avi");
         assert!(path.is_file());
         let bytes = fs::read(path).expect("read avi");
         assert!(bytes.starts_with(b"RIFF"));
+        let key_path = output_dir.path().join("vision_artifacts_key.txt");
+        assert!(key_path.is_file());
+
+        if let Some(original) = original {
+            unsafe { env::set_var("FFMPEG", original) };
+        } else {
+            unsafe { env::remove_var("FFMPEG") };
+        }
     }
 
     #[test]
@@ -900,6 +992,7 @@ mod tests {
         type Backend = NdArray<f32>;
         let device = <Backend as BackendTrait>::Device::default();
         let output_dir = tempdir().expect("tempdir");
+        let _guard = artifacts::lock_ffmpeg_env();
         let bin_dir = output_dir.path().join("bin");
         fs::create_dir_all(&bin_dir).expect("bin dir");
         let script_path = bin_dir.join("ffmpeg.cmd");
@@ -917,6 +1010,7 @@ exit /b 0
             output_dir.path().to_path_buf(),
             1,
             VisionArtifactOutputMode::Mp4,
+            4,
             [0.0, 0.0, 0.0],
             [1.0, 1.0, 1.0],
             true,
@@ -928,10 +1022,13 @@ exit /b 0
             patch_norms: None,
             probe_logits: None,
             labels: None,
+            legend: Some(vec!["frame".to_string()]),
         };
         let _ = metric.update(&input, &test_metadata(0));
         let path = output_dir.path().join("sample_00.mp4");
         assert!(path.is_file());
+        let key_path = output_dir.path().join("vision_artifacts_key.txt");
+        assert!(key_path.is_file());
 
         if let Some(original) = original {
             unsafe { env::set_var("FFMPEG", original) };

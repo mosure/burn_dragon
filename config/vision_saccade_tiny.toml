@@ -18,7 +18,7 @@ batch_size = 32
 max_iters = 2000
 log_frequency = 20
 rollout_min_steps = 1
-rollout_max_steps = 8
+rollout_max_steps = 32
 rollout_backprop_steps = 1
 
 [optimizer]
@@ -48,11 +48,13 @@ relu_threshold = 0.0
 [mode]
 type = "saccade"
 # number of parallel foveated streams (eyes) sharing the same recurrent pyramid
-num_eyes = 2
+num_eyes = 1
 # number of MIP levels (2x downsample per level) used for Gaussian sampling
-mip_levels = 3
+mip_levels = 4
 # how pyramid scales are represented: stacked (raw) or laplacian (residual)
 pyramid_mode = "laplacian"
+# pre-rollout steps always run without grad to keep memory stable
+low_mem_pre_rollout = true
 # LeJEPA-style loss over the feature pyramid (invariance + sigreg)
 lambda = 0.02
 sigreg_knots = 17
@@ -67,10 +69,12 @@ recon_hidden_dim = 256
 artifact_every = 1
 # artifact output: images (png), avi, or mp4
 artifact_output = "mp4"
+# artifact video fps (frames per second)
+artifact_fps = 4
 # max images per artifact batch (caps batch rows)
 artifact_max_images = 4
-# max panels per image (input/recon + extra trajectory overlays)
-artifact_max_views = 3
+# max panels per image (input + per-eye patches + recon + overlays)
+artifact_max_views = 4
 # overwrite validation artifacts instead of keeping history
 artifact_overwrite = true
 

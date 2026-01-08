@@ -1,9 +1,13 @@
+#![cfg_attr(not(feature = "cli"), allow(dead_code))]
+
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::{env, fmt};
 use std::time::{SystemTime, UNIX_EPOCH};
+#[cfg(test)]
+use std::sync::Mutex;
 
 use anyhow::{Context, Result, anyhow};
 use image::RgbImage;
@@ -11,6 +15,14 @@ use image::RgbImage;
 use crate::config::VisionArtifactOutputMode;
 
 pub(crate) const ARTIFACT_DEFAULT_FPS: u32 = 4;
+
+#[cfg(test)]
+static FFMPEG_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+#[cfg(test)]
+pub(crate) fn lock_ffmpeg_env() -> std::sync::MutexGuard<'static, ()> {
+    FFMPEG_ENV_LOCK.lock().expect("ffmpeg env lock")
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct ArtifactFrame {
@@ -70,16 +82,22 @@ pub(crate) fn write_video(
     iteration: usize,
     sample_idx: usize,
     frames: &[ArtifactFrame],
+    fps: u32,
 ) -> Result<ArtifactWriteOutcome> {
     if frames.is_empty() {
         return Err(anyhow!("no frames to write"));
     }
     fs::create_dir_all(output_dir).context("create artifact output dir")?;
+    let fps = if fps == 0 {
+        ARTIFACT_DEFAULT_FPS
+    } else {
+        fps
+    };
     match output_mode {
         VisionArtifactOutputMode::Avi => {
             let filename = video_filename(output_mode, overwrite, iteration, sample_idx);
             let path = output_dir.join(filename);
-            write_avi(&path, frames, ARTIFACT_DEFAULT_FPS)?;
+            write_avi(&path, frames, fps)?;
             Ok(ArtifactWriteOutcome {
                 saved: 1,
                 mode: VisionArtifactOutputMode::Avi,
@@ -89,7 +107,7 @@ pub(crate) fn write_video(
         VisionArtifactOutputMode::Mp4 => {
             let filename = video_filename(output_mode, overwrite, iteration, sample_idx);
             let path = output_dir.join(filename);
-            match write_mp4(&path, frames, ARTIFACT_DEFAULT_FPS) {
+            match write_mp4(&path, frames, fps) {
                 Ok(()) => Ok(ArtifactWriteOutcome {
                     saved: 1,
                     mode: VisionArtifactOutputMode::Mp4,
@@ -103,7 +121,7 @@ pub(crate) fn write_video(
                         sample_idx,
                     );
                     let fallback_path = output_dir.join(fallback_name);
-                    write_avi(&fallback_path, frames, ARTIFACT_DEFAULT_FPS)?;
+                    write_avi(&fallback_path, frames, fps)?;
                     Ok(ArtifactWriteOutcome {
                         saved: 1,
                         mode: VisionArtifactOutputMode::Avi,
@@ -218,8 +236,10 @@ fn create_temp_dir(prefix: &str) -> Result<PathBuf> {
 }
 
 fn write_avi(path: &Path, frames: &[ArtifactFrame], fps: u32) -> Result<()> {
-    if let Ok(()) = write_avi_ffmpeg(path, frames, fps) {
-        return Ok(());
+    if env::var("FFMPEG").is_ok() {
+        if let Ok(()) = write_avi_ffmpeg(path, frames, fps) {
+            return Ok(());
+        }
     }
     write_avi_raw(path, frames, fps)
 }
@@ -565,6 +585,7 @@ mod tests {
 
     #[test]
     fn mp4_writer_uses_stub_ffmpeg() {
+        let _guard = lock_ffmpeg_env();
         let temp_dir = create_temp_dir("mp4_test").expect("temp dir");
         let bin_dir = temp_dir.join("bin");
         fs::create_dir_all(&bin_dir).expect("bin dir");

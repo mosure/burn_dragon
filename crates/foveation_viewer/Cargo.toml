@@ -7,6 +7,7 @@ edition = "2024"
 anyhow = "1"
 bevy-inspector-egui = "0.35"
 bevy_egui = "0.38"
+bevy_burn = "0.4"
 bevy = { version = "0.17", default-features = false, features = [
   "bevy_asset",
   "bevy_camera",
@@ -23,6 +24,9 @@ bevy = { version = "0.17", default-features = false, features = [
   "bevy_winit",
 ] }
 bevy_shader = "0.17"
+burn = { version = "0.19", default-features = false, features = ["std", "wgpu"] }
+burn-wgpu = { version = "0.19", default-features = false, features = ["std"] }
+burn_dragon_hatchling_core = { path = "../burn_dragon_hatchling_core", default-features = false, features = ["train"] }
 half = "2"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 noise = "0.9"

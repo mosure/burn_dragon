@@ -18,7 +18,7 @@ batch_size = 32
 max_iters = 2000
 log_frequency = 20
 rollout_min_steps = 1
-rollout_max_steps = 32
+rollout_max_steps = 64
 rollout_backprop_steps = 1
 
 [optimizer]
@@ -33,7 +33,7 @@ image_size = 160
 patch_size = 32
 in_channels = 3
 embed_dim = 128
-steps = 32  # TODO: support infinite streaming
+steps = 128  # TODO: support infinite streaming
 n_head = 4
 mlp_internal_dim_multiplier = 4
 dropout = 0.1
@@ -60,8 +60,8 @@ lambda = 0.02
 sigreg_knots = 17
 sigreg_t_max = 3.0
 sigreg_proj_dim = 256
-# reconstruction loss is a diagnostic metric by default
-recon_weight = 0.0
+# reconstruction loss weight (trains RGB decoder)
+recon_weight = 0.1
 # saccade ignores MAE-style masking (full-image reconstruction)
 recon_mask_ratio = 0.0
 recon_hidden_dim = 256
@@ -71,7 +71,7 @@ artifact_every = 1
 artifact_output = "mp4"
 # artifact video fps (frames per second)
 artifact_fps = 4
-# max images per artifact batch (caps batch rows)
+# max images per validation epoch to write artifacts for
 artifact_max_images = 4
 # max panels per image (input + per-eye patches + recon + overlays)
 artifact_max_views = 4

@@ -1666,6 +1666,8 @@ mod imagenet {
     }
 
     impl ImageCache {
+        const ORDER_GC_MULTIPLIER: usize = 4;
+
         fn new(capacity: usize) -> Self {
             Self {
                 capacity: capacity.max(1),
@@ -1675,6 +1677,25 @@ mod imagenet {
                     tick: 0,
                 })),
             }
+        }
+
+        fn prune_order(&self, state: &mut ImageCacheState) {
+            let max_len = self
+                .capacity
+                .saturating_mul(Self::ORDER_GC_MULTIPLIER)
+                .max(1);
+            if state.order.len() <= max_len {
+                return;
+            }
+            let mut pruned = VecDeque::with_capacity(state.entries.len());
+            for (path, tick) in state.order.drain(..) {
+                if let Some(entry) = state.entries.get(&path) {
+                    if entry.tick == tick {
+                        pruned.push_back((path, tick));
+                    }
+                }
+            }
+            state.order = pruned;
         }
 
         fn get(&self, path: &Path) -> Option<Arc<DynamicImage>> {
@@ -1689,6 +1710,7 @@ mod imagenet {
                 entry.tick = tick;
             }
             state.order.push_back((path.to_path_buf(), tick));
+            self.prune_order(&mut state);
             Some(image)
         }
 
@@ -1710,6 +1732,7 @@ mod imagenet {
                     }
                 }
             }
+            self.prune_order(&mut state);
         }
     }
 
@@ -2464,6 +2487,37 @@ mod imagenet {
             out.push(value);
         }
         Ok(out)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn image_cache_prunes_order_growth() {
+            let cache = ImageCache::new(2);
+            let image = Arc::new(DynamicImage::ImageRgb8(RgbImage::new(1, 1)));
+            let path_a = PathBuf::from("a.png");
+            let path_b = PathBuf::from("b.png");
+            cache.insert(path_a.clone(), Arc::clone(&image));
+            cache.insert(path_b.clone(), Arc::clone(&image));
+
+            for _ in 0..128 {
+                let _ = cache.get(&path_a);
+            }
+
+            let order_len = cache.inner.lock().unwrap().order.len();
+            let max_len = cache.capacity * ImageCache::ORDER_GC_MULTIPLIER;
+            assert!(
+                order_len <= max_len,
+                "order len {order_len} exceeds {max_len}"
+            );
+
+            let path_c = PathBuf::from("c.png");
+            cache.insert(path_c, image);
+            let entries = cache.inner.lock().unwrap().entries.len();
+            assert!(entries <= cache.capacity);
+        }
     }
 }
 

@@ -137,6 +137,9 @@ const SACCADE_LOD_LOG2_MIN: f32 = -2.0;
 const SACCADE_LOD_LOG2_MAX: f32 = 1.0;
 const SACCADE_RING_WIDTH: f32 = 0.02;
 const SACCADE_RING_INTENSITY: f32 = 2.0;
+const SACCADE_RING_OUTER_SCALE: f32 = 2.5;
+const SACCADE_RING_OUTER_INTENSITY: f32 = 0.7;
+const SACCADE_VIEW_GAP: usize = 2;
 const SACCADE_FOVEA_SUBSAMPLES: usize = 4;
 const SACCADE_FOVEA_LOD_WINDOW: f32 = 3.0;
 const SACCADE_FOVEA_SQRT2: f32 = 1.41421356237;
@@ -1367,7 +1370,14 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
                             input_frame = overlay;
                         }
                     }
-                    let mut frame_views = vec![input_frame];
+                    let mut frame_views = Vec::new();
+                    let push_view = |views: &mut Vec<Tensor<B, 4>>, view: Tensor<B, 4>| {
+                        if !views.is_empty() && SACCADE_VIEW_GAP > 0 {
+                            views.push(view_separator_like(&view, SACCADE_VIEW_GAP));
+                        }
+                        views.push(view);
+                    };
+                    push_view(&mut frame_views, input_frame);
                     if let Some(step_patches) = step_patches {
                         if let Some(patch_views) =
                             saccade_patch_views(step_patches, height)
@@ -1375,7 +1385,7 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
                             last_patch_views =
                                 Some(patch_views.iter().map(|view| view.clone().detach()).collect());
                             for patch_view in patch_views {
-                                frame_views.push(patch_view);
+                                push_view(&mut frame_views, patch_view);
                             }
                             appended_patch = true;
                         }
@@ -1383,11 +1393,11 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
                     if !appended_patch {
                         if let Some(patch_views) = last_patch_views.clone() {
                             for patch_view in patch_views {
-                                frame_views.push(patch_view);
+                                push_view(&mut frame_views, patch_view);
                             }
                         }
                     }
-                    frame_views.push(recon_view);
+                    push_view(&mut frame_views, recon_view);
                     let frame = Tensor::cat(frame_views, 3);
                     frames.push(frame);
                 }
@@ -1468,7 +1478,7 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
             let patch_views = last_patch_views.map(|patch_views| {
                 patch_views
                     .into_iter()
-                    .map(|patch_view| pad_view_width(patch_view, target_width))
+                    .map(|patch_view| pad_view_width_centered(patch_view, target_width))
                     .collect::<Vec<_>>()
             });
             let mut views = Vec::new();
@@ -3402,6 +3412,7 @@ where
                 artifact_every: model.as_ref().expect("model").config.artifact_every,
                 artifact_output: model.as_ref().expect("model").config.artifact_output,
                 artifact_overwrite: model.as_ref().expect("model").config.artifact_overwrite,
+                artifact_max_images: model.as_ref().expect("model").config.artifact_max_images,
                 artifact_fps: model.as_ref().expect("model").config.artifact_fps,
                 normalize_mean: config.augment.normalize_mean,
                 normalize_std: config.augment.normalize_std,
@@ -3479,6 +3490,7 @@ where
                 artifact_every: model_ref.config.artifact_every,
                 artifact_output: model_ref.config.artifact_output,
                 artifact_overwrite: model_ref.config.artifact_overwrite,
+                artifact_max_images: model_ref.config.artifact_max_images,
                 artifact_fps: model_ref.config.artifact_fps,
                 normalize_mean: config.augment.normalize_mean,
                 normalize_std: config.augment.normalize_std,
@@ -3556,6 +3568,7 @@ where
                 artifact_every: model_ref.config.artifact_every,
                 artifact_output: model_ref.config.artifact_output,
                 artifact_overwrite: model_ref.config.artifact_overwrite,
+                artifact_max_images: model_ref.config.artifact_max_images,
                 artifact_fps: model_ref.config.artifact_fps,
                 normalize_mean: config.augment.normalize_mean,
                 normalize_std: config.augment.normalize_std,
@@ -3909,6 +3922,7 @@ struct VisionDiagnostics {
     artifact_every: usize,
     artifact_output: VisionArtifactOutputMode,
     artifact_overwrite: bool,
+    artifact_max_images: usize,
     artifact_fps: u32,
     normalize_mean: [f32; 3],
     normalize_std: [f32; 3],
@@ -4066,6 +4080,7 @@ where
                 artifact_dir,
                 diagnostics.artifact_every,
                 diagnostics.artifact_output,
+                diagnostics.artifact_max_images,
                 diagnostics.artifact_fps,
                 diagnostics.normalize_mean,
                 diagnostics.normalize_std,
@@ -4827,6 +4842,28 @@ fn saccade_circle_overlay<B: BackendTrait>(
     sigma: Tensor<B, 2>,
     color: [f32; 3],
 ) -> Option<Tensor<B, 4>> {
+    let outer = sigma
+        .clone()
+        .mul_scalar(SACCADE_RING_OUTER_SCALE)
+        .max_pair(sigma.clone())
+        .clamp_max(1.0 - SACCADE_EPS);
+    let images = saccade_ring_overlay(
+        images,
+        mean.clone(),
+        outer,
+        color,
+        SACCADE_RING_OUTER_INTENSITY,
+    )?;
+    saccade_ring_overlay(images, mean, sigma, color, 1.0)
+}
+
+fn saccade_ring_overlay<B: BackendTrait>(
+    images: Tensor<B, 4>,
+    mean: Tensor<B, 2>,
+    radius: Tensor<B, 2>,
+    color: [f32; 3],
+    intensity_scale: f32,
+) -> Option<Tensor<B, 4>> {
     let device = images.device();
     let [batch, channels, height, width] = images.shape().dims::<4>();
     if batch == 0 || channels < 3 || height == 0 || width == 0 {
@@ -4860,7 +4897,7 @@ fn saccade_circle_overlay<B: BackendTrait>(
     let cy = mean
         .slice_dim(1, 1..2)
         .reshape([batch, 1, 1, 1]);
-    let radius = sigma.reshape([batch, 1, 1, 1]);
+    let radius = radius.reshape([batch, 1, 1, 1]);
 
     let dx = x_coords - cx;
     let dy = y_coords - cy;
@@ -4879,7 +4916,7 @@ fn saccade_circle_overlay<B: BackendTrait>(
         .clone()
         .repeat_dim(1, 3)
         .mul(color_tensor)
-        .mul_scalar(SACCADE_RING_INTENSITY);
+        .mul_scalar(SACCADE_RING_INTENSITY * intensity_scale);
     let inv_mask = ring_mask.mul_scalar(-1.0).add_scalar(1.0);
     let overlay = images.mul(inv_mask) + ring_rgb;
     Some(overlay)
@@ -4912,6 +4949,34 @@ fn pad_view_width<B: BackendTrait>(view: Tensor<B, 4>, target_width: usize) -> T
     let device = view.device();
     let padding = Tensor::<B, 4>::zeros([batch, channels, height, pad], &device);
     Tensor::cat(vec![view, padding], 3)
+}
+
+fn pad_view_width_centered<B: BackendTrait>(
+    view: Tensor<B, 4>,
+    target_width: usize,
+) -> Tensor<B, 4> {
+    let [batch, channels, height, width] = view.shape().dims::<4>();
+    if target_width <= width {
+        return view;
+    }
+    let pad = target_width - width;
+    if pad == 0 {
+        return view;
+    }
+    let left = pad / 2;
+    let right = pad - left;
+    let device = view.device();
+    let padding_left = Tensor::<B, 4>::zeros([batch, channels, height, left], &device);
+    let padding_right = Tensor::<B, 4>::zeros([batch, channels, height, right], &device);
+    Tensor::cat(vec![padding_left, view, padding_right], 3)
+}
+
+fn view_separator_like<B: BackendTrait>(like: &Tensor<B, 4>, width: usize) -> Tensor<B, 4> {
+    let [batch, channels, height, _] = like.shape().dims::<4>();
+    if width == 0 || batch == 0 || channels == 0 || height == 0 {
+        return Tensor::<B, 4>::zeros([batch.max(1), channels.max(1), height.max(1), width.max(1)], &like.device());
+    }
+    Tensor::<B, 4>::zeros([batch, channels, height, width], &like.device())
 }
 
 fn pad_view_height_centered<B: BackendTrait>(

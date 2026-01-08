@@ -406,6 +406,9 @@ pub(crate) struct VisionArtifactMetric<B: BackendTrait> {
     output_dir: PathBuf,
     every: usize,
     output_mode: VisionArtifactOutputMode,
+    max_images: usize,
+    remaining_images: usize,
+    last_epoch: Option<usize>,
     fps: u32,
     mean: [f32; 3],
     std: [f32; 3],
@@ -418,6 +421,7 @@ impl<B: BackendTrait> VisionArtifactMetric<B> {
         output_dir: PathBuf,
         every: usize,
         output_mode: VisionArtifactOutputMode,
+        max_images: usize,
         fps: u32,
         mean: [f32; 3],
         std: [f32; 3],
@@ -428,6 +432,9 @@ impl<B: BackendTrait> VisionArtifactMetric<B> {
             output_dir,
             every,
             output_mode,
+            max_images,
+            remaining_images: max_images,
+            last_epoch: None,
             fps,
             mean,
             std,
@@ -487,6 +494,17 @@ impl<B: BackendTrait> burn_train::metric::Metric for VisionArtifactMetric<B> {
                 "0".to_string(),
             );
         }
+        if self.last_epoch != Some(metadata.epoch) {
+            self.last_epoch = Some(metadata.epoch);
+            self.remaining_images = self.max_images;
+        }
+        if self.remaining_images == 0 {
+            return burn_train::metric::MetricEntry::new(
+                Arc::clone(&self.name),
+                "budget_exhausted".to_string(),
+                "0".to_string(),
+            );
+        }
         if self.output_mode != VisionArtifactOutputMode::Images {
             let frames_tensor = item.frames.as_ref().or(item.views.as_ref());
             let Some(frames_tensor) = frames_tensor else {
@@ -524,7 +542,8 @@ impl<B: BackendTrait> burn_train::metric::Metric for VisionArtifactMetric<B> {
             };
             let mut saved = 0usize;
             let mut last_mode = self.output_mode;
-            for batch_idx in 0..batch {
+            let batch_limit = batch.min(self.remaining_images);
+            for batch_idx in 0..batch_limit {
                 let frames = collect_frames(
                     &frames_vec,
                     batch,
@@ -560,6 +579,7 @@ impl<B: BackendTrait> burn_train::metric::Metric for VisionArtifactMetric<B> {
                 saved += outcome.saved;
                 last_mode = outcome.mode;
             }
+            self.remaining_images = self.remaining_images.saturating_sub(batch_limit);
             return burn_train::metric::MetricEntry::new(
                 Arc::clone(&self.name),
                 format!("saved={saved} mode={last_mode}"),
@@ -673,7 +693,8 @@ impl<B: BackendTrait> burn_train::metric::Metric for VisionArtifactMetric<B> {
         let mut saved = 0usize;
         let mut log_lines = Vec::new();
         let width_total = width * (view_count + 1);
-        for batch_idx in 0..batch {
+        let batch_limit = batch.min(self.remaining_images);
+        for batch_idx in 0..batch_limit {
             let mut canvas = vec![0u8; width_total * height * 3];
             for view_idx in 0..view_count {
                 for y in 0..height {
@@ -813,6 +834,8 @@ impl<B: BackendTrait> burn_train::metric::Metric for VisionArtifactMetric<B> {
             }
         }
 
+        self.remaining_images = self.remaining_images.saturating_sub(batch_limit);
+
         burn_train::metric::MetricEntry::new(
             Arc::clone(&self.name),
             format!("saved={saved}"),
@@ -843,6 +866,16 @@ mod tests {
         }
     }
 
+    fn test_metadata_epoch(iteration: usize, epoch: usize) -> MetricMetadata {
+        MetricMetadata {
+            progress: Progress::new(1, 1),
+            epoch,
+            epoch_total: 1,
+            iteration,
+            lr: None,
+        }
+    }
+
     #[test]
     fn artifact_images_write_png() {
         type Backend = NdArray<f32>;
@@ -852,6 +885,7 @@ mod tests {
             output_dir.path().to_path_buf(),
             1,
             VisionArtifactOutputMode::Images,
+            4,
             4,
             [0.0, 0.0, 0.0],
             [1.0, 1.0, 1.0],
@@ -883,6 +917,7 @@ mod tests {
             output_dir.path().to_path_buf(),
             1,
             VisionArtifactOutputMode::Images,
+            4,
             4,
             [0.0, 0.0, 0.0],
             [1.0, 1.0, 1.0],
@@ -925,6 +960,7 @@ mod tests {
             1,
             VisionArtifactOutputMode::Images,
             4,
+            4,
             [0.0, 0.0, 0.0],
             [1.0, 1.0, 1.0],
             false,
@@ -947,6 +983,48 @@ mod tests {
     }
 
     #[test]
+    fn artifact_images_respects_epoch_budget() {
+        type Backend = NdArray<f32>;
+        let device = <Backend as BackendTrait>::Device::default();
+        let output_dir = tempdir().expect("tempdir");
+        let mut metric = VisionArtifactMetric::<Backend>::new(
+            output_dir.path().to_path_buf(),
+            1,
+            VisionArtifactOutputMode::Images,
+            1,
+            4,
+            [0.0, 0.0, 0.0],
+            [1.0, 1.0, 1.0],
+            true,
+        );
+        let views = Tensor::<Backend, 5>::zeros([2, 1, 3, 4, 4], &device);
+        let patch_norms = Tensor::<Backend, 3>::zeros([2, 2, 2], &device);
+        let input = VisionArtifactInput {
+            views: Some(views),
+            frames: None,
+            patch_norms: Some(patch_norms),
+            probe_logits: None,
+            labels: None,
+            legend: None,
+        };
+        let _ = metric.update(&input, &test_metadata_epoch(0, 0));
+        let _ = metric.update(&input, &test_metadata_epoch(1, 0));
+        let png_count = fs::read_dir(output_dir.path())
+            .expect("read dir")
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .map(|ext| ext.eq_ignore_ascii_case("png"))
+                    .unwrap_or(false)
+            })
+            .count();
+        assert_eq!(png_count, 1);
+    }
+
+    #[test]
     fn artifact_avi_write_video() {
         type Backend = NdArray<f32>;
         let device = <Backend as BackendTrait>::Device::default();
@@ -958,6 +1036,7 @@ mod tests {
             output_dir.path().to_path_buf(),
             1,
             VisionArtifactOutputMode::Avi,
+            4,
             4,
             [0.0, 0.0, 0.0],
             [1.0, 1.0, 1.0],
@@ -1010,6 +1089,7 @@ exit /b 0
             output_dir.path().to_path_buf(),
             1,
             VisionArtifactOutputMode::Mp4,
+            4,
             4,
             [0.0, 0.0, 0.0],
             [1.0, 1.0, 1.0],

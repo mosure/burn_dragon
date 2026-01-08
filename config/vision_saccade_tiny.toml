@@ -33,7 +33,7 @@ image_size = 160
 patch_size = 32
 in_channels = 3
 embed_dim = 128
-steps = 128  # TODO: support infinite streaming
+steps = 256  # TODO: support infinite streaming
 n_head = 4
 mlp_internal_dim_multiplier = 4
 dropout = 0.1
@@ -70,9 +70,9 @@ artifact_every = 1
 # artifact output: images (png), avi, or mp4
 artifact_output = "mp4"
 # artifact video fps (frames per second)
-artifact_fps = 4
+artifact_fps = 8
 # max images per validation epoch to write artifacts for
-artifact_max_images = 4
+artifact_max_images = 16
 # max panels per image (input + per-eye patches + recon + overlays)
 artifact_max_views = 4
 # overwrite validation artifacts instead of keeping history

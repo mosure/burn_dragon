@@ -18,6 +18,9 @@ burn inference and training of [dragon hatchling](https://arxiv.org/abs/2509.265
 - [x] training benchmarks and reporting
 - [x] [pope](https://arxiv.org/abs/2509.10534v1) positional embeddings
 - [x] wasm deployments
+- [x] sparsity metrics and visualization
+- [x] vision dragon hatchling [cortical column/stack](https://arxiv.org/abs/2412.18354)
+- [x] recurrent, foveated saccade training and inference
 - [ ] adaptive tool discovery
 - [ ] conditional (deep) gating
 - [ ] document-coherent dataloading and scale mixup
@@ -28,8 +31,6 @@ burn inference and training of [dragon hatchling](https://arxiv.org/abs/2509.265
 - [ ] multi-modal architecture
 - [ ] multi-stream truncated backpropagation through time
 - [ ] neuromorphic backend
-- [ ] rl reasoning training
-- [ ] sparsity metrics and visualization
 - [ ] streaming, sparse synaptic backpropagation
 - [ ] temporal neuron dampening
 
@@ -38,17 +39,17 @@ Dataset configuration (built-in presets and Hugging Face examples) is documented
 
 ## training
 
-- `cargo run --release` (defaults to the cuda backend)
+- `cargo run -p burn_dragon_hatchling_cli --release` (defaults to the cuda backend)
 
 
 ## inference
 
-- `cargo run --bin infer -- --max-tokens 2048 --streaming`
+- `cargo run -p burn_dragon_hatchling_cli --bin infer -- --max-tokens 2048 --streaming`
 
 
 ## benchmarks
 
-- `cargo bench` (executes both wgpu and cuda benchmarks)
+- `cargo bench -p burn_dragon_hatchling --features train,benchmark` (executes both wgpu and cuda benchmarks)
 - open `target/criterion/report/index.html`
 
 

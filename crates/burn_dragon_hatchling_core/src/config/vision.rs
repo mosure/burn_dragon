@@ -201,6 +201,7 @@ pub struct VisionLejepaConfig {
     pub local_min_scale: f32,
     pub local_max_scale: f32,
     pub artifact_output: VisionArtifactOutputMode,
+    pub artifact_fps: u32,
     pub artifact_every: usize,
     pub artifact_max_images: usize,
     pub artifact_max_views: usize,
@@ -224,6 +225,7 @@ impl Default for VisionLejepaConfig {
             local_min_scale: 0.05,
             local_max_scale: 0.3,
             artifact_output: VisionArtifactOutputMode::Mp4,
+            artifact_fps: 4,
             artifact_every: 0,
             artifact_max_images: 4,
             artifact_max_views: 3,
@@ -285,6 +287,7 @@ impl ModuleDisplayDefault for VisionLejepaConfig {
             .add("local_min_scale", &self.local_min_scale)
             .add("local_max_scale", &self.local_max_scale)
             .add("artifact_output", &self.artifact_output)
+            .add("artifact_fps", &self.artifact_fps)
             .add("artifact_every", &self.artifact_every)
             .add("artifact_max_images", &self.artifact_max_images)
             .add("artifact_max_views", &self.artifact_max_views)
@@ -302,6 +305,7 @@ pub struct VisionMaeConfig {
     pub recon_weight: f32,
     pub recon_hidden_dim: usize,
     pub artifact_output: VisionArtifactOutputMode,
+    pub artifact_fps: u32,
     pub artifact_every: usize,
     pub artifact_max_images: usize,
     pub artifact_max_views: usize,
@@ -315,6 +319,7 @@ impl Default for VisionMaeConfig {
             recon_weight: 1.0,
             recon_hidden_dim: 256,
             artifact_output: VisionArtifactOutputMode::Images,
+            artifact_fps: 4,
             artifact_every: 0,
             artifact_max_images: 4,
             artifact_max_views: 3,
@@ -366,6 +371,7 @@ impl ModuleDisplayDefault for VisionMaeConfig {
             .add("recon_weight", &self.recon_weight)
             .add("recon_hidden_dim", &self.recon_hidden_dim)
             .add("artifact_output", &self.artifact_output)
+            .add("artifact_fps", &self.artifact_fps)
             .add("artifact_every", &self.artifact_every)
             .add("artifact_max_images", &self.artifact_max_images)
             .add("artifact_max_views", &self.artifact_max_views)
@@ -382,6 +388,8 @@ pub struct VisionSaccadeConfig {
     pub num_eyes: usize,
     pub mip_levels: usize,
     pub pyramid_mode: VisionPyramidMode,
+    pub inner_steps: usize,
+    pub low_mem_pre_rollout: bool,
     pub lambda: f32,
     pub sigreg_knots: usize,
     pub sigreg_t_max: f32,
@@ -390,6 +398,7 @@ pub struct VisionSaccadeConfig {
     pub recon_mask_ratio: f32,
     pub recon_hidden_dim: usize,
     pub artifact_output: VisionArtifactOutputMode,
+    pub artifact_fps: u32,
     pub artifact_every: usize,
     pub artifact_max_images: usize,
     pub artifact_max_views: usize,
@@ -402,6 +411,8 @@ impl Default for VisionSaccadeConfig {
             num_eyes: 2,
             mip_levels: 3,
             pyramid_mode: VisionPyramidMode::Laplacian,
+            inner_steps: 1,
+            low_mem_pre_rollout: true,
             lambda: 0.02,
             sigreg_knots: 17,
             sigreg_t_max: 3.0,
@@ -410,9 +421,10 @@ impl Default for VisionSaccadeConfig {
             recon_mask_ratio: 0.75,
             recon_hidden_dim: 256,
             artifact_output: VisionArtifactOutputMode::Mp4,
+            artifact_fps: 4,
             artifact_every: 0,
             artifact_max_images: 4,
-            artifact_max_views: 3,
+            artifact_max_views: 4,
             artifact_overwrite: true,
         }
     }
@@ -460,6 +472,8 @@ impl ModuleDisplayDefault for VisionSaccadeConfig {
             .add("num_eyes", &self.num_eyes)
             .add("mip_levels", &self.mip_levels)
             .add("pyramid_mode", &self.pyramid_mode)
+            .add("inner_steps", &self.inner_steps)
+            .add("low_mem_pre_rollout", &self.low_mem_pre_rollout)
             .add("lambda", &self.lambda)
             .add("sigreg_knots", &self.sigreg_knots)
             .add("sigreg_t_max", &self.sigreg_t_max)
@@ -468,6 +482,7 @@ impl ModuleDisplayDefault for VisionSaccadeConfig {
             .add("recon_mask_ratio", &self.recon_mask_ratio)
             .add("recon_hidden_dim", &self.recon_hidden_dim)
             .add("artifact_output", &self.artifact_output)
+            .add("artifact_fps", &self.artifact_fps)
             .add("artifact_every", &self.artifact_every)
             .add("artifact_max_images", &self.artifact_max_images)
             .add("artifact_max_views", &self.artifact_max_views)
@@ -887,6 +902,7 @@ mod tests {
             local_min_scale = 0.05
             local_max_scale = 0.3
             artifact_output = "avi"
+            artifact_fps = 6
             artifact_every = 5
             artifact_max_images = 3
             artifact_max_views = 2
@@ -913,6 +929,7 @@ mod tests {
                 assert!((lejepa.local_min_scale - 0.05).abs() < f32::EPSILON);
                 assert!((lejepa.local_max_scale - 0.3).abs() < f32::EPSILON);
                 assert_eq!(lejepa.artifact_output, VisionArtifactOutputMode::Avi);
+                assert_eq!(lejepa.artifact_fps, 6);
                 assert_eq!(lejepa.artifact_every, 5);
                 assert_eq!(lejepa.artifact_max_images, 3);
                 assert_eq!(lejepa.artifact_max_views, 2);
@@ -962,6 +979,7 @@ mod tests {
             recon_weight = 1.2
             recon_hidden_dim = 192
             artifact_output = "images"
+            artifact_fps = 5
             artifact_every = 3
             artifact_max_images = 2
             artifact_max_views = 1
@@ -975,6 +993,7 @@ mod tests {
                 assert!((mae.recon_weight - 1.2).abs() < f32::EPSILON);
                 assert_eq!(mae.recon_hidden_dim, 192);
                 assert_eq!(mae.artifact_output, VisionArtifactOutputMode::Images);
+                assert_eq!(mae.artifact_fps, 5);
                 assert_eq!(mae.artifact_every, 3);
                 assert_eq!(mae.artifact_max_images, 2);
                 assert_eq!(mae.artifact_max_views, 1);
@@ -1023,6 +1042,7 @@ mod tests {
             num_eyes = 2
             mip_levels = 4
             pyramid_mode = "laplacian"
+            inner_steps = 2
             lambda = 0.05
             sigreg_knots = 9
             sigreg_t_max = 2.0
@@ -1031,6 +1051,7 @@ mod tests {
             recon_mask_ratio = 0.7
             recon_hidden_dim = 320
             artifact_output = "avi"
+            artifact_fps = 7
             artifact_every = 4
             artifact_max_images = 3
             artifact_max_views = 2
@@ -1043,6 +1064,7 @@ mod tests {
                 assert_eq!(saccade.num_eyes, 2);
                 assert_eq!(saccade.mip_levels, 4);
                 assert_eq!(saccade.pyramid_mode, VisionPyramidMode::Laplacian);
+                assert_eq!(saccade.inner_steps, 2);
                 assert!((saccade.lambda - 0.05).abs() < f32::EPSILON);
                 assert_eq!(saccade.sigreg_knots, 9);
                 assert!((saccade.sigreg_t_max - 2.0).abs() < f32::EPSILON);
@@ -1051,6 +1073,7 @@ mod tests {
                 assert!((saccade.recon_mask_ratio - 0.7).abs() < f32::EPSILON);
                 assert_eq!(saccade.recon_hidden_dim, 320);
                 assert_eq!(saccade.artifact_output, VisionArtifactOutputMode::Avi);
+                assert_eq!(saccade.artifact_fps, 7);
                 assert_eq!(saccade.artifact_every, 4);
                 assert_eq!(saccade.artifact_max_images, 3);
                 assert_eq!(saccade.artifact_max_views, 2);

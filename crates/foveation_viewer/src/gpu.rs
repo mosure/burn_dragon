@@ -20,9 +20,11 @@ use half::f16;
 use wgpu::Extent3d;
 
 use crate::{
-    resolve_foveation_sample, FoveationNoiseSample, FoveationRuntime, FoveationSettings,
-    PyramidMode, SourceImage,
+    radius_norm_from_sample, radius_px_from_norm, resolve_foveation_sample,
+    sigma_norm_from_settings, sigma_px_from_norm, FoveationBackendMode, FoveationNoiseSample,
+    FoveationRuntime, FoveationSettings, PyramidMode, SourceImage,
 };
+use burn_dragon_hatchling_core::foveation;
 #[cfg(test)]
 use crate::{ImageLevel, PyramidCache};
 
@@ -50,6 +52,7 @@ pub(crate) struct FoveationUniform {
 pub(crate) struct FoveationGpuParams {
     pub uniform: FoveationUniform,
     pub dispatch: UVec2,
+    pub enabled: bool,
 }
 
 impl Default for FoveationGpuParams {
@@ -70,6 +73,7 @@ impl Default for FoveationGpuParams {
                 _pad2: 0,
             },
             dispatch: UVec2::ONE,
+            enabled: false,
         }
     }
 }
@@ -100,6 +104,7 @@ pub(crate) struct FoveationPyramidConfig {
     pub size: UVec2,
     pub levels: u32,
     pub version: u64,
+    pub enabled: bool,
 }
 
 impl Default for FoveationPyramidConfig {
@@ -111,6 +116,7 @@ impl Default for FoveationPyramidConfig {
             size: UVec2::ONE,
             levels: 1,
             version: 0,
+            enabled: false,
         }
     }
 }
@@ -406,6 +412,11 @@ pub(crate) fn update_gpu_params(
     noise: Res<FoveationNoiseSample>,
     mut params: ResMut<FoveationGpuParams>,
 ) {
+    let enabled = matches!(settings.backend, FoveationBackendMode::Wgsl);
+    params.enabled = enabled;
+    if !enabled {
+        return;
+    }
     let patch = runtime.patch_size.max(1) as f32;
     let image_size = Vec2::new(source.width as f32, source.height as f32).max(Vec2::ONE);
     let inv_image_size = Vec2::new(1.0 / image_size.x, 1.0 / image_size.y);
@@ -414,10 +425,13 @@ pub(crate) fn update_gpu_params(
         sample.mean_x.clamp(0.0, 1.0) * image_size.x,
         sample.mean_y.clamp(0.0, 1.0) * image_size.y,
     );
-    let radius = fovea_radius_pixels_norm(sample.radius_norm, &source);
-    let sigma = Vec2::splat(radius * focus_scale(settings.focus));
-    let lod_sigma = lod_sigma_from_focus(settings.focus);
-    let sample_scale = (radius * 2.0) / patch.max(1.0);
+    let radius_norm = radius_norm_from_sample(&sample);
+    let sigma_norm = sigma_norm_from_settings(&settings, &sample);
+    let sigma_px = sigma_px_from_norm(sigma_norm, &source);
+    let radius_px = radius_px_from_norm(radius_norm, &source);
+    let sigma = Vec2::splat(sigma_px);
+    let lod_sigma = foveation::lod_sigma_from_sigma(sigma_norm);
+    let sample_scale = (radius_px * 2.0) / patch.max(1.0);
     let pyramid_levels = settings.pyramid_depth.max(2) as u32;
     let mode = match settings.mode {
         PyramidMode::Gaussian => 0,
@@ -453,8 +467,12 @@ pub(crate) fn update_gpu_pyramid_textures(
 ) {
     let size = UVec2::new(source.width as u32, source.height as u32).max(UVec2::ONE);
     let levels = settings.pyramid_depth.max(2) as u32;
+    let enabled = matches!(settings.backend, FoveationBackendMode::Wgsl);
     let mut changed = false;
 
+    if config.enabled != enabled {
+        changed = true;
+    }
     if config.size != size || config.levels != levels {
         let gaussian = blank_mip_image(size.x, size.y, levels);
         let residual = blank_mip_image(size.x, size.y, levels);
@@ -482,6 +500,7 @@ pub(crate) fn update_gpu_pyramid_textures(
     config.residual = gpu_images.residual.clone();
     config.size = size;
     config.levels = levels;
+    config.enabled = enabled;
 }
 
 fn prepare_foveation_uniform(
@@ -490,6 +509,9 @@ fn prepare_foveation_uniform(
     params: Res<FoveationGpuParams>,
     mut bind_group: ResMut<FoveationGpuBindGroup>,
 ) {
+    if !params.enabled {
+        return;
+    }
     let buffer = bind_group.uniform_buffer.get_mut();
     *buffer = params.uniform;
     bind_group
@@ -502,8 +524,13 @@ fn prepare_foveation_bind_group(
     gpu_images: Res<RenderAssets<GpuImage>>,
     images: Res<FoveationGpuImages>,
     pipeline: Res<FoveationGpuPipeline>,
+    params: Res<FoveationGpuParams>,
     mut bind_group: ResMut<FoveationGpuBindGroup>,
 ) {
+    if !params.enabled {
+        bind_group.bind_group = None;
+        return;
+    }
     let Some(gaussian) = gpu_images.get(&images.gaussian) else {
         bind_group.bind_group = None;
         return;
@@ -562,6 +589,9 @@ fn dispatch_pyramid_compute(
     config: Res<FoveationPyramidConfig>,
     gpu_images: Res<RenderAssets<GpuImage>>,
 ) {
+    if !config.enabled {
+        return;
+    }
     if config.version == state.last_version {
         return;
     }
@@ -784,6 +814,9 @@ fn dispatch_foveation_compute(
     params: Res<FoveationGpuParams>,
     bind_group: Res<FoveationGpuBindGroup>,
 ) {
+    if !params.enabled {
+        return;
+    }
     let Some(bind_group) = bind_group.bind_group.as_ref() else {
         return;
     };
@@ -810,23 +843,6 @@ fn workgroup_dispatch(size: UVec2) -> UVec2 {
     let groups_x = (size.x + WORKGROUP_SIZE - 1) / WORKGROUP_SIZE;
     let groups_y = (size.y + WORKGROUP_SIZE - 1) / WORKGROUP_SIZE;
     UVec2::new(groups_x.max(1), groups_y.max(1))
-}
-
-fn focus_scale(value: f32) -> f32 {
-    let t = value.clamp(0.0, 1.0);
-    let log2 = -3.0 + t * 3.0;
-    2.0_f32.powf(log2)
-}
-
-fn lod_sigma_from_focus(focus: f32) -> f32 {
-    let t = focus.clamp(0.0, 1.0);
-    let log2 = -2.0 + t * 3.0;
-    2.0_f32.powf(log2)
-}
-
-fn fovea_radius_pixels_norm(radius_norm: f32, source: &SourceImage) -> f32 {
-    let min_dim = source.width.min(source.height).max(1) as f32;
-    (radius_norm.clamp(0.0, 1.0) * 0.5 * min_dim).max(1.0)
 }
 
 fn blank_mip_image(width: u32, height: u32, levels: u32) -> Image {
@@ -877,11 +893,30 @@ fn push_f16(data: &mut Vec<u8>, value: f32) {
 mod tests {
     use super::*;
     use crate::{
-        build_gaussian_pyramid, build_laplacian_pyramid, lerp, render_patch, ImageLevel,
-        PyramidCache,
+        FoveationBackendMode, FoveationSample, ImageLevel, PyramidCache, build_gaussian_pyramid,
+        build_laplacian_pyramid, lerp, make_minimal_vision_config, map_pyramid_mode,
+        radius_norm_from_sample, render_patch, sigma_norm_from_settings,
     };
+    use burn::tensor::backend::Backend;
+    use burn::tensor::{Tensor, TensorData};
+    use burn_dragon_hatchling_core::train::SaccadeFoveationSampler;
+    use burn_dragon_hatchling_core::VisionSaccadeConfig;
+    use burn_wgpu::{self, RuntimeOptions, Wgpu};
+    use burn_wgpu::graphics;
     use std::sync::mpsc;
+    use std::sync::Once;
     use wgpu::util::DeviceExt;
+
+    type BurnBackend = Wgpu<f32>;
+
+    fn init_burn_device() -> burn_wgpu::WgpuDevice {
+        static INIT: Once = Once::new();
+        let device = burn_wgpu::WgpuDevice::default();
+        INIT.call_once(|| {
+            burn_wgpu::init_setup::<graphics::AutoGraphicsApi>(&device, RuntimeOptions::default());
+        });
+        device
+    }
 
     fn make_checkerboard(width: usize, height: usize) -> SourceImage {
         let mut data = Vec::with_capacity(width * height * 3);
@@ -919,7 +954,82 @@ mod tests {
         settings.mean_x = 0.5;
         settings.mean_y = 0.5;
         settings.mode = mode;
+        settings.backend = FoveationBackendMode::Wgsl;
         settings
+    }
+
+    fn tensor_from_source<B: Backend>(source: &SourceImage, device: &B::Device) -> Tensor<B, 4> {
+        let width = source.width.max(1);
+        let height = source.height.max(1);
+        let mut data = vec![0.0f32; 3 * width * height];
+        for y in 0..height {
+            for x in 0..width {
+                let src = (y * width + x) * 3;
+                let dst = y * width + x;
+                data[dst] = source.data[src];
+                data[dst + height * width] = source.data[src + 1];
+                data[dst + 2 * height * width] = source.data[src + 2];
+            }
+        }
+        Tensor::<B, 4>::from_data(TensorData::new(data, [1, 3, height, width]), device)
+    }
+
+    fn render_patch_burn(source: &SourceImage, settings: &FoveationSettings) -> Vec<u8> {
+        let device = init_burn_device();
+        let patch = settings
+            .patch_size
+            .max(1)
+            .min(source.width.min(source.height));
+        let mut vision = make_minimal_vision_config(source.width, source.height, patch);
+        vision.patch_size = patch;
+        let mut saccade = VisionSaccadeConfig::default();
+        saccade.mip_levels = settings.pyramid_depth.max(1);
+        saccade.pyramid_mode = map_pyramid_mode(settings.mode);
+        let mut sampler = SaccadeFoveationSampler::<BurnBackend>::new(vision, saccade, &device);
+        let input = tensor_from_source::<BurnBackend>(source, &device);
+        sampler.update_image(input);
+
+        let sample = FoveationSample {
+            mean_x: settings.mean_x,
+            mean_y: settings.mean_y,
+            radius_norm: settings.radius_norm,
+        };
+        let radius_norm = radius_norm_from_sample(&sample);
+        let sigma_norm = sigma_norm_from_settings(settings, &sample);
+        let mean = Tensor::<BurnBackend, 2>::from_data(
+            TensorData::new(vec![sample.mean_x, sample.mean_y], [1, 2]),
+            &device,
+        );
+        let sigma = Tensor::<BurnBackend, 2>::from_data(
+            TensorData::new(vec![sigma_norm], [1, 1]),
+            &device,
+        );
+        let radius = Tensor::<BurnBackend, 2>::from_data(
+            TensorData::new(vec![radius_norm], [1, 1]),
+            &device,
+        );
+        let patch_tensor = sampler.sample_patch_with_radius(mean, sigma, radius);
+        let [batch, channels, height, width] = patch_tensor.shape().dims::<4>();
+        let data = patch_tensor.into_data();
+        let values = data.as_slice::<f32>().expect("f32 tensor data");
+        let mut out = vec![0u8; height * width * 4];
+        if batch == 0 || channels < 3 {
+            return out;
+        }
+        let plane = height * width;
+        for y in 0..height {
+            for x in 0..width {
+                let idx = y * width + x;
+                let out_idx = idx * 4;
+                out[out_idx] = (values[idx].clamp(0.0, 1.0) * 255.0).round() as u8;
+                out[out_idx + 1] =
+                    (values[idx + plane].clamp(0.0, 1.0) * 255.0).round() as u8;
+                out[out_idx + 2] =
+                    (values[idx + plane * 2].clamp(0.0, 1.0) * 255.0).round() as u8;
+                out[out_idx + 3] = 255;
+            }
+        }
+        out
     }
 
     fn make_cache(source: &SourceImage, depth: usize) -> PyramidCache {
@@ -1148,6 +1258,38 @@ mod tests {
         assert!(
             max_diff <= 4,
             "gpu laplacian mismatch max diff {max_diff}"
+        );
+    }
+
+    #[test]
+    fn burn_matches_wgsl_gaussian() {
+        let source = make_gradient(64, 64);
+        let settings = settings_for_mode(PyramidMode::Gaussian);
+        let cache = make_cache(&source, settings.pyramid_depth);
+        let Some(gpu) = render_patch_gpu(&source, &cache, &settings) else {
+            return;
+        };
+        let burn = render_patch_burn(&source, &settings);
+        let max_diff = max_abs_diff(&gpu, &burn);
+        assert!(
+            max_diff <= 4,
+            "burn gaussian mismatch max diff {max_diff}"
+        );
+    }
+
+    #[test]
+    fn burn_matches_wgsl_laplacian() {
+        let source = make_gradient(64, 64);
+        let settings = settings_for_mode(PyramidMode::Laplacian);
+        let cache = make_cache(&source, settings.pyramid_depth);
+        let Some(gpu) = render_patch_gpu(&source, &cache, &settings) else {
+            return;
+        };
+        let burn = render_patch_burn(&source, &settings);
+        let max_diff = max_abs_diff(&gpu, &burn);
+        assert!(
+            max_diff <= 5,
+            "burn laplacian mismatch max diff {max_diff}"
         );
     }
 
@@ -1728,11 +1870,19 @@ mod tests {
             settings.mean_x.clamp(0.0, 1.0) * image_size.x,
             settings.mean_y.clamp(0.0, 1.0) * image_size.y,
         );
-        let radius = fovea_radius_pixels_norm(settings.radius_norm, source);
-        let sigma = Vec2::splat(radius * focus_scale(settings.focus));
-        let lod_sigma = lod_sigma_from_focus(settings.focus);
+        let sample = crate::FoveationSample {
+            mean_x: settings.mean_x,
+            mean_y: settings.mean_y,
+            radius_norm: settings.radius_norm,
+        };
+        let radius_norm = crate::radius_norm_from_sample(&sample);
+        let sigma_norm = crate::sigma_norm_from_settings(settings, &sample);
+        let sigma_px = crate::sigma_px_from_norm(sigma_norm, source);
+        let radius_px = crate::radius_px_from_norm(radius_norm, source);
+        let sigma = Vec2::splat(sigma_px);
+        let lod_sigma = foveation::lod_sigma_from_sigma(sigma_norm);
         let patch = settings.patch_size.max(1) as f32;
-        let sample_scale = (radius * 2.0) / patch.max(1.0);
+        let sample_scale = (radius_px * 2.0) / patch.max(1.0);
         let pyramid_levels = settings.pyramid_depth.max(2) as u32;
         let mode = match settings.mode {
             PyramidMode::Gaussian => 0,

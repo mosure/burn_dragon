@@ -800,8 +800,6 @@ dependencies = [
 [[package]]
 name = "bevy_burn"
 version = "0.4.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "64914097c9eb2cda89bc7a8f4b4d31789c48c0ed09e01fd42e252d89a998861d"
 dependencies = [
  "bevy",
  "burn",
@@ -2455,7 +2453,9 @@ dependencies = [
  "bevy_burn",
  "burn",
  "burn-autodiff",
+ "burn-cubecl",
  "burn-cuda",
+ "burn-fusion",
  "burn-ndarray",
  "burn-train",
  "burn-wgpu",

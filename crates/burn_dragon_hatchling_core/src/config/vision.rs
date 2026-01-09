@@ -45,6 +45,40 @@ impl ModuleDisplay for VisionPyramidMode {}
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+pub enum VisionFoveaSamplingMode {
+    Batched,
+    Sequential,
+    Subpatch,
+    Cubecl,
+}
+
+impl Default for VisionFoveaSamplingMode {
+    fn default() -> Self {
+        Self::Sequential
+    }
+}
+
+impl fmt::Display for VisionFoveaSamplingMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Batched => write!(f, "batched"),
+            Self::Sequential => write!(f, "sequential"),
+            Self::Subpatch => write!(f, "subpatch"),
+            Self::Cubecl => write!(f, "cubecl"),
+        }
+    }
+}
+
+impl ModuleDisplayDefault for VisionFoveaSamplingMode {
+    fn content(&self, content: Content) -> Option<Content> {
+        content.add_formatted(self).optional()
+    }
+}
+
+impl ModuleDisplay for VisionFoveaSamplingMode {}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum VisionArtifactOutputMode {
     Images,
     Avi,
@@ -388,6 +422,8 @@ pub struct VisionSaccadeConfig {
     pub num_eyes: usize,
     pub mip_levels: usize,
     pub pyramid_mode: VisionPyramidMode,
+    pub fovea_sampling_mode: VisionFoveaSamplingMode,
+    pub fovea_subpatch_size: usize,
     pub inner_steps: usize,
     pub low_mem_pre_rollout: bool,
     pub lambda: f32,
@@ -411,6 +447,8 @@ impl Default for VisionSaccadeConfig {
             num_eyes: 2,
             mip_levels: 3,
             pyramid_mode: VisionPyramidMode::Laplacian,
+            fovea_sampling_mode: VisionFoveaSamplingMode::Sequential,
+            fovea_subpatch_size: 0,
             inner_steps: 1,
             low_mem_pre_rollout: true,
             lambda: 0.02,
@@ -472,6 +510,8 @@ impl ModuleDisplayDefault for VisionSaccadeConfig {
             .add("num_eyes", &self.num_eyes)
             .add("mip_levels", &self.mip_levels)
             .add("pyramid_mode", &self.pyramid_mode)
+            .add("fovea_sampling_mode", &self.fovea_sampling_mode)
+            .add("fovea_subpatch_size", &self.fovea_subpatch_size)
             .add("inner_steps", &self.inner_steps)
             .add("low_mem_pre_rollout", &self.low_mem_pre_rollout)
             .add("lambda", &self.lambda)
@@ -1042,6 +1082,8 @@ mod tests {
             num_eyes = 2
             mip_levels = 4
             pyramid_mode = "laplacian"
+            fovea_sampling_mode = "subpatch"
+            fovea_subpatch_size = 12
             inner_steps = 2
             lambda = 0.05
             sigreg_knots = 9
@@ -1064,6 +1106,8 @@ mod tests {
                 assert_eq!(saccade.num_eyes, 2);
                 assert_eq!(saccade.mip_levels, 4);
                 assert_eq!(saccade.pyramid_mode, VisionPyramidMode::Laplacian);
+                assert_eq!(saccade.fovea_sampling_mode, VisionFoveaSamplingMode::Subpatch);
+                assert_eq!(saccade.fovea_subpatch_size, 12);
                 assert_eq!(saccade.inner_steps, 2);
                 assert!((saccade.lambda - 0.05).abs() < f32::EPSILON);
                 assert_eq!(saccade.sigreg_knots, 9);

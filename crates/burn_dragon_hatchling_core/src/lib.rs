@@ -26,10 +26,11 @@ pub use config::{
     DatasetConfig, DatasetSourceConfig, HuggingFaceDatasetConfig, HuggingFaceRecordFormat,
     ImagenetteVariant, LearningRateScheduleConfig, OptimizerConfig, TrainingConfig,
     VisionArtifactOutputMode, VisionAugmentationConfig, VisionDatasetConfig,
-    VisionDatasetDownloadConfig, VisionDistillConfig, VisionLejepaConfig, VisionMaeConfig,
-    VisionModelConfig, VisionPyramidMode, VisionSaccadeConfig, VisionTeacherConfig,
-    VisionTeacherFeatureConfig, VisionTeacherModelConfig, VisionTeacherVariant,
-    VisionTrainingConfig, VisionTrainingHyperparameters, VisionTrainingModeConfig,
+    VisionDatasetDownloadConfig, VisionDistillConfig, VisionFoveaSamplingMode,
+    VisionLejepaConfig, VisionMaeConfig, VisionModelConfig, VisionPyramidMode,
+    VisionSaccadeConfig, VisionTeacherConfig, VisionTeacherFeatureConfig,
+    VisionTeacherModelConfig, VisionTeacherVariant, VisionTrainingConfig,
+    VisionTrainingHyperparameters, VisionTrainingModeConfig,
     load_training_config, load_vision_training_config,
 };
 #[cfg(feature = "train")]

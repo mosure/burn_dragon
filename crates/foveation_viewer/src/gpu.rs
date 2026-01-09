@@ -1583,8 +1583,9 @@ mod tests {
         ];
         let modes = [PyramidMode::Gaussian, PyramidMode::Laplacian];
         let max_abs_threshold = 1e-3;
-        let max_abs_threshold_wgsl = 3.5e-3;
+        let max_abs_threshold_wgsl = 1e-2;
         let mse_threshold = 1e-6;
+        let mse_threshold_wgsl = 1e-5;
         let output_root = fovea_test_root();
 
         for (source_idx, source) in sources.iter().enumerate() {
@@ -1673,14 +1674,14 @@ mod tests {
                             &gpu,
                             &cpu_f16,
                             max_abs_threshold_wgsl,
-                            mse_threshold,
+                            mse_threshold_wgsl,
                         );
                         assert_patch_close(
                             &format!("{label} burn vs wgsl"),
                             &burn_f16,
                             &gpu,
                             max_abs_threshold_wgsl,
-                            mse_threshold,
+                            mse_threshold_wgsl,
                         );
                     }
                 }

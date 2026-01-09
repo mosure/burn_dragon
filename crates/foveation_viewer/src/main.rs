@@ -48,6 +48,7 @@ const OVERLAY_RING_THICKNESS: f32 = 3.0;
 const OVERLAY_RING_OUTER: [u8; 4] = [255, 80, 40, 220];
 const OVERLAY_RING_INNER: [u8; 4] = [60, 200, 255, 220];
 const FOVEA_PARAM_EPS: f32 = 1e-3;
+const FOVEA_AA_THRESHOLD: f32 = 1.25;
 // Avoid oversized GPU buffers when feeding full-resolution images to the burn backend.
 const BURN_MAX_BUFFER_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const BURN_MAX_IMAGE_SIDE: usize = 1024;
@@ -1316,56 +1317,101 @@ pub(crate) fn render_patch(
         for x in 0..width {
             let base_dx = x as f32 + 0.5 - half;
             let base_dy = y as f32 + 0.5 - half;
+            let ux_base = base_dx / half;
+            let uy_base = base_dy / half;
+            let warp_x_base = foveated_warp(ux_base, sigma, radius);
+            let warp_y_base = foveated_warp(uy_base, sigma, radius);
+            let local_scale_base = warp_x_base
+                .deriv
+                .abs()
+                .max(warp_y_base.deriv.abs())
+                * pixel_du;
             let mut color = [0.0; 3];
             let mut count = 0.0;
-            for sy in 0..SUBSAMPLES {
-                for sx in 0..SUBSAMPLES {
-                    let jitter_x = (sx as f32 + 0.5) / SUBSAMPLES as f32 - 0.5;
-                    let jitter_y = (sy as f32 + 0.5) / SUBSAMPLES as f32 - 0.5;
-                    let ux = (base_dx + jitter_x) / half;
-                    let uy = (base_dy + jitter_y) / half;
-                    let warp_x = foveated_warp(ux, sigma, radius);
-                    let warp_y = foveated_warp(uy, sigma, radius);
-                    let offset_x = warp_x.offset;
-                    let offset_y = warp_y.offset;
-                    let local_scale = warp_x
-                        .deriv
-                        .abs()
-                        .max(warp_y.deriv.abs())
-                        * pixel_du;
-                    let img_x = center_x + offset_x;
-                    let img_y = center_y + offset_y;
-                    let fx = img_x / source.width as f32;
-                    let fy = img_y / source.height as f32;
-                    let sample = match settings.mode {
-                        PyramidMode::Gaussian => sample_gaussian_foveated(
-                            &cache.gaussian,
-                            offset_x,
-                            offset_y,
-                            sigma,
-                            sigma,
-                            local_scale,
-                            lod_sigma,
-                            fx,
-                            fy,
-                        ),
-                        PyramidMode::Laplacian => sample_laplacian_foveated(
-                            &cache.laplacian,
-                            cache.coarse.as_ref(),
-                            offset_x,
-                            offset_y,
-                            sigma,
-                            sigma,
-                            local_scale,
-                            lod_sigma,
-                            fx,
-                            fy,
-                        ),
-                    };
-                    color[0] += sample[0];
-                    color[1] += sample[1];
-                    color[2] += sample[2];
-                    count += 1.0;
+            if local_scale_base <= FOVEA_AA_THRESHOLD {
+                let offset_x = warp_x_base.offset;
+                let offset_y = warp_y_base.offset;
+                let img_x = center_x + offset_x;
+                let img_y = center_y + offset_y;
+                let fx = img_x / source.width as f32;
+                let fy = img_y / source.height as f32;
+                let sample = match settings.mode {
+                    PyramidMode::Gaussian => sample_gaussian_foveated(
+                        &cache.gaussian,
+                        offset_x,
+                        offset_y,
+                        sigma,
+                        sigma,
+                        local_scale_base,
+                        lod_sigma,
+                        fx,
+                        fy,
+                    ),
+                    PyramidMode::Laplacian => sample_laplacian_foveated(
+                        &cache.laplacian,
+                        cache.coarse.as_ref(),
+                        offset_x,
+                        offset_y,
+                        sigma,
+                        sigma,
+                        local_scale_base,
+                        lod_sigma,
+                        fx,
+                        fy,
+                    ),
+                };
+                color = sample;
+                count = 1.0;
+            } else {
+                for sy in 0..SUBSAMPLES {
+                    for sx in 0..SUBSAMPLES {
+                        let jitter_x = (sx as f32 + 0.5) / SUBSAMPLES as f32 - 0.5;
+                        let jitter_y = (sy as f32 + 0.5) / SUBSAMPLES as f32 - 0.5;
+                        let ux = (base_dx + jitter_x) / half;
+                        let uy = (base_dy + jitter_y) / half;
+                        let warp_x = foveated_warp(ux, sigma, radius);
+                        let warp_y = foveated_warp(uy, sigma, radius);
+                        let offset_x = warp_x.offset;
+                        let offset_y = warp_y.offset;
+                        let local_scale = warp_x
+                            .deriv
+                            .abs()
+                            .max(warp_y.deriv.abs())
+                            * pixel_du;
+                        let img_x = center_x + offset_x;
+                        let img_y = center_y + offset_y;
+                        let fx = img_x / source.width as f32;
+                        let fy = img_y / source.height as f32;
+                        let sample = match settings.mode {
+                            PyramidMode::Gaussian => sample_gaussian_foveated(
+                                &cache.gaussian,
+                                offset_x,
+                                offset_y,
+                                sigma,
+                                sigma,
+                                local_scale,
+                                lod_sigma,
+                                fx,
+                                fy,
+                            ),
+                            PyramidMode::Laplacian => sample_laplacian_foveated(
+                                &cache.laplacian,
+                                cache.coarse.as_ref(),
+                                offset_x,
+                                offset_y,
+                                sigma,
+                                sigma,
+                                local_scale,
+                                lod_sigma,
+                                fx,
+                                fy,
+                            ),
+                        };
+                        color[0] += sample[0];
+                        color[1] += sample[1];
+                        color[2] += sample[2];
+                        count += 1.0;
+                    }
                 }
             }
             if count > 0.0 {
@@ -1414,56 +1460,101 @@ pub(crate) fn render_patch_f32(
         for x in 0..width {
             let base_dx = x as f32 + 0.5 - half;
             let base_dy = y as f32 + 0.5 - half;
+            let ux_base = base_dx / half;
+            let uy_base = base_dy / half;
+            let warp_x_base = foveated_warp(ux_base, sigma, radius);
+            let warp_y_base = foveated_warp(uy_base, sigma, radius);
+            let local_scale_base = warp_x_base
+                .deriv
+                .abs()
+                .max(warp_y_base.deriv.abs())
+                * pixel_du;
             let mut color = [0.0; 3];
             let mut count = 0.0;
-            for sy in 0..SUBSAMPLES {
-                for sx in 0..SUBSAMPLES {
-                    let jitter_x = (sx as f32 + 0.5) / SUBSAMPLES as f32 - 0.5;
-                    let jitter_y = (sy as f32 + 0.5) / SUBSAMPLES as f32 - 0.5;
-                    let ux = (base_dx + jitter_x) / half;
-                    let uy = (base_dy + jitter_y) / half;
-                    let warp_x = foveated_warp(ux, sigma, radius);
-                    let warp_y = foveated_warp(uy, sigma, radius);
-                    let offset_x = warp_x.offset;
-                    let offset_y = warp_y.offset;
-                    let local_scale = warp_x
-                        .deriv
-                        .abs()
-                        .max(warp_y.deriv.abs())
-                        * pixel_du;
-                    let img_x = center_x + offset_x;
-                    let img_y = center_y + offset_y;
-                    let fx = img_x / source.width as f32;
-                    let fy = img_y / source.height as f32;
-                    let sample = match settings.mode {
-                        PyramidMode::Gaussian => sample_gaussian_foveated(
-                            &cache.gaussian,
-                            offset_x,
-                            offset_y,
-                            sigma,
-                            sigma,
-                            local_scale,
-                            lod_sigma,
-                            fx,
-                            fy,
-                        ),
-                        PyramidMode::Laplacian => sample_laplacian_foveated(
-                            &cache.laplacian,
-                            cache.coarse.as_ref(),
-                            offset_x,
-                            offset_y,
-                            sigma,
-                            sigma,
-                            local_scale,
-                            lod_sigma,
-                            fx,
-                            fy,
-                        ),
-                    };
-                    color[0] += sample[0];
-                    color[1] += sample[1];
-                    color[2] += sample[2];
-                    count += 1.0;
+            if local_scale_base <= FOVEA_AA_THRESHOLD {
+                let offset_x = warp_x_base.offset;
+                let offset_y = warp_y_base.offset;
+                let img_x = center_x + offset_x;
+                let img_y = center_y + offset_y;
+                let fx = img_x / source.width as f32;
+                let fy = img_y / source.height as f32;
+                let sample = match settings.mode {
+                    PyramidMode::Gaussian => sample_gaussian_foveated(
+                        &cache.gaussian,
+                        offset_x,
+                        offset_y,
+                        sigma,
+                        sigma,
+                        local_scale_base,
+                        lod_sigma,
+                        fx,
+                        fy,
+                    ),
+                    PyramidMode::Laplacian => sample_laplacian_foveated(
+                        &cache.laplacian,
+                        cache.coarse.as_ref(),
+                        offset_x,
+                        offset_y,
+                        sigma,
+                        sigma,
+                        local_scale_base,
+                        lod_sigma,
+                        fx,
+                        fy,
+                    ),
+                };
+                color = sample;
+                count = 1.0;
+            } else {
+                for sy in 0..SUBSAMPLES {
+                    for sx in 0..SUBSAMPLES {
+                        let jitter_x = (sx as f32 + 0.5) / SUBSAMPLES as f32 - 0.5;
+                        let jitter_y = (sy as f32 + 0.5) / SUBSAMPLES as f32 - 0.5;
+                        let ux = (base_dx + jitter_x) / half;
+                        let uy = (base_dy + jitter_y) / half;
+                        let warp_x = foveated_warp(ux, sigma, radius);
+                        let warp_y = foveated_warp(uy, sigma, radius);
+                        let offset_x = warp_x.offset;
+                        let offset_y = warp_y.offset;
+                        let local_scale = warp_x
+                            .deriv
+                            .abs()
+                            .max(warp_y.deriv.abs())
+                            * pixel_du;
+                        let img_x = center_x + offset_x;
+                        let img_y = center_y + offset_y;
+                        let fx = img_x / source.width as f32;
+                        let fy = img_y / source.height as f32;
+                        let sample = match settings.mode {
+                            PyramidMode::Gaussian => sample_gaussian_foveated(
+                                &cache.gaussian,
+                                offset_x,
+                                offset_y,
+                                sigma,
+                                sigma,
+                                local_scale,
+                                lod_sigma,
+                                fx,
+                                fy,
+                            ),
+                            PyramidMode::Laplacian => sample_laplacian_foveated(
+                                &cache.laplacian,
+                                cache.coarse.as_ref(),
+                                offset_x,
+                                offset_y,
+                                sigma,
+                                sigma,
+                                local_scale,
+                                lod_sigma,
+                                fx,
+                                fy,
+                            ),
+                        };
+                        color[0] += sample[0];
+                        color[1] += sample[1];
+                        color[2] += sample[2];
+                        count += 1.0;
+                    }
                 }
             }
             if count > 0.0 {
@@ -1635,10 +1726,10 @@ pub(crate) fn compute_lod(
     let sy = sigma_y.max(1e-3);
     let dist = ((dx * dx) / (sx * sx) + (dy * dy) / (sy * sy)).sqrt();
     let lod_dist = if dist <= 1.0 { 0.0 } else { dist.log2() };
-    let lod_scale = if local_scale <= 1.0 {
+    let lod_scale = if local_scale <= FOVEA_AA_THRESHOLD {
         0.0
     } else {
-        local_scale.log2()
+        (local_scale / FOVEA_AA_THRESHOLD).log2()
     };
     lod_dist.max(lod_scale).clamp(0.0, max_level)
 }

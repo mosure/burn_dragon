@@ -147,6 +147,7 @@ const SACCADE_RING_OUTER_INTENSITY: f32 = 0.7;
 const SACCADE_VIEW_GAP: usize = 2;
 const SACCADE_FOVEA_SUBSAMPLES: usize = 4;
 const SACCADE_FOVEA_LOD_WINDOW: f32 = 3.0;
+const SACCADE_FOVEA_AA_THRESHOLD: f32 = 1.25;
 const SACCADE_FOVEA_SQRT2: f32 = 1.41421356237;
 const SACCADE_FOVEA_PI: f32 = 3.14159265359;
 const SACCADE_FOVEA_ERF_A: f32 = 0.147;
@@ -2114,10 +2115,39 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
             TensorData::new(jitter_values, [subsamples, 1, 1, 1, 2]),
             &device,
         );
+        let ux_base = base_grid.clone().slice_dim(3, 0..1).squeeze_dim::<3>(3);
+        let uy_base = base_grid.clone().slice_dim(3, 1..2).squeeze_dim::<3>(3);
+        let sigma_base = sigma_px
+            .clone()
+            .repeat_dim(1, patch_h)
+            .repeat_dim(2, patch_w);
+        let radius_base = radius_px
+            .clone()
+            .repeat_dim(1, patch_h)
+            .repeat_dim(2, patch_w);
+        let (_, dx_deriv_base) =
+            self.foveated_warp(ux_base, sigma_base.clone(), radius_base.clone());
+        let (_, dy_deriv_base) = self.foveated_warp(uy_base, sigma_base, radius_base);
+        let local_scale_base = dx_deriv_base
+            .abs()
+            .max_pair(dy_deriv_base.abs())
+            .mul_scalar(pixel_du);
+        let use_subsamples = local_scale_base.greater_elem(SACCADE_FOVEA_AA_THRESHOLD);
+
         let base_grid = base_grid
             .unsqueeze_dim::<5>(0)
             .repeat_dim(0, subsamples);
+        let base_grid_flat = base_grid
+            .clone()
+            .reshape([subsamples * batch, patch_h, patch_w, 2]);
         let grid = (base_grid + jitter).reshape([subsamples * batch, patch_h, patch_w, 2]);
+        let use_subsamples = use_subsamples
+            .unsqueeze_dim::<4>(3)
+            .unsqueeze_dim::<5>(0)
+            .repeat_dim(0, subsamples)
+            .reshape([subsamples * batch, patch_h, patch_w, 1])
+            .repeat_dim(3, 2);
+        let grid = base_grid_flat.mask_where(use_subsamples, grid);
 
         let expand_3d = |tensor: Tensor<B, 3>| -> Tensor<B, 3> {
             let [_, h, w] = tensor.shape().dims::<3>();
@@ -2163,11 +2193,14 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
             .log()
             .div_scalar(SACCADE_LN_2)
             .mask_where(dist.lower_equal_elem(1.0), zeros.clone());
-        let scale_safe = local_scale.clone().clamp_min(1.0);
+        let scale_safe = local_scale
+            .clone()
+            .clamp_min(SACCADE_FOVEA_AA_THRESHOLD);
         let lod_scale = scale_safe
+            .div_scalar(SACCADE_FOVEA_AA_THRESHOLD)
             .log()
             .div_scalar(SACCADE_LN_2)
-            .mask_where(local_scale.lower_equal_elem(1.0), zeros);
+            .mask_where(local_scale.lower_equal_elem(SACCADE_FOVEA_AA_THRESHOLD), zeros);
         let max_level = levels.len().saturating_sub(1) as f32;
         let lod = lod_dist
             .max_pair(lod_scale)
@@ -2291,6 +2324,20 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
         let subsamples = SACCADE_FOVEA_SUBSAMPLES * SACCADE_FOVEA_SUBSAMPLES;
         let mut accum =
             Tensor::<B, 4>::zeros([batch, channels, patch_h, patch_w], &device);
+        let ux_base = base_grid.clone().slice_dim(3, 0..1).squeeze_dim::<3>(3);
+        let uy_base = base_grid.clone().slice_dim(3, 1..2).squeeze_dim::<3>(3);
+        let (_, dx_deriv_base) =
+            self.foveated_warp(ux_base, sigma_px.clone(), radius_px.clone());
+        let (_, dy_deriv_base) =
+            self.foveated_warp(uy_base, sigma_px.clone(), radius_px.clone());
+        let local_scale_base = dx_deriv_base
+            .abs()
+            .max_pair(dy_deriv_base.abs())
+            .mul_scalar(pixel_du);
+        let use_subsamples = local_scale_base
+            .greater_elem(SACCADE_FOVEA_AA_THRESHOLD)
+            .unsqueeze_dim::<4>(3)
+            .repeat_dim(3, 2);
 
         for sy in 0..SACCADE_FOVEA_SUBSAMPLES {
             for sx in 0..SACCADE_FOVEA_SUBSAMPLES {
@@ -2303,6 +2350,7 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
                     &device,
                 );
                 let grid = base_grid.clone() + jitter;
+                let grid = base_grid.clone().mask_where(use_subsamples.clone(), grid);
 
                 let ux = grid.clone().slice_dim(3, 0..1).squeeze_dim::<3>(3);
                 let uy = grid.slice_dim(3, 1..2).squeeze_dim::<3>(3);
@@ -2329,11 +2377,14 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
                     .log()
                     .div_scalar(SACCADE_LN_2)
                     .mask_where(dist.lower_equal_elem(1.0), zeros.clone());
-                let scale_safe = local_scale.clone().clamp_min(1.0);
+                let scale_safe = local_scale
+                    .clone()
+                    .clamp_min(SACCADE_FOVEA_AA_THRESHOLD);
                 let lod_scale = scale_safe
+                    .div_scalar(SACCADE_FOVEA_AA_THRESHOLD)
                     .log()
                     .div_scalar(SACCADE_LN_2)
-                    .mask_where(local_scale.lower_equal_elem(1.0), zeros);
+                    .mask_where(local_scale.lower_equal_elem(SACCADE_FOVEA_AA_THRESHOLD), zeros);
                 let max_level = levels.len().saturating_sub(1) as f32;
                 let lod = lod_dist
                     .max_pair(lod_scale)

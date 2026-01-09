@@ -15,6 +15,7 @@ struct FoveationParams {
 
 const SUBSAMPLES: u32 = 4u;
 const LOD_WINDOW: i32 = 3;
+const AA_THRESHOLD: f32 = 1.25;
 const SQRT2: f32 = 1.41421356237;
 const PI: f32 = 3.14159265359;
 const ERF_A: f32 = 0.147;
@@ -153,34 +154,64 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let radius = params.sample_scale * half;
     let max_level = params.pyramid_levels - 1u;
     let lod_sigma = max(params.lod_sigma, 1e-3);
+    let ux_base = ((f32(x) + 0.5) - half) / half;
+    let uy_base = ((f32(y) + 0.5) - half) / half;
+    let warp_x_base = foveated_warp(ux_base, params.sigma.x, radius);
+    let warp_y_base = foveated_warp(uy_base, params.sigma.y, radius);
+    let local_scale_base = max(abs(warp_x_base.deriv), abs(warp_y_base.deriv)) * pixel_du;
+
     var color = vec3<f32>(0.0);
     var count = 0.0;
-    for (var sy = 0u; sy < SUBSAMPLES; sy = sy + 1u) {
-        for (var sx = 0u; sx < SUBSAMPLES; sx = sx + 1u) {
-            let jitter = (vec2<f32>(f32(sx) + 0.5, f32(sy) + 0.5) / f32(SUBSAMPLES)) - vec2<f32>(0.5, 0.5);
-            let ux = (((f32(x) + 0.5) - half) + jitter.x) / half;
-            let uy = (((f32(y) + 0.5) - half) + jitter.y) / half;
-            let warp_x = foveated_warp(ux, params.sigma.x, radius);
-            let warp_y = foveated_warp(uy, params.sigma.y, radius);
-            let dx = warp_x.offset;
-            let dy = warp_y.offset;
-            let local_scale = max(abs(warp_x.deriv), abs(warp_y.deriv)) * pixel_du;
-            let lod_scale = select(0.0, log2(local_scale), local_scale > 1.0);
-            let uv = vec2<f32>(
-                (params.center.x + dx) * params.inv_image_size.x,
-                (params.center.y + dy) * params.inv_image_size.y,
-            );
-            let lod_dist = compute_lod(dx, dy, f32(max_level));
-            let lod = clamp(max(lod_dist, lod_scale), 0.0, f32(max_level));
-            if params.mode == 0u {
-                color += sample_gaussian(uv, lod, lod_sigma, max_level);
-            } else {
-                color += sample_laplacian(uv, lod, lod_sigma, max_level);
-            }
-            count += 1.0;
+    if local_scale_base <= AA_THRESHOLD {
+        let dx = warp_x_base.offset;
+        let dy = warp_y_base.offset;
+        var lod_scale = 0.0;
+        if local_scale_base > AA_THRESHOLD {
+            lod_scale = log2(local_scale_base / AA_THRESHOLD);
         }
+        let uv = vec2<f32>(
+            (params.center.x + dx) * params.inv_image_size.x,
+            (params.center.y + dy) * params.inv_image_size.y,
+        );
+        let lod_dist = compute_lod(dx, dy, f32(max_level));
+        let lod = clamp(max(lod_dist, lod_scale), 0.0, f32(max_level));
+        if params.mode == 0u {
+            color = sample_gaussian(uv, lod, lod_sigma, max_level);
+        } else {
+            color = sample_laplacian(uv, lod, lod_sigma, max_level);
+        }
+        count = 1.0;
+    } else {
+        for (var sy = 0u; sy < SUBSAMPLES; sy = sy + 1u) {
+            for (var sx = 0u; sx < SUBSAMPLES; sx = sx + 1u) {
+                let jitter = (vec2<f32>(f32(sx) + 0.5, f32(sy) + 0.5) / f32(SUBSAMPLES)) - vec2<f32>(0.5, 0.5);
+                let ux = (((f32(x) + 0.5) - half) + jitter.x) / half;
+                let uy = (((f32(y) + 0.5) - half) + jitter.y) / half;
+                let warp_x = foveated_warp(ux, params.sigma.x, radius);
+                let warp_y = foveated_warp(uy, params.sigma.y, radius);
+                let dx = warp_x.offset;
+                let dy = warp_y.offset;
+                let local_scale = max(abs(warp_x.deriv), abs(warp_y.deriv)) * pixel_du;
+                var lod_scale = 0.0;
+                if local_scale > AA_THRESHOLD {
+                    lod_scale = log2(local_scale / AA_THRESHOLD);
+                }
+                let uv = vec2<f32>(
+                    (params.center.x + dx) * params.inv_image_size.x,
+                    (params.center.y + dy) * params.inv_image_size.y,
+                );
+                let lod_dist = compute_lod(dx, dy, f32(max_level));
+                let lod = clamp(max(lod_dist, lod_scale), 0.0, f32(max_level));
+                if params.mode == 0u {
+                    color += sample_gaussian(uv, lod, lod_sigma, max_level);
+                } else {
+                    color += sample_laplacian(uv, lod, lod_sigma, max_level);
+                }
+                count += 1.0;
+            }
+        }
+        color /= max(count, 1.0);
     }
-    color /= max(count, 1.0);
 
     textureStore(output_tex, vec2<i32>(i32(x), i32(y)), vec4<f32>(clamp(color, vec3(0.0), vec3(1.0)), 1.0));
 }

@@ -26,6 +26,7 @@ const SQRT_PI_OVER_2: f32 = super::SACCADE_FOVEA_SQRT_PI_OVER_2;
 const ERF_A: f32 = super::SACCADE_FOVEA_ERF_A;
 const PI: f32 = super::SACCADE_FOVEA_PI;
 const LN_2: f32 = super::SACCADE_LN_2;
+const AA_THRESHOLD: f32 = super::SACCADE_FOVEA_AA_THRESHOLD;
 const MAX_LAPLACIAN_LEVELS: usize = 8;
 const MAX_LAPLACIAN_RESIDUALS: usize = MAX_LAPLACIAN_LEVELS - 1;
 
@@ -845,15 +846,8 @@ fn foveated_accumulate_kernel(
     let half_safe = max_f32(half, 1.0f32);
     let pixel_du = 1.0f32 / half_safe;
 
-    let sx = subsample % SUBSAMPLE_AXIS;
-    let sy = subsample / SUBSAMPLE_AXIS;
-    let jitter_x = (f32::cast_from(sx) + 0.5f32) / f32::cast_from(SUBSAMPLE_AXIS) - 0.5f32;
-    let jitter_y = (f32::cast_from(sy) + 0.5f32) / f32::cast_from(SUBSAMPLE_AXIS) - 0.5f32;
-
     let x_base = (f32::cast_from(x) + 0.5f32 - half) / half_safe;
     let y_base = (f32::cast_from(y) + 0.5f32 - half) / half_safe;
-    let ux = x_base + jitter_x / half_safe;
-    let uy = y_base + jitter_y / half_safe;
 
     let cx_idx = batch_idx * center_x.stride(0);
     let cy_idx = batch_idx * center_y.stride(0);
@@ -868,6 +862,33 @@ fn foveated_accumulate_kernel(
 
     let k = radius / sigma;
     let u_max = min_f32(erf_approx(k / SQRT2), 0.999f32);
+
+    let u_scaled_x_base = clamp_f32(x_base, -1.0f32, 1.0f32) * u_max;
+    let u_scaled_y_base = clamp_f32(y_base, -1.0f32, 1.0f32) * u_max;
+    let erf_inv_x_base = erfinv_approx(u_scaled_x_base);
+    let erf_inv_y_base = erfinv_approx(u_scaled_y_base);
+    let dx_deriv_base =
+        sigma * SQRT2 * u_max * SQRT_PI_OVER_2 * Exp::exp(erf_inv_x_base * erf_inv_x_base);
+    let dy_deriv_base =
+        sigma * SQRT2 * u_max * SQRT_PI_OVER_2 * Exp::exp(erf_inv_y_base * erf_inv_y_base);
+    let local_scale_base = max_f32(Abs::abs(dx_deriv_base), Abs::abs(dy_deriv_base)) * pixel_du;
+    let use_subsamples = local_scale_base > AA_THRESHOLD;
+
+    let sx = subsample % SUBSAMPLE_AXIS;
+    let sy = subsample / SUBSAMPLE_AXIS;
+    let jitter_x = if use_subsamples {
+        (f32::cast_from(sx) + 0.5f32) / f32::cast_from(SUBSAMPLE_AXIS) - 0.5f32
+    } else {
+        0.0f32.into()
+    };
+    let jitter_y = if use_subsamples {
+        (f32::cast_from(sy) + 0.5f32) / f32::cast_from(SUBSAMPLE_AXIS) - 0.5f32
+    } else {
+        0.0f32.into()
+    };
+    let ux = x_base + jitter_x / half_safe;
+    let uy = y_base + jitter_y / half_safe;
+
     let u_scaled_x = clamp_f32(ux, -1.0f32, 1.0f32) * u_max;
     let u_scaled_y = clamp_f32(uy, -1.0f32, 1.0f32) * u_max;
 
@@ -901,10 +922,10 @@ fn foveated_accumulate_kernel(
     } else {
         Log::log(max_f32(dist, 1.0f32)) / LN_2
     };
-    let lod_scale = if local_scale <= 1.0f32 {
+    let lod_scale = if local_scale <= AA_THRESHOLD {
         0.0f32.into()
     } else {
-        Log::log(max_f32(local_scale, 1.0f32)) / LN_2
+        Log::log(max_f32(local_scale / AA_THRESHOLD, 1.0f32)) / LN_2
     };
     let max_level = if level_count > 0 {
         f32::cast_from(level_count - 1)
@@ -972,15 +993,8 @@ fn foveated_laplacian_weight_kernel(
     let half_safe = max_f32(half, 1.0f32);
     let pixel_du = 1.0f32 / half_safe;
 
-    let sx = subsample % SUBSAMPLE_AXIS;
-    let sy = subsample / SUBSAMPLE_AXIS;
-    let jitter_x = (f32::cast_from(sx) + 0.5f32) / f32::cast_from(SUBSAMPLE_AXIS) - 0.5f32;
-    let jitter_y = (f32::cast_from(sy) + 0.5f32) / f32::cast_from(SUBSAMPLE_AXIS) - 0.5f32;
-
     let x_base = (f32::cast_from(x) + 0.5f32 - half) / half_safe;
     let y_base = (f32::cast_from(y) + 0.5f32 - half) / half_safe;
-    let ux = x_base + jitter_x / half_safe;
-    let uy = y_base + jitter_y / half_safe;
 
     let sigma_idx = batch_idx * sigma_px.stride(0);
     let radius_idx = batch_idx * radius_px.stride(0);
@@ -991,6 +1005,33 @@ fn foveated_laplacian_weight_kernel(
 
     let k = radius / sigma;
     let u_max = min_f32(erf_approx(k / SQRT2), 0.999f32);
+
+    let u_scaled_x_base = clamp_f32(x_base, -1.0f32, 1.0f32) * u_max;
+    let u_scaled_y_base = clamp_f32(y_base, -1.0f32, 1.0f32) * u_max;
+    let erf_inv_x_base = erfinv_approx(u_scaled_x_base);
+    let erf_inv_y_base = erfinv_approx(u_scaled_y_base);
+    let dx_deriv_base =
+        sigma * SQRT2 * u_max * SQRT_PI_OVER_2 * Exp::exp(erf_inv_x_base * erf_inv_x_base);
+    let dy_deriv_base =
+        sigma * SQRT2 * u_max * SQRT_PI_OVER_2 * Exp::exp(erf_inv_y_base * erf_inv_y_base);
+    let local_scale_base = max_f32(Abs::abs(dx_deriv_base), Abs::abs(dy_deriv_base)) * pixel_du;
+    let use_subsamples = local_scale_base > AA_THRESHOLD;
+
+    let sx = subsample % SUBSAMPLE_AXIS;
+    let sy = subsample / SUBSAMPLE_AXIS;
+    let jitter_x = if use_subsamples {
+        (f32::cast_from(sx) + 0.5f32) / f32::cast_from(SUBSAMPLE_AXIS) - 0.5f32
+    } else {
+        0.0f32.into()
+    };
+    let jitter_y = if use_subsamples {
+        (f32::cast_from(sy) + 0.5f32) / f32::cast_from(SUBSAMPLE_AXIS) - 0.5f32
+    } else {
+        0.0f32.into()
+    };
+    let ux = x_base + jitter_x / half_safe;
+    let uy = y_base + jitter_y / half_safe;
+
     let u_scaled_x = clamp_f32(ux, -1.0f32, 1.0f32) * u_max;
     let u_scaled_y = clamp_f32(uy, -1.0f32, 1.0f32) * u_max;
 
@@ -1012,10 +1053,10 @@ fn foveated_laplacian_weight_kernel(
     } else {
         Log::log(max_f32(dist, 1.0f32)) / LN_2
     };
-    let lod_scale = if local_scale <= 1.0f32 {
+    let lod_scale = if local_scale <= AA_THRESHOLD {
         0.0f32.into()
     } else {
-        Log::log(max_f32(local_scale, 1.0f32)) / LN_2
+        Log::log(max_f32(local_scale / AA_THRESHOLD, 1.0f32)) / LN_2
     };
     let max_level = if level_count > 0 {
         f32::cast_from(level_count - 1)
@@ -1080,15 +1121,8 @@ fn foveated_laplacian_residual_kernel(
     let half_safe = max_f32(half, 1.0f32);
     let pixel_du = 1.0f32 / half_safe;
 
-    let sx = subsample % SUBSAMPLE_AXIS;
-    let sy = subsample / SUBSAMPLE_AXIS;
-    let jitter_x = (f32::cast_from(sx) + 0.5f32) / f32::cast_from(SUBSAMPLE_AXIS) - 0.5f32;
-    let jitter_y = (f32::cast_from(sy) + 0.5f32) / f32::cast_from(SUBSAMPLE_AXIS) - 0.5f32;
-
     let x_base = (f32::cast_from(x) + 0.5f32 - half) / half_safe;
     let y_base = (f32::cast_from(y) + 0.5f32 - half) / half_safe;
-    let ux = x_base + jitter_x / half_safe;
-    let uy = y_base + jitter_y / half_safe;
 
     let cx_idx = batch_idx * center_x.stride(0);
     let cy_idx = batch_idx * center_y.stride(0);
@@ -1101,6 +1135,33 @@ fn foveated_laplacian_residual_kernel(
 
     let k = radius / sigma;
     let u_max = min_f32(erf_approx(k / SQRT2), 0.999f32);
+
+    let u_scaled_x_base = clamp_f32(x_base, -1.0f32, 1.0f32) * u_max;
+    let u_scaled_y_base = clamp_f32(y_base, -1.0f32, 1.0f32) * u_max;
+    let erf_inv_x_base = erfinv_approx(u_scaled_x_base);
+    let erf_inv_y_base = erfinv_approx(u_scaled_y_base);
+    let dx_deriv_base =
+        sigma * SQRT2 * u_max * SQRT_PI_OVER_2 * Exp::exp(erf_inv_x_base * erf_inv_x_base);
+    let dy_deriv_base =
+        sigma * SQRT2 * u_max * SQRT_PI_OVER_2 * Exp::exp(erf_inv_y_base * erf_inv_y_base);
+    let local_scale_base = max_f32(Abs::abs(dx_deriv_base), Abs::abs(dy_deriv_base)) * pixel_du;
+    let use_subsamples = local_scale_base > AA_THRESHOLD;
+
+    let sx = subsample % SUBSAMPLE_AXIS;
+    let sy = subsample / SUBSAMPLE_AXIS;
+    let jitter_x = if use_subsamples {
+        (f32::cast_from(sx) + 0.5f32) / f32::cast_from(SUBSAMPLE_AXIS) - 0.5f32
+    } else {
+        0.0f32.into()
+    };
+    let jitter_y = if use_subsamples {
+        (f32::cast_from(sy) + 0.5f32) / f32::cast_from(SUBSAMPLE_AXIS) - 0.5f32
+    } else {
+        0.0f32.into()
+    };
+    let ux = x_base + jitter_x / half_safe;
+    let uy = y_base + jitter_y / half_safe;
+
     let u_scaled_x = clamp_f32(ux, -1.0f32, 1.0f32) * u_max;
     let u_scaled_y = clamp_f32(uy, -1.0f32, 1.0f32) * u_max;
 
@@ -1108,12 +1169,6 @@ fn foveated_laplacian_residual_kernel(
     let erf_inv_y = erfinv_approx(u_scaled_y);
     let dx = sigma * SQRT2 * erf_inv_x;
     let dy = sigma * SQRT2 * erf_inv_y;
-    let dx_deriv =
-        sigma * SQRT2 * u_max * SQRT_PI_OVER_2 * Exp::exp(erf_inv_x * erf_inv_x);
-    let dy_deriv =
-        sigma * SQRT2 * u_max * SQRT_PI_OVER_2 * Exp::exp(erf_inv_y * erf_inv_y);
-
-    let _local_scale = max_f32(Abs::abs(dx_deriv), Abs::abs(dy_deriv)) * pixel_du;
     let img_x = cx + dx;
     let img_y = cy + dy;
 
@@ -1175,16 +1230,10 @@ fn foveated_laplacian_coarse_kernel(
 
     let half = f32::cast_from(out_h) * 0.5f32;
     let half_safe = max_f32(half, 1.0f32);
-
-    let sx = subsample % SUBSAMPLE_AXIS;
-    let sy = subsample / SUBSAMPLE_AXIS;
-    let jitter_x = (f32::cast_from(sx) + 0.5f32) / f32::cast_from(SUBSAMPLE_AXIS) - 0.5f32;
-    let jitter_y = (f32::cast_from(sy) + 0.5f32) / f32::cast_from(SUBSAMPLE_AXIS) - 0.5f32;
+    let pixel_du = 1.0f32 / half_safe;
 
     let x_base = (f32::cast_from(x) + 0.5f32 - half) / half_safe;
     let y_base = (f32::cast_from(y) + 0.5f32 - half) / half_safe;
-    let ux = x_base + jitter_x / half_safe;
-    let uy = y_base + jitter_y / half_safe;
 
     let cx_idx = batch_idx * center_x.stride(0);
     let cy_idx = batch_idx * center_y.stride(0);
@@ -1197,6 +1246,33 @@ fn foveated_laplacian_coarse_kernel(
 
     let k = radius / sigma;
     let u_max = min_f32(erf_approx(k / SQRT2), 0.999f32);
+
+    let u_scaled_x_base = clamp_f32(x_base, -1.0f32, 1.0f32) * u_max;
+    let u_scaled_y_base = clamp_f32(y_base, -1.0f32, 1.0f32) * u_max;
+    let erf_inv_x_base = erfinv_approx(u_scaled_x_base);
+    let erf_inv_y_base = erfinv_approx(u_scaled_y_base);
+    let dx_deriv_base =
+        sigma * SQRT2 * u_max * SQRT_PI_OVER_2 * Exp::exp(erf_inv_x_base * erf_inv_x_base);
+    let dy_deriv_base =
+        sigma * SQRT2 * u_max * SQRT_PI_OVER_2 * Exp::exp(erf_inv_y_base * erf_inv_y_base);
+    let local_scale_base = max_f32(Abs::abs(dx_deriv_base), Abs::abs(dy_deriv_base)) * pixel_du;
+    let use_subsamples = local_scale_base > AA_THRESHOLD;
+
+    let sx = subsample % SUBSAMPLE_AXIS;
+    let sy = subsample / SUBSAMPLE_AXIS;
+    let jitter_x = if use_subsamples {
+        (f32::cast_from(sx) + 0.5f32) / f32::cast_from(SUBSAMPLE_AXIS) - 0.5f32
+    } else {
+        0.0f32.into()
+    };
+    let jitter_y = if use_subsamples {
+        (f32::cast_from(sy) + 0.5f32) / f32::cast_from(SUBSAMPLE_AXIS) - 0.5f32
+    } else {
+        0.0f32.into()
+    };
+    let ux = x_base + jitter_x / half_safe;
+    let uy = y_base + jitter_y / half_safe;
+
     let u_scaled_x = clamp_f32(ux, -1.0f32, 1.0f32) * u_max;
     let u_scaled_y = clamp_f32(uy, -1.0f32, 1.0f32) * u_max;
 

@@ -5,6 +5,7 @@ const SIGMA_MIN: f32 = 0.03;
 const SIGMA_MAX: f32 = 0.5;
 const LOD_LOG2_MIN: f32 = -2.0;
 const LOD_LOG2_MAX: f32 = 1.0;
+const FOVEA_AA_THRESHOLD: f32 = 1.25;
 const SQRT2: f32 = 1.41421356237;
 const PI: f32 = 3.14159265359;
 const ERF_A: f32 = 0.147;
@@ -111,56 +112,101 @@ pub fn render_foveated_patch_with_radius(
         for x in 0..patch {
             let base_dx = x as f32 + 0.5 - half;
             let base_dy = y as f32 + 0.5 - half;
+            let ux_base = base_dx / half.max(1.0);
+            let uy_base = base_dy / half.max(1.0);
+            let warp_x_base = foveated_warp(ux_base, sigma_px, radius_px);
+            let warp_y_base = foveated_warp(uy_base, sigma_px, radius_px);
+            let local_scale_base = warp_x_base
+                .deriv
+                .abs()
+                .max(warp_y_base.deriv.abs())
+                * pixel_du;
             let mut color = [0.0; 3];
             let mut count = 0.0;
-            for sy in 0..SUBSAMPLES {
-                for sx in 0..SUBSAMPLES {
-                    let jitter_x = (sx as f32 + 0.5) / SUBSAMPLES as f32 - 0.5;
-                    let jitter_y = (sy as f32 + 0.5) / SUBSAMPLES as f32 - 0.5;
-                    let ux = (base_dx + jitter_x) / half.max(1.0);
-                    let uy = (base_dy + jitter_y) / half.max(1.0);
-                    let warp_x = foveated_warp(ux, sigma_px, radius_px);
-                    let warp_y = foveated_warp(uy, sigma_px, radius_px);
-                    let offset_x = warp_x.offset;
-                    let offset_y = warp_y.offset;
-                    let local_scale = warp_x
-                        .deriv
-                        .abs()
-                        .max(warp_y.deriv.abs())
-                        * pixel_du;
-                    let img_x = center_x + offset_x;
-                    let img_y = center_y + offset_y;
-                    let fx = img_x / width as f32;
-                    let fy = img_y / height as f32;
-                    let sample = match cache.mode {
-                        VisionPyramidMode::Stacked => sample_gaussian_foveated(
-                            &cache.gaussian,
-                            offset_x,
-                            offset_y,
-                            sigma_px,
-                            sigma_px,
-                            local_scale,
-                            lod_sigma,
-                            fx,
-                            fy,
-                        ),
-                        VisionPyramidMode::Laplacian => sample_laplacian_foveated(
-                            &cache.laplacian,
-                            &cache.coarse,
-                            offset_x,
-                            offset_y,
-                            sigma_px,
-                            sigma_px,
-                            local_scale,
-                            lod_sigma,
-                            fx,
-                            fy,
-                        ),
-                    };
-                    color[0] += sample[0];
-                    color[1] += sample[1];
-                    color[2] += sample[2];
-                    count += 1.0;
+            if local_scale_base <= FOVEA_AA_THRESHOLD {
+                let offset_x = warp_x_base.offset;
+                let offset_y = warp_y_base.offset;
+                let img_x = center_x + offset_x;
+                let img_y = center_y + offset_y;
+                let fx = img_x / width as f32;
+                let fy = img_y / height as f32;
+                let sample = match cache.mode {
+                    VisionPyramidMode::Stacked => sample_gaussian_foveated(
+                        &cache.gaussian,
+                        offset_x,
+                        offset_y,
+                        sigma_px,
+                        sigma_px,
+                        local_scale_base,
+                        lod_sigma,
+                        fx,
+                        fy,
+                    ),
+                    VisionPyramidMode::Laplacian => sample_laplacian_foveated(
+                        &cache.laplacian,
+                        &cache.coarse,
+                        offset_x,
+                        offset_y,
+                        sigma_px,
+                        sigma_px,
+                        local_scale_base,
+                        lod_sigma,
+                        fx,
+                        fy,
+                    ),
+                };
+                color = sample;
+                count = 1.0;
+            } else {
+                for sy in 0..SUBSAMPLES {
+                    for sx in 0..SUBSAMPLES {
+                        let jitter_x = (sx as f32 + 0.5) / SUBSAMPLES as f32 - 0.5;
+                        let jitter_y = (sy as f32 + 0.5) / SUBSAMPLES as f32 - 0.5;
+                        let ux = (base_dx + jitter_x) / half.max(1.0);
+                        let uy = (base_dy + jitter_y) / half.max(1.0);
+                        let warp_x = foveated_warp(ux, sigma_px, radius_px);
+                        let warp_y = foveated_warp(uy, sigma_px, radius_px);
+                        let offset_x = warp_x.offset;
+                        let offset_y = warp_y.offset;
+                        let local_scale = warp_x
+                            .deriv
+                            .abs()
+                            .max(warp_y.deriv.abs())
+                            * pixel_du;
+                        let img_x = center_x + offset_x;
+                        let img_y = center_y + offset_y;
+                        let fx = img_x / width as f32;
+                        let fy = img_y / height as f32;
+                        let sample = match cache.mode {
+                            VisionPyramidMode::Stacked => sample_gaussian_foveated(
+                                &cache.gaussian,
+                                offset_x,
+                                offset_y,
+                                sigma_px,
+                                sigma_px,
+                                local_scale,
+                                lod_sigma,
+                                fx,
+                                fy,
+                            ),
+                            VisionPyramidMode::Laplacian => sample_laplacian_foveated(
+                                &cache.laplacian,
+                                &cache.coarse,
+                                offset_x,
+                                offset_y,
+                                sigma_px,
+                                sigma_px,
+                                local_scale,
+                                lod_sigma,
+                                fx,
+                                fy,
+                            ),
+                        };
+                        color[0] += sample[0];
+                        color[1] += sample[1];
+                        color[2] += sample[2];
+                        count += 1.0;
+                    }
                 }
             }
             if count > 0.0 {
@@ -320,10 +366,10 @@ fn compute_lod(
     let sy = sigma_y.max(1e-3);
     let dist = ((dx * dx) / (sx * sx) + (dy * dy) / (sy * sy)).sqrt();
     let lod_dist = if dist <= 1.0 { 0.0 } else { dist.log2() };
-    let lod_scale = if local_scale <= 1.0 {
+    let lod_scale = if local_scale <= FOVEA_AA_THRESHOLD {
         0.0
     } else {
-        local_scale.log2()
+        (local_scale / FOVEA_AA_THRESHOLD).log2()
     };
     lod_dist.max(lod_scale).clamp(0.0, max_level)
 }

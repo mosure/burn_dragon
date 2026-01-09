@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use bevy::asset::RenderAssetUsages;
 use bevy::ecs::hierarchy::ChildSpawnerCommands;
-use bevy::image::{ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
+use bevy::image::{ImageSampler, ImageSamplerDescriptor};
 use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use bevy::prelude::*;
 use bevy::render::settings::{RenderCreation, WgpuFeatures, WgpuSettings};
@@ -29,14 +29,15 @@ use burn_dragon_hatchling_core::foveation;
 use burn_dragon_hatchling_core::train::SaccadeFoveationSampler;
 use burn_dragon_hatchling_core::{
     SpatialPositionalEncodingKind, VisionAttentionMode, VisionDragonHatchlingConfig,
-    VisionPyramidMode, VisionSaccadeConfig,
+    VisionFoveaSamplingMode, VisionPyramidMode, VisionSaccadeConfig,
 };
 use half::f16;
 use image::ImageReader;
 use noise::{NoiseFn, OpenSimplex};
 
 use gpu::{
-    update_gpu_params, update_gpu_pyramid_textures, FoveationGpuPlugin, FoveationInputImage,
+    update_gpu_params, update_gpu_pyramid_textures, FoveationGpuImages, FoveationGpuPlugin,
+    FoveationInputImage,
 };
 
 const UI_PADDING: f32 = 12.0;
@@ -48,6 +49,7 @@ const OVERLAY_RING_OUTER: [u8; 4] = [255, 80, 40, 220];
 const OVERLAY_RING_INNER: [u8; 4] = [60, 200, 255, 220];
 const FOVEA_PARAM_EPS: f32 = 1e-3;
 // Avoid oversized GPU buffers when feeding full-resolution images to the burn backend.
+const BURN_MAX_BUFFER_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const BURN_MAX_IMAGE_SIDE: usize = 1024;
 type BurnBackend = Wgpu<f32>;
 
@@ -131,6 +133,7 @@ pub(crate) enum FoveationBackendMode {
     Cpu,
     Wgsl,
     Burn,
+    Cubecl,
 }
 
 #[derive(Resource, Reflect, InspectorOptions)]
@@ -540,7 +543,7 @@ fn sync_patch_backend(
     }
     state.backend = settings.backend;
     let patch_handle = match settings.backend {
-        FoveationBackendMode::Burn => output.burn.clone(),
+        FoveationBackendMode::Burn | FoveationBackendMode::Cubecl => output.burn.clone(),
         _ => output.cpu.clone(),
     };
     for (kind, mut image) in &mut panels {
@@ -548,7 +551,10 @@ fn sync_patch_backend(
             image.image = patch_handle.clone();
         }
     }
-    if settings.backend != FoveationBackendMode::Burn {
+    if !matches!(
+        settings.backend,
+        FoveationBackendMode::Burn | FoveationBackendMode::Cubecl
+    ) {
         for mut handle in &mut burn_handles {
             handle.upload = false;
         }
@@ -679,7 +685,9 @@ fn update_patch_texture(
     mut states: ResMut<PanZoomStates>,
     mut textures: ResMut<PanZoomTextures>,
     mut images: ResMut<Assets<Image>>,
-    output_handles: Res<FoveationOutputHandles>,
+    mut gpu_images: ResMut<FoveationGpuImages>,
+    mut output_handles: ResMut<FoveationOutputHandles>,
+    mut panels: Query<(&PanelKind, &mut ImageNode), With<PanZoomImage>>,
     mut burn_handles: Query<&mut BevyBurnHandle<BurnBackend>>,
 ) {
     let patch = settings
@@ -693,22 +701,20 @@ fn update_patch_texture(
     if !patch_changed {
         return;
     }
-    update_patch_image(
-        &output_handles.cpu,
-        patch,
-        TextureFormat::Rgba8Unorm,
-        RenderAssetUsages::default(),
-        ImageSamplerDescriptor::linear(),
-        &mut images,
-    );
-    update_patch_image(
-        &output_handles.burn,
-        patch,
-        TextureFormat::Rgba32Float,
-        RenderAssetUsages::RENDER_WORLD,
-        nearest_sampler(),
-        &mut images,
-    );
+    output_handles.cpu = create_blank_image(patch, &mut images);
+    output_handles.burn = create_burn_image(patch, &mut images);
+    gpu_images.output = output_handles.cpu.clone();
+    let patch_handle = match settings.backend {
+        FoveationBackendMode::Burn | FoveationBackendMode::Cubecl => {
+            output_handles.burn.clone()
+        }
+        _ => output_handles.cpu.clone(),
+    };
+    for (kind, mut image) in &mut panels {
+        if *kind == PanelKind::Patch {
+            image.image = patch_handle.clone();
+        }
+    }
     for mut handle in &mut burn_handles {
         let device = handle.tensor.device();
         handle.tensor = Tensor::<BurnBackend, 3>::zeros([patch, patch, 4], &device);
@@ -789,7 +795,10 @@ fn update_burn_patch(
     mut state: NonSendMut<BurnFoveationState>,
     mut handles: Query<&mut BevyBurnHandle<BurnBackend>>,
 ) {
-    if settings.backend != FoveationBackendMode::Burn {
+    if !matches!(
+        settings.backend,
+        FoveationBackendMode::Burn | FoveationBackendMode::Cubecl
+    ) {
         return;
     }
     let Some(burn_device) = burn_device else {
@@ -798,7 +807,7 @@ fn update_burn_patch(
     let Some(device) = burn_device.device().cloned() else {
         return;
     };
-    let (burn_width, burn_height) = burn_target_dims(&source);
+    let (burn_width, burn_height) = burn_target_dims(&source, &settings);
     let patch = runtime
         .patch_size
         .max(1)
@@ -820,6 +829,9 @@ fn update_burn_patch(
         let mut saccade = VisionSaccadeConfig::default();
         saccade.mip_levels = key.depth;
         saccade.pyramid_mode = map_pyramid_mode(settings.mode);
+        if settings.backend == FoveationBackendMode::Cubecl {
+            saccade.fovea_sampling_mode = VisionFoveaSamplingMode::Cubecl;
+        }
         let mut sampler = SaccadeFoveationSampler::<BurnBackend>::new(vision, saccade, &device);
         let input =
             tensor_from_source_resized::<BurnBackend>(&source, burn_width, burn_height, &device);
@@ -1372,6 +1384,103 @@ pub(crate) fn render_patch(
 }
 
 #[cfg(test)]
+pub(crate) fn render_patch_f32(
+    source: &SourceImage,
+    cache: &PyramidCache,
+    settings: &FoveationSettings,
+    patch_size: usize,
+) -> Vec<f32> {
+    const SUBSAMPLES: usize = 4;
+    let patch = patch_size.max(1);
+    let width = patch;
+    let height = patch;
+    let sample = FoveationSample {
+        mean_x: settings.mean_x,
+        mean_y: settings.mean_y,
+        radius_norm: settings.radius_norm,
+    };
+    let center_x = sample.mean_x.clamp(0.0, 1.0) * source.width as f32;
+    let center_y = sample.mean_y.clamp(0.0, 1.0) * source.height as f32;
+    let radius_norm = radius_norm_from_sample(&sample);
+    let sigma_norm = sigma_norm_from_settings(settings, &sample);
+    let sigma = sigma_px_from_norm(sigma_norm, source);
+    let radius = radius_px_from_norm(radius_norm, source);
+    let lod_sigma = foveation::lod_sigma_from_sigma(sigma_norm);
+    let mut out = vec![0.0f32; width * height * 3];
+
+    let half = patch as f32 * 0.5;
+    let pixel_du = 1.0 / half;
+    for y in 0..height {
+        for x in 0..width {
+            let base_dx = x as f32 + 0.5 - half;
+            let base_dy = y as f32 + 0.5 - half;
+            let mut color = [0.0; 3];
+            let mut count = 0.0;
+            for sy in 0..SUBSAMPLES {
+                for sx in 0..SUBSAMPLES {
+                    let jitter_x = (sx as f32 + 0.5) / SUBSAMPLES as f32 - 0.5;
+                    let jitter_y = (sy as f32 + 0.5) / SUBSAMPLES as f32 - 0.5;
+                    let ux = (base_dx + jitter_x) / half;
+                    let uy = (base_dy + jitter_y) / half;
+                    let warp_x = foveated_warp(ux, sigma, radius);
+                    let warp_y = foveated_warp(uy, sigma, radius);
+                    let offset_x = warp_x.offset;
+                    let offset_y = warp_y.offset;
+                    let local_scale = warp_x
+                        .deriv
+                        .abs()
+                        .max(warp_y.deriv.abs())
+                        * pixel_du;
+                    let img_x = center_x + offset_x;
+                    let img_y = center_y + offset_y;
+                    let fx = img_x / source.width as f32;
+                    let fy = img_y / source.height as f32;
+                    let sample = match settings.mode {
+                        PyramidMode::Gaussian => sample_gaussian_foveated(
+                            &cache.gaussian,
+                            offset_x,
+                            offset_y,
+                            sigma,
+                            sigma,
+                            local_scale,
+                            lod_sigma,
+                            fx,
+                            fy,
+                        ),
+                        PyramidMode::Laplacian => sample_laplacian_foveated(
+                            &cache.laplacian,
+                            cache.coarse.as_ref(),
+                            offset_x,
+                            offset_y,
+                            sigma,
+                            sigma,
+                            local_scale,
+                            lod_sigma,
+                            fx,
+                            fy,
+                        ),
+                    };
+                    color[0] += sample[0];
+                    color[1] += sample[1];
+                    color[2] += sample[2];
+                    count += 1.0;
+                }
+            }
+            if count > 0.0 {
+                color[0] /= count;
+                color[1] /= count;
+                color[2] /= count;
+            }
+            let idx = (y * width + x) * 3;
+            out[idx] = color[0];
+            out[idx + 1] = color[1];
+            out[idx + 2] = color[2];
+        }
+    }
+    out
+}
+
+#[cfg(test)]
 const SQRT2: f32 = 1.41421356237;
 
 #[cfg(test)]
@@ -1856,47 +1965,8 @@ fn create_burn_image(size: usize, images: &mut Assets<Image>) -> Handle<Image> {
     image.texture_descriptor.usage |= TextureUsages::COPY_DST
         | TextureUsages::TEXTURE_BINDING
         | TextureUsages::STORAGE_BINDING;
-    image.sampler = ImageSampler::Descriptor(nearest_sampler());
+    image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor::linear());
     images.add(image)
-}
-
-fn update_patch_image(
-    handle: &Handle<Image>,
-    patch: usize,
-    format: TextureFormat,
-    usages: RenderAssetUsages,
-    sampler: ImageSamplerDescriptor,
-    images: &mut Assets<Image>,
-) {
-    let size = patch.max(1);
-    let extent = Extent3d {
-        width: size as u32,
-        height: size as u32,
-        depth_or_array_layers: 1,
-    };
-    if let Some(target) = images.get_mut(handle) {
-        let mut image = Image::new_fill(
-            extent,
-            TextureDimension::D2,
-            &[0u8; 16],
-            format,
-            usages,
-        );
-        image.texture_descriptor.usage |= TextureUsages::COPY_DST
-            | TextureUsages::TEXTURE_BINDING
-            | TextureUsages::STORAGE_BINDING;
-        image.sampler = ImageSampler::Descriptor(sampler);
-        *target = image;
-    }
-}
-
-fn nearest_sampler() -> ImageSamplerDescriptor {
-    ImageSamplerDescriptor {
-        mag_filter: ImageFilterMode::Nearest,
-        min_filter: ImageFilterMode::Nearest,
-        mipmap_filter: ImageFilterMode::Nearest,
-        ..Default::default()
-    }
 }
 
 fn push_f16(data: &mut Vec<u8>, value: f32) {
@@ -1921,18 +1991,19 @@ pub(crate) fn sigma_norm_from_settings(
     sample: &FoveationSample,
 ) -> f32 {
     let radius = radius_norm_from_sample(sample);
-    let sigma = foveation::sigma_from_unit(settings.focus);
-    sigma.min(radius)
+    let focus = settings.focus.clamp(0.0, 1.0);
+    let sigma = radius * focus;
+    sigma.clamp(FOVEA_PARAM_EPS, radius)
 }
 
 fn sigma_px_from_norm(sigma_norm: f32, source: &SourceImage) -> f32 {
     let min_dim = source.width.min(source.height).max(1) as f32;
-    (sigma_norm * min_dim).max(1.0)
+    (sigma_norm * min_dim).max(FOVEA_PARAM_EPS)
 }
 
 pub(crate) fn radius_px_from_norm(radius_norm: f32, source: &SourceImage) -> f32 {
     let min_dim = source.width.min(source.height).max(1) as f32;
-    (radius_norm * min_dim).max(1.0)
+    (radius_norm * min_dim).max(FOVEA_PARAM_EPS)
 }
 
 pub(crate) fn map_pyramid_mode(mode: PyramidMode) -> VisionPyramidMode {
@@ -1984,17 +2055,151 @@ fn tensor_from_source<B: Backend>(source: &SourceImage, device: &B::Device) -> T
     Tensor::<B, 4>::from_data(TensorData::new(data, [1, 3, height, width]), device)
 }
 
-fn burn_target_dims(source: &SourceImage) -> (usize, usize) {
+fn burn_target_dims(source: &SourceImage, settings: &FoveationSettings) -> (usize, usize) {
     let width = source.width.max(1);
     let height = source.height.max(1);
-    let max_side = width.max(height);
-    if max_side <= BURN_MAX_IMAGE_SIDE {
-        return (width, height);
-    }
-    let scale = BURN_MAX_IMAGE_SIDE as f32 / max_side as f32;
-    let scaled_w = (width as f32 * scale).round().max(1.0) as usize;
-    let scaled_h = (height as f32 * scale).round().max(1.0) as usize;
+    let (width, height) = scale_to_max_side(width, height, BURN_MAX_IMAGE_SIDE);
+    let depth = settings.pyramid_depth.max(1);
+    let mode = map_pyramid_mode(settings.mode);
+    let (scaled_w, scaled_h) =
+        scale_to_burn_limits(width, height, depth, mode, BURN_MAX_BUFFER_BYTES);
     (scaled_w, scaled_h)
+}
+
+fn scale_to_max_side(width: usize, height: usize, max_side: usize) -> (usize, usize) {
+    let max_side = max_side.max(1);
+    let max_dim = width.max(height);
+    if max_dim <= max_side {
+        return (width.max(1), height.max(1));
+    }
+    let scale = max_side as f64 / max_dim as f64;
+    let scaled_w = ((width as f64) * scale).round().max(1.0) as usize;
+    let scaled_h = ((height as f64) * scale).round().max(1.0) as usize;
+    (scaled_w, scaled_h)
+}
+
+fn tensor_bytes_f32(batch: usize, channels: usize, height: usize, width: usize) -> u64 {
+    let elems = (batch as u64)
+        .saturating_mul(channels as u64)
+        .saturating_mul(height as u64)
+        .saturating_mul(width as u64);
+    elems.saturating_mul(4)
+}
+
+// burn-tensor's default grid_sample expands buffers to N*C*H_out*W_out*W_in.
+fn grid_sample_max_buffer_bytes(
+    batch: usize,
+    channels: usize,
+    height_in: usize,
+    width_in: usize,
+    height_out: usize,
+    width_out: usize,
+) -> u64 {
+    let n = batch as u64;
+    let c = channels as u64;
+    let h = height_in.max(height_out).max(1) as u64;
+    let w_out = width_out.max(1) as u64;
+    let w_in = width_in.max(1) as u64;
+    n.saturating_mul(c)
+        .saturating_mul(h)
+        .saturating_mul(w_out)
+        .saturating_mul(w_in)
+        .saturating_mul(4)
+}
+
+fn pyramid_level_dims(width: usize, height: usize, depth: usize) -> Vec<(usize, usize)> {
+    let mut levels = Vec::with_capacity(depth.max(1));
+    let mut w = width.max(1);
+    let mut h = height.max(1);
+    for _ in 0..depth.max(1) {
+        levels.push((w, h));
+        if w < 2 || h < 2 {
+            break;
+        }
+        let even_w = w - (w % 2);
+        let even_h = h - (h % 2);
+        if even_w == 0 || even_h == 0 {
+            break;
+        }
+        w = (even_w / 2).max(1);
+        h = (even_h / 2).max(1);
+    }
+    levels
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct BurnPyramidSize {
+    max_tensor_bytes: u64,
+    total_bytes: u64,
+}
+
+fn estimate_pyramid_bytes(
+    batch: usize,
+    channels: usize,
+    width: usize,
+    height: usize,
+    depth: usize,
+    mode: VisionPyramidMode,
+) -> BurnPyramidSize {
+    let levels = pyramid_level_dims(width, height, depth);
+    if levels.is_empty() {
+        return BurnPyramidSize::default();
+    }
+    let mut total = 0u64;
+    let mut max_tensor = 0u64;
+    for (idx, (w, h)) in levels.iter().copied().enumerate() {
+        let level_bytes = tensor_bytes_f32(batch, channels, h, w);
+        total = total.saturating_add(level_bytes);
+        max_tensor = max_tensor.max(level_bytes);
+        let grid_bytes = tensor_bytes_f32(batch, 2, h, w);
+        max_tensor = max_tensor.max(grid_bytes);
+        if matches!(mode, VisionPyramidMode::Laplacian) && idx + 1 < levels.len() {
+            total = total.saturating_add(level_bytes);
+        }
+    }
+    if matches!(mode, VisionPyramidMode::Laplacian) {
+        let mut max_grid_sample = 0u64;
+        for window in levels.windows(2) {
+            let (w_out, h_out) = window[0];
+            let (w_in, h_in) = window[1];
+            let bytes =
+                grid_sample_max_buffer_bytes(batch, channels, h_in, w_in, h_out, w_out);
+            max_grid_sample = max_grid_sample.max(bytes);
+        }
+        max_tensor = max_tensor.max(max_grid_sample);
+    }
+    BurnPyramidSize {
+        max_tensor_bytes: max_tensor,
+        total_bytes: total,
+    }
+}
+
+fn scale_to_burn_limits(
+    width: usize,
+    height: usize,
+    depth: usize,
+    mode: VisionPyramidMode,
+    max_bytes: u64,
+) -> (usize, usize) {
+    let mut w = width.max(1);
+    let mut h = height.max(1);
+    loop {
+        let estimate = estimate_pyramid_bytes(1, 3, w, h, depth, mode);
+        let max_needed = estimate.max_tensor_bytes.max(estimate.total_bytes);
+        if max_needed <= max_bytes {
+            return (w, h);
+        }
+        let scale = (max_bytes as f64 / max_needed as f64).sqrt().min(1.0);
+        let next_w = ((w as f64) * scale).floor().max(1.0) as usize;
+        let next_h = ((h as f64) * scale).floor().max(1.0) as usize;
+        if next_w == w && next_h == h {
+            w = w.saturating_sub(1).max(1);
+            h = h.saturating_sub(1).max(1);
+        } else {
+            w = next_w;
+            h = next_h;
+        }
+    }
 }
 
 fn tensor_from_source_resized<B: Backend>(

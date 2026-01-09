@@ -441,11 +441,9 @@ fn resample(level: &CpuImageLevel, width: usize, height: usize) -> CpuImageLevel
 }
 
 fn sample_bilinear(level: &CpuImageLevel, fx: f32, fy: f32) -> [f32; 3] {
-    // Align with burn's grid_sample_2d (align_corners=true) coordinate mapping.
-    let max_x = level.width.saturating_sub(1) as f32;
-    let max_y = level.height.saturating_sub(1) as f32;
-    let x = fx.clamp(0.0, 1.0) * max_x;
-    let y = fy.clamp(0.0, 1.0) * max_y;
+    // Match WGSL/texture sampling (0..1 maps to texel edges), and burn's grid mapping.
+    let x = fx.clamp(0.0, 1.0) * level.width as f32 - 0.5;
+    let y = fy.clamp(0.0, 1.0) * level.height as f32 - 0.5;
     let x0 = x.floor();
     let y0 = y.floor();
     let x1 = x0 + 1.0;

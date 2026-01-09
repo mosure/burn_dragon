@@ -12,7 +12,7 @@ mod vision_bench {
     use burn_autodiff::Autodiff;
     use burn_dragon_hatchling::{
         ImageNetAugmentations, ImageNetSplit, VisionAugmentationConfig, VisionDragonHatchlingConfig,
-        VisionPyramidMode, VisionSaccadeConfig, VisionNormalize,
+        VisionFoveaSamplingMode, VisionPyramidMode, VisionSaccadeConfig, VisionNormalize,
     };
     use burn_dragon_hatchling::train::bench::VisionSaccadeBench;
     use burn_wgpu::Wgpu;
@@ -97,7 +97,7 @@ mod vision_bench {
                 attention_mode: burn_dragon_hatchling::VisionAttentionMode::RowL1,
                 fused_kernels: burn_dragon_hatchling::FusedKernelConfig::default(),
             };
-            let saccade = VisionSaccadeConfig {
+            let saccade_base = VisionSaccadeConfig {
                 num_eyes: 2,
                 mip_levels: cfg.mip_levels,
                 pyramid_mode: VisionPyramidMode::Laplacian,
@@ -105,7 +105,7 @@ mod vision_bench {
                 ..VisionSaccadeConfig::default()
             };
             let bench =
-                VisionSaccadeBench::<B>::new(vision, saccade, cfg.batch, cfg.steps, 1, &device);
+                VisionSaccadeBench::<B>::new(vision.clone(), saccade_base.clone(), cfg.batch, cfg.steps, 1, &device);
             let estimate = bench.fovea_patch_kernel_estimate();
             eprintln!(
                 "[{name}:{cfg_name}] fovea_patch grid_sample calls={calls} (unfused={unfused}) levels={levels} subsamples={subsamples}",
@@ -121,12 +121,40 @@ mod vision_bench {
             bench_stage(&mut group, cfg, "mip_pyramid", &bench, VisionSaccadeBench::stage_mip_pyramid);
             bench_stage(&mut group, cfg, "fovea_weights", &bench, VisionSaccadeBench::stage_fovea_weights);
             bench_stage(&mut group, cfg, "fovea_context", &bench, VisionSaccadeBench::stage_fovea_context);
-            bench_stage(&mut group, cfg, "fovea_patch", &bench, VisionSaccadeBench::stage_fovea_patch);
             bench_stage(&mut group, cfg, "token_forward", &bench, VisionSaccadeBench::stage_token_forward);
             bench_stage(&mut group, cfg, "residual_scatter", &bench, VisionSaccadeBench::stage_residual_scatter);
             bench_stage(&mut group, cfg, "full_forward", &bench, VisionSaccadeBench::stage_full_forward);
             if name != "wgpu" {
                 bench_stage(&mut group, cfg, "full_backward", &bench, VisionSaccadeBench::stage_full_backward);
+            }
+
+            let sampling_modes = [
+                ("batched", VisionFoveaSamplingMode::Batched),
+                ("sequential", VisionFoveaSamplingMode::Sequential),
+                ("subpatch", VisionFoveaSamplingMode::Subpatch),
+                ("cubecl", VisionFoveaSamplingMode::Cubecl),
+            ];
+            for (sampling_name, sampling_mode) in sampling_modes {
+                let mut saccade = saccade_base.clone();
+                saccade.fovea_sampling_mode = sampling_mode;
+                saccade.fovea_subpatch_size = if matches!(
+                    sampling_mode,
+                    VisionFoveaSamplingMode::Subpatch
+                ) {
+                    (cfg.patch_size / 2).max(1)
+                } else {
+                    0
+                };
+                let bench = VisionSaccadeBench::<B>::new(
+                    vision.clone(),
+                    saccade,
+                    cfg.batch,
+                    cfg.steps,
+                    1,
+                    &device,
+                );
+                let stage = format!("fovea_patch/{sampling_name}");
+                bench_stage(&mut group, cfg, &stage, &bench, VisionSaccadeBench::stage_fovea_patch);
             }
         }
         group.finish();

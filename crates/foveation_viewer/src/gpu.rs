@@ -895,7 +895,7 @@ mod tests {
     use crate::{
         FoveationBackendMode, FoveationSample, ImageLevel, PyramidCache, build_gaussian_pyramid,
         build_laplacian_pyramid, lerp, make_minimal_vision_config, map_pyramid_mode,
-        radius_norm_from_sample, render_patch, sigma_norm_from_settings,
+        radius_norm_from_sample, render_patch_f32, sigma_norm_from_settings,
     };
     use burn::tensor::backend::Backend;
     use burn::tensor::{Tensor, TensorData};
@@ -903,6 +903,9 @@ mod tests {
     use burn_dragon_hatchling_core::VisionSaccadeConfig;
     use burn_wgpu::{self, RuntimeOptions, Wgpu};
     use burn_wgpu::graphics;
+    use image::RgbImage;
+    use std::fs;
+    use std::path::{Path, PathBuf};
     use std::sync::mpsc;
     use std::sync::Once;
     use wgpu::util::DeviceExt;
@@ -974,7 +977,7 @@ mod tests {
         Tensor::<B, 4>::from_data(TensorData::new(data, [1, 3, height, width]), device)
     }
 
-    fn render_patch_burn(source: &SourceImage, settings: &FoveationSettings) -> Vec<u8> {
+    fn render_patch_burn(source: &SourceImage, settings: &FoveationSettings) -> Vec<f32> {
         let device = init_burn_device();
         let patch = settings
             .patch_size
@@ -1012,7 +1015,7 @@ mod tests {
         let [batch, channels, height, width] = patch_tensor.shape().dims::<4>();
         let data = patch_tensor.into_data();
         let values = data.as_slice::<f32>().expect("f32 tensor data");
-        let mut out = vec![0u8; height * width * 4];
+        let mut out = vec![0.0f32; height * width * 3];
         if batch == 0 || channels < 3 {
             return out;
         }
@@ -1020,16 +1023,347 @@ mod tests {
         for y in 0..height {
             for x in 0..width {
                 let idx = y * width + x;
-                let out_idx = idx * 4;
-                out[out_idx] = (values[idx].clamp(0.0, 1.0) * 255.0).round() as u8;
-                out[out_idx + 1] =
-                    (values[idx + plane].clamp(0.0, 1.0) * 255.0).round() as u8;
-                out[out_idx + 2] =
-                    (values[idx + plane * 2].clamp(0.0, 1.0) * 255.0).round() as u8;
-                out[out_idx + 3] = 255;
+                let out_idx = idx * 3;
+                out[out_idx] = values[idx];
+                out[out_idx + 1] = values[idx + plane];
+                out[out_idx + 2] = values[idx + plane * 2];
             }
         }
         out
+    }
+
+    fn max_abs_diff_f32(a: &[f32], b: &[f32]) -> f32 {
+        a.iter()
+            .zip(b.iter())
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0, f32::max)
+    }
+
+    fn quantize_f16(values: &[f32]) -> Vec<f32> {
+        values.iter().map(|value| f16::from_f32(*value).to_f32()).collect()
+    }
+
+    fn mse_f32(a: &[f32], b: &[f32]) -> f32 {
+        let mut sum = 0.0f32;
+        let mut count = 0usize;
+        for (x, y) in a.iter().zip(b.iter()) {
+            let diff = x - y;
+            sum += diff * diff;
+            count += 1;
+        }
+        if count == 0 {
+            return 0.0;
+        }
+        sum / count as f32
+    }
+
+    fn assert_patch_close(label: &str, a: &[f32], b: &[f32], max_abs: f32, mse: f32) {
+        let max_diff = max_abs_diff_f32(a, b);
+        let mse_diff = mse_f32(a, b);
+        assert!(
+            max_diff <= max_abs && mse_diff <= mse,
+            "{label} max_abs {max_diff} mse {mse_diff}"
+        );
+    }
+
+    fn fovea_test_root() -> PathBuf {
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let root = manifest_dir
+            .parent()
+            .and_then(|parent| parent.parent())
+            .map(PathBuf::from)
+            .unwrap_or(manifest_dir);
+        root.join("runs").join("fovea_test")
+    }
+
+    fn save_patch_image(path: &Path, patch: &[f32], patch_size: usize) {
+        let expected = patch_size * patch_size * 3;
+        assert_eq!(
+            patch.len(),
+            expected,
+            "expected {expected} rgb values, got {}",
+            patch.len()
+        );
+        let mut bytes = Vec::with_capacity(expected);
+        for value in patch {
+            let scaled = (value.clamp(0.0, 1.0) * 255.0).round() as u8;
+            bytes.push(scaled);
+        }
+        let image = RgbImage::from_raw(patch_size as u32, patch_size as u32, bytes)
+            .expect("rgb patch buffer");
+        image.save(path).expect("write fovea test image");
+    }
+
+    fn save_checkerboard_patch(
+        root: &Path,
+        source: &SourceImage,
+        mode: PyramidMode,
+        case_idx: usize,
+        mean_x: f32,
+        mean_y: f32,
+        radius: f32,
+        focus: f32,
+        patch_size: usize,
+        depth: usize,
+        backend: &str,
+        patch: &[f32],
+    ) {
+        let case_dir = format!(
+            "case_{case_idx}_mx_{mean_x:.2}_my_{mean_y:.2}_r_{radius:.2}_f_{focus:.2}_patch_{patch_size}_depth_{depth}"
+        );
+        let dir = root
+            .join("checkerboard")
+            .join(format!("{}x{}", source.width, source.height))
+            .join(format!("mode_{mode:?}"))
+            .join(case_dir);
+        fs::create_dir_all(&dir).expect("create fovea_test output dir");
+        let path = dir.join(format!("{backend}.png"));
+        save_patch_image(&path, patch, patch_size);
+    }
+
+    fn shader_source_f16() -> String {
+        SHADER_SOURCE.replace("rgba8unorm", "rgba16float")
+    }
+
+    fn render_patch_gpu_f32(
+        source: &SourceImage,
+        cache: &PyramidCache,
+        settings: &FoveationSettings,
+    ) -> Option<Vec<f32>> {
+        let instance = wgpu::Instance::default();
+        let supports_format = |adapter: &wgpu::Adapter| {
+            let features = adapter.get_texture_format_features(TextureFormat::Rgba16Float);
+            features
+                .flags
+                .contains(wgpu::TextureFormatFeatureFlags::FILTERABLE)
+                && features
+                    .flags
+                    .contains(wgpu::TextureFormatFeatureFlags::STORAGE_WRITE_ONLY)
+        };
+
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::LowPower,
+            compatible_surface: None,
+            force_fallback_adapter: false,
+        }))
+        .ok()?;
+        if !supports_format(&adapter) {
+            return None;
+        }
+
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: None,
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::default(),
+            memory_hints: wgpu::MemoryHints::default(),
+            trace: wgpu::Trace::Off,
+        }))
+        .ok()?;
+
+        let gaussian_texture = create_mip_texture(&device, &queue, &cache.gaussian);
+        let residual_levels = build_residual_levels(cache);
+        let residual_texture = create_mip_texture(&device, &queue, &residual_levels);
+
+        let output_size = settings.patch_size as u32;
+        let output_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("foveation_output_f16"),
+            size: wgpu::Extent3d {
+                width: output_size.max(1),
+                height: output_size.max(1),
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let output_view = output_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+
+        let uniform = uniform_for_settings(settings, source);
+        let mut encased = bevy::render::render_resource::encase::UniformBuffer::new(Vec::new());
+        encased.write(&uniform).ok()?;
+        let uniform_bytes = encased.into_inner();
+        let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("foveation_uniform"),
+            contents: &uniform_bytes,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let shader_source = shader_source_f16();
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("foveation_shader_f16"),
+            source: wgpu::ShaderSource::Wgsl(shader_source.into()),
+        });
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("foveation_bind_group_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::WriteOnly,
+                        format: wgpu::TextureFormat::Rgba16Float,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("foveation_bind_group"),
+            layout: &bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(
+                        &gaussian_texture.create_view(&wgpu::TextureViewDescriptor::default()),
+                    ),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(
+                        &residual_texture.create_view(&wgpu::TextureViewDescriptor::default()),
+                    ),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&output_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("foveation_pipeline_layout"),
+            bind_group_layouts: &[&bind_group_layout],
+            push_constant_ranges: &[],
+        });
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("foveation_compute_pipeline"),
+            layout: Some(&pipeline_layout),
+            module: &shader,
+            entry_point: Some("main"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            cache: None,
+        });
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("foveation_compute_encoder"),
+        });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("foveation_compute_pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            let groups_x = (output_size + WORKGROUP_SIZE - 1) / WORKGROUP_SIZE;
+            let groups_y = (output_size + WORKGROUP_SIZE - 1) / WORKGROUP_SIZE;
+            pass.dispatch_workgroups(groups_x, groups_y, 1);
+        }
+
+        let bytes_per_row = output_size * 8;
+        let aligned_bytes_per_row = align_bytes_per_row(bytes_per_row);
+        let buffer_size = (aligned_bytes_per_row * output_size) as u64;
+        let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("foveation_output_buffer"),
+            size: buffer_size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &output_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &output_buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(aligned_bytes_per_row),
+                    rows_per_image: Some(output_size),
+                },
+            },
+            wgpu::Extent3d {
+                width: output_size,
+                height: output_size,
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit([encoder.finish()]);
+
+        let slice = output_buffer.slice(..);
+        let (tx, rx) = mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |res| {
+            tx.send(res).ok();
+        });
+        device.poll(wgpu::PollType::Wait).ok();
+        let map_result = rx.recv().ok()?;
+        map_result.ok()?;
+        let data = slice.get_mapped_range().to_vec();
+        output_buffer.unmap();
+        let trimmed = trim_padded_rows_bytes(
+            &data,
+            output_size,
+            output_size,
+            8,
+            aligned_bytes_per_row,
+        );
+        Some(decode_f16_rgb(&trimmed, output_size as usize, output_size as usize))
     }
 
     fn make_cache(source: &SourceImage, depth: usize) -> PyramidCache {
@@ -1209,13 +1543,13 @@ mod tests {
         let source = make_checkerboard(64, 64);
         let settings = settings_for_mode(PyramidMode::Gaussian);
         let cache = make_cache(&source, settings.pyramid_depth);
-        let patch = render_patch(&source, &cache, &settings, settings.patch_size);
+        let patch = render_patch_f32(&source, &cache, &settings, settings.patch_size);
 
         let center = settings.patch_size / 2;
-        let center_idx = (center * settings.patch_size + center) * 4;
+        let center_idx = (center * settings.patch_size + center) * 3;
         let corner_idx = 0;
-        let center_value = patch[center_idx] as f32 / 255.0;
-        let corner_value = patch[corner_idx] as f32 / 255.0;
+        let center_value = patch[center_idx];
+        let corner_value = patch[corner_idx];
 
         let src_center = source.data
             [(source.height / 2 * source.width + source.width / 2) * 3];
@@ -1230,67 +1564,128 @@ mod tests {
     }
 
     #[test]
-    fn gpu_matches_cpu_gaussian() {
-        let source = make_gradient(64, 64);
-        let settings = settings_for_mode(PyramidMode::Gaussian);
-        let cache = make_cache(&source, settings.pyramid_depth);
-        let cpu = render_patch(&source, &cache, &settings, settings.patch_size);
-        let Some(gpu) = render_patch_gpu(&source, &cache, &settings) else {
-            return;
-        };
-        let max_diff = max_abs_diff(&cpu, &gpu);
-        assert!(
-            max_diff <= 3,
-            "gpu gaussian mismatch max diff {max_diff}"
-        );
-    }
+    fn foveation_backends_match_across_settings() {
+        let sources = [
+            make_gradient(64, 64),
+            make_gradient(80, 48),
+            make_checkerboard(64, 64),
+        ];
+        let cases = [
+            (0.5, 0.5, 0.25, 0.5, 16, 4),
+            (0.2, 0.8, 0.1, 0.2, 12, 3),
+            (0.8, 0.2, 0.4, 0.7, 24, 4),
+            (0.05, 0.95, 0.15, 0.35, 8, 2),
+            (0.5, 0.5, 0.35, 1.0, 64, 4),
+            (0.25, 0.75, 0.2, 0.8, 64, 5),
+            (0.8, 0.2, 0.6, 0.4, 64, 6),
+            (0.1, 0.9, 0.12, 1.0, 64, 3),
+            (0.9, 0.1, 0.45, 0.6, 64, 5),
+        ];
+        let modes = [PyramidMode::Gaussian, PyramidMode::Laplacian];
+        let max_abs_threshold = 1e-3;
+        let max_abs_threshold_wgsl = 3.5e-3;
+        let mse_threshold = 1e-6;
+        let output_root = fovea_test_root();
 
-    #[test]
-    fn gpu_matches_cpu_laplacian() {
-        let source = make_gradient(64, 64);
-        let settings = settings_for_mode(PyramidMode::Laplacian);
-        let cache = make_cache(&source, settings.pyramid_depth);
-        let cpu = render_patch(&source, &cache, &settings, settings.patch_size);
-        let Some(gpu) = render_patch_gpu(&source, &cache, &settings) else {
-            return;
-        };
-        let max_diff = max_abs_diff(&cpu, &gpu);
-        assert!(
-            max_diff <= 4,
-            "gpu laplacian mismatch max diff {max_diff}"
-        );
-    }
+        for (source_idx, source) in sources.iter().enumerate() {
+            let save_outputs = source_idx == 2;
+            for mode in modes.iter().copied() {
+                for (case_idx, (mean_x, mean_y, radius, focus, patch_size, depth)) in
+                    cases.iter().copied().enumerate()
+                {
+                    let max_patch = source.width.min(source.height);
+                    if patch_size > max_patch {
+                        continue;
+                    }
+                    let mut settings = settings_for_mode(mode);
+                    settings.mean_x = mean_x;
+                    settings.mean_y = mean_y;
+                    settings.radius_norm = radius;
+                    settings.focus = focus;
+                    settings.patch_size = patch_size;
+                    settings.pyramid_depth = depth;
 
-    #[test]
-    fn burn_matches_wgsl_gaussian() {
-        let source = make_gradient(64, 64);
-        let settings = settings_for_mode(PyramidMode::Gaussian);
-        let cache = make_cache(&source, settings.pyramid_depth);
-        let Some(gpu) = render_patch_gpu(&source, &cache, &settings) else {
-            return;
-        };
-        let burn = render_patch_burn(&source, &settings);
-        let max_diff = max_abs_diff(&gpu, &burn);
-        assert!(
-            max_diff <= 4,
-            "burn gaussian mismatch max diff {max_diff}"
-        );
-    }
+                    let cache = make_cache(source, settings.pyramid_depth);
+                    let cpu = render_patch_f32(source, &cache, &settings, settings.patch_size);
+                    let burn = render_patch_burn(source, &settings);
+                    let label = format!(
+                        "source {source_idx} case {case_idx} mode {mode:?}"
+                    );
+                    if save_outputs {
+                        save_checkerboard_patch(
+                            &output_root,
+                            source,
+                            mode,
+                            case_idx,
+                            mean_x,
+                            mean_y,
+                            radius,
+                            focus,
+                            patch_size,
+                            depth,
+                            "cpu",
+                            &cpu,
+                        );
+                        save_checkerboard_patch(
+                            &output_root,
+                            source,
+                            mode,
+                            case_idx,
+                            mean_x,
+                            mean_y,
+                            radius,
+                            focus,
+                            patch_size,
+                            depth,
+                            "burn",
+                            &burn,
+                        );
+                    }
+                    assert_patch_close(
+                        &format!("{label} burn vs cpu"),
+                        &burn,
+                        &cpu,
+                        max_abs_threshold,
+                        mse_threshold,
+                    );
 
-    #[test]
-    fn burn_matches_wgsl_laplacian() {
-        let source = make_gradient(64, 64);
-        let settings = settings_for_mode(PyramidMode::Laplacian);
-        let cache = make_cache(&source, settings.pyramid_depth);
-        let Some(gpu) = render_patch_gpu(&source, &cache, &settings) else {
-            return;
-        };
-        let burn = render_patch_burn(&source, &settings);
-        let max_diff = max_abs_diff(&gpu, &burn);
-        assert!(
-            max_diff <= 5,
-            "burn laplacian mismatch max diff {max_diff}"
-        );
+                    if let Some(gpu) = render_patch_gpu_f32(source, &cache, &settings) {
+                        let cpu_f16 = quantize_f16(&cpu);
+                        let burn_f16 = quantize_f16(&burn);
+                        if save_outputs {
+                            save_checkerboard_patch(
+                                &output_root,
+                                source,
+                                mode,
+                                case_idx,
+                                mean_x,
+                                mean_y,
+                                radius,
+                                focus,
+                                patch_size,
+                                depth,
+                                "wgsl",
+                                &gpu,
+                            );
+                        }
+                        assert_patch_close(
+                            &format!("{label} wgsl vs cpu"),
+                            &gpu,
+                            &cpu_f16,
+                            max_abs_threshold_wgsl,
+                            mse_threshold,
+                        );
+                        assert_patch_close(
+                            &format!("{label} burn vs wgsl"),
+                            &burn_f16,
+                            &gpu,
+                            max_abs_threshold_wgsl,
+                            mse_threshold,
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -1317,14 +1712,6 @@ mod tests {
             &gpu_residual[..laplacian.len()],
             0.02,
         );
-    }
-
-    fn max_abs_diff(a: &[u8], b: &[u8]) -> u8 {
-        a.iter()
-            .zip(b.iter())
-            .map(|(x, y)| x.abs_diff(*y))
-            .max()
-            .unwrap_or(0)
     }
 
     fn render_patch_gpu(

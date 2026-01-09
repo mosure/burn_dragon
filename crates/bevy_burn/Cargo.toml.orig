@@ -1,0 +1,166 @@
+[package]
+name = "bevy_burn"
+description = "bevy burn bindings"
+version = "0.4.9"
+edition = "2021"
+authors = ["mosure <mitchell@mosure.me>"]
+license = "MIT"
+keywords = [
+  "bevy",
+  "burn",
+  "machine-learning",
+  "compute-shader",
+]
+categories = [
+  "computer-vision",
+  "graphics",
+  "rendering",
+]
+homepage = "https://github.com/mosure/bevy_burn"
+repository = "https://github.com/mosure/bevy_burn"
+readme = "README.md"
+exclude = [
+  ".devcontainer",
+  ".github",
+  "docs",
+  "dist",
+  "build",
+  "assets",
+  "credits",
+]
+
+
+[dependencies]
+burn-core = { version = "0.19" }
+burn-cubecl = { version = "0.19", default-features = false }
+bytemuck = "1.23"
+wgpu = "26.0"
+
+
+[dependencies.burn]
+version = "0.19"
+default-features = false
+features = [
+  "std",
+]
+
+[dependencies.burn-cubecl-fusion]
+version = "0.19"
+default-features = false
+features = [
+  "std",
+  # "std",
+]
+
+[dependencies.burn-wgpu]
+version = "0.19"
+default-features = false
+features = [
+  "fusion",
+  # "std",
+]
+
+# [dependencies.cubecl]
+# version = "0.8"
+# default-features = false
+# features = [
+#   "std",
+#   # "template",
+# ]
+
+# [dependencies.cubecl-runtime]
+# version = "0.8"
+# default-features = false
+# features = [
+#   # "std",
+#   "channel-mpsc",
+#   # "template",
+# ]
+
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+console_error_panic_hook = "0.1"
+getrandom = { version = "0.3", default-features = false, features = ["wasm_js"] }
+wasm-bindgen = "0.2"
+
+
+[dependencies.bevy]
+version = "0.17"
+default-features = false
+features = [
+  "bevy_asset",
+  "bevy_camera",
+  "bevy_core_pipeline",
+  "bevy_image",
+  "bevy_log",
+  "bevy_pbr",
+  "bevy_render",
+  "bevy_sprite",
+  "bevy_text",
+  "bevy_ui",
+  "bevy_ui_render",
+  "bevy_window",
+  "bevy_winit",
+  "debug",
+  "default_font",
+  "png",
+  "std",
+  "tonemapping_luts",
+  "webgpu",
+  "x11",
+  "zstd_rust",
+]
+
+
+[target.'cfg(target_arch = "wasm32")'.dependencies.web-sys]
+version = "0.3"
+features = [
+  'Document',
+  'Element',
+  'HtmlElement',
+  'Location',
+  'Node',
+  'Window',
+]
+
+
+[dev-dependencies]
+futures = "0.3"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+criterion = { version = "0.7", features = ["html_reports"] }
+
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.dev]
+opt-level = 1
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+opt-level = 3
+
+[profile.wasm-release]
+inherits = "release"
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+
+
+[[example]]
+name = "navier_stokes"
+path = "example/navier_stokes.rs"
+
+
+[[example]]
+name = "gpu_interop"
+path = "example/gpu_interop.rs"
+
+
+
+[[bench]]
+name = "io"
+harness = false
+path = "bench/io.rs"

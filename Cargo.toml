@@ -91,6 +91,9 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 
+[patch.crates-io]
+bevy_burn = { path = "crates/bevy_burn" }
+
 
 [lib]
 path = "src/lib.rs"

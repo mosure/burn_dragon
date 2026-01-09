@@ -1,0 +1,40 @@
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <title>bevy_burn - gpu_interop</title>
+    <style>
+      body {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        padding: 0;
+        overflow: hidden;
+      }
+    </style>
+  </head>
+  <script type="module">
+    import init from './out/gpu_interop.js'
+    init()
+  </script>
+  <script>
+    // disable right-click context menu
+    document.addEventListener('contextmenu', event => event.preventDefault());
+  </script>
+  <style>
+    body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+    }
+
+    .full-size {
+      width: 100% !important;
+      height: 100% !important;
+    }
+  </style>
+  <body>
+    <canvas id="bevy" class="full-size"></canvas>
+  </body>
+</html>

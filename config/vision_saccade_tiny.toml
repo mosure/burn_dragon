@@ -53,6 +53,10 @@ num_eyes = 1
 mip_levels = 4
 # how pyramid scales are represented: stacked (raw) or laplacian (residual)
 pyramid_mode = "laplacian"
+# fovea sampling strategy: batched, sequential, or subpatch
+fovea_sampling_mode = "sequential"
+# subpatch size for "subpatch" sampling (0 uses full patch)
+fovea_subpatch_size = 0
 # pre-rollout steps always run without grad to keep memory stable
 low_mem_pre_rollout = true
 # LeJEPA-style loss over the feature pyramid (invariance + sigreg)
@@ -61,7 +65,7 @@ sigreg_knots = 17
 sigreg_t_max = 3.0
 sigreg_proj_dim = 256
 # reconstruction loss weight (trains RGB decoder)
-recon_weight = 0.1
+recon_weight = 1.0
 # saccade ignores MAE-style masking (full-image reconstruction)
 recon_mask_ratio = 0.0
 recon_hidden_dim = 256

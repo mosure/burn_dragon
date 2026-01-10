@@ -34,6 +34,7 @@ members = [
   ".",
   "crates/burn_dragon_hatchling_core",
   "crates/burn_dragon_hatchling_cli",
+  "crates/burn_dragon_hatchling_vision",
   "crates/foveation_viewer",
 ]
 
@@ -59,9 +60,14 @@ burn = { version = "0.19", default-features = false, features = ["fusion", "ndar
 burn-autodiff = { version = "0.19" }
 burn-wgpu = { version = "0.19", default-features = false, features = ["fusion", "std"] }
 burn-cuda = { version = "0.19", default-features = false, features = ["std"] }
+burn_dragon_hatchling_vision = { path = "crates/burn_dragon_hatchling_vision" }
+bytemuck = { version = "1", features = ["derive"] }
+half = "2"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+pollster = "0.3"
 rand = "0.8"
 tempfile = "3"
+wgpu = "26"
 
 
 [profile.dev.package."*"]

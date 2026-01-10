@@ -25,11 +25,11 @@ use bevy_inspector_egui::quick::ResourceInspectorPlugin;
 use burn::tensor::backend::Backend;
 use burn::tensor::{Tensor, TensorData};
 use burn_wgpu::Wgpu;
-use burn_dragon_hatchling_core::foveation;
+use burn_dragon_hatchling_vision::foveation;
 use burn_dragon_hatchling_core::train::SaccadeFoveationSampler;
 use burn_dragon_hatchling_core::{
     SpatialPositionalEncodingKind, VisionAttentionMode, VisionDragonHatchlingConfig,
-    VisionFoveaSamplingMode, VisionPyramidMode, VisionSaccadeConfig,
+    VisionFoveaSamplingMode, VisionFoveaWarpMode, VisionPyramidMode, VisionSaccadeConfig,
 };
 use half::f16;
 use image::ImageReader;
@@ -97,6 +97,7 @@ fn main() {
         .add_plugins(ResourceInspectorPlugin::<FoveationSettings>::default())
         .register_type::<FoveationSettings>()
         .register_type::<PyramidMode>()
+        .register_type::<FoveaWarpMode>()
         .register_type::<FoveationBackendMode>()
         .add_systems(Startup, setup)
         .add_systems(
@@ -130,6 +131,13 @@ pub(crate) enum PyramidMode {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Reflect, InspectorOptions)]
 #[reflect(InspectorOptions)]
+pub(crate) enum FoveaWarpMode {
+    Warped,
+    Patched,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Reflect, InspectorOptions)]
+#[reflect(InspectorOptions)]
 pub(crate) enum FoveationBackendMode {
     Cpu,
     Wgsl,
@@ -153,6 +161,7 @@ pub(crate) struct FoveationSettings {
     #[inspector(min = 2, max = 8)]
     pyramid_depth: usize,
     mode: PyramidMode,
+    warp_mode: FoveaWarpMode,
     backend: FoveationBackendMode,
     noise: bool,
 }
@@ -207,6 +216,7 @@ impl Default for FoveationSettings {
             patch_size: 16,
             pyramid_depth: 4,
             mode: PyramidMode::Gaussian,
+            warp_mode: FoveaWarpMode::Warped,
             backend: FoveationBackendMode::Wgsl,
             noise: false,
         }
@@ -756,7 +766,7 @@ fn update_cpu_patch(
             height: source.height,
             data: source.data.clone(),
         };
-        let mode = map_pyramid_mode(settings.mode);
+        let mode = map_pyramid_mode_cpu(settings.mode);
         cache.cache = Some(foveation::build_pyramid_cache(image, key.depth, mode));
         cache.key = Some(key);
     }
@@ -772,6 +782,7 @@ fn update_cpu_patch(
         sigma_norm,
         radius_norm,
         patch,
+        map_warp_mode_cpu(settings.warp_mode),
     );
     let mut rgba = vec![0u8; patch * patch * 4];
     for idx in 0..(patch * patch) {
@@ -830,6 +841,7 @@ fn update_burn_patch(
         let mut saccade = VisionSaccadeConfig::default();
         saccade.mip_levels = key.depth;
         saccade.pyramid_mode = map_pyramid_mode(settings.mode);
+        saccade.fovea_warp_mode = map_warp_mode(settings.warp_mode);
         if settings.backend == FoveationBackendMode::Cubecl {
             saccade.fovea_sampling_mode = VisionFoveaSamplingMode::Cubecl;
         }
@@ -1346,6 +1358,7 @@ pub(crate) fn render_patch(
                         lod_sigma,
                         fx,
                         fy,
+                        settings.warp_mode,
                     ),
                     PyramidMode::Laplacian => sample_laplacian_foveated(
                         &cache.laplacian,
@@ -1358,6 +1371,7 @@ pub(crate) fn render_patch(
                         lod_sigma,
                         fx,
                         fy,
+                        settings.warp_mode,
                     ),
                 };
                 color = sample;
@@ -1393,6 +1407,7 @@ pub(crate) fn render_patch(
                                 lod_sigma,
                                 fx,
                                 fy,
+                                settings.warp_mode,
                             ),
                             PyramidMode::Laplacian => sample_laplacian_foveated(
                                 &cache.laplacian,
@@ -1405,6 +1420,7 @@ pub(crate) fn render_patch(
                                 lod_sigma,
                                 fx,
                                 fy,
+                                settings.warp_mode,
                             ),
                         };
                         color[0] += sample[0];
@@ -1489,6 +1505,7 @@ pub(crate) fn render_patch_f32(
                         lod_sigma,
                         fx,
                         fy,
+                        settings.warp_mode,
                     ),
                     PyramidMode::Laplacian => sample_laplacian_foveated(
                         &cache.laplacian,
@@ -1501,6 +1518,7 @@ pub(crate) fn render_patch_f32(
                         lod_sigma,
                         fx,
                         fy,
+                        settings.warp_mode,
                     ),
                 };
                 color = sample;
@@ -1536,6 +1554,7 @@ pub(crate) fn render_patch_f32(
                                 lod_sigma,
                                 fx,
                                 fy,
+                                settings.warp_mode,
                             ),
                             PyramidMode::Laplacian => sample_laplacian_foveated(
                                 &cache.laplacian,
@@ -1548,6 +1567,7 @@ pub(crate) fn render_patch_f32(
                                 lod_sigma,
                                 fx,
                                 fy,
+                                settings.warp_mode,
                             ),
                         };
                         color[0] += sample[0];
@@ -1641,12 +1661,17 @@ pub(crate) fn sample_gaussian_foveated(
     lod_sigma: f32,
     fx: f32,
     fy: f32,
+    warp_mode: FoveaWarpMode,
 ) -> [f32; 3] {
     if levels.is_empty() {
         return [0.0, 0.0, 0.0];
     }
     let max_level = (levels.len().saturating_sub(1)) as f32;
     let lod_center = compute_lod(dx, dy, sigma_x, sigma_y, max_level, local_scale);
+    if matches!(warp_mode, FoveaWarpMode::Patched) {
+        let level = lod_center.round().clamp(0.0, max_level) as usize;
+        return sample_bilinear(&levels[level], fx, fy);
+    }
     let mut color = [0.0; 3];
     let mut weight_sum = 0.0;
     let base = lod_center.floor() as i32;
@@ -1682,12 +1707,17 @@ pub(crate) fn sample_laplacian_foveated(
     lod_sigma: f32,
     fx: f32,
     fy: f32,
+    warp_mode: FoveaWarpMode,
 ) -> [f32; 3] {
     let Some(coarse) = coarse else {
         return [0.0, 0.0, 0.0];
     };
     let max_level = residuals.len() as f32;
     let lod_center = compute_lod(dx, dy, sigma_x, sigma_y, max_level, local_scale);
+    if matches!(warp_mode, FoveaWarpMode::Patched) {
+        let level = lod_center.round().clamp(0.0, max_level) as usize;
+        return sample_laplacian_at(residuals, coarse, level, fx, fy);
+    }
     let mut color = [0.0; 3];
     let mut weight_sum = 0.0;
     let base = lod_center.floor() as i32;
@@ -2101,6 +2131,27 @@ pub(crate) fn map_pyramid_mode(mode: PyramidMode) -> VisionPyramidMode {
     match mode {
         PyramidMode::Gaussian => VisionPyramidMode::Stacked,
         PyramidMode::Laplacian => VisionPyramidMode::Laplacian,
+    }
+}
+
+pub(crate) fn map_warp_mode(mode: FoveaWarpMode) -> VisionFoveaWarpMode {
+    match mode {
+        FoveaWarpMode::Warped => VisionFoveaWarpMode::Warped,
+        FoveaWarpMode::Patched => VisionFoveaWarpMode::Patched,
+    }
+}
+
+fn map_pyramid_mode_cpu(mode: PyramidMode) -> foveation::PyramidMode {
+    match mode {
+        PyramidMode::Gaussian => foveation::PyramidMode::Stacked,
+        PyramidMode::Laplacian => foveation::PyramidMode::Laplacian,
+    }
+}
+
+fn map_warp_mode_cpu(mode: FoveaWarpMode) -> foveation::FoveaWarpMode {
+    match mode {
+        FoveaWarpMode::Warped => foveation::FoveaWarpMode::Warped,
+        FoveaWarpMode::Patched => foveation::FoveaWarpMode::Patched,
     }
 }
 

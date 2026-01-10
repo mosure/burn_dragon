@@ -1,5 +1,3 @@
-use crate::VisionPyramidMode;
-
 const FOVEA_PARAM_EPS: f32 = 1e-3;
 const SIGMA_MIN: f32 = 0.03;
 const SIGMA_MAX: f32 = 0.5;
@@ -12,6 +10,30 @@ const ERF_A: f32 = 0.147;
 const SQRT_PI_OVER_2: f32 = 0.88622692545;
 const LOD_WINDOW: i32 = 3;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PyramidMode {
+    Stacked,
+    Laplacian,
+}
+
+impl Default for PyramidMode {
+    fn default() -> Self {
+        Self::Laplacian
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FoveaWarpMode {
+    Warped,
+    Patched,
+}
+
+impl Default for FoveaWarpMode {
+    fn default() -> Self {
+        Self::Warped
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct CpuImageLevel {
     pub width: usize,
@@ -21,7 +43,7 @@ pub struct CpuImageLevel {
 
 #[derive(Clone, Debug)]
 pub struct CpuPyramidCache {
-    pub mode: VisionPyramidMode,
+    pub mode: PyramidMode,
     pub gaussian: Vec<CpuImageLevel>,
     pub laplacian: Vec<CpuImageLevel>,
     pub coarse: CpuImageLevel,
@@ -63,7 +85,7 @@ pub fn image_from_nchw(
 pub fn build_pyramid_cache(
     image: CpuImageLevel,
     depth: usize,
-    mode: VisionPyramidMode,
+    mode: PyramidMode,
 ) -> CpuPyramidCache {
     let gaussian = build_gaussian_pyramid(&image, depth);
     let (laplacian, coarse) = build_laplacian_pyramid(&gaussian);
@@ -80,8 +102,9 @@ pub fn render_foveated_patch(
     mean: [f32; 2],
     sigma: f32,
     patch_size: usize,
+    warp_mode: FoveaWarpMode,
 ) -> Vec<f32> {
-    render_foveated_patch_with_radius(cache, mean, sigma, sigma, patch_size)
+    render_foveated_patch_with_radius(cache, mean, sigma, sigma, patch_size, warp_mode)
 }
 
 pub fn render_foveated_patch_with_radius(
@@ -90,6 +113,7 @@ pub fn render_foveated_patch_with_radius(
     sigma: f32,
     radius: f32,
     patch_size: usize,
+    warp_mode: FoveaWarpMode,
 ) -> Vec<f32> {
     const SUBSAMPLES: usize = 4;
     let patch = patch_size.max(1);
@@ -131,7 +155,7 @@ pub fn render_foveated_patch_with_radius(
                 let fx = img_x / width as f32;
                 let fy = img_y / height as f32;
                 let sample = match cache.mode {
-                    VisionPyramidMode::Stacked => sample_gaussian_foveated(
+                    PyramidMode::Stacked => sample_gaussian_foveated(
                         &cache.gaussian,
                         offset_x,
                         offset_y,
@@ -141,8 +165,9 @@ pub fn render_foveated_patch_with_radius(
                         lod_sigma,
                         fx,
                         fy,
+                        warp_mode,
                     ),
-                    VisionPyramidMode::Laplacian => sample_laplacian_foveated(
+                    PyramidMode::Laplacian => sample_laplacian_foveated(
                         &cache.laplacian,
                         &cache.coarse,
                         offset_x,
@@ -153,6 +178,7 @@ pub fn render_foveated_patch_with_radius(
                         lod_sigma,
                         fx,
                         fy,
+                        warp_mode,
                     ),
                 };
                 color = sample;
@@ -178,7 +204,7 @@ pub fn render_foveated_patch_with_radius(
                         let fx = img_x / width as f32;
                         let fy = img_y / height as f32;
                         let sample = match cache.mode {
-                            VisionPyramidMode::Stacked => sample_gaussian_foveated(
+                            PyramidMode::Stacked => sample_gaussian_foveated(
                                 &cache.gaussian,
                                 offset_x,
                                 offset_y,
@@ -188,8 +214,9 @@ pub fn render_foveated_patch_with_radius(
                                 lod_sigma,
                                 fx,
                                 fy,
+                                warp_mode,
                             ),
-                            VisionPyramidMode::Laplacian => sample_laplacian_foveated(
+                            PyramidMode::Laplacian => sample_laplacian_foveated(
                                 &cache.laplacian,
                                 &cache.coarse,
                                 offset_x,
@@ -200,6 +227,7 @@ pub fn render_foveated_patch_with_radius(
                                 lod_sigma,
                                 fx,
                                 fy,
+                                warp_mode,
                             ),
                         };
                         color[0] += sample[0];
@@ -286,12 +314,17 @@ fn sample_gaussian_foveated(
     lod_sigma: f32,
     fx: f32,
     fy: f32,
+    warp_mode: FoveaWarpMode,
 ) -> [f32; 3] {
     if levels.is_empty() {
         return [0.0, 0.0, 0.0];
     }
     let max_level = (levels.len().saturating_sub(1)) as f32;
     let lod_center = compute_lod(dx, dy, sigma_x, sigma_y, max_level, local_scale);
+    if matches!(warp_mode, FoveaWarpMode::Patched) {
+        let level = lod_center.round().clamp(0.0, max_level) as usize;
+        return sample_bilinear(&levels[level], fx, fy);
+    }
     let mut color = [0.0; 3];
     let mut weight_sum = 0.0;
     let base = lod_center.floor() as i32;
@@ -326,9 +359,14 @@ fn sample_laplacian_foveated(
     lod_sigma: f32,
     fx: f32,
     fy: f32,
+    warp_mode: FoveaWarpMode,
 ) -> [f32; 3] {
     let max_level = residuals.len() as f32;
     let lod_center = compute_lod(dx, dy, sigma_x, sigma_y, max_level, local_scale);
+    if matches!(warp_mode, FoveaWarpMode::Patched) {
+        let level = lod_center.round().clamp(0.0, max_level) as usize;
+        return sample_laplacian_at(residuals, coarse, level, fx, fy);
+    }
     let mut color = [0.0; 3];
     let mut weight_sum = 0.0;
     let base = lod_center.floor() as i32;
@@ -581,8 +619,9 @@ mod tests {
     #[test]
     fn foveated_patch_constant_image_is_constant() {
         let base = constant_image(16, 16, 0.25);
-        let cache = build_pyramid_cache(base, 4, VisionPyramidMode::Stacked);
-        let patch = render_foveated_patch(&cache, [0.5, 0.5], 0.1, 8);
+        let cache = build_pyramid_cache(base, 4, PyramidMode::Stacked);
+        let patch =
+            render_foveated_patch(&cache, [0.5, 0.5], 0.1, 8, FoveaWarpMode::Warped);
         for value in patch {
             assert!((value - 0.25).abs() < 1e-3);
         }

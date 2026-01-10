@@ -1,0 +1,15 @@
+[package]
+name = "burn_dragon_hatchling_vision"
+description = "Foveation and vision sampling utilities for burn dragon hatchling"
+version = "0.3.0"
+edition = "2024"
+authors = ["mosure <mitchell@mosure.me>"]
+license = "MIT OR Apache-2.0"
+keywords = ["vision", "foveation", "sampling", "burn"]
+categories = ["science", "science::neuroscience"]
+readme = "../../README.md"
+
+[features]
+default = []
+
+[dependencies]

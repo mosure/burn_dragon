@@ -40,6 +40,8 @@ use burn::tensor::backend::{AutodiffBackend, Backend as BackendTrait};
 use burn_autodiff::Autodiff;
 #[cfg(any(feature = "train", feature = "cli"))]
 use burn_ndarray::NdArrayDevice;
+#[cfg(any(feature = "train", feature = "cli"))]
+use burn_wgpu::WgpuDevice;
 use burn_train::metric::{LearningRateMetric, LossMetric};
 use burn_train::{
     LearnerBuilder,
@@ -1019,6 +1021,156 @@ impl<B: BackendTrait> ModuleDisplayDefault for UpsampleWeightsCache<B> {
 
 impl<B: BackendTrait> ModuleDisplay for UpsampleWeightsCache<B> {}
 
+#[derive(Clone, Debug)]
+struct FoveaBaseGridCache<B: BackendTrait> {
+    inner: Arc<Mutex<HashMap<usize, Tensor<B, 4>>>>,
+}
+
+impl<B: BackendTrait> FoveaBaseGridCache<B> {
+    fn new() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    fn get_or_build(&self, patch_size: usize, device: &B::Device) -> Tensor<B, 4> {
+        let key = patch_size.max(1);
+        if let Ok(cache) = self.inner.lock() {
+            if let Some(grid) = cache.get(&key) {
+                return grid.clone();
+            }
+        }
+        let grid = build_foveated_base_grid::<B>(key, device);
+        if let Ok(mut cache) = self.inner.lock() {
+            cache.insert(key, grid.clone());
+        }
+        grid
+    }
+}
+
+impl<B: BackendTrait> Module<B> for FoveaBaseGridCache<B> {
+    type Record = ();
+
+    fn collect_devices(&self, devices: burn::module::Devices<B>) -> burn::module::Devices<B> {
+        devices
+    }
+
+    fn fork(self, _device: &B::Device) -> Self {
+        self
+    }
+
+    fn to_device(self, _device: &B::Device) -> Self {
+        self
+    }
+
+    fn visit<Visitor: burn::module::ModuleVisitor<B>>(&self, _visitor: &mut Visitor) {}
+
+    fn map<Mapper: burn::module::ModuleMapper<B>>(self, _mapper: &mut Mapper) -> Self {
+        self
+    }
+
+    fn load_record(self, _record: Self::Record) -> Self {
+        self
+    }
+
+    fn into_record(self) -> Self::Record {}
+}
+
+impl<B: AutodiffBackend> AutodiffModule<B> for FoveaBaseGridCache<B> {
+    type InnerModule = FoveaBaseGridCache<B::InnerBackend>;
+
+    fn valid(&self) -> Self::InnerModule {
+        FoveaBaseGridCache::new()
+    }
+}
+
+impl<B: BackendTrait> ModuleDisplayDefault for FoveaBaseGridCache<B> {
+    fn content(&self, content: Content) -> Option<Content> {
+        let entries = self.inner.lock().map(|cache| cache.len()).unwrap_or(0);
+        content.add("entries", &entries).optional()
+    }
+}
+
+impl<B: BackendTrait> ModuleDisplay for FoveaBaseGridCache<B> {}
+
+#[derive(Clone, Debug)]
+struct FoveaJitter<B: BackendTrait> {
+    batched: Tensor<B, 5>,
+    sequential: Vec<Tensor<B, 4>>,
+}
+
+#[derive(Clone, Debug)]
+struct FoveaJitterCache<B: BackendTrait> {
+    inner: Arc<Mutex<HashMap<usize, FoveaJitter<B>>>>,
+}
+
+impl<B: BackendTrait> FoveaJitterCache<B> {
+    fn new() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    fn get_or_build(&self, patch_size: usize, device: &B::Device) -> FoveaJitter<B> {
+        let key = patch_size.max(1);
+        if let Ok(cache) = self.inner.lock() {
+            if let Some(jitter) = cache.get(&key) {
+                return jitter.clone();
+            }
+        }
+        let jitter = build_fovea_jitter::<B>(key, device);
+        if let Ok(mut cache) = self.inner.lock() {
+            cache.insert(key, jitter.clone());
+        }
+        jitter
+    }
+}
+
+impl<B: BackendTrait> Module<B> for FoveaJitterCache<B> {
+    type Record = ();
+
+    fn collect_devices(&self, devices: burn::module::Devices<B>) -> burn::module::Devices<B> {
+        devices
+    }
+
+    fn fork(self, _device: &B::Device) -> Self {
+        self
+    }
+
+    fn to_device(self, _device: &B::Device) -> Self {
+        self
+    }
+
+    fn visit<Visitor: burn::module::ModuleVisitor<B>>(&self, _visitor: &mut Visitor) {}
+
+    fn map<Mapper: burn::module::ModuleMapper<B>>(self, _mapper: &mut Mapper) -> Self {
+        self
+    }
+
+    fn load_record(self, _record: Self::Record) -> Self {
+        self
+    }
+
+    fn into_record(self) -> Self::Record {}
+}
+
+impl<B: AutodiffBackend> AutodiffModule<B> for FoveaJitterCache<B> {
+    type InnerModule = FoveaJitterCache<B::InnerBackend>;
+
+    fn valid(&self) -> Self::InnerModule {
+        FoveaJitterCache::new()
+    }
+}
+
+impl<B: BackendTrait> ModuleDisplayDefault for FoveaJitterCache<B> {
+    fn content(&self, content: Content) -> Option<Content> {
+        let entries = self.inner.lock().map(|cache| cache.len()).unwrap_or(0);
+        content.add("entries", &entries).optional()
+    }
+}
+
+impl<B: BackendTrait> ModuleDisplay for FoveaJitterCache<B> {}
+
 #[derive(Module, Debug)]
 struct VisionSaccadeModel<B: BackendTrait> {
     model: VisionDragonHatchling<B>,
@@ -1029,11 +1181,17 @@ struct VisionSaccadeModel<B: BackendTrait> {
     eye_token: Param<Tensor<B, 2>>,
     input_proj: VisionSaccadeProjection<B>,
     fovea_proj: VisionSaccadeProjection<B>,
+    pyramid_in_proj: Option<VisionSaccadeProjection<B>>,
+    pyramid_out_proj: Option<VisionSaccadeProjection<B>>,
     residual_proj: VisionSaccadeProjection<B>,
     saccade_head: VisionSaccadeHead<B>,
     config: VisionSaccadeConfig,
     level_coords_cache: LevelCoordsCache<B>,
     upsample_weights_cache: UpsampleWeightsCache<B>,
+    fovea_grid_cache: FoveaBaseGridCache<B>,
+    fovea_jitter_cache: FoveaJitterCache<B>,
+    #[module(ignore)]
+    pyramid_dim: usize,
     #[module(ignore)]
     rollout: VisionRollout,
 }
@@ -1087,9 +1245,24 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
         } else {
             Tensor::<B, 2>::zeros([num_eyes, embed_dim.max(1)], device)
         };
+        let pyramid_dim = config
+            .pyramid_feature_dim
+            .filter(|&value| value > 0)
+            .unwrap_or(embed_dim)
+            .max(1);
         let input_proj = VisionSaccadeProjection::new(embed_dim, embed_dim, device);
         let fovea_proj = VisionSaccadeProjection::new(3, embed_dim, device);
-        let residual_proj = VisionSaccadeProjection::new(embed_dim, embed_dim, device);
+        let pyramid_in_proj = if pyramid_dim != embed_dim {
+            Some(VisionSaccadeProjection::new(embed_dim, pyramid_dim, device))
+        } else {
+            None
+        };
+        let pyramid_out_proj = if pyramid_dim != embed_dim {
+            Some(VisionSaccadeProjection::new(pyramid_dim, embed_dim, device))
+        } else {
+            None
+        };
+        let residual_proj = VisionSaccadeProjection::new(embed_dim, pyramid_dim, device);
         let saccade_head = VisionSaccadeHead::new(embed_dim, device);
         Self {
             model,
@@ -1098,11 +1271,16 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
             eye_token: Param::from_tensor(eye_token),
             input_proj,
             fovea_proj,
+            pyramid_in_proj,
+            pyramid_out_proj,
             residual_proj,
             saccade_head,
             config,
             level_coords_cache: LevelCoordsCache::new(),
             upsample_weights_cache: UpsampleWeightsCache::new(),
+            fovea_grid_cache: FoveaBaseGridCache::new(),
+            fovea_jitter_cache: FoveaJitterCache::new(),
+            pyramid_dim,
             rollout,
         }
     }
@@ -1113,6 +1291,49 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
         } else {
             tensor
         }
+    }
+
+    pub(crate) fn pyramid_feature_dim(&self) -> usize {
+        self.pyramid_dim
+    }
+
+    fn project_pyramid_tokens(&self, tokens: Tensor<B, 3>) -> Tensor<B, 3> {
+        if let Some(proj) = &self.pyramid_in_proj {
+            proj.forward(tokens)
+        } else {
+            tokens
+        }
+    }
+
+    pub(crate) fn project_pyramid_context(&self, context: Tensor<B, 3>) -> Tensor<B, 3> {
+        if let Some(proj) = &self.pyramid_out_proj {
+            proj.forward(context)
+        } else {
+            context
+        }
+    }
+
+    fn project_pyramid_level(&self, level: Tensor<B, 3>) -> Tensor<B, 3> {
+        self.project_pyramid_context(level)
+    }
+
+    fn project_pyramid_levels(&self, levels: &[Tensor<B, 3>]) -> Vec<Tensor<B, 3>> {
+        if let Some(proj) = &self.pyramid_out_proj {
+            levels
+                .iter()
+                .map(|level| proj.forward(level.clone()))
+                .collect()
+        } else {
+            levels.iter().cloned().collect()
+        }
+    }
+
+    fn fovea_base_grid(&self, patch_size: usize, device: &B::Device) -> Tensor<B, 4> {
+        self.fovea_grid_cache.get_or_build(patch_size, device)
+    }
+
+    fn fovea_jitter(&self, patch_size: usize, device: &B::Device) -> FoveaJitter<B> {
+        self.fovea_jitter_cache.get_or_build(patch_size, device)
     }
 
     fn forward_losses(
@@ -1178,7 +1399,9 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
         let device = images.device();
         let _ = randomize_mask;
         let [batch, channels, height, width] = images.shape().dims::<4>();
-        let patch = self.model.patch_embed_raw(images.clone());
+        let patch = {
+            self.model.patch_embed_raw(images.clone())
+        };
         let [_, tokens, embed_dim] = patch.tokens.shape().dims::<3>();
         let grid_h = patch.grid.height;
         let grid_w = patch.grid.width;
@@ -1192,7 +1415,9 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
             return (zero.clone(), zero.clone(), zero.clone(), zero, None);
         }
 
-        let mip_levels = self.build_mip_pyramid(images.clone(), patch_size);
+        let mip_levels = {
+            self.build_mip_pyramid(images.clone(), patch_size)
+        };
         if mip_levels.is_empty() {
             let zero = Tensor::<B, 1>::zeros([1], &device);
             return (zero.clone(), zero.clone(), zero.clone(), zero, None);
@@ -1202,14 +1427,16 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
         let grids: Vec<PatchGrid> = mip_levels.iter().map(|level| level.grid).collect();
         let input_residuals = match self.config.pyramid_mode {
             VisionPyramidMode::Stacked => input_levels.clone(),
-            VisionPyramidMode::Laplacian => self.decompose_pyramid(&input_levels, &grids),
+            VisionPyramidMode::Laplacian => {
+                self.decompose_pyramid(&input_levels, &grids)
+            }
         };
         let laplacian_images = if matches!(self.config.pyramid_mode, VisionPyramidMode::Laplacian) {
             self.build_laplacian_images(&mip_levels)
         } else {
             None
         };
-        let base_grid = build_foveated_base_grid::<B>(patch_size, &device);
+        let base_grid = self.fovea_base_grid(patch_size, &device);
         let traj_len = self.trajectory_token.val().shape().dims::<2>()[0].max(1);
         let num_eyes = self.config.num_eyes.max(1);
         let inner_steps = self.config.inner_steps.max(1);
@@ -1294,7 +1521,9 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
                     .clone()
                     .mean_dim(1)
                     .reshape([batch, 1, embed_dim]);
-                let params = self.saccade_head.forward(traj_summary);
+                let params = {
+                    self.saccade_head.forward(traj_summary)
+                };
                 let params = Self::detach_if(params, pre_rollout);
                 let (mean, sigma) = self.decode_saccade_params(params);
                 let mean = Self::detach_if(mean, pre_rollout);
@@ -1308,44 +1537,64 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
                 }
                 // Reuse fovea weights for both context and residual scatter to keep updates localized
                 // to the sampled region of the pyramid.
-                let weights = self.mip_gaussian_weights(&mip_levels, mean.clone(), sigma.clone());
-                let patch_image = self.foveated_patch_image(
-                    &mip_levels,
-                    &base_grid,
-                    mean_step.clone(),
-                    sigma_step.clone(),
-                    laplacian_images.as_ref(),
-                );
-                let patch_tokens = self.model.patch_embed_raw(patch_image.clone()).tokens;
+                let weights = {
+                    self.mip_gaussian_weights(&mip_levels, mean.clone(), sigma.clone())
+                };
+                let patch_image = {
+                    self.foveated_patch_image(
+                        &mip_levels,
+                        &base_grid,
+                        mean_step.clone(),
+                        sigma_step.clone(),
+                        laplacian_images.as_ref(),
+                    )
+                };
+                let patch_tokens = {
+                    self.model.patch_embed_raw(patch_image.clone()).tokens
+                };
                 let patch_tokens = Self::detach_if(patch_tokens, pre_rollout);
                 if let Some(step_patches) = step_patches.as_mut() {
                     step_patches.push(patch_image);
                 }
                 let input_context = patch_tokens;
-                let state_context = self.mip_weighted_sum(&state_composed, &weights);
+                let state_context = {
+                    let context = self.mip_weighted_sum(&state_composed, &weights);
+                    self.project_pyramid_context(context)
+                };
                 let fovea_params = Tensor::cat(vec![mean, sigma], 2);
-                let fovea_embed = self.fovea_proj.forward(fovea_params);
+                let fovea_embed = {
+                    self.fovea_proj.forward(fovea_params)
+                };
                 let fovea_embed = Self::detach_if(fovea_embed, pre_rollout);
-                let input_tokens =
-                    self.input_proj.forward(input_context) + state_context + fovea_embed;
+                let input_tokens = {
+                    self.input_proj.forward(input_context)
+                } + state_context
+                    + fovea_embed;
                 let input_tokens = Self::detach_if(input_tokens, pre_rollout);
                 let input_tokens = input_tokens.repeat_dim(1, traj_len);
                 let tokens_in = traj_with_eye + input_tokens;
-                let out_tokens = self
-                    .model
-                    .forward_tokens_embed_steps(tokens_in, inner_steps)
-                    .patch_tokens;
+                let out_tokens = {
+                    self.model
+                        .forward_tokens_embed_steps(tokens_in, inner_steps)
+                        .patch_tokens
+                };
                 let out_tokens = Self::detach_if(out_tokens, pre_rollout);
-                let residual = self.residual_proj.forward(out_tokens.clone());
+                let residual = {
+                    self.residual_proj.forward(out_tokens.clone())
+                };
                 let residual = Self::detach_if(residual, pre_rollout);
                 let residual_pool = residual
                     .clone()
                     .mean_dim(1)
-                    .reshape([batch, 1, embed_dim]);
+                    .reshape([batch, 1, self.pyramid_dim]);
                 let next_traj = out_tokens;
                 for (update, weights) in updates.iter_mut().zip(weights.iter()) {
-                    let update_eye =
-                        self.weighted_sum_tokens(weights.clone().swap_dims(1, 2), residual_pool.clone());
+                    let update_eye = {
+                        self.weighted_sum_tokens(
+                            weights.clone().swap_dims(1, 2),
+                            residual_pool.clone(),
+                        )
+                    };
                     *update = update.clone() + update_eye;
                 }
                 next_trajs.push(next_traj);
@@ -1364,7 +1613,9 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
                         VisionPyramidMode::Stacked => state_levels.clone(),
                         VisionPyramidMode::Laplacian => self.compose_pyramid(&state_levels, &grids),
                     };
-                    let pred_patches = self.recon.forward(state_composed[0].clone());
+                    let pred_patches = self
+                        .recon
+                        .forward(self.project_pyramid_level(state_composed[0].clone()));
                     let recon_view =
                         unpatchify(pred_patches, patch_size, height, width, channels);
                     let mut input_frame = images.clone();
@@ -1424,14 +1675,17 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
             VisionPyramidMode::Stacked => state_levels.clone(),
             VisionPyramidMode::Laplacian => self.compose_pyramid(&state_levels, &grids),
         };
-        let (inv, sigreg) = self.pyramid_lejepa_loss(&state_composed);
+        let state_composed_embed = self.project_pyramid_levels(&state_composed);
+        let (inv, sigreg) = self.pyramid_lejepa_loss(&state_composed_embed);
 
         let mut loss_sum = Tensor::<B, 1>::zeros([1], &device);
         let mut mask_sum_value = 0.0f32;
         let mut pred_base = None;
         let mut target_base = None;
         for (level_idx, level) in mip_levels.iter().enumerate() {
-            let pred_patches = self.recon.forward(state_composed[level_idx].clone());
+            let pred_patches = self
+                .recon
+                .forward(state_composed_embed[level_idx].clone());
             let [total, level_tokens, patch_dim] = pred_patches.shape().dims::<3>();
             if total == 0 || level_tokens == 0 || patch_dim == 0 {
                 continue;
@@ -1599,8 +1853,9 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
             if grid.height == 0 || grid.width == 0 {
                 break;
             }
+            let tokens = self.project_pyramid_tokens(patch.tokens);
             levels.push(SaccadeMipLevel {
-                tokens: patch.tokens,
+                tokens,
                 grid,
                 image: cropped.clone(),
             });
@@ -2146,6 +2401,19 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
         laplacian_images: Option<&SaccadeLaplacianImages<B>>,
         full_patch_h: usize,
     ) -> Tensor<B, 4> {
+        if matches!(self.config.fovea_warp_mode, VisionFoveaWarpMode::Patched) {
+            return self.foveated_patch_sample_patched(
+                levels,
+                base_grid,
+                center_x,
+                center_y,
+                sigma_px,
+                radius_px,
+                lod_sigma,
+                laplacian_images,
+                full_patch_h,
+            );
+        }
         let device = base_grid.device();
         let Some(first) = levels.first() else {
             let [batch, _, _, _] = base_grid.shape().dims::<4>();
@@ -2156,21 +2424,7 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
         let full_half = full_patch_h as f32 * 0.5;
         let pixel_du = 1.0 / full_half.max(1.0);
         let subsamples = SACCADE_FOVEA_SUBSAMPLES * SACCADE_FOVEA_SUBSAMPLES;
-        let mut jitter_values = Vec::with_capacity(subsamples * 2);
-        for sy in 0..SACCADE_FOVEA_SUBSAMPLES {
-            for sx in 0..SACCADE_FOVEA_SUBSAMPLES {
-                let jitter_x =
-                    (sx as f32 + 0.5) / SACCADE_FOVEA_SUBSAMPLES as f32 - 0.5;
-                let jitter_y =
-                    (sy as f32 + 0.5) / SACCADE_FOVEA_SUBSAMPLES as f32 - 0.5;
-                jitter_values.push(jitter_x / full_half);
-                jitter_values.push(jitter_y / full_half);
-            }
-        }
-        let jitter = Tensor::<B, 5>::from_data(
-            TensorData::new(jitter_values, [subsamples, 1, 1, 1, 2]),
-            &device,
-        );
+        let jitter = self.fovea_jitter(full_patch_h, &device).batched;
         let ux_base = base_grid.clone().slice_dim(3, 0..1).squeeze_dim::<3>(3);
         let uy_base = base_grid.clone().slice_dim(3, 1..2).squeeze_dim::<3>(3);
         let sigma_base = sigma_px
@@ -2345,7 +2599,7 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
         accum.mul_scalar(1.0 / subsamples as f32)
     }
 
-    fn foveated_patch_sample_sequential(
+    fn foveated_patch_sample_patched(
         &self,
         levels: &[SaccadeMipLevel<B>],
         base_grid: Tensor<B, 4>,
@@ -2364,9 +2618,126 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
         };
         let [batch, channels, height, width] = first.image.shape().dims::<4>();
         let [_, patch_h, patch_w, _] = base_grid.shape().dims::<4>();
+        if batch == 0 || channels == 0 || patch_h == 0 || patch_w == 0 {
+            return Tensor::<B, 4>::zeros(
+                [batch.max(1), channels.max(1), patch_h.max(1), patch_w.max(1)],
+                &device,
+            );
+        }
+        let full_patch_h = full_patch_h.max(1);
+        if let Some(patch) = foveation_wgsl::try_foveated_patch_wgsl(
+            levels,
+            &base_grid,
+            &center_x,
+            &center_y,
+            &sigma_px,
+            &radius_px,
+            &lod_sigma,
+            laplacian_images,
+            VisionFoveaWarpMode::Patched,
+        ) {
+            return patch;
+        }
+
+        let ux = base_grid.clone().slice_dim(3, 0..1).squeeze_dim::<3>(3);
+        let uy = base_grid.slice_dim(3, 1..2).squeeze_dim::<3>(3);
+        let half = full_patch_h as f32 * 0.5;
+        let dx = ux.mul_scalar(half);
+        let dy = uy.mul_scalar(half);
+        let mean_x = center_x.clone().div_scalar(width as f32);
+        let mean_y = center_y.clone().div_scalar(height as f32);
+        let min_side = width.min(height).max(1) as f32;
+        let max_level = levels.len().saturating_sub(1) as f32;
+        let level_map = radius_px
+            .clone()
+            .div_scalar(min_side)
+            .clamp_min(0.0)
+            .clamp_max(1.0)
+            .mul_scalar(max_level)
+            .add_scalar(0.5)
+            .floor()
+            .clamp_min(0.0)
+            .clamp_max(max_level)
+            .repeat_dim(1, patch_h)
+            .repeat_dim(2, patch_w);
+
+        let make_grid = |fx: &Tensor<B, 3>, fy: &Tensor<B, 3>, level_w: usize, level_h: usize| {
+            grid_from_fx_fy::<B>(fx, fy, level_w, level_h, &device)
+        };
+
+        let sample_laplacian = |start_idx: usize, fx: &Tensor<B, 3>, fy: &Tensor<B, 3>| {
+            let laplacian = laplacian_images.expect("laplacian images");
+            let [_, _, coarse_h, coarse_w] = laplacian.coarse.shape().dims::<4>();
+            let coarse_grid = make_grid(fx, fy, coarse_w, coarse_h);
+            let mut sample =
+                grid_sample_2d_bilinear::<B>(laplacian.coarse.clone(), coarse_grid);
+            for (idx, residual) in laplacian.residuals.iter().enumerate() {
+                if idx < start_idx {
+                    continue;
+                }
+                let [_, _, res_h, res_w] = residual.shape().dims::<4>();
+                let residual_grid = make_grid(fx, fy, res_w, res_h);
+                sample =
+                    sample + grid_sample_2d_bilinear::<B>(residual.clone(), residual_grid);
+            }
+            sample
+        };
+
+        let mut color =
+            Tensor::<B, 4>::zeros([batch, channels, patch_h, patch_w], &device);
+        for (level_idx, level) in levels.iter().enumerate() {
+            let level_f = level_idx as f32;
+            let [_, _, level_h, level_w] = level.image.shape().dims::<4>();
+            let fx = mean_x.clone().add(dx.clone().div_scalar(level_w as f32));
+            let fy = mean_y.clone().add(dy.clone().div_scalar(level_h as f32));
+            let weight = level_map.clone().equal_elem(level_f).float();
+            let sample = if laplacian_images.is_some() {
+                sample_laplacian(level_idx, &fx, &fy)
+            } else {
+                let level_grid = make_grid(&fx, &fy, level_w, level_h);
+                grid_sample_2d_bilinear::<B>(level.image.clone(), level_grid)
+            };
+            color = color + sample * weight.clone().unsqueeze_dim::<4>(1);
+        }
+        color
+    }
+
+    fn foveated_patch_sample_sequential(
+        &self,
+        levels: &[SaccadeMipLevel<B>],
+        base_grid: Tensor<B, 4>,
+        center_x: Tensor<B, 3>,
+        center_y: Tensor<B, 3>,
+        sigma_px: Tensor<B, 3>,
+        radius_px: Tensor<B, 3>,
+        lod_sigma: Tensor<B, 3>,
+        laplacian_images: Option<&SaccadeLaplacianImages<B>>,
+        full_patch_h: usize,
+    ) -> Tensor<B, 4> {
+        if matches!(self.config.fovea_warp_mode, VisionFoveaWarpMode::Patched) {
+            return self.foveated_patch_sample_patched(
+                levels,
+                base_grid,
+                center_x,
+                center_y,
+                sigma_px,
+                radius_px,
+                lod_sigma,
+                laplacian_images,
+                full_patch_h,
+            );
+        }
+        let device = base_grid.device();
+        let Some(first) = levels.first() else {
+            let [batch, _, _, _] = base_grid.shape().dims::<4>();
+            return Tensor::<B, 4>::zeros([batch.max(1), 3, 1, 1], &device);
+        };
+        let [batch, channels, height, width] = first.image.shape().dims::<4>();
+        let [_, patch_h, patch_w, _] = base_grid.shape().dims::<4>();
         let full_half = full_patch_h as f32 * 0.5;
         let pixel_du = 1.0 / full_half.max(1.0);
-        let subsamples = SACCADE_FOVEA_SUBSAMPLES * SACCADE_FOVEA_SUBSAMPLES;
+        let jitter_samples = self.fovea_jitter(full_patch_h, &device).sequential;
+        let subsample_count = jitter_samples.len().max(1) as f32;
         let mut accum =
             Tensor::<B, 4>::zeros([batch, channels, patch_h, patch_w], &device);
         let ux_base = base_grid.clone().slice_dim(3, 0..1).squeeze_dim::<3>(3);
@@ -2384,65 +2755,51 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
             .unsqueeze_dim::<4>(3)
             .repeat_dim(3, 2);
 
-        for sy in 0..SACCADE_FOVEA_SUBSAMPLES {
-            for sx in 0..SACCADE_FOVEA_SUBSAMPLES {
-                let jitter_x =
-                    (sx as f32 + 0.5) / SACCADE_FOVEA_SUBSAMPLES as f32 - 0.5;
-                let jitter_y =
-                    (sy as f32 + 0.5) / SACCADE_FOVEA_SUBSAMPLES as f32 - 0.5;
-                let jitter = Tensor::<B, 4>::from_data(
-                    TensorData::new(vec![jitter_x / full_half, jitter_y / full_half], [1, 1, 1, 2]),
-                    &device,
-                );
-                let grid = base_grid.clone() + jitter;
-                let grid = base_grid.clone().mask_where(use_subsamples.clone(), grid);
+        for jitter in jitter_samples {
+            let grid = base_grid.clone() + jitter;
+            let grid = base_grid.clone().mask_where(use_subsamples.clone(), grid);
 
-                let ux = grid.clone().slice_dim(3, 0..1).squeeze_dim::<3>(3);
-                let uy = grid.slice_dim(3, 1..2).squeeze_dim::<3>(3);
-                let (dx, dx_deriv) =
-                    self.foveated_warp(ux, sigma_px.clone(), radius_px.clone());
-                let (dy, dy_deriv) =
-                    self.foveated_warp(uy, sigma_px.clone(), radius_px.clone());
-                let local_scale = dx_deriv.abs().max_pair(dy_deriv.abs()).mul_scalar(pixel_du);
-                let img_x = center_x.clone() + dx.clone();
-                let img_y = center_y.clone() + dy.clone();
-                let fx = img_x.div_scalar(width as f32);
-                let fy = img_y.div_scalar(height as f32);
+            let ux = grid.clone().slice_dim(3, 0..1).squeeze_dim::<3>(3);
+            let uy = grid.slice_dim(3, 1..2).squeeze_dim::<3>(3);
+            let (dx, dx_deriv) = self.foveated_warp(ux, sigma_px.clone(), radius_px.clone());
+            let (dy, dy_deriv) = self.foveated_warp(uy, sigma_px.clone(), radius_px.clone());
+            let local_scale = dx_deriv.abs().max_pair(dy_deriv.abs()).mul_scalar(pixel_du);
+            let img_x = center_x.clone() + dx.clone();
+            let img_y = center_y.clone() + dy.clone();
+            let fx = img_x.div_scalar(width as f32);
+            let fy = img_y.div_scalar(height as f32);
 
-                let sigma_sq = sigma_px.clone().powf_scalar(2.0);
-                let dist = dx
-                    .clone()
-                    .powf_scalar(2.0)
-                    .div(sigma_sq.clone())
-                    .add(dy.clone().powf_scalar(2.0).div(sigma_sq))
-                    .sqrt();
-                let zeros = Tensor::<B, 3>::zeros(dist.shape().dims::<3>(), &device);
-                let dist_safe = dist.clone().clamp_min(1.0);
-                let lod_dist = dist_safe
-                    .log()
-                    .div_scalar(SACCADE_LN_2)
-                    .mask_where(dist.lower_equal_elem(1.0), zeros.clone());
-                let scale_safe = local_scale
-                    .clone()
-                    .clamp_min(SACCADE_FOVEA_AA_THRESHOLD);
-                let lod_scale = scale_safe
-                    .div_scalar(SACCADE_FOVEA_AA_THRESHOLD)
-                    .log()
-                    .div_scalar(SACCADE_LN_2)
-                    .mask_where(local_scale.lower_equal_elem(SACCADE_FOVEA_AA_THRESHOLD), zeros);
-                let max_level = levels.len().saturating_sub(1) as f32;
-                let lod = lod_dist
-                    .max_pair(lod_scale)
-                    .clamp_min(0.0)
-                    .clamp_max(max_level);
-                let patched =
-                    matches!(self.config.fovea_warp_mode, VisionFoveaWarpMode::Patched);
-                let lod_round = lod
-                    .clone()
-                    .add_scalar(0.5)
-                    .floor()
-                    .clamp_min(0.0)
-                    .clamp_max(max_level);
+            let sigma_sq = sigma_px.clone().powf_scalar(2.0);
+            let dist = dx
+                .clone()
+                .powf_scalar(2.0)
+                .div(sigma_sq.clone())
+                .add(dy.clone().powf_scalar(2.0).div(sigma_sq))
+                .sqrt();
+            let zeros = Tensor::<B, 3>::zeros(dist.shape().dims::<3>(), &device);
+            let dist_safe = dist.clone().clamp_min(1.0);
+            let lod_dist = dist_safe
+                .log()
+                .div_scalar(SACCADE_LN_2)
+                .mask_where(dist.lower_equal_elem(1.0), zeros.clone());
+            let scale_safe = local_scale.clone().clamp_min(SACCADE_FOVEA_AA_THRESHOLD);
+            let lod_scale = scale_safe
+                .div_scalar(SACCADE_FOVEA_AA_THRESHOLD)
+                .log()
+                .div_scalar(SACCADE_LN_2)
+                .mask_where(local_scale.lower_equal_elem(SACCADE_FOVEA_AA_THRESHOLD), zeros);
+            let max_level = levels.len().saturating_sub(1) as f32;
+            let lod = lod_dist
+                .max_pair(lod_scale)
+                .clamp_min(0.0)
+                .clamp_max(max_level);
+            let patched = matches!(self.config.fovea_warp_mode, VisionFoveaWarpMode::Patched);
+            let lod_round = lod
+                .clone()
+                .add_scalar(0.5)
+                .floor()
+                .clamp_min(0.0)
+                .clamp_max(max_level);
 
         let make_grid =
             |fx: &Tensor<B, 3>, fy: &Tensor<B, 3>, level_w: usize, level_h: usize| {
@@ -2476,41 +2833,40 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
                     None
                 };
 
-                let mut color =
-                    Tensor::<B, 4>::zeros([batch, channels, patch_h, patch_w], &device);
-                let mut weight_sum =
-                    Tensor::<B, 3>::zeros([batch, patch_h, patch_w], &device);
-                for (level_idx, level) in levels.iter().enumerate() {
-                    let level_f = level_idx as f32;
-                    let weight = if patched {
-                        lod_round.clone().equal_elem(level_f).float()
-                    } else {
-                        let diff = lod.clone().sub_scalar(level_f).div(lod_sigma.clone());
-                        let weight = diff.powf_scalar(2.0).mul_scalar(-0.5).exp();
-                        let window_mask = lod
-                            .clone()
-                            .sub_scalar(level_f)
-                            .abs()
-                            .lower_equal_elem(SACCADE_FOVEA_LOD_WINDOW);
-                        Tensor::<B, 3>::zeros(weight.shape().dims::<3>(), &device)
-                            .mask_where(window_mask, weight)
-                    };
-                    let sample = if let Some(laplacian_samples) = laplacian_samples.as_ref() {
-                        laplacian_samples[level_idx].clone()
-                    } else {
-                        let [_, _, level_h, level_w] = level.image.shape().dims::<4>();
-                        let level_grid = make_grid(&fx, &fy, level_w, level_h);
-                        grid_sample_2d_bilinear::<B>(level.image.clone(), level_grid)
-                    };
-                    color = color + sample * weight.clone().unsqueeze_dim::<4>(1);
-                    weight_sum = weight_sum + weight;
-                }
-                let weight_sum = weight_sum.clamp_min(SACCADE_EPS);
-                let sample = color / weight_sum.unsqueeze_dim::<4>(1);
-                accum = accum + sample;
+            let mut color =
+                Tensor::<B, 4>::zeros([batch, channels, patch_h, patch_w], &device);
+            let mut weight_sum =
+                Tensor::<B, 3>::zeros([batch, patch_h, patch_w], &device);
+            for (level_idx, level) in levels.iter().enumerate() {
+                let level_f = level_idx as f32;
+                let weight = if patched {
+                    lod_round.clone().equal_elem(level_f).float()
+                } else {
+                    let diff = lod.clone().sub_scalar(level_f).div(lod_sigma.clone());
+                    let weight = diff.powf_scalar(2.0).mul_scalar(-0.5).exp();
+                    let window_mask = lod
+                        .clone()
+                        .sub_scalar(level_f)
+                        .abs()
+                        .lower_equal_elem(SACCADE_FOVEA_LOD_WINDOW);
+                    Tensor::<B, 3>::zeros(weight.shape().dims::<3>(), &device)
+                        .mask_where(window_mask, weight)
+                };
+                let sample = if let Some(laplacian_samples) = laplacian_samples.as_ref() {
+                    laplacian_samples[level_idx].clone()
+                } else {
+                    let [_, _, level_h, level_w] = level.image.shape().dims::<4>();
+                    let level_grid = make_grid(&fx, &fy, level_w, level_h);
+                    grid_sample_2d_bilinear::<B>(level.image.clone(), level_grid)
+                };
+                color = color + sample * weight.clone().unsqueeze_dim::<4>(1);
+                weight_sum = weight_sum + weight;
             }
+            let weight_sum = weight_sum.clamp_min(SACCADE_EPS);
+            let sample = color / weight_sum.unsqueeze_dim::<4>(1);
+            accum = accum + sample;
         }
-        accum.mul_scalar(1.0 / subsamples as f32)
+        accum.mul_scalar(1.0 / subsample_count)
     }
 
     fn foveated_patch_sample_subpatch(
@@ -2526,6 +2882,21 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
         subpatch_size: usize,
         full_patch_h: usize,
     ) -> Tensor<B, 4> {
+        if matches!(self.config.fovea_warp_mode, VisionFoveaWarpMode::Patched)
+            && foveation_wgsl::supports_backend::<B>()
+        {
+            return self.foveated_patch_sample_patched(
+                levels,
+                base_grid,
+                center_x,
+                center_y,
+                sigma_px,
+                radius_px,
+                lod_sigma,
+                laplacian_images,
+                full_patch_h,
+            );
+        }
         let device = base_grid.device();
         let [batch, patch_h, patch_w, _] = base_grid.shape().dims::<4>();
         if patch_h == 0 || patch_w == 0 {
@@ -2615,11 +2986,69 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
             .first()
             .map(|tokens| tokens.shape().dims::<3>()[2])
             .unwrap_or(0);
-        let mut context = Tensor::<B, 3>::zeros([batch, traj_tokens, embed_dim.max(1)], &device);
-        for (tokens, weights) in levels.iter().zip(weights.iter()) {
-            context = context + self.weighted_sum_tokens(weights.clone(), tokens.clone());
+        if batch == 0 || traj_tokens == 0 || embed_dim == 0 {
+            return Tensor::<B, 3>::zeros(
+                [batch, traj_tokens.max(1), embed_dim.max(1)],
+                &device,
+            );
         }
-        context
+        let prefer_concat = {
+            #[cfg(any(feature = "train", feature = "cli"))]
+            {
+                TypeId::of::<B::Device>() != TypeId::of::<WgpuDevice>()
+            }
+            #[cfg(not(any(feature = "train", feature = "cli")))]
+            {
+                true
+            }
+        };
+        if !prefer_concat {
+            let mut context =
+                Tensor::<B, 3>::zeros([batch, traj_tokens, embed_dim.max(1)], &device);
+            for (tokens, weights) in levels.iter().zip(weights.iter()) {
+                context = context + self.weighted_sum_tokens(weights.clone(), tokens.clone());
+            }
+            return context;
+        }
+        let mut tokens_chunks = Vec::with_capacity(levels.len());
+        let mut weight_chunks = Vec::with_capacity(weights.len());
+        for (tokens, weights_level) in levels.iter().zip(weights.iter()) {
+            let [batch_t, in_tokens, dim_t] = tokens.shape().dims::<3>();
+            let [batch_w, out_tokens, in_tokens_w] = weights_level.shape().dims::<3>();
+            if batch_t == 0 || in_tokens == 0 || dim_t == 0 {
+                continue;
+            }
+            if batch_w == 0 || out_tokens == 0 || in_tokens_w == 0 {
+                continue;
+            }
+            if batch_t != batch
+                || batch_w != batch
+                || out_tokens != traj_tokens
+                || dim_t != embed_dim
+                || in_tokens_w != in_tokens
+            {
+                let mut context =
+                    Tensor::<B, 3>::zeros([batch, traj_tokens, embed_dim.max(1)], &device);
+                for (tokens, weights) in levels.iter().zip(weights.iter()) {
+                    context = context + self.weighted_sum_tokens(weights.clone(), tokens.clone());
+                }
+                return context;
+            }
+            tokens_chunks.push(tokens.clone());
+            weight_chunks.push(weights_level.clone());
+        }
+        if tokens_chunks.is_empty() {
+            return Tensor::<B, 3>::zeros([batch, traj_tokens, embed_dim.max(1)], &device);
+        }
+        if tokens_chunks.len() == 1 {
+            return self.weighted_sum_tokens(
+                weight_chunks.pop().expect("single weight"),
+                tokens_chunks.pop().expect("single tokens"),
+            );
+        }
+        let tokens_cat = Tensor::cat(tokens_chunks, 1);
+        let weights_cat = Tensor::cat(weight_chunks, 2);
+        self.weighted_sum_tokens(weights_cat, tokens_cat)
     }
 
     fn weighted_sum_tokens(
@@ -2635,6 +3064,14 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
                 [batch, out_tokens.max(1), dim.max(1)],
                 &device,
             );
+        }
+        if in_tokens == 1 {
+            return weights * tokens;
+        }
+        if out_tokens == 1 {
+            let weights = weights.squeeze_dim::<2>(1).unsqueeze_dim::<3>(2);
+            let weighted = tokens * weights;
+            return weighted.sum_dim(1).reshape([batch, 1, dim]);
         }
         match self.config.fovea_scatter_mode {
             VisionFoveaScatterMode::Cubecl => {
@@ -2653,9 +3090,7 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
             }
             VisionFoveaScatterMode::Tensor => {}
         }
-        let weights = weights.unsqueeze_dim::<4>(3);
-        let tokens = tokens.unsqueeze_dim::<4>(1);
-        (weights * tokens).sum_dim(2).squeeze_dim::<3>(2)
+        weights.matmul(tokens)
     }
 
     #[cfg(test)]
@@ -5240,7 +5675,7 @@ fn should_fix_grid<B: BackendTrait>() -> bool
 where
     B::Device: 'static,
 {
-    #[cfg(any(feature = "train", feature = "cli"))]
+#[cfg(any(feature = "train", feature = "cli"))]
     {
         if TypeId::of::<B::Device>() == TypeId::of::<NdArrayDevice>() {
             return false;
@@ -5331,6 +5766,37 @@ fn build_foveated_base_grid<B: BackendTrait>(
     Tensor::<B, 1>::from_data(TensorData::new(coords, [patch * patch * 2]), device)
         .reshape([patch, patch, 2])
         .unsqueeze_dim::<4>(0)
+}
+
+fn build_fovea_jitter<B: BackendTrait>(full_patch_h: usize, device: &B::Device) -> FoveaJitter<B> {
+    let subsamples = SACCADE_FOVEA_SUBSAMPLES * SACCADE_FOVEA_SUBSAMPLES;
+    let full_half = full_patch_h as f32 * 0.5;
+    let scale = if full_half > 0.0 {
+        1.0 / full_half
+    } else {
+        0.0
+    };
+    let mut jitter_values = Vec::with_capacity(subsamples * 2);
+    let mut sequential = Vec::with_capacity(subsamples);
+    for sy in 0..SACCADE_FOVEA_SUBSAMPLES {
+        for sx in 0..SACCADE_FOVEA_SUBSAMPLES {
+            let jitter_x = (sx as f32 + 0.5) / SACCADE_FOVEA_SUBSAMPLES as f32 - 0.5;
+            let jitter_y = (sy as f32 + 0.5) / SACCADE_FOVEA_SUBSAMPLES as f32 - 0.5;
+            let jitter_x = jitter_x * scale;
+            let jitter_y = jitter_y * scale;
+            jitter_values.push(jitter_x);
+            jitter_values.push(jitter_y);
+            sequential.push(Tensor::<B, 4>::from_data(
+                TensorData::new(vec![jitter_x, jitter_y], [1, 1, 1, 2]),
+                device,
+            ));
+        }
+    }
+    let batched = Tensor::<B, 5>::from_data(
+        TensorData::new(jitter_values, [subsamples, 1, 1, 1, 2]),
+        device,
+    );
+    FoveaJitter { batched, sequential }
 }
 
 fn build_image_grid<B: BackendTrait>(
@@ -5686,14 +6152,6 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     use burn_wgpu::Wgpu;
     use std::sync::Once;
-    #[cfg(not(target_os = "windows"))]
-    use pprof::ProfilerGuard;
-    #[cfg(not(target_os = "windows"))]
-    use std::fs;
-    #[cfg(not(target_os = "windows"))]
-    use std::fs::File;
-    #[cfg(not(target_os = "windows"))]
-    use std::path::{Path, PathBuf};
 
     fn make_training(max_iters: usize, epochs: Option<usize>) -> TrainingHyperparameters {
         TrainingHyperparameters {
@@ -5752,6 +6210,7 @@ mod tests {
             fovea_warp_mode: VisionFoveaWarpMode::Warped,
             fovea_subpatch_size: 0,
             fovea_scatter_mode: VisionFoveaScatterMode::Tensor,
+            pyramid_feature_dim: None,
             inner_steps: 1,
             low_mem_pre_rollout: true,
             lambda: 0.02,
@@ -5815,24 +6274,6 @@ mod tests {
         INIT.call_once(|| {
             burn_wgpu::init_setup::<graphics::AutoGraphicsApi>(device, RuntimeOptions::default());
         });
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    fn flamegraph_root() -> PathBuf {
-        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let root = manifest_dir
-            .parent()
-            .and_then(|parent| parent.parent())
-            .map(PathBuf::from)
-            .unwrap_or(manifest_dir);
-        root.join("runs").join("flamegraph_test")
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    fn write_flamegraph(path: &Path, guard: ProfilerGuard) {
-        let report = guard.report().build().expect("build flamegraph report");
-        let file = File::create(path).expect("create flamegraph file");
-        report.flamegraph(file).expect("write flamegraph");
     }
 
     fn make_text_config(vocab_size: usize) -> BDHConfig {
@@ -6059,9 +6500,9 @@ mod tests {
         let width = 12;
         let height = 8;
         let patch_size = 4;
-        let (mut saccade, vision_config) =
+        let (mut saccade, _vision_config) =
             make_saccade_model_with_dims::<B>(device, 1, width, height, patch_size);
-        let embed_dim = vision_config.embed_dim;
+        let feature_dim = saccade.pyramid_feature_dim();
 
         let base = make_test_image(channels, height, width);
         let mut data = Vec::with_capacity(batch * channels * height * width);
@@ -6083,14 +6524,14 @@ mod tests {
             TensorData::new(vec![0.2, 0.35], [batch, 1, 1]),
             device,
         );
-        let mut residual_values = Vec::with_capacity(batch * embed_dim);
+        let mut residual_values = Vec::with_capacity(batch * feature_dim);
         for b in 0..batch {
-            for d in 0..embed_dim {
+            for d in 0..feature_dim {
                 residual_values.push(0.15 + b as f32 * 0.03 + d as f32 * 0.01);
             }
         }
         let residual_pool = Tensor::<B, 3>::from_data(
-            TensorData::new(residual_values, [batch, 1, embed_dim]),
+            TensorData::new(residual_values, [batch, 1, feature_dim]),
             device,
         );
 
@@ -6267,6 +6708,7 @@ mod tests {
         let patch_tokens = saccade.model.patch_embed_raw(patch_image).tokens;
         let input_context = patch_tokens;
         let state_context = saccade.mip_weighted_sum(&state_composed, &weights);
+        let state_context = saccade.project_pyramid_context(state_context);
         let fovea_params = Tensor::cat(vec![mean, sigma], 2);
         let fovea_embed = saccade.fovea_proj.forward(fovea_params);
         let input_tokens = saccade.input_proj.forward(input_context) + state_context + fovea_embed;
@@ -6281,7 +6723,7 @@ mod tests {
         let residual_pool = residual
             .clone()
             .mean_dim(1)
-            .reshape([batch, 1, embed_dim]);
+            .reshape([batch, 1, saccade.pyramid_feature_dim()]);
         let next_traj = out_tokens;
         let mut updates = Vec::with_capacity(weights.len());
         for weights in &weights {
@@ -6751,63 +7193,6 @@ mod tests {
         assert_tensor_finite(eye_grad);
     }
 
-    #[cfg(all(not(target_arch = "wasm32"), not(target_os = "windows")))]
-    #[test]
-    fn training_flamegraphs_write_svg() {
-        type Backend = Autodiff<NdArray<f32>>;
-        let device = <Backend as BackendTrait>::Device::default();
-        let output_root = flamegraph_root();
-        fs::create_dir_all(&output_root).expect("create flamegraph output dir");
-
-        let text_config = make_text_config(64);
-        let text_batch = make_text_batch::<Backend>(&device, 2, 16, text_config.vocab_size);
-        let text_model = BDH::<Backend>::new(text_config, &device);
-        let text_cases = [
-            ("text_tiny_forward", false),
-            ("text_tiny_backward", true),
-        ];
-        for (name, backward) in text_cases {
-            let path = output_root.join(format!("{name}.svg"));
-            let guard = ProfilerGuard::new(100).expect("start text profiler");
-            for _ in 0..3 {
-                let batch = text_batch.clone();
-                let logits = text_model.forward(batch.inputs);
-                let loss = language_model_loss::<Backend>(logits, batch.targets);
-                if backward {
-                    let _ = loss.backward();
-                } else {
-                    let _ = loss.to_data();
-                }
-            }
-            write_flamegraph(&path, guard);
-        }
-
-        let (saccade, _vision_config) = make_saccade_model::<Backend>(&device, 1);
-        let images =
-            Tensor::<Backend, 4>::random([2, 3, 8, 8], TensorDistribution::Default, &device);
-        let labels = Tensor::<Backend, 1, Int>::zeros([2], &device);
-        let vision_batch = ImageNetBatch::new(images, None, None, None, None, labels, None, None);
-        let vision_cases = [
-            ("vision_tiny_forward_bp1", 2, 1, false),
-            ("vision_tiny_forward_bp2", 2, 2, false),
-            ("vision_tiny_backward_bp1", 2, 1, true),
-            ("vision_tiny_backward_bp2", 2, 2, true),
-        ];
-        for (name, steps, backprop_steps, backward) in vision_cases {
-            let path = output_root.join(format!("{name}.svg"));
-            let guard = ProfilerGuard::new(100).expect("start vision profiler");
-            for _ in 0..2 {
-                let batch = vision_batch.clone();
-                let losses = saccade.forward_losses(batch, steps, backprop_steps, true, false);
-                if backward {
-                    let _ = losses.total.backward();
-                } else {
-                    let _ = losses.total.to_data();
-                }
-            }
-            write_flamegraph(&path, guard);
-        }
-    }
 }
 
 fn build_vocab_only(config: &TrainingConfig) -> Result<()> {

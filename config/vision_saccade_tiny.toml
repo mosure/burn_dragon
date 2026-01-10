@@ -57,6 +57,8 @@ pyramid_mode = "laplacian"
 fovea_sampling_mode = "sequential"
 # subpatch size for "subpatch" sampling (0 uses full patch)
 fovea_subpatch_size = 0
+# feature pyramid embedding dim (unset uses model embed_dim)
+pyramid_feature_dim = 64
 # pre-rollout steps always run without grad to keep memory stable
 low_mem_pre_rollout = true
 # LeJEPA-style loss over the feature pyramid (invariance + sigreg)

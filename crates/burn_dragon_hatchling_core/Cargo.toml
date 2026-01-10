@@ -67,7 +67,6 @@ viz = [
   "dep:image",
 ]
 
-
 [dependencies]
 bevy_burn = { version = "0.4", optional = true }
 burn_dragon_hatchling_vision = { path = "../burn_dragon_hatchling_vision" }
@@ -201,8 +200,8 @@ features = [
 ]
 
 [target.'cfg(not(target_os = "windows"))'.dependencies]
-pprof = { version = "0.13", features = ["flamegraph"] }
 
+[target.'cfg(target_os = "windows")'.dependencies]
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 console_error_panic_hook = "0.1"
@@ -228,7 +227,6 @@ features = [
 [dev-dependencies]
 avirus = "0.2.5"
 tempfile = "3"
-
 
 [lib]
 path = "src/lib.rs"

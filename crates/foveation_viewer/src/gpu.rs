@@ -899,7 +899,7 @@ mod tests {
     use super::*;
     use crate::{
         FoveaWarpMode, FoveationBackendMode, FoveationSample, ImageLevel, PyramidCache,
-        build_gaussian_pyramid, build_laplacian_pyramid, lerp, make_minimal_vision_config,
+        build_gaussian_pyramid, build_laplacian_pyramid, make_minimal_vision_config,
         map_pyramid_mode, map_warp_mode, radius_norm_from_sample, render_patch_f32,
         sigma_norm_from_settings,
     };
@@ -910,6 +910,7 @@ mod tests {
     use burn_wgpu::{self, RuntimeOptions, Wgpu};
     use burn_wgpu::graphics;
     use image::RgbImage;
+    use std::collections::HashSet;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::mpsc;
@@ -1070,7 +1071,10 @@ mod tests {
     }
 
     fn quantize_f16(values: &[f32]) -> Vec<f32> {
-        values.iter().map(|value| f16::from_f32(*value).to_f32()).collect()
+        values
+            .iter()
+            .map(|value| f16::from_f32(value.clamp(0.0, 1.0)).to_f32())
+            .collect()
     }
 
     fn mse_f32(a: &[f32], b: &[f32]) -> f32 {
@@ -1124,8 +1128,49 @@ mod tests {
         image.save(path).expect("write fovea test image");
     }
 
-    fn save_checkerboard_patch(
+    fn save_source_image(path: &Path, source: &SourceImage) {
+        let expected = source.width * source.height * 3;
+        assert_eq!(
+            source.data.len(),
+            expected,
+            "expected {expected} rgb values, got {}",
+            source.data.len()
+        );
+        let mut bytes = Vec::with_capacity(expected);
+        for value in source.data.iter().copied() {
+            let scaled = (value.clamp(0.0, 1.0) * 255.0).round() as u8;
+            bytes.push(scaled);
+        }
+        let image = RgbImage::from_raw(source.width as u32, source.height as u32, bytes)
+            .expect("rgb source buffer");
+        image.save(path).expect("write fovea test source image");
+    }
+
+    fn save_source_identity(
         root: &Path,
+        source_name: &str,
+        source: &SourceImage,
+        seen: &mut HashSet<String>,
+    ) {
+        let key = format!("{source_name}/{}x{}", source.width, source.height);
+        if !seen.insert(key) {
+            return;
+        }
+        let dir = root
+            .join(source_name)
+            .join(format!("{}x{}", source.width, source.height));
+        fs::create_dir_all(&dir).expect("create fovea_test source dir");
+        let info = format!(
+            "source={source_name}\nwidth={}\nheight={}\n",
+            source.width, source.height
+        );
+        fs::write(dir.join("source.txt"), info).expect("write fovea_test source identity");
+        save_source_image(&dir.join("source.png"), source);
+    }
+
+    fn save_patch_output(
+        root: &Path,
+        source_name: &str,
         source: &SourceImage,
         mode: PyramidMode,
         warp_mode: FoveaWarpMode,
@@ -1143,7 +1188,7 @@ mod tests {
             "case_{case_idx}_mx_{mean_x:.2}_my_{mean_y:.2}_r_{radius:.2}_f_{focus:.2}_patch_{patch_size}_depth_{depth}"
         );
         let dir = root
-            .join("checkerboard")
+            .join(source_name)
             .join(format!("{}x{}", source.width, source.height))
             .join(format!("mode_{mode:?}"))
             .join(format!("warp_{warp_mode:?}"))
@@ -1514,14 +1559,26 @@ mod tests {
     }
 
     fn sample_bilinear_gpu(level: &ImageLevel, fx: f32, fy: f32) -> [f32; 3] {
-        let x = fx.clamp(0.0, 1.0) * level.width as f32 - 0.5;
-        let y = fy.clamp(0.0, 1.0) * level.height as f32 - 0.5;
+        let grid_x = if level.width > 1 {
+            (fx * level.width as f32 - 0.5) * (2.0 / (level.width - 1) as f32) - 1.0
+        } else {
+            0.0
+        }
+        .clamp(-1.0, 1.0);
+        let grid_y = if level.height > 1 {
+            (fy * level.height as f32 - 0.5) * (2.0 / (level.height - 1) as f32) - 1.0
+        } else {
+            0.0
+        }
+        .clamp(-1.0, 1.0);
+        let x_half = (level.width - 1) as f32 * 0.5;
+        let y_half = (level.height - 1) as f32 * 0.5;
+        let x = grid_x * x_half + x_half;
+        let y = grid_y * y_half + y_half;
         let x0 = x.floor();
         let y0 = y.floor();
-        let x1 = x0 + 1.0;
-        let y1 = y0 + 1.0;
-        let tx = x - x0;
-        let ty = y - y0;
+        let x1 = (x + 1.0).floor();
+        let y1 = (y + 1.0).floor();
         let x0i = x0.clamp(0.0, (level.width - 1) as f32) as usize;
         let y0i = y0.clamp(0.0, (level.height - 1) as f32) as usize;
         let x1i = x1.clamp(0.0, (level.width - 1) as f32) as usize;
@@ -1553,20 +1610,15 @@ mod tests {
             level.data[idx11 + 2],
         ];
 
-        let a = [
-            lerp(c00[0], c10[0], tx),
-            lerp(c00[1], c10[1], tx),
-            lerp(c00[2], c10[2], tx),
-        ];
-        let b = [
-            lerp(c01[0], c11[0], tx),
-            lerp(c01[1], c11[1], tx),
-            lerp(c01[2], c11[2], tx),
-        ];
+        let weight_00 = (x1 - x) * (y1 - y);
+        let weight_10 = (x - x0) * (y1 - y);
+        let weight_01 = (x1 - x) * (y - y0);
+        let weight_11 = (x - x0) * (y - y0);
+
         [
-            lerp(a[0], b[0], ty),
-            lerp(a[1], b[1], ty),
-            lerp(a[2], b[2], ty),
+            c00[0] * weight_00 + c10[0] * weight_10 + c01[0] * weight_01 + c11[0] * weight_11,
+            c00[1] * weight_00 + c10[1] * weight_10 + c01[1] * weight_01 + c11[1] * weight_11,
+            c00[2] * weight_00 + c10[2] * weight_10 + c01[2] * weight_01 + c11[2] * weight_11,
         ]
     }
 
@@ -1598,10 +1650,10 @@ mod tests {
     #[test]
     fn foveation_backends_match_across_settings() {
         let sources = [
-            make_gradient(64, 64),
-            make_gradient(80, 48),
-            make_checkerboard(64, 64),
-            make_radial(64, 64),
+            ("gradient", make_gradient(64, 64)),
+            ("gradient_wide", make_gradient(80, 48)),
+            ("checkerboard", make_checkerboard(64, 64)),
+            ("radial", make_radial(64, 64)),
         ];
         let cases = [
             (0.5, 0.5, 0.25, 0.5, 16, 4),
@@ -1621,9 +1673,13 @@ mod tests {
         let mse_threshold = 1e-6;
         let mse_threshold_wgsl = 3e-5;
         let output_root = fovea_test_root();
+        let mut saved_sources = HashSet::new();
 
-        for (source_idx, source) in sources.iter().enumerate() {
-            let save_outputs = source_idx == 2 || source_idx == 3;
+        for (source_idx, (source_name, source)) in sources.iter().enumerate() {
+            let save_outputs = true;
+            if save_outputs {
+                save_source_identity(&output_root, source_name, source, &mut saved_sources);
+            }
             for mode in modes.iter().copied() {
                 for warp_mode in warp_modes.iter().copied() {
                     for (case_idx, (mean_x, mean_y, radius, focus, patch_size, depth)) in
@@ -1652,8 +1708,9 @@ mod tests {
                             "source {source_idx} case {case_idx} mode {mode:?} warp {warp_mode:?}"
                         );
                         if save_outputs {
-                            save_checkerboard_patch(
+                            save_patch_output(
                                 &output_root,
+                                source_name,
                                 source,
                                 mode,
                                 warp_mode,
@@ -1667,8 +1724,9 @@ mod tests {
                                 "cpu",
                                 &cpu,
                             );
-                            save_checkerboard_patch(
+                            save_patch_output(
                                 &output_root,
+                                source_name,
                                 source,
                                 mode,
                                 warp_mode,
@@ -1682,8 +1740,9 @@ mod tests {
                                 "burn",
                                 &burn,
                             );
-                            save_checkerboard_patch(
+                            save_patch_output(
                                 &output_root,
+                                source_name,
                                 source,
                                 mode,
                                 warp_mode,
@@ -1719,8 +1778,9 @@ mod tests {
                             let burn_f16 = quantize_f16(&burn);
                             let cubecl_f16 = quantize_f16(&cubecl);
                             if save_outputs {
-                                save_checkerboard_patch(
+                                save_patch_output(
                                     &output_root,
+                                    source_name,
                                     source,
                                     mode,
                                     warp_mode,

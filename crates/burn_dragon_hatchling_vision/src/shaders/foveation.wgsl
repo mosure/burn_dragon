@@ -20,6 +20,7 @@ const SQRT2: f32 = 1.41421356237;
 const PI: f32 = 3.14159265359;
 const ERF_A: f32 = 0.147;
 const SQRT_PI_OVER_2: f32 = 0.88622692545;
+const INV_LN2: f32 = 1.4426950408889634;
 
 struct FoveaWarp {
     offset: f32,
@@ -42,7 +43,7 @@ fn compute_lod(dx: f32, dy: f32, max_level: f32) -> f32 {
     if dist <= 1.0 {
         return 0.0;
     }
-    let lod = log2(dist);
+    let lod = log(dist) * INV_LN2;
     return clamp(lod, 0.0, max_level);
 }
 
@@ -83,7 +84,7 @@ fn foveated_warp(u: f32, sigma: f32, radius: f32) -> FoveaWarp {
 
 fn sample_gaussian(uv: vec2<f32>, lod_center: f32, lod_sigma: f32, max_level: u32) -> vec3<f32> {
     if params.warp_mode == 1u {
-        let level = u32(clamp(round(lod_center), 0.0, f32(max_level)));
+        let level = u32(clamp(floor(lod_center + 0.5), 0.0, f32(max_level)));
         return textureSampleLevel(gaussian_tex, gaussian_sampler, uv, f32(level)).xyz;
     }
     var color = vec3<f32>(0.0);
@@ -124,7 +125,7 @@ fn reconstruct_laplacian(uv: vec2<f32>, start: u32, max_level: u32) -> vec3<f32>
 
 fn sample_laplacian(uv: vec2<f32>, lod_center: f32, lod_sigma: f32, max_level: u32) -> vec3<f32> {
     if params.warp_mode == 1u {
-        let level = u32(clamp(round(lod_center), 0.0, f32(max_level)));
+        let level = u32(clamp(floor(lod_center + 0.5), 0.0, f32(max_level)));
         return reconstruct_laplacian(uv, level, max_level);
     }
     var color = vec3<f32>(0.0);
@@ -162,20 +163,49 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let radius = params.sample_scale * half;
     let max_level = params.pyramid_levels - 1u;
     let lod_sigma = max(params.lod_sigma, 1e-3);
+    let patched = params.warp_mode == 1u;
     let ux_base = ((f32(x) + 0.5) - half) / half;
     let uy_base = ((f32(y) + 0.5) - half) / half;
+    var color = vec3<f32>(0.0);
+    if patched {
+        let min_side = max(min(params.image_size.x, params.image_size.y), 1.0);
+        let radius_norm = clamp(radius / min_side, 0.0, 1.0);
+        let level_f = clamp(floor(radius_norm * f32(max_level) + 0.5), 0.0, f32(max_level));
+        let level_u = u32(level_f);
+        let level_dims = textureDimensions(gaussian_tex, level_u);
+        let level_w = max(f32(level_dims.x), 1.0);
+        let level_h = max(f32(level_dims.y), 1.0);
+        let center_norm = params.center * params.inv_image_size;
+        let dx = (f32(x) + 0.5) - half;
+        let dy = (f32(y) + 0.5) - half;
+        let uv = vec2<f32>(
+            center_norm.x + dx / level_w,
+            center_norm.y + dy / level_h,
+        );
+        if params.mode == 0u {
+            color = sample_gaussian(uv, level_f, lod_sigma, max_level);
+        } else {
+            color = sample_laplacian(uv, level_f, lod_sigma, max_level);
+        }
+        textureStore(output_tex, vec2<i32>(i32(x), i32(y)), vec4<f32>(clamp(color, vec3(0.0), vec3(1.0)), 1.0));
+        return;
+    }
+    var local_scale_base = 0.0;
     let warp_x_base = foveated_warp(ux_base, params.sigma.x, radius);
     let warp_y_base = foveated_warp(uy_base, params.sigma.y, radius);
-    let local_scale_base = max(abs(warp_x_base.deriv), abs(warp_y_base.deriv)) * pixel_du;
+    local_scale_base = max(abs(warp_x_base.deriv), abs(warp_y_base.deriv)) * pixel_du;
 
-    var color = vec3<f32>(0.0);
     var count = 0.0;
     if local_scale_base <= AA_THRESHOLD {
-        let dx = warp_x_base.offset;
-        let dy = warp_y_base.offset;
+        var dx = 0.0;
+        var dy = 0.0;
+        var local_scale = 0.0;
+        dx = warp_x_base.offset;
+        dy = warp_y_base.offset;
+        local_scale = local_scale_base;
         var lod_scale = 0.0;
-        if local_scale_base > AA_THRESHOLD {
-            lod_scale = log2(local_scale_base / AA_THRESHOLD);
+        if local_scale > AA_THRESHOLD {
+            lod_scale = log(local_scale / AA_THRESHOLD) * INV_LN2;
         }
         let uv = vec2<f32>(
             (params.center.x + dx) * params.inv_image_size.x,
@@ -202,7 +232,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let local_scale = max(abs(warp_x.deriv), abs(warp_y.deriv)) * pixel_du;
                 var lod_scale = 0.0;
                 if local_scale > AA_THRESHOLD {
-                    lod_scale = log2(local_scale / AA_THRESHOLD);
+                    lod_scale = log(local_scale / AA_THRESHOLD) * INV_LN2;
                 }
                 let uv = vec2<f32>(
                     (params.center.x + dx) * params.inv_image_size.x,

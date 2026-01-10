@@ -6,6 +6,7 @@ const SQRT2: f32 = 1.41421356237;
 const PI: f32 = 3.14159265359;
 const ERF_A: f32 = 0.147;
 const SQRT_PI_OVER_2: f32 = 0.88622692545;
+const INV_LN2: f32 = 1.4426950408889634;
 const MAX_LEVELS: u32 = 8u;
 
 const META_PATCH_W: u32 = 0u;
@@ -89,8 +90,8 @@ fn compute_lod(dx: f32, dy: f32, sigma: f32, local_scale: f32, max_level: f32) -
     }
     let sigma_safe = max(sigma, 1e-3);
     let dist = sqrt(((dx * dx) / (sigma_safe * sigma_safe)) + ((dy * dy) / (sigma_safe * sigma_safe)));
-    let lod_dist = select(0.0, log2(dist), dist > 1.0);
-    let lod_scale = select(0.0, log2(local_scale / AA_THRESHOLD), local_scale > AA_THRESHOLD);
+    let lod_dist = select(0.0, log(dist) * INV_LN2, dist > 1.0);
+    let lod_scale = select(0.0, log(local_scale / AA_THRESHOLD) * INV_LN2, local_scale > AA_THRESHOLD);
     return clamp(max(lod_dist, lod_scale), 0.0, max_level);
 }
 
@@ -262,7 +263,7 @@ fn sample_gaussian(
     }
     let max_level = f32(level_count - 1u);
     if warp_mode == 1u {
-        let level = u32(clamp(round(lod_center), 0.0, max_level));
+        let level = u32(clamp(floor(lod_center + 0.5), 0.0, max_level));
         return sample_gaussian_level(level, b, c, fx, fy, channels);
     }
     var color = 0.0;
@@ -320,7 +321,7 @@ fn sample_laplacian(
 ) -> f32 {
     let max_level = f32(residual_count);
     if warp_mode == 1u {
-        let level = u32(clamp(round(lod_center), 0.0, max_level));
+        let level = u32(clamp(floor(lod_center + 0.5), 0.0, max_level));
         return sample_laplacian_at(level, b, c, fx, fy, residual_count, channels);
     }
     var color = 0.0;
@@ -385,9 +386,57 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let radius = max(params[param_idx + 3u], 1e-6);
     let lod_sigma = max(params[param_idx + 4u], 1e-6);
 
-    let warp_x_base = foveated_warp(ux_base, sigma, radius);
-    let warp_y_base = foveated_warp(uy_base, sigma, radius);
-    let local_scale_base = max(abs(warp_x_base.deriv), abs(warp_y_base.deriv)) * pixel_du;
+    let patched = warp_mode == 1u;
+    let mean_x = center_x / base_width;
+    let mean_y = center_y / base_height;
+    if patched {
+        let min_side = max(min(base_width, base_height), 1.0);
+        let radius_norm = clamp(radius / min_side, 0.0, 1.0);
+        var max_level = f32(level_count - 1u);
+        if mode == 1u {
+            max_level = f32(residual_count);
+        }
+        let level_f = clamp(floor(radius_norm * max_level + 0.5), 0.0, max_level);
+        let level = u32(level_f);
+        var level_w = gaussian_width(level);
+        var level_h = gaussian_height(level);
+        if mode == 1u {
+            if level >= residual_count {
+                level_w = coarse_width();
+                level_h = coarse_height();
+            } else {
+                level_w = residual_width(level);
+                level_h = residual_height(level);
+            }
+        }
+        let level_w_f = max(f32(level_w), 1.0);
+        let level_h_f = max(f32(level_h), 1.0);
+        let dx = base_dx;
+        let dy = base_dy;
+        let fx = mean_x + dx / level_w_f;
+        let fy = mean_y + dy / level_h_f;
+
+        var channel = 0u;
+        loop {
+            if channel >= channels {
+                break;
+            }
+            var sample = sample_gaussian(b, channel, fx, fy, level_f, lod_sigma, level_count, warp_mode, channels);
+            if mode == 1u {
+                sample = sample_laplacian(b, channel, fx, fy, level_f, lod_sigma, residual_count, warp_mode, channels);
+            }
+            let out_index = ((b * channels + channel) * patch_h + y) * patch_w + x;
+            output[out_index] = sample;
+            channel += 1u;
+        }
+        return;
+    }
+    var local_scale_base = 0.0;
+    if !patched {
+        let warp_x_base = foveated_warp(ux_base, sigma, radius);
+        let warp_y_base = foveated_warp(uy_base, sigma, radius);
+        local_scale_base = max(abs(warp_x_base.deriv), abs(warp_y_base.deriv)) * pixel_du;
+    }
 
     var channel = 0u;
     loop {
@@ -396,9 +445,20 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
         var accum = 0.0;
         var count = 0.0;
-        if local_scale_base <= AA_THRESHOLD {
-            let dx = warp_x_base.offset;
-            let dy = warp_y_base.offset;
+        if patched || local_scale_base <= AA_THRESHOLD {
+            var dx = 0.0;
+            var dy = 0.0;
+            var local_scale = 0.0;
+            if patched {
+                dx = ux_base * radius;
+                dy = uy_base * radius;
+            } else {
+                let warp_x_base = foveated_warp(ux_base, sigma, radius);
+                let warp_y_base = foveated_warp(uy_base, sigma, radius);
+                dx = warp_x_base.offset;
+                dy = warp_y_base.offset;
+                local_scale = local_scale_base;
+            }
             let img_x = center_x + dx;
             let img_y = center_y + dy;
             let fx = img_x / base_width;
@@ -407,7 +467,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             if mode == 1u {
                 max_level = f32(residual_count);
             }
-            let lod_center = compute_lod(dx, dy, sigma, local_scale_base, max_level);
+            let lod_center = compute_lod(dx, dy, sigma, local_scale, max_level);
             var sample = sample_gaussian(b, channel, fx, fy, lod_center, lod_sigma, level_count, warp_mode, channels);
             if mode == 1u {
                 sample = sample_laplacian(b, channel, fx, fy, lod_center, lod_sigma, residual_count, warp_mode, channels);

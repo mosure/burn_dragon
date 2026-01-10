@@ -6,7 +6,7 @@ use burn::tensor::{Int, Tensor, TensorData};
 use super::{
     ImageNetBatch, PatchGrid, ValidBackend, VisionDragonHatchling, VisionDragonHatchlingConfig,
     VisionPyramidMode, VisionRollout, VisionSaccadeConfig, VisionSaccadeModel,
-    SACCADE_FOVEA_SUBSAMPLES,
+    SACCADE_FOVEA_SUBSAMPLES, SaccadeLaplacianImages, SaccadeMipLevel,
 };
 
 pub struct VisionSaccadeBench<B: AutodiffBackend> {
@@ -16,7 +16,18 @@ pub struct VisionSaccadeBench<B: AutodiffBackend> {
     steps: usize,
     backprop_steps: usize,
     patch_size: usize,
-    embed_dim: usize,
+    levels: Vec<SaccadeMipLevel<B>>,
+    input_sample_levels: Vec<Tensor<B, 3>>,
+    state_composed: Vec<Tensor<B, 3>>,
+    mean: Tensor<B, 3>,
+    sigma: Tensor<B, 3>,
+    mean_step: Tensor<B, 2>,
+    sigma_step: Tensor<B, 2>,
+    cached_weights: Vec<Tensor<B, 3>>,
+    tokens_in: Tensor<B, 3>,
+    residual_pool: Tensor<B, 3>,
+    base_grid: Tensor<B, 4>,
+    laplacian_images: Option<SaccadeLaplacianImages<B>>,
 }
 
 pub struct VisionScatterBench<B: BackendTrait> {
@@ -67,6 +78,83 @@ impl<B: AutodiffBackend> VisionSaccadeBench<B> {
             device,
         );
 
+        let levels = saccade.build_mip_pyramid(images.clone(), vision.patch_size);
+        let input_levels: Vec<Tensor<B, 3>> =
+            levels.iter().map(|level| level.tokens.clone()).collect();
+        let grids: Vec<PatchGrid> = levels.iter().map(|level| level.grid).collect();
+        let (input_residuals, input_sample_levels) = match saccade.config.pyramid_mode {
+            VisionPyramidMode::Stacked => (input_levels.clone(), input_levels.clone()),
+            VisionPyramidMode::Laplacian => {
+                let residuals = saccade.decompose_pyramid(&input_levels, &grids);
+                (residuals.clone(), residuals)
+            }
+        };
+        let state_levels: Vec<Tensor<B, 3>> = input_residuals
+            .iter()
+            .map(|level| Tensor::<B, 3>::zeros(level.shape().dims::<3>(), device))
+            .collect();
+        let state_composed = match saccade.config.pyramid_mode {
+            VisionPyramidMode::Stacked => state_levels.clone(),
+            VisionPyramidMode::Laplacian => saccade.compose_pyramid(&state_levels, &grids),
+        };
+
+        let [batch, _channels, _height, _width] = images.shape().dims::<4>();
+        let traj_len = saccade.trajectory_token.val().shape().dims::<2>()[0].max(1);
+        let base_traj = saccade
+            .trajectory_token
+            .val()
+            .reshape([1, traj_len, vision.embed_dim])
+            .repeat_dim(0, batch);
+        let eye_embed = saccade
+            .eye_token
+            .val()
+            .slice_dim(0, 0..1)
+            .reshape([1, 1, vision.embed_dim])
+            .repeat_dim(0, batch)
+            .repeat_dim(1, traj_len);
+        let eye_embed = if saccade.config.num_eyes > 1 {
+            eye_embed
+        } else {
+            Tensor::<B, 3>::zeros([batch, traj_len, vision.embed_dim], device)
+        };
+        let traj_with_eye = base_traj + eye_embed;
+        let traj_summary = traj_with_eye
+            .clone()
+            .mean_dim(1)
+            .reshape([batch, 1, vision.embed_dim]);
+        let params = saccade.saccade_head.forward(traj_summary);
+        let (mean, sigma) = saccade.decode_saccade_params(params);
+        let mean_step = mean.clone().mean_dim(1).reshape([batch, 2]);
+        let sigma_step = sigma.clone().mean_dim(1).reshape([batch, 1]);
+        let cached_weights = saccade.mip_gaussian_weights(&levels, mean.clone(), sigma.clone());
+
+        let input_context = saccade.mip_weighted_sum(&input_sample_levels, &cached_weights);
+        let input_context = saccade.project_pyramid_context(input_context);
+        let state_context = saccade.mip_weighted_sum(&state_composed, &cached_weights);
+        let state_context = saccade.project_pyramid_context(state_context);
+        let fovea_params = Tensor::cat(vec![mean.clone(), sigma.clone()], 2);
+        let fovea_embed = saccade.fovea_proj.forward(fovea_params);
+        let input_tokens =
+            saccade.input_proj.forward(input_context) + state_context + fovea_embed;
+        let tokens_in = traj_with_eye.clone() + input_tokens.repeat_dim(1, traj_len);
+        let inner_steps = saccade.config.inner_steps.max(1);
+        let tokens_out = saccade
+            .model
+            .forward_tokens_embed_steps(tokens_in.clone(), inner_steps)
+            .patch_tokens;
+        let residual = saccade.residual_proj.forward(tokens_out);
+        let residual_pool = residual
+            .mean_dim(1)
+            .reshape([batch, 1, saccade.pyramid_feature_dim()]);
+
+        let base_grid = super::build_foveated_base_grid::<B>(vision.patch_size, device);
+        let laplacian_images = if matches!(saccade.config.pyramid_mode, VisionPyramidMode::Laplacian)
+        {
+            saccade.build_laplacian_images(&levels)
+        } else {
+            None
+        };
+
         Self {
             model: saccade,
             images,
@@ -74,7 +162,18 @@ impl<B: AutodiffBackend> VisionSaccadeBench<B> {
             steps,
             backprop_steps,
             patch_size: vision.patch_size,
-            embed_dim: vision.embed_dim,
+            levels,
+            input_sample_levels,
+            state_composed,
+            mean,
+            sigma,
+            mean_step,
+            sigma_step,
+            cached_weights,
+            tokens_in,
+            residual_pool,
+            base_grid,
+            laplacian_images,
         }
     }
 
@@ -108,10 +207,9 @@ impl<B: AutodiffBackend> VisionSaccadeBench<B> {
     }
 
     pub fn stage_fovea_weights(&self) -> Tensor<B, 1> {
-        let levels = self.model.build_mip_pyramid(self.images.clone(), self.patch_size);
-        let traj = self.traj_with_eye(0);
-        let (mean, sigma) = self.fovea_params(traj);
-        let weights = self.model.mip_gaussian_weights(&levels, mean, sigma);
+        let weights = self
+            .model
+            .mip_gaussian_weights(&self.levels, self.mean.clone(), self.sigma.clone());
         let device = self.images.device();
         let mut total = Tensor::<B, 1>::zeros([1], &device);
         for weight in weights {
@@ -121,32 +219,15 @@ impl<B: AutodiffBackend> VisionSaccadeBench<B> {
     }
 
     pub fn stage_fovea_context(&self) -> Tensor<B, 1> {
-        let levels = self.model.build_mip_pyramid(self.images.clone(), self.patch_size);
-        let input_levels: Vec<Tensor<B, 3>> =
-            levels.iter().map(|level| level.tokens.clone()).collect();
-        let grids: Vec<PatchGrid> = levels.iter().map(|level| level.grid).collect();
-        let (input_residuals, input_sample_levels) = match self.model.config.pyramid_mode {
-            VisionPyramidMode::Stacked => (input_levels.clone(), input_levels.clone()),
-            VisionPyramidMode::Laplacian => {
-                let residuals = self.model.decompose_pyramid(&input_levels, &grids);
-                (residuals.clone(), residuals)
-            }
-        };
-        let device = self.images.device();
-        let state_levels: Vec<Tensor<B, 3>> = input_residuals
-            .iter()
-            .map(|level| Tensor::<B, 3>::zeros(level.shape().dims::<3>(), &device))
-            .collect();
-        let state_composed = match self.model.config.pyramid_mode {
-            VisionPyramidMode::Stacked => state_levels.clone(),
-            VisionPyramidMode::Laplacian => self.model.compose_pyramid(&state_levels, &grids),
-        };
-        let traj = self.traj_with_eye(0);
-        let (mean, sigma) = self.fovea_params(traj.clone());
-        let weights = self.model.mip_gaussian_weights(&levels, mean.clone(), sigma.clone());
-        let input_context = self.model.mip_weighted_sum(&input_sample_levels, &weights);
-        let state_context = self.model.mip_weighted_sum(&state_composed, &weights);
-        let fovea_params = Tensor::cat(vec![mean, sigma], 2);
+        let input_context = self
+            .model
+            .mip_weighted_sum(&self.input_sample_levels, &self.cached_weights);
+        let input_context = self.model.project_pyramid_context(input_context);
+        let state_context = self
+            .model
+            .mip_weighted_sum(&self.state_composed, &self.cached_weights);
+        let state_context = self.model.project_pyramid_context(state_context);
+        let fovea_params = Tensor::cat(vec![self.mean.clone(), self.sigma.clone()], 2);
         let fovea_embed = self.model.fovea_proj.forward(fovea_params);
         let input_tokens =
             self.model.input_proj.forward(input_context) + state_context + fovea_embed;
@@ -154,121 +235,33 @@ impl<B: AutodiffBackend> VisionSaccadeBench<B> {
     }
 
     pub fn stage_fovea_patch(&self) -> Tensor<B, 1> {
-        let levels = self.model.build_mip_pyramid(self.images.clone(), self.patch_size);
-        let device = self.images.device();
-        let base_grid = super::build_foveated_base_grid::<B>(self.patch_size, &device);
-        let traj = self.traj_with_eye(0);
-        let (mean, sigma) = self.fovea_params(traj);
-        let [batch, _, _] = mean.shape().dims::<3>();
-        let mean_step = mean.mean_dim(1).reshape([batch, 2]);
-        let sigma_step = sigma.mean_dim(1).reshape([batch, 1]);
-        let laplacian_images = if matches!(self.model.config.pyramid_mode, VisionPyramidMode::Laplacian)
-        {
-            self.model.build_laplacian_images(&levels)
-        } else {
-            None
-        };
         let patch = self.model.foveated_patch_image(
-            &levels,
-            &base_grid,
-            mean_step,
-            sigma_step,
-            laplacian_images.as_ref(),
+            &self.levels,
+            &self.base_grid,
+            self.mean_step.clone(),
+            self.sigma_step.clone(),
+            self.laplacian_images.as_ref(),
         );
         patch.sum()
     }
 
     pub fn stage_token_forward(&self) -> Tensor<B, 1> {
-        let levels = self.model.build_mip_pyramid(self.images.clone(), self.patch_size);
-        let input_levels: Vec<Tensor<B, 3>> =
-            levels.iter().map(|level| level.tokens.clone()).collect();
-        let grids: Vec<PatchGrid> = levels.iter().map(|level| level.grid).collect();
-        let (input_residuals, input_sample_levels) = match self.model.config.pyramid_mode {
-            VisionPyramidMode::Stacked => (input_levels.clone(), input_levels.clone()),
-            VisionPyramidMode::Laplacian => {
-                let residuals = self.model.decompose_pyramid(&input_levels, &grids);
-                (residuals.clone(), residuals)
-            }
-        };
-        let device = self.images.device();
-        let state_levels: Vec<Tensor<B, 3>> = input_residuals
-            .iter()
-            .map(|level| Tensor::<B, 3>::zeros(level.shape().dims::<3>(), &device))
-            .collect();
-        let state_composed = match self.model.config.pyramid_mode {
-            VisionPyramidMode::Stacked => state_levels.clone(),
-            VisionPyramidMode::Laplacian => self.model.compose_pyramid(&state_levels, &grids),
-        };
-        let traj = self.traj_with_eye(0);
-        let traj_len = traj.shape().dims::<3>()[1];
-        let (mean, sigma) = self.fovea_params(traj.clone());
-        let weights = self.model.mip_gaussian_weights(&levels, mean.clone(), sigma.clone());
-        let input_context = self.model.mip_weighted_sum(&input_sample_levels, &weights);
-        let state_context = self.model.mip_weighted_sum(&state_composed, &weights);
-        let fovea_params = Tensor::cat(vec![mean, sigma], 2);
-        let fovea_embed = self.model.fovea_proj.forward(fovea_params);
-        let input_tokens =
-            self.model.input_proj.forward(input_context) + state_context + fovea_embed;
-        let input_tokens = input_tokens.repeat_dim(1, traj_len);
-        let tokens_in = traj + input_tokens;
         let inner_steps = self.model.config.inner_steps.max(1);
         let out = self
             .model
             .model
-            .forward_tokens_embed_steps(tokens_in, inner_steps)
+            .forward_tokens_embed_steps(self.tokens_in.clone(), inner_steps)
             .patch_tokens;
         out.sum()
     }
 
     pub fn stage_residual_scatter(&self) -> Tensor<B, 1> {
-        let levels = self.model.build_mip_pyramid(self.images.clone(), self.patch_size);
-        let input_levels: Vec<Tensor<B, 3>> =
-            levels.iter().map(|level| level.tokens.clone()).collect();
-        let grids: Vec<PatchGrid> = levels.iter().map(|level| level.grid).collect();
-        let (input_residuals, input_sample_levels) = match self.model.config.pyramid_mode {
-            VisionPyramidMode::Stacked => (input_levels.clone(), input_levels.clone()),
-            VisionPyramidMode::Laplacian => {
-                let residuals = self.model.decompose_pyramid(&input_levels, &grids);
-                (residuals.clone(), residuals)
-            }
-        };
         let device = self.images.device();
-        let state_levels: Vec<Tensor<B, 3>> = input_residuals
-            .iter()
-            .map(|level| Tensor::<B, 3>::zeros(level.shape().dims::<3>(), &device))
-            .collect();
-        let state_composed = match self.model.config.pyramid_mode {
-            VisionPyramidMode::Stacked => state_levels.clone(),
-            VisionPyramidMode::Laplacian => self.model.compose_pyramid(&state_levels, &grids),
-        };
-        let traj = self.traj_with_eye(0);
-        let traj_len = traj.shape().dims::<3>()[1];
-        let (mean, sigma) = self.fovea_params(traj.clone());
-        let weights = self.model.mip_gaussian_weights(&levels, mean.clone(), sigma.clone());
-        let input_context = self.model.mip_weighted_sum(&input_sample_levels, &weights);
-        let state_context = self.model.mip_weighted_sum(&state_composed, &weights);
-        let fovea_params = Tensor::cat(vec![mean, sigma], 2);
-        let fovea_embed = self.model.fovea_proj.forward(fovea_params);
-        let input_tokens =
-            self.model.input_proj.forward(input_context) + state_context + fovea_embed;
-        let input_tokens = input_tokens.repeat_dim(1, traj_len);
-        let tokens_in = traj + input_tokens;
-        let inner_steps = self.model.config.inner_steps.max(1);
-        let out = self
-            .model
-            .model
-            .forward_tokens_embed_steps(tokens_in, inner_steps)
-            .patch_tokens;
-        let residual = self.model.residual_proj.forward(out.clone());
-        let residual_pool = residual
-            .clone()
-            .mean_dim(1)
-            .reshape([residual.shape().dims::<3>()[0], 1, self.embed_dim]);
         let mut total = Tensor::<B, 1>::zeros([1], &device);
-        for weights in &weights {
+        for weights in &self.cached_weights {
             let update = self
                 .model
-                .weighted_sum_tokens(weights.clone().swap_dims(1, 2), residual_pool.clone());
+                .weighted_sum_tokens(weights.clone().swap_dims(1, 2), self.residual_pool.clone());
             total = total + update.sum();
         }
         total
@@ -309,38 +302,6 @@ impl<B: AutodiffBackend> VisionSaccadeBench<B> {
         )
     }
 
-    fn traj_with_eye(&self, eye_idx: usize) -> Tensor<B, 3> {
-        let device = self.images.device();
-        let [batch, _channels, _height, _width] = self.images.shape().dims::<4>();
-        let traj_len = self.model.trajectory_token.val().shape().dims::<2>()[0].max(1);
-        let base_traj = self
-            .model
-            .trajectory_token
-            .val()
-            .reshape([1, traj_len, self.embed_dim])
-            .repeat_dim(0, batch);
-        let eye_embed = self
-            .model
-            .eye_token
-            .val()
-            .slice_dim(0, eye_idx..eye_idx + 1)
-            .reshape([1, 1, self.embed_dim])
-            .repeat_dim(0, batch)
-            .repeat_dim(1, traj_len);
-        let eye_embed = if self.model.config.num_eyes > 1 {
-            eye_embed
-        } else {
-            Tensor::<B, 3>::zeros([batch, traj_len, self.embed_dim], &device)
-        };
-        base_traj + eye_embed
-    }
-
-    fn fovea_params(&self, traj_with_eye: Tensor<B, 3>) -> (Tensor<B, 3>, Tensor<B, 3>) {
-        let [batch, _, _] = traj_with_eye.shape().dims::<3>();
-        let traj_summary = traj_with_eye.mean_dim(1).reshape([batch, 1, self.embed_dim]);
-        let params = self.model.saccade_head.forward(traj_summary);
-        self.model.decode_saccade_params(params)
-    }
 }
 
 impl<B: BackendTrait> VisionScatterBench<B> {
@@ -350,7 +311,7 @@ impl<B: BackendTrait> VisionScatterBench<B> {
         batch_size: usize,
         out_tokens: usize,
         in_tokens: usize,
-        embed_dim: usize,
+        feature_dim: usize,
         device: &B::Device,
     ) -> Self {
         let model = VisionDragonHatchling::<B>::new(vision.clone(), device);
@@ -369,7 +330,7 @@ impl<B: BackendTrait> VisionScatterBench<B> {
             device,
         );
         let tokens = Tensor::<B, 3>::random(
-            [batch_size, in_tokens.max(1), embed_dim.max(1)],
+            [batch_size, in_tokens.max(1), feature_dim.max(1)],
             TensorDistribution::Default,
             device,
         );

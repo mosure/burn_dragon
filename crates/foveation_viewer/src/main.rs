@@ -1314,8 +1314,8 @@ pub(crate) fn render_patch(
         mean_y: settings.mean_y,
         radius_norm: settings.radius_norm,
     };
-    let center_x = sample.mean_x.clamp(0.0, 1.0) * source.width as f32;
-    let center_y = sample.mean_y.clamp(0.0, 1.0) * source.height as f32;
+    let mean_x = sample.mean_x.clamp(0.0, 1.0);
+    let mean_y = sample.mean_y.clamp(0.0, 1.0);
     let radius_norm = radius_norm_from_sample(&sample);
     let sigma_norm = sigma_norm_from_settings(settings, &sample);
     let sigma = sigma_px_from_norm(sigma_norm, source);
@@ -1325,6 +1325,72 @@ pub(crate) fn render_patch(
 
     let half = patch as f32 * 0.5;
     let pixel_du = 1.0 / half;
+    if matches!(settings.warp_mode, FoveaWarpMode::Patched) {
+        let (level, level_w, level_h) = match settings.mode {
+            PyramidMode::Gaussian => {
+                let max_level = cache.gaussian.len().saturating_sub(1);
+                let level = patched_level_from_radius(radius_norm, max_level);
+                let level_w = cache
+                    .gaussian
+                    .get(level)
+                    .map(|level| level.width)
+                    .unwrap_or(source.width)
+                    .max(1);
+                let level_h = cache
+                    .gaussian
+                    .get(level)
+                    .map(|level| level.height)
+                    .unwrap_or(source.height)
+                    .max(1);
+                (level, level_w, level_h)
+            }
+            PyramidMode::Laplacian => {
+                let max_level = cache.laplacian.len();
+                let level = patched_level_from_radius(radius_norm, max_level);
+                if level >= cache.laplacian.len() {
+                    (level, cache.coarse.width.max(1), cache.coarse.height.max(1))
+                } else {
+                    let level_w = cache.laplacian[level].width.max(1);
+                    let level_h = cache.laplacian[level].height.max(1);
+                    (level, level_w, level_h)
+                }
+            }
+        };
+        let center_x = mean_x * level_w as f32;
+        let center_y = mean_y * level_h as f32;
+        for y in 0..height {
+            for x in 0..width {
+                let dx = x as f32 + 0.5 - half;
+                let dy = y as f32 + 0.5 - half;
+                let fx = (center_x + dx) / level_w as f32;
+                let fy = (center_y + dy) / level_h as f32;
+                let sample = match settings.mode {
+                    PyramidMode::Gaussian => {
+                        let level_img = cache
+                            .gaussian
+                            .get(level)
+                            .unwrap_or_else(|| cache.gaussian.first().expect("gaussian level"));
+                        sample_bilinear(level_img, fx, fy)
+                    }
+                    PyramidMode::Laplacian => {
+                        let coarse = cache
+                            .coarse
+                            .as_ref()
+                            .unwrap_or_else(|| cache.gaussian.last().expect("coarse level"));
+                        sample_laplacian_at(&cache.laplacian, coarse, level, fx, fy)
+                    }
+                };
+                let idx = (y * width + x) * 4;
+                out[idx] = (sample[0].clamp(0.0, 1.0) * 255.0).round() as u8;
+                out[idx + 1] = (sample[1].clamp(0.0, 1.0) * 255.0).round() as u8;
+                out[idx + 2] = (sample[2].clamp(0.0, 1.0) * 255.0).round() as u8;
+                out[idx + 3] = 255;
+            }
+        }
+        return out;
+    }
+    let center_x = mean_x * source.width as f32;
+    let center_y = mean_y * source.height as f32;
     for y in 0..height {
         for x in 0..width {
             let base_dx = x as f32 + 0.5 - half;
@@ -1461,8 +1527,8 @@ pub(crate) fn render_patch_f32(
         mean_y: settings.mean_y,
         radius_norm: settings.radius_norm,
     };
-    let center_x = sample.mean_x.clamp(0.0, 1.0) * source.width as f32;
-    let center_y = sample.mean_y.clamp(0.0, 1.0) * source.height as f32;
+    let mean_x = sample.mean_x.clamp(0.0, 1.0);
+    let mean_y = sample.mean_y.clamp(0.0, 1.0);
     let radius_norm = radius_norm_from_sample(&sample);
     let sigma_norm = sigma_norm_from_settings(settings, &sample);
     let sigma = sigma_px_from_norm(sigma_norm, source);
@@ -1472,6 +1538,71 @@ pub(crate) fn render_patch_f32(
 
     let half = patch as f32 * 0.5;
     let pixel_du = 1.0 / half;
+    if matches!(settings.warp_mode, FoveaWarpMode::Patched) {
+        let (level, level_w, level_h) = match settings.mode {
+            PyramidMode::Gaussian => {
+                let max_level = cache.gaussian.len().saturating_sub(1);
+                let level = patched_level_from_radius(radius_norm, max_level);
+                let level_w = cache
+                    .gaussian
+                    .get(level)
+                    .map(|level| level.width)
+                    .unwrap_or(source.width)
+                    .max(1);
+                let level_h = cache
+                    .gaussian
+                    .get(level)
+                    .map(|level| level.height)
+                    .unwrap_or(source.height)
+                    .max(1);
+                (level, level_w, level_h)
+            }
+            PyramidMode::Laplacian => {
+                let max_level = cache.laplacian.len();
+                let level = patched_level_from_radius(radius_norm, max_level);
+                if level >= cache.laplacian.len() {
+                    (level, cache.coarse.width.max(1), cache.coarse.height.max(1))
+                } else {
+                    let level_w = cache.laplacian[level].width.max(1);
+                    let level_h = cache.laplacian[level].height.max(1);
+                    (level, level_w, level_h)
+                }
+            }
+        };
+        let center_x = mean_x * level_w as f32;
+        let center_y = mean_y * level_h as f32;
+        for y in 0..height {
+            for x in 0..width {
+                let dx = x as f32 + 0.5 - half;
+                let dy = y as f32 + 0.5 - half;
+                let fx = (center_x + dx) / level_w as f32;
+                let fy = (center_y + dy) / level_h as f32;
+                let sample = match settings.mode {
+                    PyramidMode::Gaussian => {
+                        let level_img = cache
+                            .gaussian
+                            .get(level)
+                            .unwrap_or_else(|| cache.gaussian.first().expect("gaussian level"));
+                        sample_bilinear(level_img, fx, fy)
+                    }
+                    PyramidMode::Laplacian => {
+                        let coarse = cache
+                            .coarse
+                            .as_ref()
+                            .unwrap_or_else(|| cache.gaussian.last().expect("coarse level"));
+                        sample_laplacian_at(&cache.laplacian, coarse, level, fx, fy)
+                    }
+                };
+                let idx = (y * width + x) * 3;
+                out[idx] = sample[0];
+                out[idx + 1] = sample[1];
+                out[idx + 2] = sample[2];
+            }
+        }
+        return out;
+    }
+    let center_x = mean_x * source.width as f32;
+    let center_y = mean_y * source.height as f32;
     for y in 0..height {
         for x in 0..width {
             let base_dx = x as f32 + 0.5 - half;
@@ -1669,7 +1800,7 @@ pub(crate) fn sample_gaussian_foveated(
     let max_level = (levels.len().saturating_sub(1)) as f32;
     let lod_center = compute_lod(dx, dy, sigma_x, sigma_y, max_level, local_scale);
     if matches!(warp_mode, FoveaWarpMode::Patched) {
-        let level = lod_center.round().clamp(0.0, max_level) as usize;
+        let level = (lod_center + 0.5).floor().clamp(0.0, max_level) as usize;
         return sample_bilinear(&levels[level], fx, fy);
     }
     let mut color = [0.0; 3];
@@ -1715,7 +1846,7 @@ pub(crate) fn sample_laplacian_foveated(
     let max_level = residuals.len() as f32;
     let lod_center = compute_lod(dx, dy, sigma_x, sigma_y, max_level, local_scale);
     if matches!(warp_mode, FoveaWarpMode::Patched) {
-        let level = lod_center.round().clamp(0.0, max_level) as usize;
+        let level = (lod_center + 0.5).floor().clamp(0.0, max_level) as usize;
         return sample_laplacian_at(residuals, coarse, level, fx, fy);
     }
     let mut color = [0.0; 3];
@@ -1741,6 +1872,18 @@ pub(crate) fn sample_laplacian_foveated(
 }
 
 #[cfg(test)]
+fn patched_level_from_radius(radius_norm: f32, max_level: usize) -> usize {
+    if max_level == 0 {
+        return 0;
+    }
+    let max_level_f = max_level as f32;
+    let level = (radius_norm.clamp(0.0, 1.0) * max_level_f + 0.5)
+        .floor()
+        .clamp(0.0, max_level_f);
+    level as usize
+}
+
+#[cfg(test)]
 pub(crate) fn compute_lod(
     dx: f32,
     dy: f32,
@@ -1755,11 +1898,15 @@ pub(crate) fn compute_lod(
     let sx = sigma_x.max(1e-3);
     let sy = sigma_y.max(1e-3);
     let dist = ((dx * dx) / (sx * sx) + (dy * dy) / (sy * sy)).sqrt();
-    let lod_dist = if dist <= 1.0 { 0.0 } else { dist.log2() };
+    let lod_dist = if dist <= 1.0 {
+        0.0
+    } else {
+        dist.ln() / std::f32::consts::LN_2
+    };
     let lod_scale = if local_scale <= FOVEA_AA_THRESHOLD {
         0.0
     } else {
-        (local_scale / FOVEA_AA_THRESHOLD).log2()
+        (local_scale / FOVEA_AA_THRESHOLD).ln() / std::f32::consts::LN_2
     };
     lod_dist.max(lod_scale).clamp(0.0, max_level)
 }
@@ -1883,14 +2030,26 @@ fn resample(level: &ImageLevel, width: usize, height: usize) -> ImageLevel {
 
 #[cfg(test)]
 fn sample_bilinear(level: &ImageLevel, fx: f32, fy: f32) -> [f32; 3] {
-    let x = fx.clamp(0.0, 1.0) * level.width as f32 - 0.5;
-    let y = fy.clamp(0.0, 1.0) * level.height as f32 - 0.5;
+    let grid_x = if level.width > 1 {
+        (fx * level.width as f32 - 0.5) * (2.0 / (level.width - 1) as f32) - 1.0
+    } else {
+        0.0
+    }
+    .clamp(-1.0, 1.0);
+    let grid_y = if level.height > 1 {
+        (fy * level.height as f32 - 0.5) * (2.0 / (level.height - 1) as f32) - 1.0
+    } else {
+        0.0
+    }
+    .clamp(-1.0, 1.0);
+    let x_half = (level.width - 1) as f32 * 0.5;
+    let y_half = (level.height - 1) as f32 * 0.5;
+    let x = grid_x * x_half + x_half;
+    let y = grid_y * y_half + y_half;
     let x0 = x.floor();
     let y0 = y.floor();
-    let x1 = x0 + 1.0;
-    let y1 = y0 + 1.0;
-    let tx = x - x0;
-    let ty = y - y0;
+    let x1 = (x + 1.0).floor();
+    let y1 = (y + 1.0).floor();
     let x0i = x0.clamp(0.0, (level.width - 1) as f32) as usize;
     let y0i = y0.clamp(0.0, (level.height - 1) as f32) as usize;
     let x1i = x1.clamp(0.0, (level.width - 1) as f32) as usize;
@@ -1901,20 +2060,15 @@ fn sample_bilinear(level: &ImageLevel, fx: f32, fy: f32) -> [f32; 3] {
     let c01 = get_pixel(level, x0i, y1i);
     let c11 = get_pixel(level, x1i, y1i);
 
-    let a = [
-        lerp(c00[0], c10[0], tx),
-        lerp(c00[1], c10[1], tx),
-        lerp(c00[2], c10[2], tx),
-    ];
-    let b = [
-        lerp(c01[0], c11[0], tx),
-        lerp(c01[1], c11[1], tx),
-        lerp(c01[2], c11[2], tx),
-    ];
+    let weight_00 = (x1 - x) * (y1 - y);
+    let weight_10 = (x - x0) * (y1 - y);
+    let weight_01 = (x1 - x) * (y - y0);
+    let weight_11 = (x - x0) * (y - y0);
+
     [
-        lerp(a[0], b[0], ty),
-        lerp(a[1], b[1], ty),
-        lerp(a[2], b[2], ty),
+        c00[0] * weight_00 + c10[0] * weight_10 + c01[0] * weight_01 + c11[0] * weight_11,
+        c00[1] * weight_00 + c10[1] * weight_10 + c01[1] * weight_01 + c11[1] * weight_11,
+        c00[2] * weight_00 + c10[2] * weight_10 + c01[2] * weight_01 + c11[2] * weight_11,
     ]
 }
 
@@ -2434,9 +2588,4 @@ fn patch_to_rgba<B: Backend>(patch: Tensor<B, 4>) -> Tensor<B, 3> {
         Tensor::cat(vec![patch, alpha], 2)
     };
     patch
-}
-
-#[cfg(test)]
-fn lerp(a: f32, b: f32, t: f32) -> f32 {
-    a + (b - a) * t
 }

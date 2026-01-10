@@ -490,6 +490,7 @@ pub struct VisionSaccadeConfig {
     pub fovea_warp_mode: VisionFoveaWarpMode,
     pub fovea_subpatch_size: usize,
     pub fovea_scatter_mode: VisionFoveaScatterMode,
+    pub pyramid_feature_dim: Option<usize>,
     pub inner_steps: usize,
     pub low_mem_pre_rollout: bool,
     pub lambda: f32,
@@ -517,6 +518,7 @@ impl Default for VisionSaccadeConfig {
             fovea_warp_mode: VisionFoveaWarpMode::Warped,
             fovea_subpatch_size: 0,
             fovea_scatter_mode: VisionFoveaScatterMode::Tensor,
+            pyramid_feature_dim: None,
             inner_steps: 1,
             low_mem_pre_rollout: true,
             lambda: 0.02,
@@ -582,6 +584,7 @@ impl ModuleDisplayDefault for VisionSaccadeConfig {
             .add("fovea_warp_mode", &self.fovea_warp_mode)
             .add("fovea_subpatch_size", &self.fovea_subpatch_size)
             .add("fovea_scatter_mode", &self.fovea_scatter_mode)
+            .add("pyramid_feature_dim", &self.pyramid_feature_dim)
             .add("inner_steps", &self.inner_steps)
             .add("low_mem_pre_rollout", &self.low_mem_pre_rollout)
             .add("lambda", &self.lambda)

@@ -70,6 +70,7 @@ viz = [
 
 [dependencies]
 bevy_burn = { version = "0.4", optional = true }
+burn_dragon_hatchling_vision = { path = "../burn_dragon_hatchling_vision" }
 ctrlc = { version = "3.4", optional = true }
 toml = { version = "0.9", optional = true }
 rand = "0.8"
@@ -152,7 +153,7 @@ default-features = false
 features = [
   "fusion",
   "std",
-  # "template",
+  "template",
 ]
 
 [dependencies.cubecl]
@@ -198,6 +199,9 @@ default-features = false
 features = [
   "std",
 ]
+
+[target.'cfg(not(target_os = "windows"))'.dependencies]
+pprof = { version = "0.13", features = ["flamegraph"] }
 
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]

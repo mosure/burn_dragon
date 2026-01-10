@@ -1,6 +1,6 @@
 use burn::optim::GradientsParams;
 use burn::tensor::Distribution as TensorDistribution;
-use burn::tensor::backend::AutodiffBackend;
+use burn::tensor::backend::{AutodiffBackend, Backend as BackendTrait};
 use burn::tensor::{Int, Tensor, TensorData};
 
 use super::{
@@ -17,6 +17,12 @@ pub struct VisionSaccadeBench<B: AutodiffBackend> {
     backprop_steps: usize,
     patch_size: usize,
     embed_dim: usize,
+}
+
+pub struct VisionScatterBench<B: BackendTrait> {
+    model: VisionSaccadeModel<B>,
+    weights: Tensor<B, 3>,
+    tokens: Tensor<B, 3>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -334,5 +340,50 @@ impl<B: AutodiffBackend> VisionSaccadeBench<B> {
         let traj_summary = traj_with_eye.mean_dim(1).reshape([batch, 1, self.embed_dim]);
         let params = self.model.saccade_head.forward(traj_summary);
         self.model.decode_saccade_params(params)
+    }
+}
+
+impl<B: BackendTrait> VisionScatterBench<B> {
+    pub fn new(
+        vision: VisionDragonHatchlingConfig,
+        saccade: VisionSaccadeConfig,
+        batch_size: usize,
+        out_tokens: usize,
+        in_tokens: usize,
+        embed_dim: usize,
+        device: &B::Device,
+    ) -> Self {
+        let model = VisionDragonHatchling::<B>::new(vision.clone(), device);
+        let recon_patch_dim = vision.patch_size * vision.patch_size * vision.in_channels;
+        let rollout = VisionRollout {
+            min_steps: 1,
+            max_steps: 1,
+            backprop_steps: 1,
+        };
+        let saccade =
+            VisionSaccadeModel::new(model, saccade, vision.embed_dim, rollout, recon_patch_dim, device);
+
+        let weights = Tensor::<B, 3>::random(
+            [batch_size, out_tokens.max(1), in_tokens.max(1)],
+            TensorDistribution::Default,
+            device,
+        );
+        let tokens = Tensor::<B, 3>::random(
+            [batch_size, in_tokens.max(1), embed_dim.max(1)],
+            TensorDistribution::Default,
+            device,
+        );
+
+        Self {
+            model: saccade,
+            weights,
+            tokens,
+        }
+    }
+
+    pub fn stage_scatter(&self) -> Tensor<B, 1> {
+        self.model
+            .weighted_sum_tokens(self.weights.clone(), self.tokens.clone())
+            .sum()
     }
 }

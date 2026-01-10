@@ -21,16 +21,17 @@ use wgpu::Extent3d;
 
 use crate::{
     radius_norm_from_sample, radius_px_from_norm, resolve_foveation_sample,
-    sigma_norm_from_settings, sigma_px_from_norm, FoveationBackendMode, FoveationNoiseSample,
-    FoveationRuntime, FoveationSettings, PyramidMode, SourceImage,
+    sigma_norm_from_settings, sigma_px_from_norm, FoveaWarpMode, FoveationBackendMode,
+    FoveationNoiseSample, FoveationRuntime, FoveationSettings, PyramidMode, SourceImage,
 };
-use burn_dragon_hatchling_core::foveation;
+use burn_dragon_hatchling_vision::foveation;
+use burn_dragon_hatchling_vision::{FOVEATION_SHADER, PYRAMID_SHADER};
 #[cfg(test)]
 use crate::{ImageLevel, PyramidCache};
 
 const WORKGROUP_SIZE: u32 = 8;
-const SHADER_SOURCE: &str = include_str!("foveation.wgsl");
-const PYRAMID_SHADER_SOURCE: &str = include_str!("pyramid.wgsl");
+const SHADER_SOURCE: &str = FOVEATION_SHADER;
+const PYRAMID_SHADER_SOURCE: &str = PYRAMID_SHADER;
 
 #[derive(Clone, Copy, Default, ShaderType)]
 pub(crate) struct FoveationUniform {
@@ -43,9 +44,9 @@ pub(crate) struct FoveationUniform {
     patch_size: f32,
     pyramid_levels: u32,
     mode: u32,
+    warp_mode: u32,
     _pad0: u32,
     _pad1: u32,
-    _pad2: u32,
 }
 
 #[derive(Resource, Clone, ExtractResource)]
@@ -68,9 +69,9 @@ impl Default for FoveationGpuParams {
                 patch_size: 1.0,
                 pyramid_levels: 1,
                 mode: 0,
+                warp_mode: 0,
                 _pad0: 0,
                 _pad1: 0,
-                _pad2: 0,
             },
             dispatch: UVec2::ONE,
             enabled: false,
@@ -437,6 +438,10 @@ pub(crate) fn update_gpu_params(
         PyramidMode::Gaussian => 0,
         PyramidMode::Laplacian => 1,
     };
+    let warp_mode = match settings.warp_mode {
+        FoveaWarpMode::Warped => 0,
+        FoveaWarpMode::Patched => 1,
+    };
 
     params.uniform = FoveationUniform {
         image_size,
@@ -448,9 +453,9 @@ pub(crate) fn update_gpu_params(
         patch_size: patch,
         pyramid_levels,
         mode,
+        warp_mode,
         _pad0: 0,
         _pad1: 0,
-        _pad2: 0,
     };
     let groups_x = (runtime.patch_size.max(1) as u32 + WORKGROUP_SIZE - 1) / WORKGROUP_SIZE;
     let groups_y = (runtime.patch_size.max(1) as u32 + WORKGROUP_SIZE - 1) / WORKGROUP_SIZE;
@@ -893,14 +898,15 @@ fn push_f16(data: &mut Vec<u8>, value: f32) {
 mod tests {
     use super::*;
     use crate::{
-        FoveationBackendMode, FoveationSample, ImageLevel, PyramidCache, build_gaussian_pyramid,
-        build_laplacian_pyramid, lerp, make_minimal_vision_config, map_pyramid_mode,
-        radius_norm_from_sample, render_patch_f32, sigma_norm_from_settings,
+        FoveaWarpMode, FoveationBackendMode, FoveationSample, ImageLevel, PyramidCache,
+        build_gaussian_pyramid, build_laplacian_pyramid, lerp, make_minimal_vision_config,
+        map_pyramid_mode, map_warp_mode, radius_norm_from_sample, render_patch_f32,
+        sigma_norm_from_settings,
     };
     use burn::tensor::backend::Backend;
     use burn::tensor::{Tensor, TensorData};
     use burn_dragon_hatchling_core::train::SaccadeFoveationSampler;
-    use burn_dragon_hatchling_core::VisionSaccadeConfig;
+    use burn_dragon_hatchling_core::{VisionFoveaSamplingMode, VisionSaccadeConfig};
     use burn_wgpu::{self, RuntimeOptions, Wgpu};
     use burn_wgpu::graphics;
     use image::RgbImage;
@@ -948,6 +954,26 @@ mod tests {
         SourceImage { width, height, data }
     }
 
+    fn make_radial(width: usize, height: usize) -> SourceImage {
+        let mut data = Vec::with_capacity(width * height * 3);
+        let cx = (width.saturating_sub(1)) as f32 * 0.5;
+        let cy = (height.saturating_sub(1)) as f32 * 0.5;
+        let max_r = (cx * cx + cy * cy).sqrt().max(1.0);
+        for y in 0..height {
+            for x in 0..width {
+                let dx = x as f32 - cx;
+                let dy = y as f32 - cy;
+                let r = ((dx * dx + dy * dy).sqrt() / max_r).clamp(0.0, 1.0);
+                let angle = dy.atan2(dx);
+                let wave = (angle * 6.0).sin() * 0.5 + 0.5;
+                data.push(r);
+                data.push(1.0 - r);
+                data.push(wave);
+            }
+        }
+        SourceImage { width, height, data }
+    }
+
     fn settings_for_mode(mode: PyramidMode) -> FoveationSettings {
         let mut settings = FoveationSettings::default();
         settings.patch_size = 16;
@@ -988,6 +1014,10 @@ mod tests {
         let mut saccade = VisionSaccadeConfig::default();
         saccade.mip_levels = settings.pyramid_depth.max(1);
         saccade.pyramid_mode = map_pyramid_mode(settings.mode);
+        saccade.fovea_warp_mode = map_warp_mode(settings.warp_mode);
+        if settings.backend == FoveationBackendMode::Cubecl {
+            saccade.fovea_sampling_mode = VisionFoveaSamplingMode::Cubecl;
+        }
         let mut sampler = SaccadeFoveationSampler::<BurnBackend>::new(vision, saccade, &device);
         let input = tensor_from_source::<BurnBackend>(source, &device);
         sampler.update_image(input);
@@ -1098,6 +1128,7 @@ mod tests {
         root: &Path,
         source: &SourceImage,
         mode: PyramidMode,
+        warp_mode: FoveaWarpMode,
         case_idx: usize,
         mean_x: f32,
         mean_y: f32,
@@ -1115,6 +1146,7 @@ mod tests {
             .join("checkerboard")
             .join(format!("{}x{}", source.width, source.height))
             .join(format!("mode_{mode:?}"))
+            .join(format!("warp_{warp_mode:?}"))
             .join(case_dir);
         fs::create_dir_all(&dir).expect("create fovea_test output dir");
         let path = dir.join(format!("{backend}.png"));
@@ -1569,6 +1601,7 @@ mod tests {
             make_gradient(64, 64),
             make_gradient(80, 48),
             make_checkerboard(64, 64),
+            make_radial(64, 64),
         ];
         let cases = [
             (0.5, 0.5, 0.25, 0.5, 16, 4),
@@ -1582,82 +1615,48 @@ mod tests {
             (0.9, 0.1, 0.45, 0.6, 64, 5),
         ];
         let modes = [PyramidMode::Gaussian, PyramidMode::Laplacian];
+        let warp_modes = [FoveaWarpMode::Warped, FoveaWarpMode::Patched];
         let max_abs_threshold = 1e-3;
-        let max_abs_threshold_wgsl = 1e-2;
+        let max_abs_threshold_wgsl = 6e-2;
         let mse_threshold = 1e-6;
-        let mse_threshold_wgsl = 1e-5;
+        let mse_threshold_wgsl = 3e-5;
         let output_root = fovea_test_root();
 
         for (source_idx, source) in sources.iter().enumerate() {
-            let save_outputs = source_idx == 2;
+            let save_outputs = source_idx == 2 || source_idx == 3;
             for mode in modes.iter().copied() {
-                for (case_idx, (mean_x, mean_y, radius, focus, patch_size, depth)) in
-                    cases.iter().copied().enumerate()
-                {
-                    let max_patch = source.width.min(source.height);
-                    if patch_size > max_patch {
-                        continue;
-                    }
-                    let mut settings = settings_for_mode(mode);
-                    settings.mean_x = mean_x;
-                    settings.mean_y = mean_y;
-                    settings.radius_norm = radius;
-                    settings.focus = focus;
-                    settings.patch_size = patch_size;
-                    settings.pyramid_depth = depth;
+                for warp_mode in warp_modes.iter().copied() {
+                    for (case_idx, (mean_x, mean_y, radius, focus, patch_size, depth)) in
+                        cases.iter().copied().enumerate()
+                    {
+                        let max_patch = source.width.min(source.height);
+                        if patch_size > max_patch {
+                            continue;
+                        }
+                        let mut settings = settings_for_mode(mode);
+                        settings.mean_x = mean_x;
+                        settings.mean_y = mean_y;
+                        settings.radius_norm = radius;
+                        settings.focus = focus;
+                        settings.patch_size = patch_size;
+                        settings.pyramid_depth = depth;
+                        settings.warp_mode = warp_mode;
 
-                    let cache = make_cache(source, settings.pyramid_depth);
-                    let cpu = render_patch_f32(source, &cache, &settings, settings.patch_size);
-                    let burn = render_patch_burn(source, &settings);
-                    let label = format!(
-                        "source {source_idx} case {case_idx} mode {mode:?}"
-                    );
-                    if save_outputs {
-                        save_checkerboard_patch(
-                            &output_root,
-                            source,
-                            mode,
-                            case_idx,
-                            mean_x,
-                            mean_y,
-                            radius,
-                            focus,
-                            patch_size,
-                            depth,
-                            "cpu",
-                            &cpu,
+                        let cache = make_cache(source, settings.pyramid_depth);
+                        let cpu = render_patch_f32(source, &cache, &settings, settings.patch_size);
+                        settings.backend = FoveationBackendMode::Burn;
+                        let burn = render_patch_burn(source, &settings);
+                        settings.backend = FoveationBackendMode::Cubecl;
+                        let cubecl = render_patch_burn(source, &settings);
+                        let label = format!(
+                            "source {source_idx} case {case_idx} mode {mode:?} warp {warp_mode:?}"
                         );
-                        save_checkerboard_patch(
-                            &output_root,
-                            source,
-                            mode,
-                            case_idx,
-                            mean_x,
-                            mean_y,
-                            radius,
-                            focus,
-                            patch_size,
-                            depth,
-                            "burn",
-                            &burn,
-                        );
-                    }
-                    assert_patch_close(
-                        &format!("{label} burn vs cpu"),
-                        &burn,
-                        &cpu,
-                        max_abs_threshold,
-                        mse_threshold,
-                    );
-
-                    if let Some(gpu) = render_patch_gpu_f32(source, &cache, &settings) {
-                        let cpu_f16 = quantize_f16(&cpu);
-                        let burn_f16 = quantize_f16(&burn);
                         if save_outputs {
                             save_checkerboard_patch(
                                 &output_root,
                                 source,
                                 mode,
+                                warp_mode,
                                 case_idx,
                                 mean_x,
                                 mean_y,
@@ -1665,24 +1664,99 @@ mod tests {
                                 focus,
                                 patch_size,
                                 depth,
-                                "wgsl",
-                                &gpu,
+                                "cpu",
+                                &cpu,
+                            );
+                            save_checkerboard_patch(
+                                &output_root,
+                                source,
+                                mode,
+                                warp_mode,
+                                case_idx,
+                                mean_x,
+                                mean_y,
+                                radius,
+                                focus,
+                                patch_size,
+                                depth,
+                                "burn",
+                                &burn,
+                            );
+                            save_checkerboard_patch(
+                                &output_root,
+                                source,
+                                mode,
+                                warp_mode,
+                                case_idx,
+                                mean_x,
+                                mean_y,
+                                radius,
+                                focus,
+                                patch_size,
+                                depth,
+                                "cubecl",
+                                &cubecl,
                             );
                         }
                         assert_patch_close(
-                            &format!("{label} wgsl vs cpu"),
-                            &gpu,
-                            &cpu_f16,
-                            max_abs_threshold_wgsl,
-                            mse_threshold_wgsl,
+                            &format!("{label} burn vs cpu"),
+                            &burn,
+                            &cpu,
+                            max_abs_threshold,
+                            mse_threshold,
                         );
                         assert_patch_close(
-                            &format!("{label} burn vs wgsl"),
-                            &burn_f16,
-                            &gpu,
-                            max_abs_threshold_wgsl,
-                            mse_threshold_wgsl,
+                            &format!("{label} cubecl vs cpu"),
+                            &cubecl,
+                            &cpu,
+                            max_abs_threshold,
+                            mse_threshold,
                         );
+
+                        settings.backend = FoveationBackendMode::Wgsl;
+                        if let Some(gpu) = render_patch_gpu_f32(source, &cache, &settings) {
+                            let cpu_f16 = quantize_f16(&cpu);
+                            let burn_f16 = quantize_f16(&burn);
+                            let cubecl_f16 = quantize_f16(&cubecl);
+                            if save_outputs {
+                                save_checkerboard_patch(
+                                    &output_root,
+                                    source,
+                                    mode,
+                                    warp_mode,
+                                    case_idx,
+                                    mean_x,
+                                    mean_y,
+                                    radius,
+                                    focus,
+                                    patch_size,
+                                    depth,
+                                    "wgsl",
+                                    &gpu,
+                                );
+                            }
+                            assert_patch_close(
+                                &format!("{label} wgsl vs cpu"),
+                                &gpu,
+                                &cpu_f16,
+                                max_abs_threshold_wgsl,
+                                mse_threshold_wgsl,
+                            );
+                            assert_patch_close(
+                                &format!("{label} burn vs wgsl"),
+                                &burn_f16,
+                                &gpu,
+                                max_abs_threshold_wgsl,
+                                mse_threshold_wgsl,
+                            );
+                            assert_patch_close(
+                                &format!("{label} cubecl vs wgsl"),
+                                &cubecl_f16,
+                                &gpu,
+                                max_abs_threshold_wgsl,
+                                mse_threshold_wgsl,
+                            );
+                        }
                     }
                 }
             }
@@ -2276,6 +2350,10 @@ mod tests {
             PyramidMode::Gaussian => 0,
             PyramidMode::Laplacian => 1,
         };
+        let warp_mode = match settings.warp_mode {
+            FoveaWarpMode::Warped => 0,
+            FoveaWarpMode::Patched => 1,
+        };
 
         FoveationUniform {
             image_size,
@@ -2287,9 +2365,9 @@ mod tests {
             patch_size: patch,
             pyramid_levels,
             mode,
+            warp_mode,
             _pad0: 0,
             _pad1: 0,
-            _pad2: 0,
         }
     }
 

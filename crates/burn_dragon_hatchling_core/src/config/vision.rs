@@ -50,6 +50,7 @@ pub enum VisionFoveaSamplingMode {
     Sequential,
     Subpatch,
     Cubecl,
+    Wgsl,
 }
 
 impl Default for VisionFoveaSamplingMode {
@@ -65,6 +66,7 @@ impl fmt::Display for VisionFoveaSamplingMode {
             Self::Sequential => write!(f, "sequential"),
             Self::Subpatch => write!(f, "subpatch"),
             Self::Cubecl => write!(f, "cubecl"),
+            Self::Wgsl => write!(f, "wgsl"),
         }
     }
 }
@@ -76,6 +78,68 @@ impl ModuleDisplayDefault for VisionFoveaSamplingMode {
 }
 
 impl ModuleDisplay for VisionFoveaSamplingMode {}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum VisionFoveaWarpMode {
+    Warped,
+    Patched,
+}
+
+impl Default for VisionFoveaWarpMode {
+    fn default() -> Self {
+        Self::Warped
+    }
+}
+
+impl fmt::Display for VisionFoveaWarpMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Warped => write!(f, "warped"),
+            Self::Patched => write!(f, "patched"),
+        }
+    }
+}
+
+impl ModuleDisplayDefault for VisionFoveaWarpMode {
+    fn content(&self, content: Content) -> Option<Content> {
+        content.add_formatted(self).optional()
+    }
+}
+
+impl ModuleDisplay for VisionFoveaWarpMode {}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum VisionFoveaScatterMode {
+    Tensor,
+    Cubecl,
+    Wgsl,
+}
+
+impl Default for VisionFoveaScatterMode {
+    fn default() -> Self {
+        Self::Tensor
+    }
+}
+
+impl fmt::Display for VisionFoveaScatterMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Tensor => write!(f, "tensor"),
+            Self::Cubecl => write!(f, "cubecl"),
+            Self::Wgsl => write!(f, "wgsl"),
+        }
+    }
+}
+
+impl ModuleDisplayDefault for VisionFoveaScatterMode {
+    fn content(&self, content: Content) -> Option<Content> {
+        content.add_formatted(self).optional()
+    }
+}
+
+impl ModuleDisplay for VisionFoveaScatterMode {}
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -423,7 +487,9 @@ pub struct VisionSaccadeConfig {
     pub mip_levels: usize,
     pub pyramid_mode: VisionPyramidMode,
     pub fovea_sampling_mode: VisionFoveaSamplingMode,
+    pub fovea_warp_mode: VisionFoveaWarpMode,
     pub fovea_subpatch_size: usize,
+    pub fovea_scatter_mode: VisionFoveaScatterMode,
     pub inner_steps: usize,
     pub low_mem_pre_rollout: bool,
     pub lambda: f32,
@@ -448,7 +514,9 @@ impl Default for VisionSaccadeConfig {
             mip_levels: 3,
             pyramid_mode: VisionPyramidMode::Laplacian,
             fovea_sampling_mode: VisionFoveaSamplingMode::Sequential,
+            fovea_warp_mode: VisionFoveaWarpMode::Warped,
             fovea_subpatch_size: 0,
+            fovea_scatter_mode: VisionFoveaScatterMode::Tensor,
             inner_steps: 1,
             low_mem_pre_rollout: true,
             lambda: 0.02,
@@ -511,7 +579,9 @@ impl ModuleDisplayDefault for VisionSaccadeConfig {
             .add("mip_levels", &self.mip_levels)
             .add("pyramid_mode", &self.pyramid_mode)
             .add("fovea_sampling_mode", &self.fovea_sampling_mode)
+            .add("fovea_warp_mode", &self.fovea_warp_mode)
             .add("fovea_subpatch_size", &self.fovea_subpatch_size)
+            .add("fovea_scatter_mode", &self.fovea_scatter_mode)
             .add("inner_steps", &self.inner_steps)
             .add("low_mem_pre_rollout", &self.low_mem_pre_rollout)
             .add("lambda", &self.lambda)
@@ -1083,6 +1153,7 @@ mod tests {
             mip_levels = 4
             pyramid_mode = "laplacian"
             fovea_sampling_mode = "subpatch"
+            fovea_warp_mode = "patched"
             fovea_subpatch_size = 12
             inner_steps = 2
             lambda = 0.05
@@ -1107,6 +1178,7 @@ mod tests {
                 assert_eq!(saccade.mip_levels, 4);
                 assert_eq!(saccade.pyramid_mode, VisionPyramidMode::Laplacian);
                 assert_eq!(saccade.fovea_sampling_mode, VisionFoveaSamplingMode::Subpatch);
+                assert_eq!(saccade.fovea_warp_mode, VisionFoveaWarpMode::Patched);
                 assert_eq!(saccade.fovea_subpatch_size, 12);
                 assert_eq!(saccade.inner_steps, 2);
                 assert!((saccade.lambda - 0.05).abs() < f32::EPSILON);

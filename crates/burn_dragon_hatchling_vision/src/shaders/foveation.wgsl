@@ -8,9 +8,9 @@ struct FoveationParams {
     patch_size: f32,
     pyramid_levels: u32,
     mode: u32,
+    warp_mode: u32,
     _pad0: u32,
     _pad1: u32,
-    _pad2: u32,
 };
 
 const SUBSAMPLES: u32 = 4u;
@@ -82,6 +82,10 @@ fn foveated_warp(u: f32, sigma: f32, radius: f32) -> FoveaWarp {
 }
 
 fn sample_gaussian(uv: vec2<f32>, lod_center: f32, lod_sigma: f32, max_level: u32) -> vec3<f32> {
+    if params.warp_mode == 1u {
+        let level = u32(clamp(round(lod_center), 0.0, f32(max_level)));
+        return textureSampleLevel(gaussian_tex, gaussian_sampler, uv, f32(level)).xyz;
+    }
     var color = vec3<f32>(0.0);
     var weight_sum = 0.0;
     let base = i32(floor(lod_center));
@@ -119,6 +123,10 @@ fn reconstruct_laplacian(uv: vec2<f32>, start: u32, max_level: u32) -> vec3<f32>
 }
 
 fn sample_laplacian(uv: vec2<f32>, lod_center: f32, lod_sigma: f32, max_level: u32) -> vec3<f32> {
+    if params.warp_mode == 1u {
+        let level = u32(clamp(round(lod_center), 0.0, f32(max_level)));
+        return reconstruct_laplacian(uv, level, max_level);
+    }
     var color = vec3<f32>(0.0);
     var weight_sum = 0.0;
     let base = i32(floor(lod_center));

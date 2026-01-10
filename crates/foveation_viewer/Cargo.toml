@@ -27,6 +27,7 @@ bevy_shader = "0.17"
 burn = { version = "0.19", default-features = false, features = ["std", "wgpu"] }
 burn-wgpu = { version = "0.19", default-features = false, features = ["std"] }
 burn_dragon_hatchling_core = { path = "../burn_dragon_hatchling_core", default-features = false, features = ["train"] }
+burn_dragon_hatchling_vision = { path = "../burn_dragon_hatchling_vision" }
 half = "2"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 noise = "0.9"

@@ -27,6 +27,7 @@ const ERF_A: f32 = super::SACCADE_FOVEA_ERF_A;
 const PI: f32 = super::SACCADE_FOVEA_PI;
 const LN_2: f32 = super::SACCADE_LN_2;
 const AA_THRESHOLD: f32 = super::SACCADE_FOVEA_AA_THRESHOLD;
+const LOD_WINDOW_I32: i32 = super::SACCADE_FOVEA_LOD_WINDOW as i32;
 const MAX_LAPLACIAN_LEVELS: usize = 8;
 const MAX_LAPLACIAN_RESIDUALS: usize = MAX_LAPLACIAN_LEVELS - 1;
 
@@ -187,6 +188,7 @@ where
             {
                 return Some(result);
             }
+            return None;
         }
     }
 
@@ -335,26 +337,33 @@ where
     }
 
     let device = center_x.device();
+    let [batch, _, _] = center_x.shape().dims::<3>();
     let [_, _, base_h, base_w] = level_images.first()?.shape().dims::<4>();
-    let base_dims = BurnTensor::<B, 1>::from_data(
-        TensorData::new(vec![base_w as f32, base_h as f32], [2]),
+    let base_w = BurnTensor::<B, 3>::from_data(
+        TensorData::new(vec![base_w as f32; batch.max(1)], [batch.max(1), 1, 1]),
         &device,
     );
-    let center_x = resolve_fusion_tensor::<B, BT, R, 3>(center_x)?;
-    let center_y = resolve_fusion_tensor::<B, BT, R, 3>(center_y)?;
-    let sigma_px = resolve_fusion_tensor::<B, BT, R, 3>(sigma_px)?;
-    let radius_px = resolve_fusion_tensor::<B, BT, R, 3>(radius_px)?;
-    let lod_sigma = resolve_fusion_tensor::<B, BT, R, 3>(lod_sigma)?;
-    let base_dims = resolve_fusion_tensor::<B, BT, R, 1>(&base_dims)?;
+    let base_h = BurnTensor::<B, 3>::from_data(
+        TensorData::new(vec![base_h as f32; batch.max(1)], [batch.max(1), 1, 1]),
+        &device,
+    );
+    let params = BurnTensor::cat(
+        vec![
+            center_x.clone(),
+            center_y.clone(),
+            sigma_px.clone(),
+            radius_px.clone(),
+            lod_sigma.clone(),
+            base_w,
+            base_h,
+        ],
+        2,
+    );
+    let params = resolve_fusion_tensor::<B, BT, R, 3>(&params)?;
 
     let output = foveated_patch_cubecl_runtime::<R>(
         cube_levels,
-        center_x,
-        center_y,
-        sigma_px,
-        radius_px,
-        lod_sigma,
-        base_dims,
+        params,
         patch_h,
         patch_w,
     );
@@ -393,26 +402,33 @@ where
         cube_levels.push(cube);
     }
     let device = center_x.device();
+    let [batch, _, _] = center_x.shape().dims::<3>();
     let [_, _, base_h, base_w] = level_images.first()?.shape().dims::<4>();
-    let base_dims = BurnTensor::<B, 1>::from_data(
-        TensorData::new(vec![base_w as f32, base_h as f32], [2]),
+    let base_w = BurnTensor::<B, 3>::from_data(
+        TensorData::new(vec![base_w as f32; batch.max(1)], [batch.max(1), 1, 1]),
         &device,
     );
-    let center_x = resolve_direct_tensor::<B, R, 3>(center_x)?;
-    let center_y = resolve_direct_tensor::<B, R, 3>(center_y)?;
-    let sigma_px = resolve_direct_tensor::<B, R, 3>(sigma_px)?;
-    let radius_px = resolve_direct_tensor::<B, R, 3>(radius_px)?;
-    let lod_sigma = resolve_direct_tensor::<B, R, 3>(lod_sigma)?;
-    let base_dims = resolve_direct_tensor::<B, R, 1>(&base_dims)?;
+    let base_h = BurnTensor::<B, 3>::from_data(
+        TensorData::new(vec![base_h as f32; batch.max(1)], [batch.max(1), 1, 1]),
+        &device,
+    );
+    let params = BurnTensor::cat(
+        vec![
+            center_x.clone(),
+            center_y.clone(),
+            sigma_px.clone(),
+            radius_px.clone(),
+            lod_sigma.clone(),
+            base_w,
+            base_h,
+        ],
+        2,
+    );
+    let params = resolve_direct_tensor::<B, R, 3>(&params)?;
 
     let output = foveated_patch_cubecl_runtime::<R>(
         cube_levels,
-        center_x,
-        center_y,
-        sigma_px,
-        radius_px,
-        lod_sigma,
-        base_dims,
+        params,
         patch_h,
         patch_w,
     );
@@ -599,70 +615,53 @@ where
 
 fn foveated_patch_cubecl_runtime<R: CubeRuntime>(
     level_images: Vec<CubeTensor<R>>,
-    center_x: CubeTensor<R>,
-    center_y: CubeTensor<R>,
-    sigma_px: CubeTensor<R>,
-    radius_px: CubeTensor<R>,
-    lod_sigma: CubeTensor<R>,
-    base_dims: CubeTensor<R>,
+    params: CubeTensor<R>,
     patch_h: usize,
     patch_w: usize,
 ) -> CubeTensor<R> {
-    let levels: Vec<_> = level_images.into_iter().map(into_contiguous).collect();
-    let center_x = into_contiguous(center_x);
-    let center_y = into_contiguous(center_y);
-    let sigma_px = into_contiguous(sigma_px);
-    let radius_px = into_contiguous(radius_px);
-    let lod_sigma = into_contiguous(lod_sigma);
-    let base_dims = into_contiguous(base_dims);
+    let mut levels: Vec<_> = level_images.into_iter().map(into_contiguous).collect();
+    let params = into_contiguous(params);
 
+    let level_count = levels.len().min(MAX_LAPLACIAN_LEVELS);
     let first = levels.first().expect("levels not empty");
     let [batch, channels, _, _] = first.shape.dims::<4>();
-    let subsamples = SUBSAMPLES as usize;
-    let sbatch = batch * subsamples;
-    let color_shape = Shape::new([sbatch, channels, patch_h, patch_w]);
-    let weight_shape = Shape::new([sbatch, patch_h, patch_w]);
-
     let client = first.client.clone();
     let device = first.device.clone();
 
-    let color_accum = zeros_device::<R, f32>(client.clone(), device.clone(), color_shape);
-    let weight_sum = zeros_device::<R, f32>(client.clone(), device.clone(), weight_shape);
-
-    let cube_dim = CubeDim::default();
-    let elem_count = color_accum.shape.num_elements();
-    let cube_count = calculate_cube_count_elemwise(elem_count, cube_dim);
-    let level_count = levels.len() as u32;
-    for (level_idx, level) in levels.into_iter().enumerate() {
-        foveated_accumulate_kernel::launch::<R>(
-            &client,
-            cube_count.clone(),
-            cube_dim,
-            level.as_tensor_arg::<f32>(1),
-            color_accum.as_tensor_arg::<f32>(1),
-            weight_sum.as_tensor_arg::<f32>(1),
-            center_x.as_tensor_arg::<f32>(1),
-            center_y.as_tensor_arg::<f32>(1),
-            sigma_px.as_tensor_arg::<f32>(1),
-            radius_px.as_tensor_arg::<f32>(1),
-            lod_sigma.as_tensor_arg::<f32>(1),
-            base_dims.as_tensor_arg::<f32>(1),
-            ScalarArg::new(level_idx as u32),
-            ScalarArg::new(level_count),
-        );
+    let zero_shape = Shape::new([batch.max(1), channels.max(1), 1, 1]);
+    let zero = zeros_device::<R, f32>(client.clone(), device.clone(), zero_shape);
+    levels.resize_with(MAX_LAPLACIAN_LEVELS, || zero.clone());
+    let mut levels = levels
+        .into_iter()
+        .take(MAX_LAPLACIAN_LEVELS)
+        .collect::<Vec<_>>();
+    for level in &mut levels {
+        *level = into_contiguous(level.clone());
     }
+    let [l0, l1, l2, l3, l4, l5, l6, l7]: [CubeTensor<R>; MAX_LAPLACIAN_LEVELS] =
+        levels.try_into().expect("fixed levels");
 
     let output_shape = Shape::new([batch, channels, patch_h, patch_w]);
     let output = empty_device::<R, f32>(client.clone(), device, output_shape);
+
+    let cube_dim = CubeDim::default();
     let out_elems = output.shape.num_elements();
     let out_cube_count = calculate_cube_count_elemwise(out_elems, cube_dim);
-    foveated_finalize_kernel::launch::<R>(
+    foveated_gaussian_fused_kernel::launch::<R>(
         &client,
         out_cube_count,
         cube_dim,
-        color_accum.as_tensor_arg::<f32>(1),
-        weight_sum.as_tensor_arg::<f32>(1),
+        l0.as_tensor_arg::<f32>(1),
+        l1.as_tensor_arg::<f32>(1),
+        l2.as_tensor_arg::<f32>(1),
+        l3.as_tensor_arg::<f32>(1),
+        l4.as_tensor_arg::<f32>(1),
+        l5.as_tensor_arg::<f32>(1),
+        l6.as_tensor_arg::<f32>(1),
+        l7.as_tensor_arg::<f32>(1),
         output.as_tensor_arg::<f32>(1),
+        params.as_tensor_arg::<f32>(1),
+        ScalarArg::new(level_count as u32),
     );
     output
 }
@@ -680,7 +679,7 @@ fn foveated_patch_cubecl_laplacian_runtime<R: CubeRuntime>(
     patch_w: usize,
     level_count: u32,
 ) -> CubeTensor<R> {
-    let residuals: Vec<_> = residuals.into_iter().map(into_contiguous).collect();
+    let mut residuals: Vec<_> = residuals.into_iter().map(into_contiguous).collect();
     let coarse = into_contiguous(coarse);
     let center_x = into_contiguous(center_x);
     let center_y = into_contiguous(center_y);
@@ -690,22 +689,8 @@ fn foveated_patch_cubecl_laplacian_runtime<R: CubeRuntime>(
     let base_dims = into_contiguous(base_dims);
 
     let [batch, channels, _, _] = coarse.shape.dims::<4>();
-    let subsamples = SUBSAMPLES as usize;
-    let sbatch = batch * subsamples;
-    let color_shape = Shape::new([sbatch, channels, patch_h, patch_w]);
-    let weight_shape = Shape::new([sbatch, patch_h, patch_w]);
-
     let client = coarse.client.clone();
     let device = coarse.device.clone();
-
-    let color_accum = zeros_device::<R, f32>(client.clone(), device.clone(), color_shape);
-    let weight_sum = zeros_device::<R, f32>(client.clone(), device.clone(), weight_shape.clone());
-    let prefix_weight =
-        zeros_device::<R, f32>(client.clone(), device.clone(), weight_shape);
-
-    let cube_dim = CubeDim::default();
-    let elem_count = color_accum.shape.num_elements();
-    let cube_count = calculate_cube_count_elemwise(elem_count, cube_dim);
     let level_count = if level_count == 0 {
         1u32
     } else if level_count > MAX_LAPLACIAN_LEVELS as u32 {
@@ -716,11 +701,42 @@ fn foveated_patch_cubecl_laplacian_runtime<R: CubeRuntime>(
 
     let zero_shape = Shape::new([batch.max(1), channels.max(1), 1, 1]);
     let zero = zeros_device::<R, f32>(client.clone(), device.clone(), zero_shape);
+    residuals.resize_with(MAX_LAPLACIAN_RESIDUALS, || zero.clone());
+    let mut residuals = residuals
+        .into_iter()
+        .take(MAX_LAPLACIAN_RESIDUALS)
+        .collect::<Vec<_>>();
+    for residual in &mut residuals {
+        *residual = into_contiguous(residual.clone());
+    }
+    let [r0, r1, r2, r3, r4, r5, r6]: [CubeTensor<R>; MAX_LAPLACIAN_RESIDUALS] =
+        residuals.try_into().expect("fixed residuals");
 
-    for level_idx in 0..level_count {
+    let patch_h = patch_h.max(1);
+    let patch_w = patch_w.max(1);
+    let subsamples = SUBSAMPLES as usize;
+    let batch_sub = batch.max(1).saturating_mul(subsamples.max(1));
+    let accum_shape = Shape::new([batch_sub, channels.max(1), patch_h, patch_w]);
+    let weight_shape = Shape::new([batch_sub, patch_h, patch_w]);
+    let color_accum = zeros_device::<R, f32>(client.clone(), device.clone(), accum_shape);
+    let weight_sum = zeros_device::<R, f32>(client.clone(), device.clone(), weight_shape.clone());
+    let prefix_weight = zeros_device::<R, f32>(client.clone(), device.clone(), weight_shape);
+
+    let cube_dim = CubeDim::default();
+    let weight_elems = weight_sum.shape.num_elements();
+    let weight_cube_count = calculate_cube_count_elemwise(weight_elems, cube_dim);
+    let accum_elems = color_accum.shape.num_elements();
+    let accum_cube_count = calculate_cube_count_elemwise(accum_elems, cube_dim);
+
+    let residual_count = std::cmp::min(
+        level_count.saturating_sub(1),
+        MAX_LAPLACIAN_RESIDUALS as u32,
+    );
+    let mut level_idx = 0u32;
+    while level_idx < level_count {
         foveated_laplacian_weight_kernel::launch::<R>(
             &client,
-            cube_count.clone(),
+            weight_cube_count.clone(),
             cube_dim,
             weight_sum.as_tensor_arg::<f32>(1),
             prefix_weight.as_tensor_arg::<f32>(1),
@@ -731,27 +747,37 @@ fn foveated_patch_cubecl_laplacian_runtime<R: CubeRuntime>(
             ScalarArg::new(level_count),
         );
 
-        let residual = residuals
-            .get(level_idx as usize)
-            .unwrap_or(&zero);
-        foveated_laplacian_residual_kernel::launch::<R>(
-            &client,
-            cube_count.clone(),
-            cube_dim,
-            residual.as_tensor_arg::<f32>(1),
-            color_accum.as_tensor_arg::<f32>(1),
-            prefix_weight.as_tensor_arg::<f32>(1),
-            center_x.as_tensor_arg::<f32>(1),
-            center_y.as_tensor_arg::<f32>(1),
-            sigma_px.as_tensor_arg::<f32>(1),
-            radius_px.as_tensor_arg::<f32>(1),
-            base_dims.as_tensor_arg::<f32>(1),
-        );
+        if level_idx < residual_count {
+            let residual = match level_idx {
+                0 => &r0,
+                1 => &r1,
+                2 => &r2,
+                3 => &r3,
+                4 => &r4,
+                5 => &r5,
+                6 => &r6,
+                _ => break,
+            };
+            foveated_laplacian_residual_kernel::launch::<R>(
+                &client,
+                accum_cube_count.clone(),
+                cube_dim,
+                residual.as_tensor_arg::<f32>(1),
+                color_accum.as_tensor_arg::<f32>(1),
+                prefix_weight.as_tensor_arg::<f32>(1),
+                center_x.as_tensor_arg::<f32>(1),
+                center_y.as_tensor_arg::<f32>(1),
+                sigma_px.as_tensor_arg::<f32>(1),
+                radius_px.as_tensor_arg::<f32>(1),
+                base_dims.as_tensor_arg::<f32>(1),
+            );
+        }
+        level_idx += 1u32;
     }
 
     foveated_laplacian_coarse_kernel::launch::<R>(
         &client,
-        cube_count.clone(),
+        accum_cube_count,
         cube_dim,
         coarse.as_tensor_arg::<f32>(1),
         color_accum.as_tensor_arg::<f32>(1),
@@ -803,6 +829,536 @@ where
         .map(|boxed| *boxed)
 }
 
+#[cube]
+fn compute_lod(dx: f32, dy: f32, sigma: f32, local_scale: f32, max_level: f32) -> f32 {
+    let mut lod = 0.0f32;
+    if max_level > 0.0f32 {
+        let sigma_sq = sigma * sigma;
+        let dist = Sqrt::sqrt(((dx * dx) / sigma_sq) + ((dy * dy) / sigma_sq));
+        let lod_dist = if dist <= 1.0f32 {
+            0.0f32.into()
+        } else {
+            Log::log(max_f32(dist, 1.0f32)) / LN_2
+        };
+        let lod_scale = if local_scale <= AA_THRESHOLD {
+            0.0f32.into()
+        } else {
+            Log::log(max_f32(local_scale / AA_THRESHOLD, 1.0f32)) / LN_2
+        };
+        lod = clamp_f32(max_f32(lod_dist, lod_scale), 0.0f32, max_level);
+    }
+    lod
+}
+
+#[cube]
+fn sample_gaussian_level(
+    level_idx: u32,
+    batch_idx: u32,
+    channel: u32,
+    fx: f32,
+    fy: f32,
+    level0: &Tensor<f32>,
+    level1: &Tensor<f32>,
+    level2: &Tensor<f32>,
+    level3: &Tensor<f32>,
+    level4: &Tensor<f32>,
+    level5: &Tensor<f32>,
+    level6: &Tensor<f32>,
+    level7: &Tensor<f32>,
+) -> f32 {
+    if level_idx == 0u32 {
+        sample_bilinear(level0, batch_idx, channel, fx, fy)
+    } else if level_idx == 1u32 {
+        sample_bilinear(level1, batch_idx, channel, fx, fy)
+    } else if level_idx == 2u32 {
+        sample_bilinear(level2, batch_idx, channel, fx, fy)
+    } else if level_idx == 3u32 {
+        sample_bilinear(level3, batch_idx, channel, fx, fy)
+    } else if level_idx == 4u32 {
+        sample_bilinear(level4, batch_idx, channel, fx, fy)
+    } else if level_idx == 5u32 {
+        sample_bilinear(level5, batch_idx, channel, fx, fy)
+    } else if level_idx == 6u32 {
+        sample_bilinear(level6, batch_idx, channel, fx, fy)
+    } else if level_idx == 7u32 {
+        sample_bilinear(level7, batch_idx, channel, fx, fy)
+    } else {
+        0.0f32.into()
+    }
+}
+
+#[cube]
+fn sample_residual_level(
+    level_idx: u32,
+    batch_idx: u32,
+    channel: u32,
+    fx: f32,
+    fy: f32,
+    level0: &Tensor<f32>,
+    level1: &Tensor<f32>,
+    level2: &Tensor<f32>,
+    level3: &Tensor<f32>,
+    level4: &Tensor<f32>,
+    level5: &Tensor<f32>,
+    level6: &Tensor<f32>,
+) -> f32 {
+    if level_idx == 0u32 {
+        sample_bilinear(level0, batch_idx, channel, fx, fy)
+    } else if level_idx == 1u32 {
+        sample_bilinear(level1, batch_idx, channel, fx, fy)
+    } else if level_idx == 2u32 {
+        sample_bilinear(level2, batch_idx, channel, fx, fy)
+    } else if level_idx == 3u32 {
+        sample_bilinear(level3, batch_idx, channel, fx, fy)
+    } else if level_idx == 4u32 {
+        sample_bilinear(level4, batch_idx, channel, fx, fy)
+    } else if level_idx == 5u32 {
+        sample_bilinear(level5, batch_idx, channel, fx, fy)
+    } else if level_idx == 6u32 {
+        sample_bilinear(level6, batch_idx, channel, fx, fy)
+    } else {
+        0.0f32.into()
+    }
+}
+
+#[cube(launch)]
+fn foveated_gaussian_fused_kernel(
+    level0: &Tensor<f32>,
+    level1: &Tensor<f32>,
+    level2: &Tensor<f32>,
+    level3: &Tensor<f32>,
+    level4: &Tensor<f32>,
+    level5: &Tensor<f32>,
+    level6: &Tensor<f32>,
+    level7: &Tensor<f32>,
+    output: &mut Tensor<f32>,
+    params: &Tensor<f32>,
+    level_count: u32,
+) {
+    if ABSOLUTE_POS >= output.len() {
+        terminate!();
+    }
+    let out_w = output.shape(3);
+    let out_h = output.shape(2);
+    let channels = output.shape(1);
+    if out_w == 0 || out_h == 0 || channels == 0 {
+        terminate!();
+    }
+
+    let x = ABSOLUTE_POS % out_w;
+    let pos = ABSOLUTE_POS / out_w;
+    let y = pos % out_h;
+    let pos = pos / out_h;
+    let c = pos % channels;
+    let b = pos / channels;
+
+    let half = f32::cast_from(out_h) * 0.5f32;
+    let half_safe = max_f32(half, 1.0f32);
+    let pixel_du = 1.0f32 / half_safe;
+
+    let x_base = (f32::cast_from(x) + 0.5f32 - half) / half_safe;
+    let y_base = (f32::cast_from(y) + 0.5f32 - half) / half_safe;
+
+    let param_idx = b * params.stride(0);
+    let cx = params[param_idx];
+    let cy = params[param_idx + 1u32];
+    let sigma = max_f32(params[param_idx + 2u32], EPS);
+    let radius = max_f32(params[param_idx + 3u32], EPS);
+    let lod_sigma = max_f32(params[param_idx + 4u32], EPS);
+    let base_width = params[param_idx + 5u32];
+    let base_height = params[param_idx + 6u32];
+
+    let k = radius / sigma;
+    let u_max = min_f32(erf_approx(k / SQRT2), 0.999f32);
+
+    let u_scaled_x_base = clamp_f32(x_base, -1.0f32, 1.0f32) * u_max;
+    let u_scaled_y_base = clamp_f32(y_base, -1.0f32, 1.0f32) * u_max;
+    let erf_inv_x_base = erfinv_approx(u_scaled_x_base);
+    let erf_inv_y_base = erfinv_approx(u_scaled_y_base);
+    let dx_base = sigma * SQRT2 * erf_inv_x_base;
+    let dy_base = sigma * SQRT2 * erf_inv_y_base;
+    let dx_deriv_base =
+        sigma * SQRT2 * u_max * SQRT_PI_OVER_2 * Exp::exp(erf_inv_x_base * erf_inv_x_base);
+    let dy_deriv_base =
+        sigma * SQRT2 * u_max * SQRT_PI_OVER_2 * Exp::exp(erf_inv_y_base * erf_inv_y_base);
+    let local_scale_base = max_f32(Abs::abs(dx_deriv_base), Abs::abs(dy_deriv_base)) * pixel_du;
+    let use_subsamples = local_scale_base > AA_THRESHOLD;
+
+    if base_width <= 0.0f32 || base_height <= 0.0f32 {
+        terminate!();
+    }
+    let max_level = if level_count > 0 {
+        f32::cast_from(level_count - 1)
+    } else {
+        0.0f32.into()
+    };
+    let max_level_idx = if level_count > 0 {
+        level_count - 1
+    } else {
+        0u32.into()
+    };
+
+    let mut accum = 0.0f32;
+    let mut samples = 0.0f32;
+
+    if !use_subsamples {
+        let local_scale = local_scale_base;
+        let fx = (cx + dx_base) / base_width;
+        let fy = (cy + dy_base) / base_height;
+        let lod = compute_lod(dx_base, dy_base, sigma, local_scale, max_level);
+        let mut weight_sum = 0.0f32;
+        let mut color = 0.0f32;
+        let base_f: f32 = Floor::floor(lod);
+        let base = base_f as i32;
+        let mut start = base - LOD_WINDOW_I32;
+        if start < 0 {
+            start = 0;
+        }
+        let mut end = base + LOD_WINDOW_I32;
+        let max_level_i32 = max_level_idx as i32;
+        if end > max_level_i32 {
+            end = max_level_i32;
+        }
+        let mut level = start as u32;
+        while level <= end as u32 {
+            let level_f = f32::cast_from(level);
+            let diff = (level_f - lod) / lod_sigma;
+            let weight = Exp::exp(-0.5f32 * diff * diff);
+            let sample = sample_gaussian_level(
+                level,
+                b,
+                c,
+                fx,
+                fy,
+                level0,
+                level1,
+                level2,
+                level3,
+                level4,
+                level5,
+                level6,
+                level7,
+            );
+            color += sample * weight;
+            weight_sum += weight;
+            level += 1u32;
+        }
+        if weight_sum > EPS {
+            color = color / weight_sum;
+        }
+        accum = color;
+        samples = 1.0f32;
+    } else {
+        let mut sy = 0u32;
+        while sy < SUBSAMPLE_AXIS {
+            let mut sx = 0u32;
+            while sx < SUBSAMPLE_AXIS {
+                let jitter_x = (f32::cast_from(sx) + 0.5f32) / f32::cast_from(SUBSAMPLE_AXIS)
+                    - 0.5f32;
+                let jitter_y = (f32::cast_from(sy) + 0.5f32) / f32::cast_from(SUBSAMPLE_AXIS)
+                    - 0.5f32;
+                let ux = x_base + jitter_x / half_safe;
+                let uy = y_base + jitter_y / half_safe;
+                let u_scaled_x = clamp_f32(ux, -1.0f32, 1.0f32) * u_max;
+                let u_scaled_y = clamp_f32(uy, -1.0f32, 1.0f32) * u_max;
+                let erf_inv_x = erfinv_approx(u_scaled_x);
+                let erf_inv_y = erfinv_approx(u_scaled_y);
+                let dx = sigma * SQRT2 * erf_inv_x;
+                let dy = sigma * SQRT2 * erf_inv_y;
+                let dx_deriv =
+                    sigma * SQRT2 * u_max * SQRT_PI_OVER_2 * Exp::exp(erf_inv_x * erf_inv_x);
+                let dy_deriv =
+                    sigma * SQRT2 * u_max * SQRT_PI_OVER_2 * Exp::exp(erf_inv_y * erf_inv_y);
+                let local_scale =
+                    max_f32(Abs::abs(dx_deriv), Abs::abs(dy_deriv)) * pixel_du;
+                let fx = (cx + dx) / base_width;
+                let fy = (cy + dy) / base_height;
+                let lod = compute_lod(dx, dy, sigma, local_scale, max_level);
+                let mut weight_sum = 0.0f32;
+                let mut color = 0.0f32;
+                let base_f: f32 = Floor::floor(lod);
+                let base = base_f as i32;
+                let mut start = base - LOD_WINDOW_I32;
+                if start < 0 {
+                    start = 0;
+                }
+                let mut end = base + LOD_WINDOW_I32;
+                let max_level_i32 = max_level_idx as i32;
+                if end > max_level_i32 {
+                    end = max_level_i32;
+                }
+                let mut level = start as u32;
+                while level <= end as u32 {
+                    let level_f = f32::cast_from(level);
+                    let diff = (level_f - lod) / lod_sigma;
+                    let weight = Exp::exp(-0.5f32 * diff * diff);
+                    let sample = sample_gaussian_level(
+                        level,
+                        b,
+                        c,
+                        fx,
+                        fy,
+                        level0,
+                        level1,
+                        level2,
+                        level3,
+                        level4,
+                        level5,
+                        level6,
+                        level7,
+                    );
+                    color += sample * weight;
+                    weight_sum += weight;
+                    level += 1u32;
+                }
+                if weight_sum > EPS {
+                    color = color / weight_sum;
+                }
+                accum += color;
+                samples += 1.0f32;
+                sx += 1u32;
+            }
+            sy += 1u32;
+        }
+    }
+
+    let out_idx = b * output.stride(0)
+        + c * output.stride(1)
+        + y * output.stride(2)
+        + x * output.stride(3);
+    output[out_idx] = if samples > 0.0f32 {
+        accum / samples
+    } else {
+        0.0f32.into()
+    };
+}
+
+#[allow(dead_code)]
+#[cube(launch)]
+fn foveated_laplacian_fused_kernel(
+    residual0: &Tensor<f32>,
+    residual1: &Tensor<f32>,
+    residual2: &Tensor<f32>,
+    residual3: &Tensor<f32>,
+    residual4: &Tensor<f32>,
+    residual5: &Tensor<f32>,
+    residual6: &Tensor<f32>,
+    coarse: &Tensor<f32>,
+    output: &mut Tensor<f32>,
+    params: &Tensor<f32>,
+    level_count: u32,
+) {
+    if ABSOLUTE_POS >= output.len() {
+        terminate!();
+    }
+    let out_w = output.shape(3);
+    let out_h = output.shape(2);
+    let channels = output.shape(1);
+    if out_w == 0 || out_h == 0 || channels == 0 {
+        terminate!();
+    }
+
+    let x = ABSOLUTE_POS % out_w;
+    let pos = ABSOLUTE_POS / out_w;
+    let y = pos % out_h;
+    let pos = pos / out_h;
+    let c = pos % channels;
+    let b = pos / channels;
+
+    let half = f32::cast_from(out_h) * 0.5f32;
+    let half_safe = max_f32(half, 1.0f32);
+    let pixel_du = 1.0f32 / half_safe;
+
+    let x_base = (f32::cast_from(x) + 0.5f32 - half) / half_safe;
+    let y_base = (f32::cast_from(y) + 0.5f32 - half) / half_safe;
+
+    let param_idx = b * params.stride(0);
+    let cx = params[param_idx];
+    let cy = params[param_idx + 1u32];
+    let sigma = max_f32(params[param_idx + 2u32], EPS);
+    let radius = max_f32(params[param_idx + 3u32], EPS);
+    let lod_sigma = max_f32(params[param_idx + 4u32], EPS);
+    let base_width = params[param_idx + 5u32];
+    let base_height = params[param_idx + 6u32];
+
+    let k = radius / sigma;
+    let u_max = min_f32(erf_approx(k / SQRT2), 0.999f32);
+
+    let u_scaled_x_base = clamp_f32(x_base, -1.0f32, 1.0f32) * u_max;
+    let u_scaled_y_base = clamp_f32(y_base, -1.0f32, 1.0f32) * u_max;
+    let erf_inv_x_base = erfinv_approx(u_scaled_x_base);
+    let erf_inv_y_base = erfinv_approx(u_scaled_y_base);
+    let dx_base = sigma * SQRT2 * erf_inv_x_base;
+    let dy_base = sigma * SQRT2 * erf_inv_y_base;
+    let dx_deriv_base =
+        sigma * SQRT2 * u_max * SQRT_PI_OVER_2 * Exp::exp(erf_inv_x_base * erf_inv_x_base);
+    let dy_deriv_base =
+        sigma * SQRT2 * u_max * SQRT_PI_OVER_2 * Exp::exp(erf_inv_y_base * erf_inv_y_base);
+    let local_scale_base = max_f32(Abs::abs(dx_deriv_base), Abs::abs(dy_deriv_base)) * pixel_du;
+    let use_subsamples = local_scale_base > AA_THRESHOLD;
+
+    if base_width <= 0.0f32 || base_height <= 0.0f32 {
+        terminate!();
+    }
+    let max_level = if level_count > 0 {
+        f32::cast_from(level_count - 1)
+    } else {
+        0.0f32.into()
+    };
+    let max_level_idx = if level_count > 0 {
+        level_count - 1
+    } else {
+        0u32.into()
+    };
+
+    let mut accum = 0.0f32;
+    let mut samples = 0.0f32;
+
+    if !use_subsamples {
+        let local_scale = local_scale_base;
+        let fx = (cx + dx_base) / base_width;
+        let fy = (cy + dy_base) / base_height;
+        let lod = compute_lod(dx_base, dy_base, sigma, local_scale, max_level);
+
+        let mut weight_sum = 0.0f32;
+        let mut color = 0.0f32;
+        let base_f: f32 = Floor::floor(lod);
+        let base = base_f as i32;
+        let mut start = base - LOD_WINDOW_I32;
+        if start < 0 {
+            start = 0;
+        }
+        let mut end = base + LOD_WINDOW_I32;
+        let max_level_i32 = max_level_idx as i32;
+        if end > max_level_i32 {
+            end = max_level_i32;
+        }
+        let mut level = start as u32;
+        while level <= end as u32 {
+            let level_f = f32::cast_from(level);
+            let diff = (level_f - lod) / lod_sigma;
+            let weight = Exp::exp(-0.5f32 * diff * diff);
+            let mut sample = sample_bilinear(coarse, b, c, fx, fy);
+            let mut residual_level = level;
+            while residual_level < max_level_idx {
+                let residual = sample_residual_level(
+                    residual_level,
+                    b,
+                    c,
+                    fx,
+                    fy,
+                    residual0,
+                    residual1,
+                    residual2,
+                    residual3,
+                    residual4,
+                    residual5,
+                    residual6,
+                );
+                sample += residual;
+                residual_level += 1u32;
+            }
+            color += sample * weight;
+            weight_sum += weight;
+            level += 1u32;
+        }
+        if weight_sum > EPS {
+            color = color / weight_sum;
+        }
+        accum = color;
+        samples = 1.0f32;
+    } else {
+        let mut sy = 0u32;
+        while sy < SUBSAMPLE_AXIS {
+            let mut sx = 0u32;
+            while sx < SUBSAMPLE_AXIS {
+                let jitter_x = (f32::cast_from(sx) + 0.5f32) / f32::cast_from(SUBSAMPLE_AXIS)
+                    - 0.5f32;
+                let jitter_y = (f32::cast_from(sy) + 0.5f32) / f32::cast_from(SUBSAMPLE_AXIS)
+                    - 0.5f32;
+                let ux = x_base + jitter_x / half_safe;
+                let uy = y_base + jitter_y / half_safe;
+                let u_scaled_x = clamp_f32(ux, -1.0f32, 1.0f32) * u_max;
+                let u_scaled_y = clamp_f32(uy, -1.0f32, 1.0f32) * u_max;
+                let erf_inv_x = erfinv_approx(u_scaled_x);
+                let erf_inv_y = erfinv_approx(u_scaled_y);
+                let dx = sigma * SQRT2 * erf_inv_x;
+                let dy = sigma * SQRT2 * erf_inv_y;
+                let dx_deriv =
+                    sigma * SQRT2 * u_max * SQRT_PI_OVER_2 * Exp::exp(erf_inv_x * erf_inv_x);
+                let dy_deriv =
+                    sigma * SQRT2 * u_max * SQRT_PI_OVER_2 * Exp::exp(erf_inv_y * erf_inv_y);
+                let local_scale =
+                    max_f32(Abs::abs(dx_deriv), Abs::abs(dy_deriv)) * pixel_du;
+                let fx = (cx + dx) / base_width;
+                let fy = (cy + dy) / base_height;
+                let lod = compute_lod(dx, dy, sigma, local_scale, max_level);
+
+                let mut weight_sum = 0.0f32;
+                let mut color = 0.0f32;
+                let base_f: f32 = Floor::floor(lod);
+                let base = base_f as i32;
+                let mut start = base - LOD_WINDOW_I32;
+                if start < 0 {
+                    start = 0;
+                }
+                let mut end = base + LOD_WINDOW_I32;
+                let max_level_i32 = max_level_idx as i32;
+                if end > max_level_i32 {
+                    end = max_level_i32;
+                }
+                let mut level = start as u32;
+                while level <= end as u32 {
+                    let level_f = f32::cast_from(level);
+                    let diff = (level_f - lod) / lod_sigma;
+                    let weight = Exp::exp(-0.5f32 * diff * diff);
+                    let mut sample = sample_bilinear(coarse, b, c, fx, fy);
+                    let mut residual_level = level;
+                    while residual_level < max_level_idx {
+                        let residual = sample_residual_level(
+                            residual_level,
+                            b,
+                            c,
+                            fx,
+                            fy,
+                            residual0,
+                            residual1,
+                            residual2,
+                            residual3,
+                            residual4,
+                            residual5,
+                            residual6,
+                        );
+                        sample += residual;
+                        residual_level += 1u32;
+                    }
+                    color += sample * weight;
+                    weight_sum += weight;
+                    level += 1u32;
+                }
+                if weight_sum > EPS {
+                    color = color / weight_sum;
+                }
+                accum += color;
+                samples += 1.0f32;
+                sx += 1u32;
+            }
+            sy += 1u32;
+        }
+    }
+
+    let out_idx = b * output.stride(0)
+        + c * output.stride(1)
+        + y * output.stride(2)
+        + x * output.stride(3);
+    output[out_idx] = if samples > 0.0f32 {
+        accum / samples
+    } else {
+        0.0f32.into()
+    };
+}
+
+#[allow(dead_code)]
 #[cube(launch)]
 fn foveated_accumulate_kernel(
     input: &Tensor<f32>,
@@ -957,6 +1513,7 @@ fn foveated_accumulate_kernel(
     }
 }
 
+#[allow(dead_code)]
 #[cube(launch)]
 fn foveated_laplacian_weight_kernel(
     weight_sum: &mut Tensor<f32>,
@@ -1081,6 +1638,7 @@ fn foveated_laplacian_weight_kernel(
     weight_sum[w_idx] = weight_sum[w_idx] + weight;
 }
 
+#[allow(dead_code)]
 #[cube(launch)]
 fn foveated_laplacian_residual_kernel(
     residual: &Tensor<f32>,
@@ -1192,6 +1750,7 @@ fn foveated_laplacian_residual_kernel(
     output[out_idx] = output[out_idx] + sample * weight;
 }
 
+#[allow(dead_code)]
 #[cube(launch)]
 fn foveated_laplacian_coarse_kernel(
     coarse: &Tensor<f32>,
@@ -1303,6 +1862,7 @@ fn foveated_laplacian_coarse_kernel(
     output[out_idx] = output[out_idx] + sample * weight;
 }
 
+#[allow(dead_code)]
 #[cube(launch)]
 fn foveated_finalize_kernel(
     color_accum: &Tensor<f32>,

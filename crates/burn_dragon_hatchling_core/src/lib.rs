@@ -3,8 +3,6 @@
 pub mod config;
 #[cfg(feature = "train")]
 pub mod dataset;
-#[cfg(feature = "train")]
-pub mod foveation;
 pub mod generation;
 pub mod inference;
 pub mod kernel;
@@ -26,8 +24,8 @@ pub use config::{
     DatasetConfig, DatasetSourceConfig, HuggingFaceDatasetConfig, HuggingFaceRecordFormat,
     ImagenetteVariant, LearningRateScheduleConfig, OptimizerConfig, TrainingConfig,
     VisionArtifactOutputMode, VisionAugmentationConfig, VisionDatasetConfig,
-    VisionDatasetDownloadConfig, VisionDistillConfig, VisionFoveaSamplingMode,
-    VisionLejepaConfig, VisionMaeConfig, VisionModelConfig, VisionPyramidMode,
+    VisionDatasetDownloadConfig, VisionDistillConfig, VisionFoveaSamplingMode, VisionFoveaWarpMode,
+    VisionFoveaScatterMode, VisionLejepaConfig, VisionMaeConfig, VisionModelConfig, VisionPyramidMode,
     VisionSaccadeConfig, VisionTeacherConfig, VisionTeacherFeatureConfig,
     VisionTeacherModelConfig, VisionTeacherVariant, VisionTrainingConfig,
     VisionTrainingHyperparameters, VisionTrainingModeConfig,

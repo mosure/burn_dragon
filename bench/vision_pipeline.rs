@@ -12,14 +12,21 @@ mod vision_bench {
     use burn_autodiff::Autodiff;
     use burn_dragon_hatchling::{
         ImageNetAugmentations, ImageNetSplit, VisionAugmentationConfig, VisionDragonHatchlingConfig,
-        VisionFoveaSamplingMode, VisionPyramidMode, VisionSaccadeConfig, VisionNormalize,
+        VisionFoveaSamplingMode, VisionFoveaScatterMode, VisionFoveaWarpMode, VisionPyramidMode,
+        VisionSaccadeConfig, VisionNormalize,
     };
-    use burn_dragon_hatchling::train::bench::VisionSaccadeBench;
-    use burn_wgpu::Wgpu;
+    use burn_dragon_hatchling_vision::foveation;
+    use burn_dragon_hatchling_vision::FOVEATION_SHADER;
+    use burn_dragon_hatchling::train::bench::{VisionSaccadeBench, VisionScatterBench};
+    use burn_wgpu::{self, RuntimeOptions, Wgpu, WgpuDevice, graphics};
+    use bytemuck::{Pod, Zeroable};
+    use half::f16;
     use image::{DynamicImage, RgbImage};
     use rand::SeedableRng;
     use rand::rngs::StdRng;
     use std::hint::black_box;
+    use std::sync::Once;
+    use wgpu::util::DeviceExt;
 
     #[cfg(feature = "cuda")]
     use burn_cuda::Cuda;
@@ -56,16 +63,49 @@ mod vision_bench {
         },
     ];
 
+    const FOVEATION_SHADER_SOURCE: &str = FOVEATION_SHADER;
+    const FOVEATION_WORKGROUP_SIZE: u32 = 8;
+
+    #[repr(C, align(8))]
+    #[derive(Clone, Copy, Default, Pod, Zeroable)]
+    struct AlignedVec2 {
+        x: f32,
+        y: f32,
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy, Default, Pod, Zeroable)]
+    struct FoveationUniform {
+        image_size: AlignedVec2,
+        inv_image_size: AlignedVec2,
+        center: AlignedVec2,
+        sigma: AlignedVec2,
+        sample_scale: f32,
+        lod_sigma: f32,
+        patch_size: f32,
+        pyramid_levels: u32,
+        mode: u32,
+        warp_mode: u32,
+        _pad0: u32,
+        _pad1: u32,
+    }
+
     pub fn vision_pipeline_bench(c: &mut Criterion) {
+        bench_foveation_baselines(c);
+        bench_scatter_modes(c);
         run_vision_backend::<Autodiff<Wgpu<f32>>, _>(c, "wgpu", |device| {
-            #[cfg(feature = "cli")]
-            {
-                burn_dragon_hatchling::wgpu::init_runtime(device);
-            }
+            init_wgpu_runtime(device);
         });
 
         #[cfg(feature = "cuda")]
         run_vision_backend::<Autodiff<Cuda<f32>>, _>(c, "cuda", |_| {});
+    }
+
+    fn init_wgpu_runtime(device: &WgpuDevice) {
+        static INIT: Once = Once::new();
+        INIT.call_once(|| {
+            burn_wgpu::init_setup::<graphics::AutoGraphicsApi>(device, RuntimeOptions::default());
+        });
     }
 
     fn run_vision_backend<B, Init>(c: &mut Criterion, name: &'static str, init: Init)
@@ -133,31 +173,631 @@ mod vision_bench {
                 ("sequential", VisionFoveaSamplingMode::Sequential),
                 ("subpatch", VisionFoveaSamplingMode::Subpatch),
                 ("cubecl", VisionFoveaSamplingMode::Cubecl),
+                ("wgsl", VisionFoveaSamplingMode::Wgsl),
+            ];
+            let warp_modes = [
+                ("warped", VisionFoveaWarpMode::Warped),
+                ("patched", VisionFoveaWarpMode::Patched),
             ];
             for (sampling_name, sampling_mode) in sampling_modes {
-                let mut saccade = saccade_base.clone();
-                saccade.fovea_sampling_mode = sampling_mode;
-                saccade.fovea_subpatch_size = if matches!(
-                    sampling_mode,
-                    VisionFoveaSamplingMode::Subpatch
-                ) {
-                    (cfg.patch_size / 2).max(1)
-                } else {
-                    0
-                };
-                let bench = VisionSaccadeBench::<B>::new(
-                    vision.clone(),
-                    saccade,
-                    cfg.batch,
-                    cfg.steps,
-                    1,
-                    &device,
-                );
-                let stage = format!("fovea_patch/{sampling_name}");
-                bench_stage(&mut group, cfg, &stage, &bench, VisionSaccadeBench::stage_fovea_patch);
+                for (warp_label, warp_mode) in warp_modes {
+                    let mut saccade = saccade_base.clone();
+                    saccade.fovea_sampling_mode = sampling_mode;
+                    saccade.fovea_warp_mode = warp_mode;
+                    saccade.fovea_subpatch_size = if matches!(
+                        sampling_mode,
+                        VisionFoveaSamplingMode::Subpatch
+                    ) {
+                        (cfg.patch_size / 2).max(1)
+                    } else {
+                        0
+                    };
+                    let bench = VisionSaccadeBench::<B>::new(
+                        vision.clone(),
+                        saccade,
+                        cfg.batch,
+                        cfg.steps,
+                        1,
+                        &device,
+                    );
+                    let stage = format!("fovea_patch/{sampling_name}/{warp_label}");
+                    bench_stage(
+                        &mut group,
+                        cfg,
+                        &stage,
+                        &bench,
+                        VisionSaccadeBench::stage_fovea_patch,
+                    );
+                }
             }
         }
         group.finish();
+    }
+
+    fn bench_scatter_modes(c: &mut Criterion) {
+        let device = WgpuDevice::default();
+        init_wgpu_runtime(&device);
+        <Wgpu<f32> as BackendTrait>::seed(&device, 7);
+
+        let mut group = c.benchmark_group("vision_scatter/wgpu");
+        for cfg in VISION_CONFIGS {
+            let vision = VisionDragonHatchlingConfig {
+                image_size: cfg.image_size,
+                patch_size: cfg.patch_size,
+                in_channels: 3,
+                embed_dim: cfg.embed_dim,
+                steps: cfg.steps,
+                n_head: 4,
+                mlp_internal_dim_multiplier: 4,
+                dropout: 0.1,
+                projection_dim: 128,
+                projection_hidden_dim: 256,
+                use_cls_token: true,
+                pos_encoding: burn_dragon_hatchling::SpatialPositionalEncodingKind::Learned2d,
+                pos_max_height: cfg.image_size / cfg.patch_size,
+                pos_max_width: cfg.image_size / cfg.patch_size,
+                attention_mode: burn_dragon_hatchling::VisionAttentionMode::RowL1,
+                fused_kernels: burn_dragon_hatchling::FusedKernelConfig::default(),
+            };
+            let grid = (cfg.image_size / cfg.patch_size).max(1);
+            let out_tokens = grid * grid;
+            let in_tokens = 1;
+
+            let scatter_modes = [
+                ("tensor", VisionFoveaScatterMode::Tensor),
+                ("cubecl", VisionFoveaScatterMode::Cubecl),
+                ("wgsl", VisionFoveaScatterMode::Wgsl),
+            ];
+            for (label, mode) in scatter_modes {
+                let mut saccade = VisionSaccadeConfig {
+                    num_eyes: 2,
+                    mip_levels: cfg.mip_levels,
+                    pyramid_mode: VisionPyramidMode::Laplacian,
+                    low_mem_pre_rollout: true,
+                    ..VisionSaccadeConfig::default()
+                };
+                saccade.fovea_scatter_mode = mode;
+                let bench = VisionScatterBench::<Wgpu<f32>>::new(
+                    vision.clone(),
+                    saccade,
+                    cfg.batch,
+                    out_tokens,
+                    in_tokens,
+                    cfg.embed_dim,
+                    &device,
+                );
+                let stage = format!("scatter/{label}");
+                bench_scatter_stage(
+                    &mut group,
+                    cfg,
+                    &stage,
+                    &bench,
+                    VisionScatterBench::stage_scatter,
+                );
+            }
+        }
+        group.finish();
+    }
+
+    fn bench_foveation_baselines(c: &mut Criterion) {
+        let mut group = c.benchmark_group("foveation_baseline");
+        for cfg in VISION_CONFIGS {
+            let base = make_cpu_image(cfg.image_size, cfg.image_size);
+            let cache = foveation::build_pyramid_cache(
+                base,
+                cfg.mip_levels.max(1),
+                foveation::PyramidMode::Laplacian,
+            );
+
+            let mean = [0.5f32, 0.5f32];
+            let radius_norm = foveation::sigma_from_unit(0.6);
+            let sigma_norm = (radius_norm * 0.6).clamp(1e-3, radius_norm);
+            let warp_modes = [
+                ("warped", foveation::FoveaWarpMode::Warped),
+                ("patched", foveation::FoveaWarpMode::Patched),
+            ];
+
+            for (warp_label, warp_mode) in warp_modes {
+                let uniform = make_foveation_uniform(
+                    cfg,
+                    &cache,
+                    foveation::PyramidMode::Laplacian,
+                    warp_mode,
+                );
+                let wgsl = WgslFoveationBench::new(cfg, &cache, uniform);
+
+                group.bench_with_input(
+                    BenchmarkId::new(format!("cpu_{warp_label}"), cfg.name),
+                    cfg,
+                    |b, cfg| {
+                        b.iter_custom(|iters| {
+                            let mut total = Duration::ZERO;
+                            for _ in 0..iters {
+                                let start = Instant::now();
+                                let mut acc = 0.0f32;
+                                for _ in 0..cfg.batch {
+                                    let patch = foveation::render_foveated_patch_with_radius(
+                                        &cache,
+                                        mean,
+                                        sigma_norm,
+                                        radius_norm,
+                                        cfg.patch_size,
+                                        warp_mode,
+                                    );
+                                    acc += patch.get(0).copied().unwrap_or(0.0);
+                                }
+                                black_box(acc);
+                                total += start.elapsed();
+                            }
+                            total
+                        });
+                    },
+                );
+
+                group.bench_with_input(
+                    BenchmarkId::new(format!("wgsl_{warp_label}"), cfg.name),
+                    cfg,
+                    |b, cfg| {
+                        b.iter_custom(|iters| {
+                            let mut total = Duration::ZERO;
+                            for _ in 0..iters {
+                                let start = Instant::now();
+                                for _ in 0..cfg.batch {
+                                    wgsl.run_once();
+                                }
+                                total += start.elapsed();
+                            }
+                            total
+                        });
+                    },
+                );
+            }
+        }
+        group.finish();
+    }
+
+    fn make_cpu_image(width: usize, height: usize) -> foveation::CpuImageLevel {
+        let mut data = Vec::with_capacity(width * height * 3);
+        let denom_w = (width - 1).max(1) as f32;
+        let denom_h = (height - 1).max(1) as f32;
+        for y in 0..height {
+            for x in 0..width {
+                let fx = x as f32 / denom_w;
+                let fy = y as f32 / denom_h;
+                let checker = ((x / 4 + y / 3) % 2) as f32;
+                data.push(fx);
+                data.push(fy);
+                data.push(0.55 * fx + 0.35 * fy + 0.1 * checker);
+            }
+        }
+        foveation::CpuImageLevel { width, height, data }
+    }
+
+    fn make_foveation_uniform(
+        cfg: &VisionBenchConfig,
+        cache: &foveation::CpuPyramidCache,
+        mode: foveation::PyramidMode,
+        warp_mode: foveation::FoveaWarpMode,
+    ) -> FoveationUniform {
+        let width = cache.gaussian.first().map(|level| level.width).unwrap_or(1);
+        let height = cache.gaussian.first().map(|level| level.height).unwrap_or(1);
+        let min_dim = width.min(height).max(1) as f32;
+        let radius_norm = foveation::sigma_from_unit(0.6);
+        let sigma_norm = (radius_norm * 0.6).clamp(1e-3, radius_norm);
+        let sigma_px = sigma_norm * min_dim;
+        let radius_px = radius_norm * min_dim;
+        let patch = cfg.patch_size.max(1) as f32;
+        let sample_scale = (radius_px * 2.0) / patch;
+        let lod_sigma = foveation::lod_sigma_from_sigma(sigma_norm);
+        FoveationUniform {
+            image_size: AlignedVec2 {
+                x: width as f32,
+                y: height as f32,
+            },
+            inv_image_size: AlignedVec2 {
+                x: 1.0 / width.max(1) as f32,
+                y: 1.0 / height.max(1) as f32,
+            },
+            center: AlignedVec2 {
+                x: 0.5 * width as f32,
+                y: 0.5 * height as f32,
+            },
+            sigma: AlignedVec2 {
+                x: sigma_px.max(1e-3),
+                y: sigma_px.max(1e-3),
+            },
+            sample_scale,
+            lod_sigma,
+            patch_size: patch,
+            pyramid_levels: cfg.mip_levels.max(1) as u32,
+            mode: match mode {
+                foveation::PyramidMode::Stacked => 0,
+                foveation::PyramidMode::Laplacian => 1,
+            },
+            warp_mode: match warp_mode {
+                foveation::FoveaWarpMode::Warped => 0,
+                foveation::FoveaWarpMode::Patched => 1,
+            },
+            _pad0: 0,
+            _pad1: 0,
+        }
+    }
+
+    struct WgslFoveationBench {
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        pipeline: wgpu::ComputePipeline,
+        bind_group: wgpu::BindGroup,
+        output_texture: wgpu::Texture,
+        output_buffer: wgpu::Buffer,
+        output_size: u32,
+        aligned_bytes_per_row: u32,
+        _gaussian: wgpu::Texture,
+        _residual: wgpu::Texture,
+        _gaussian_view: wgpu::TextureView,
+        _residual_view: wgpu::TextureView,
+        _output_view: wgpu::TextureView,
+        _uniform: wgpu::Buffer,
+        _sampler: wgpu::Sampler,
+    }
+
+    impl WgslFoveationBench {
+        fn new(
+            cfg: &VisionBenchConfig,
+            cache: &foveation::CpuPyramidCache,
+            uniform: FoveationUniform,
+        ) -> Self {
+            let instance = wgpu::Instance::default();
+            let adapter = pollster::block_on(instance.request_adapter(
+                &wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::LowPower,
+                    compatible_surface: None,
+                    force_fallback_adapter: false,
+                },
+            ))
+            .expect("wgpu adapter");
+            let (device, queue) = pollster::block_on(adapter.request_device(
+                &wgpu::DeviceDescriptor {
+                    label: None,
+                    required_features: wgpu::Features::empty(),
+                    required_limits: wgpu::Limits::default(),
+                    memory_hints: wgpu::MemoryHints::default(),
+                    trace: wgpu::Trace::Off,
+                },
+            ))
+            .expect("wgpu device");
+
+            let gaussian = create_mip_texture(&device, &queue, &cache.gaussian);
+            let residual_levels = build_residual_levels(cache);
+            let residual = create_mip_texture(&device, &queue, &residual_levels);
+            let gaussian_view = gaussian.create_view(&wgpu::TextureViewDescriptor::default());
+            let residual_view = residual.create_view(&wgpu::TextureViewDescriptor::default());
+
+            let output_size = cfg.patch_size.max(1) as u32;
+            let output_texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("foveation_output"),
+                size: wgpu::Extent3d {
+                    width: output_size,
+                    height: output_size,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba16Float,
+                usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let output_view = output_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+            let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+                mag_filter: wgpu::FilterMode::Linear,
+                min_filter: wgpu::FilterMode::Linear,
+                mipmap_filter: wgpu::FilterMode::Linear,
+                ..Default::default()
+            });
+
+            let shader_source = FOVEATION_SHADER_SOURCE.replace("rgba8unorm", "rgba16float");
+            let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("foveation_shader"),
+                source: wgpu::ShaderSource::Wgsl(shader_source.into()),
+            });
+
+            let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("foveation_uniform"),
+                contents: bytemuck::bytes_of(&uniform),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
+
+            let bind_group_layout =
+                device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("foveation_bind_group_layout"),
+                    entries: &[
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 0,
+                            visibility: wgpu::ShaderStages::COMPUTE,
+                            ty: wgpu::BindingType::Texture {
+                                multisampled: false,
+                                view_dimension: wgpu::TextureViewDimension::D2,
+                                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            },
+                            count: None,
+                        },
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 1,
+                            visibility: wgpu::ShaderStages::COMPUTE,
+                            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                            count: None,
+                        },
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 2,
+                            visibility: wgpu::ShaderStages::COMPUTE,
+                            ty: wgpu::BindingType::Texture {
+                                multisampled: false,
+                                view_dimension: wgpu::TextureViewDimension::D2,
+                                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            },
+                            count: None,
+                        },
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 3,
+                            visibility: wgpu::ShaderStages::COMPUTE,
+                            ty: wgpu::BindingType::StorageTexture {
+                                access: wgpu::StorageTextureAccess::WriteOnly,
+                                format: wgpu::TextureFormat::Rgba16Float,
+                                view_dimension: wgpu::TextureViewDimension::D2,
+                            },
+                            count: None,
+                        },
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 4,
+                            visibility: wgpu::ShaderStages::COMPUTE,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Uniform,
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
+                            count: None,
+                        },
+                    ],
+                });
+
+            let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("foveation_bind_group"),
+                layout: &bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&gaussian_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(&residual_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(&output_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: uniform_buffer.as_entire_binding(),
+                    },
+                ],
+            });
+
+            let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("foveation_pipeline_layout"),
+                bind_group_layouts: &[&bind_group_layout],
+                push_constant_ranges: &[],
+            });
+            let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("foveation_pipeline"),
+                layout: Some(&pipeline_layout),
+                module: &shader,
+                entry_point: Some("main"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+
+            let bytes_per_row = output_size * 8;
+            let aligned_bytes_per_row = align_bytes_per_row(bytes_per_row);
+            let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("foveation_output_buffer"),
+                size: (aligned_bytes_per_row as u64) * output_size as u64,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+
+            Self {
+                device,
+                queue,
+                pipeline,
+                bind_group,
+                output_texture,
+                output_buffer,
+                output_size,
+                aligned_bytes_per_row,
+                _gaussian: gaussian,
+                _residual: residual,
+                _gaussian_view: gaussian_view,
+                _residual_view: residual_view,
+                _output_view: output_view,
+                _uniform: uniform_buffer,
+                _sampler: sampler,
+            }
+        }
+
+        fn run_once(&self) {
+            let mut encoder = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("foveation_encoder"),
+                });
+            {
+                let mut pass =
+                    encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                        label: Some("foveation_pass"),
+                        timestamp_writes: None,
+                    });
+                pass.set_pipeline(&self.pipeline);
+                pass.set_bind_group(0, &self.bind_group, &[]);
+                let groups_x =
+                    (self.output_size + FOVEATION_WORKGROUP_SIZE - 1) / FOVEATION_WORKGROUP_SIZE;
+                let groups_y =
+                    (self.output_size + FOVEATION_WORKGROUP_SIZE - 1) / FOVEATION_WORKGROUP_SIZE;
+                pass.dispatch_workgroups(groups_x.max(1), groups_y.max(1), 1);
+            }
+            encoder.copy_texture_to_buffer(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &self.output_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &self.output_buffer,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(self.aligned_bytes_per_row),
+                        rows_per_image: Some(self.output_size),
+                    },
+                },
+                wgpu::Extent3d {
+                    width: self.output_size,
+                    height: self.output_size,
+                    depth_or_array_layers: 1,
+                },
+            );
+            self.queue.submit(Some(encoder.finish()));
+            let buffer_slice = self.output_buffer.slice(..);
+            let (tx, rx) = std::sync::mpsc::channel();
+            buffer_slice.map_async(wgpu::MapMode::Read, move |res| {
+                let _ = tx.send(res);
+            });
+            let _ = self.device.poll(wgpu::PollType::Wait);
+            let _ = rx.recv();
+            self.output_buffer.unmap();
+        }
+    }
+
+    fn build_residual_levels(
+        cache: &foveation::CpuPyramidCache,
+    ) -> Vec<foveation::CpuImageLevel> {
+        let mut levels = cache.laplacian.clone();
+        let coarse = &cache.coarse;
+        let data = vec![0.0; coarse.width * coarse.height * 3];
+        levels.push(foveation::CpuImageLevel {
+            width: coarse.width,
+            height: coarse.height,
+            data,
+        });
+        levels
+    }
+
+    fn create_mip_texture(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        levels: &[foveation::CpuImageLevel],
+    ) -> wgpu::Texture {
+        let base = levels.first().expect("mip levels");
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("foveation_mip_texture"),
+            size: wgpu::Extent3d {
+                width: base.width as u32,
+                height: base.height as u32,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: levels.len() as u32,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+
+        for (level_idx, level) in levels.iter().enumerate() {
+            let bytes = level_to_f16_bytes(level);
+            let bytes_per_row = 8 * level.width as u32;
+            let aligned_bytes_per_row = align_bytes_per_row(bytes_per_row);
+            let padded = if aligned_bytes_per_row == bytes_per_row {
+                bytes
+            } else {
+                pad_rows(
+                    &bytes,
+                    level.width as u32,
+                    level.height as u32,
+                    8,
+                    aligned_bytes_per_row,
+                )
+            };
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &texture,
+                    mip_level: level_idx as u32,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &padded,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(aligned_bytes_per_row),
+                    rows_per_image: Some(level.height as u32),
+                },
+                wgpu::Extent3d {
+                    width: level.width as u32,
+                    height: level.height as u32,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+        texture
+    }
+
+    fn level_to_f16_bytes(level: &foveation::CpuImageLevel) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(level.width * level.height * 8);
+        for idx in 0..(level.width * level.height) {
+            let base = idx * 3;
+            push_f16(&mut bytes, level.data[base]);
+            push_f16(&mut bytes, level.data[base + 1]);
+            push_f16(&mut bytes, level.data[base + 2]);
+            push_f16(&mut bytes, 1.0);
+        }
+        bytes
+    }
+
+    fn push_f16(bytes: &mut Vec<u8>, value: f32) {
+        let bits = f16::from_f32(value).to_bits();
+        bytes.extend_from_slice(&bits.to_le_bytes());
+    }
+
+    fn align_bytes_per_row(bytes_per_row: u32) -> u32 {
+        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        ((bytes_per_row + align - 1) / align) * align
+    }
+
+    fn pad_rows(
+        data: &[u8],
+        width: u32,
+        height: u32,
+        bytes_per_pixel: u32,
+        aligned_bytes_per_row: u32,
+    ) -> Vec<u8> {
+        let bytes_per_row = bytes_per_pixel * width;
+        let mut padded = vec![0u8; (aligned_bytes_per_row * height) as usize];
+        for row in 0..height {
+            let src_start = (row * bytes_per_row) as usize;
+            let src_end = src_start + bytes_per_row as usize;
+            let dst_start = (row * aligned_bytes_per_row) as usize;
+            let dst_end = dst_start + bytes_per_row as usize;
+            padded[dst_start..dst_end].copy_from_slice(&data[src_start..src_end]);
+        }
+        padded
     }
 
     fn bench_stage<B, F>(
@@ -169,6 +809,34 @@ mod vision_bench {
     ) where
         B: AutodiffBackend + Clone + 'static,
         F: FnMut(&VisionSaccadeBench<B>) -> Tensor<B, 1>,
+    {
+        group.bench_with_input(
+            BenchmarkId::new(stage, cfg.name),
+            cfg,
+            |b, _cfg| {
+                b.iter_custom(|iters| {
+                    let mut total = Duration::ZERO;
+                    for _ in 0..iters {
+                        let start = Instant::now();
+                        let value = func(bench);
+                        force_sync(value);
+                        total += start.elapsed();
+                    }
+                    total
+                });
+            },
+        );
+    }
+
+    fn bench_scatter_stage<B, F>(
+        group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
+        cfg: &VisionBenchConfig,
+        stage: &str,
+        bench: &VisionScatterBench<B>,
+        mut func: F,
+    ) where
+        B: BackendTrait + Clone + 'static,
+        F: FnMut(&VisionScatterBench<B>) -> Tensor<B, 1>,
     {
         group.bench_with_input(
             BenchmarkId::new(stage, cfg.name),

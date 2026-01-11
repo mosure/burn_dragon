@@ -14,8 +14,9 @@ pub use train::{
 pub use vision::{
     ImagenetteVariant, VisionAugmentationConfig, VisionDatasetConfig, VisionDatasetDownloadConfig,
     VisionArtifactOutputMode, VisionDistillConfig, VisionFoveaSamplingMode, VisionFoveaScatterMode,
-    VisionFoveaWarpMode, VisionLejepaConfig, VisionMaeConfig, VisionModelConfig, VisionPyramidMode,
-    VisionSaccadeConfig,
+    VisionFoveaWarpMode, VisionLejepaConfig, VisionLejepaLossConfig, VisionLossConfig,
+    VisionMaeConfig, VisionMaeLossConfig, VisionModelConfig, VisionPyramidMode,
+    VisionReconLossConfig, VisionSaccadeCacheConfig, VisionSaccadeConfig,
     VisionTeacherConfig, VisionTeacherFeatureConfig, VisionTeacherModelConfig, VisionTeacherVariant,
     VisionTrainingConfig, VisionTrainingHyperparameters, VisionTrainingModeConfig,
     load_vision_training_config,

@@ -495,14 +495,17 @@ mod train_tests {
 
                 [mode]
                 type = "lejepa"
-                lambda = 0.02
-                sigreg_knots = 9
-                sigreg_t_max = 2.0
-                sigreg_proj_dim = 16
                 views = 2
                 artifact_every = 0
                 artifact_max_images = 2
                 artifact_max_views = 2
+
+                [mode.loss.lejepa]
+                enabled = true
+                lambda = 0.02
+                sigreg_knots = 9
+                sigreg_t_max = 2.0
+                sigreg_proj_dim = 16
 
                 [augment]
                 image_size = 8

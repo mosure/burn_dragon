@@ -387,10 +387,11 @@ mod tests {
 
         let frame = encoder.step(&[Some(layer0), Some(layer1)], 0);
 
-        assert_eq!(frame.units_x.shape().dims::<3>(), [11, 4, 4]);
-        assert_eq!(frame.units_y.shape().dims::<3>(), [11, 4, 4]);
-        assert_eq!(frame.units_xy.shape().dims::<3>(), [11, 4, 4]);
-        assert_eq!(frame.units_rho.shape().dims::<3>(), [11, 4, 4]);
+        let expected_units = super::units_height(2, 2 * 2);
+        assert_eq!(frame.units_x.shape().dims::<3>(), [expected_units, 4, 4]);
+        assert_eq!(frame.units_y.shape().dims::<3>(), [expected_units, 4, 4]);
+        assert_eq!(frame.units_xy.shape().dims::<3>(), [expected_units, 4, 4]);
+        assert_eq!(frame.units_rho.shape().dims::<3>(), [expected_units, 4, 4]);
         assert_eq!(frame.cursor, 0);
 
         let units_x = frame

@@ -284,14 +284,127 @@ pub enum VisionTeacherVariant {
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(default)]
-pub struct VisionLejepaConfig {
+pub struct VisionLejepaLossConfig {
+    pub enabled: bool,
     pub lambda: f32,
     pub sigreg_knots: usize,
     pub sigreg_t_max: f32,
     pub sigreg_proj_dim: usize,
-    pub recon_weight: f32,
-    pub recon_mask_ratio: f32,
-    pub recon_hidden_dim: usize,
+}
+
+impl Default for VisionLejepaLossConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            lambda: 0.02,
+            sigreg_knots: 17,
+            sigreg_t_max: 3.0,
+            sigreg_proj_dim: 256,
+        }
+    }
+}
+
+impl ModuleDisplayDefault for VisionLejepaLossConfig {
+    fn content(&self, content: Content) -> Option<Content> {
+        content
+            .add("enabled", &self.enabled)
+            .add("lambda", &self.lambda)
+            .add("sigreg_knots", &self.sigreg_knots)
+            .add("sigreg_t_max", &self.sigreg_t_max)
+            .add("sigreg_proj_dim", &self.sigreg_proj_dim)
+            .optional()
+    }
+}
+
+impl ModuleDisplay for VisionLejepaLossConfig {}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct VisionReconLossConfig {
+    pub weight: f32,
+    pub mask_ratio: f32,
+    pub hidden_dim: usize,
+}
+
+impl Default for VisionReconLossConfig {
+    fn default() -> Self {
+        Self {
+            weight: 0.0,
+            mask_ratio: 0.75,
+            hidden_dim: 256,
+        }
+    }
+}
+
+impl ModuleDisplayDefault for VisionReconLossConfig {
+    fn content(&self, content: Content) -> Option<Content> {
+        content
+            .add("weight", &self.weight)
+            .add("mask_ratio", &self.mask_ratio)
+            .add("hidden_dim", &self.hidden_dim)
+            .optional()
+    }
+}
+
+impl ModuleDisplay for VisionReconLossConfig {}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct VisionLossConfig {
+    pub lejepa: VisionLejepaLossConfig,
+    pub recon: VisionReconLossConfig,
+}
+
+impl Default for VisionLossConfig {
+    fn default() -> Self {
+        Self {
+            lejepa: VisionLejepaLossConfig::default(),
+            recon: VisionReconLossConfig::default(),
+        }
+    }
+}
+
+impl ModuleDisplayDefault for VisionLossConfig {
+    fn content(&self, content: Content) -> Option<Content> {
+        content
+            .add("lejepa", &self.lejepa)
+            .add("recon", &self.recon)
+            .optional()
+    }
+}
+
+impl ModuleDisplay for VisionLossConfig {}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct VisionMaeLossConfig {
+    pub recon: VisionReconLossConfig,
+}
+
+impl Default for VisionMaeLossConfig {
+    fn default() -> Self {
+        Self {
+            recon: VisionReconLossConfig {
+                weight: 1.0,
+                mask_ratio: 0.75,
+                hidden_dim: 256,
+            },
+        }
+    }
+}
+
+impl ModuleDisplayDefault for VisionMaeLossConfig {
+    fn content(&self, content: Content) -> Option<Content> {
+        content.add("recon", &self.recon).optional()
+    }
+}
+
+impl ModuleDisplay for VisionMaeLossConfig {}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct VisionLejepaConfig {
+    pub loss: VisionLossConfig,
     pub views: usize,
     pub global_views: usize,
     pub local_views: usize,
@@ -309,13 +422,7 @@ pub struct VisionLejepaConfig {
 impl Default for VisionLejepaConfig {
     fn default() -> Self {
         Self {
-            lambda: 0.02,
-            sigreg_knots: 17,
-            sigreg_t_max: 3.0,
-            sigreg_proj_dim: 256,
-            recon_weight: 0.0,
-            recon_mask_ratio: 0.75,
-            recon_hidden_dim: 256,
+            loss: VisionLossConfig::default(),
             views: 4,
             global_views: 0,
             local_views: 0,
@@ -371,13 +478,7 @@ impl<B: AutodiffBackend> AutodiffModule<B> for VisionLejepaConfig {
 impl ModuleDisplayDefault for VisionLejepaConfig {
     fn content(&self, content: Content) -> Option<Content> {
         content
-            .add("lambda", &self.lambda)
-            .add("sigreg_knots", &self.sigreg_knots)
-            .add("sigreg_t_max", &self.sigreg_t_max)
-            .add("sigreg_proj_dim", &self.sigreg_proj_dim)
-            .add("recon_weight", &self.recon_weight)
-            .add("recon_mask_ratio", &self.recon_mask_ratio)
-            .add("recon_hidden_dim", &self.recon_hidden_dim)
+            .add("loss", &self.loss)
             .add("views", &self.views)
             .add("global_views", &self.global_views)
             .add("local_views", &self.local_views)
@@ -399,9 +500,7 @@ impl ModuleDisplay for VisionLejepaConfig {}
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct VisionMaeConfig {
-    pub mask_ratio: f32,
-    pub recon_weight: f32,
-    pub recon_hidden_dim: usize,
+    pub loss: VisionMaeLossConfig,
     pub artifact_output: VisionArtifactOutputMode,
     pub artifact_fps: u32,
     pub artifact_every: usize,
@@ -413,9 +512,7 @@ pub struct VisionMaeConfig {
 impl Default for VisionMaeConfig {
     fn default() -> Self {
         Self {
-            mask_ratio: 0.75,
-            recon_weight: 1.0,
-            recon_hidden_dim: 256,
+            loss: VisionMaeLossConfig::default(),
             artifact_output: VisionArtifactOutputMode::Images,
             artifact_fps: 4,
             artifact_every: 0,
@@ -465,9 +562,7 @@ impl<B: AutodiffBackend> AutodiffModule<B> for VisionMaeConfig {
 impl ModuleDisplayDefault for VisionMaeConfig {
     fn content(&self, content: Content) -> Option<Content> {
         content
-            .add("mask_ratio", &self.mask_ratio)
-            .add("recon_weight", &self.recon_weight)
-            .add("recon_hidden_dim", &self.recon_hidden_dim)
+            .add("loss", &self.loss)
             .add("artifact_output", &self.artifact_output)
             .add("artifact_fps", &self.artifact_fps)
             .add("artifact_every", &self.artifact_every)
@@ -482,6 +577,26 @@ impl ModuleDisplay for VisionMaeConfig {}
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(default)]
+pub struct VisionSaccadeCacheConfig {
+    pub max_entries: usize,
+}
+
+impl Default for VisionSaccadeCacheConfig {
+    fn default() -> Self {
+        Self { max_entries: 64 }
+    }
+}
+
+impl ModuleDisplayDefault for VisionSaccadeCacheConfig {
+    fn content(&self, content: Content) -> Option<Content> {
+        content.add("max_entries", &self.max_entries).optional()
+    }
+}
+
+impl ModuleDisplay for VisionSaccadeCacheConfig {}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct VisionSaccadeConfig {
     pub num_eyes: usize,
     pub mip_levels: usize,
@@ -493,13 +608,8 @@ pub struct VisionSaccadeConfig {
     pub pyramid_feature_dim: Option<usize>,
     pub inner_steps: usize,
     pub low_mem_pre_rollout: bool,
-    pub lambda: f32,
-    pub sigreg_knots: usize,
-    pub sigreg_t_max: f32,
-    pub sigreg_proj_dim: usize,
-    pub recon_weight: f32,
-    pub recon_mask_ratio: f32,
-    pub recon_hidden_dim: usize,
+    pub cache: VisionSaccadeCacheConfig,
+    pub loss: VisionLossConfig,
     pub artifact_output: VisionArtifactOutputMode,
     pub artifact_fps: u32,
     pub artifact_every: usize,
@@ -511,25 +621,20 @@ pub struct VisionSaccadeConfig {
 impl Default for VisionSaccadeConfig {
     fn default() -> Self {
         Self {
-            num_eyes: 2,
-            mip_levels: 3,
+            num_eyes: 1,
+            mip_levels: 4,
             pyramid_mode: VisionPyramidMode::Laplacian,
-            fovea_sampling_mode: VisionFoveaSamplingMode::Sequential,
+            fovea_sampling_mode: VisionFoveaSamplingMode::Batched,
             fovea_warp_mode: VisionFoveaWarpMode::Warped,
             fovea_subpatch_size: 0,
             fovea_scatter_mode: VisionFoveaScatterMode::Tensor,
             pyramid_feature_dim: None,
             inner_steps: 1,
             low_mem_pre_rollout: true,
-            lambda: 0.02,
-            sigreg_knots: 17,
-            sigreg_t_max: 3.0,
-            sigreg_proj_dim: 256,
-            recon_weight: 0.0,
-            recon_mask_ratio: 0.75,
-            recon_hidden_dim: 256,
+            cache: VisionSaccadeCacheConfig::default(),
+            loss: VisionLossConfig::default(),
             artifact_output: VisionArtifactOutputMode::Mp4,
-            artifact_fps: 4,
+            artifact_fps: 8,
             artifact_every: 0,
             artifact_max_images: 4,
             artifact_max_views: 4,
@@ -587,13 +692,8 @@ impl ModuleDisplayDefault for VisionSaccadeConfig {
             .add("pyramid_feature_dim", &self.pyramid_feature_dim)
             .add("inner_steps", &self.inner_steps)
             .add("low_mem_pre_rollout", &self.low_mem_pre_rollout)
-            .add("lambda", &self.lambda)
-            .add("sigreg_knots", &self.sigreg_knots)
-            .add("sigreg_t_max", &self.sigreg_t_max)
-            .add("sigreg_proj_dim", &self.sigreg_proj_dim)
-            .add("recon_weight", &self.recon_weight)
-            .add("recon_mask_ratio", &self.recon_mask_ratio)
-            .add("recon_hidden_dim", &self.recon_hidden_dim)
+            .add("cache", &self.cache)
+            .add("loss", &self.loss)
             .add("artifact_output", &self.artifact_output)
             .add("artifact_fps", &self.artifact_fps)
             .add("artifact_every", &self.artifact_every)
@@ -1001,13 +1101,6 @@ mod tests {
 
             [mode]
             type = "lejepa"
-            lambda = 0.05
-            sigreg_knots = 19
-            sigreg_t_max = 2.5
-            sigreg_proj_dim = 128
-            recon_weight = 0.7
-            recon_mask_ratio = 0.6
-            recon_hidden_dim = 192
             views = 4
             global_views = 2
             local_views = 6
@@ -1020,6 +1113,18 @@ mod tests {
             artifact_max_images = 3
             artifact_max_views = 2
             artifact_overwrite = true
+
+            [mode.loss.lejepa]
+            enabled = true
+            lambda = 0.05
+            sigreg_knots = 19
+            sigreg_t_max = 2.5
+            sigreg_proj_dim = 128
+
+            [mode.loss.recon]
+            weight = 0.7
+            mask_ratio = 0.6
+            hidden_dim = 192
         "#;
 
         let config: VisionTrainingConfig = toml::from_str(text).expect("parse lejepa config");
@@ -1028,13 +1133,14 @@ mod tests {
         assert_eq!(config.training.rollout_backprop_steps, Some(1));
         match config.mode {
             VisionTrainingModeConfig::Lejepa(lejepa) => {
-                assert!((lejepa.lambda - 0.05).abs() < f32::EPSILON);
-                assert_eq!(lejepa.sigreg_knots, 19);
-                assert!((lejepa.sigreg_t_max - 2.5).abs() < f32::EPSILON);
-                assert_eq!(lejepa.sigreg_proj_dim, 128);
-                assert!((lejepa.recon_weight - 0.7).abs() < f32::EPSILON);
-                assert!((lejepa.recon_mask_ratio - 0.6).abs() < f32::EPSILON);
-                assert_eq!(lejepa.recon_hidden_dim, 192);
+                assert!(lejepa.loss.lejepa.enabled);
+                assert!((lejepa.loss.lejepa.lambda - 0.05).abs() < f32::EPSILON);
+                assert_eq!(lejepa.loss.lejepa.sigreg_knots, 19);
+                assert!((lejepa.loss.lejepa.sigreg_t_max - 2.5).abs() < f32::EPSILON);
+                assert_eq!(lejepa.loss.lejepa.sigreg_proj_dim, 128);
+                assert!((lejepa.loss.recon.weight - 0.7).abs() < f32::EPSILON);
+                assert!((lejepa.loss.recon.mask_ratio - 0.6).abs() < f32::EPSILON);
+                assert_eq!(lejepa.loss.recon.hidden_dim, 192);
                 assert_eq!(lejepa.views, 4);
                 assert_eq!(lejepa.global_views, 2);
                 assert_eq!(lejepa.local_views, 6);
@@ -1088,23 +1194,25 @@ mod tests {
 
             [mode]
             type = "mae"
-            mask_ratio = 0.8
-            recon_weight = 1.2
-            recon_hidden_dim = 192
             artifact_output = "images"
             artifact_fps = 5
             artifact_every = 3
             artifact_max_images = 2
             artifact_max_views = 1
             artifact_overwrite = true
+
+            [mode.loss.recon]
+            weight = 1.2
+            mask_ratio = 0.8
+            hidden_dim = 192
         "#;
 
         let config: VisionTrainingConfig = toml::from_str(text).expect("parse mae config");
         match config.mode {
             VisionTrainingModeConfig::Mae(mae) => {
-                assert!((mae.mask_ratio - 0.8).abs() < f32::EPSILON);
-                assert!((mae.recon_weight - 1.2).abs() < f32::EPSILON);
-                assert_eq!(mae.recon_hidden_dim, 192);
+                assert!((mae.loss.recon.mask_ratio - 0.8).abs() < f32::EPSILON);
+                assert!((mae.loss.recon.weight - 1.2).abs() < f32::EPSILON);
+                assert_eq!(mae.loss.recon.hidden_dim, 192);
                 assert_eq!(mae.artifact_output, VisionArtifactOutputMode::Images);
                 assert_eq!(mae.artifact_fps, 5);
                 assert_eq!(mae.artifact_every, 3);
@@ -1159,19 +1267,24 @@ mod tests {
             fovea_warp_mode = "patched"
             fovea_subpatch_size = 12
             inner_steps = 2
-            lambda = 0.05
-            sigreg_knots = 9
-            sigreg_t_max = 2.0
-            sigreg_proj_dim = 192
-            recon_weight = 0.9
-            recon_mask_ratio = 0.7
-            recon_hidden_dim = 320
             artifact_output = "avi"
             artifact_fps = 7
             artifact_every = 4
             artifact_max_images = 3
             artifact_max_views = 2
             artifact_overwrite = false
+
+            [mode.loss.lejepa]
+            enabled = true
+            lambda = 0.05
+            sigreg_knots = 9
+            sigreg_t_max = 2.0
+            sigreg_proj_dim = 192
+
+            [mode.loss.recon]
+            weight = 0.9
+            mask_ratio = 0.7
+            hidden_dim = 320
         "#;
 
         let config: VisionTrainingConfig = toml::from_str(text).expect("parse saccade config");
@@ -1184,13 +1297,14 @@ mod tests {
                 assert_eq!(saccade.fovea_warp_mode, VisionFoveaWarpMode::Patched);
                 assert_eq!(saccade.fovea_subpatch_size, 12);
                 assert_eq!(saccade.inner_steps, 2);
-                assert!((saccade.lambda - 0.05).abs() < f32::EPSILON);
-                assert_eq!(saccade.sigreg_knots, 9);
-                assert!((saccade.sigreg_t_max - 2.0).abs() < f32::EPSILON);
-                assert_eq!(saccade.sigreg_proj_dim, 192);
-                assert!((saccade.recon_weight - 0.9).abs() < f32::EPSILON);
-                assert!((saccade.recon_mask_ratio - 0.7).abs() < f32::EPSILON);
-                assert_eq!(saccade.recon_hidden_dim, 320);
+                assert!(saccade.loss.lejepa.enabled);
+                assert!((saccade.loss.lejepa.lambda - 0.05).abs() < f32::EPSILON);
+                assert_eq!(saccade.loss.lejepa.sigreg_knots, 9);
+                assert!((saccade.loss.lejepa.sigreg_t_max - 2.0).abs() < f32::EPSILON);
+                assert_eq!(saccade.loss.lejepa.sigreg_proj_dim, 192);
+                assert!((saccade.loss.recon.weight - 0.9).abs() < f32::EPSILON);
+                assert!((saccade.loss.recon.mask_ratio - 0.7).abs() < f32::EPSILON);
+                assert_eq!(saccade.loss.recon.hidden_dim, 320);
                 assert_eq!(saccade.artifact_output, VisionArtifactOutputMode::Avi);
                 assert_eq!(saccade.artifact_fps, 7);
                 assert_eq!(saccade.artifact_every, 4);

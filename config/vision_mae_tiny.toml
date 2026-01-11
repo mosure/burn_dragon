@@ -48,10 +48,6 @@ relu_threshold = 0.0
 
 [mode]
 type = "mae"
-# fraction of patches to mask for reconstruction
-mask_ratio = 0.75
-recon_weight = 1.0
-recon_hidden_dim = 256
 # write artifact images every N validation iterations (0 disables)
 artifact_every = 1
 # max images per artifact batch (caps batch rows)
@@ -60,6 +56,12 @@ artifact_max_images = 4
 artifact_max_views = 3
 # overwrite validation artifacts instead of keeping history
 artifact_overwrite = true
+
+[mode.loss.recon]
+# fraction of patches to mask for reconstruction
+mask_ratio = 0.75
+weight = 1.0
+hidden_dim = 256
 
 [augment]
 image_size = 160

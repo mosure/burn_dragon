@@ -19,7 +19,7 @@ max_iters = 2000
 log_frequency = 20
 rollout_min_steps = 1
 rollout_max_steps = 64
-rollout_backprop_steps = 1
+rollout_backprop_steps = 8
 
 [optimizer]
 learning_rate = 0.0005
@@ -54,23 +54,19 @@ mip_levels = 4
 # how pyramid scales are represented: stacked (raw) or laplacian (residual)
 pyramid_mode = "laplacian"
 # fovea sampling strategy: batched, sequential, or subpatch
-fovea_sampling_mode = "sequential"
+fovea_sampling_mode = "batched"
+# fovea warp mode: warped (continuous) or patched (level crop)
+fovea_warp_mode = "warped"
 # subpatch size for "subpatch" sampling (0 uses full patch)
 fovea_subpatch_size = 0
+# fovea scatter mode for feature pyramid updates
+fovea_scatter_mode = "tensor"
 # feature pyramid embedding dim (unset uses model embed_dim)
 pyramid_feature_dim = 64
+# inner recurrent steps per rollout step
+inner_steps = 1
 # pre-rollout steps always run without grad to keep memory stable
 low_mem_pre_rollout = true
-# LeJEPA-style loss over the feature pyramid (invariance + sigreg)
-lambda = 0.02
-sigreg_knots = 17
-sigreg_t_max = 3.0
-sigreg_proj_dim = 256
-# reconstruction loss weight (trains RGB decoder)
-recon_weight = 1.0
-# saccade ignores MAE-style masking (full-image reconstruction)
-recon_mask_ratio = 0.0
-recon_hidden_dim = 256
 # write artifact images every N validation iterations (0 disables)
 artifact_every = 1
 # artifact output: images (png), avi, or mp4
@@ -83,6 +79,25 @@ artifact_max_images = 16
 artifact_max_views = 4
 # overwrite validation artifacts instead of keeping history
 artifact_overwrite = true
+
+[mode.cache]
+# cap cached GPU foveation tensors to avoid runaway VRAM on varying shapes
+max_entries = 64
+
+[mode.loss.lejepa]
+# enable LeJEPA invariance + sigreg losses
+enabled = true
+lambda = 0.02
+sigreg_knots = 17
+sigreg_t_max = 3.0
+sigreg_proj_dim = 256
+
+[mode.loss.recon]
+# reconstruction loss weight (trains RGB decoder)
+weight = 1.0
+# saccade ignores MAE-style masking (full-image reconstruction)
+mask_ratio = 0.0
+hidden_dim = 256
 
 [augment]
 image_size = 160

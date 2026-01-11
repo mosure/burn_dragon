@@ -1348,7 +1348,13 @@ pub(crate) fn render_patch(
                 let max_level = cache.laplacian.len();
                 let level = patched_level_from_radius(radius_norm, max_level);
                 if level >= cache.laplacian.len() {
-                    (level, cache.coarse.width.max(1), cache.coarse.height.max(1))
+                    let (coarse_w, coarse_h) = cache
+                        .coarse
+                        .as_ref()
+                        .or_else(|| cache.gaussian.last())
+                        .map(|level| (level.width.max(1), level.height.max(1)))
+                        .unwrap_or((source.width.max(1), source.height.max(1)));
+                    (level, coarse_w, coarse_h)
                 } else {
                     let level_w = cache.laplacian[level].width.max(1);
                     let level_h = cache.laplacian[level].height.max(1);
@@ -1561,7 +1567,13 @@ pub(crate) fn render_patch_f32(
                 let max_level = cache.laplacian.len();
                 let level = patched_level_from_radius(radius_norm, max_level);
                 if level >= cache.laplacian.len() {
-                    (level, cache.coarse.width.max(1), cache.coarse.height.max(1))
+                    let (coarse_w, coarse_h) = cache
+                        .coarse
+                        .as_ref()
+                        .or_else(|| cache.gaussian.last())
+                        .map(|level| (level.width.max(1), level.height.max(1)))
+                        .unwrap_or((source.width.max(1), source.height.max(1)));
+                    (level, coarse_w, coarse_h)
                 } else {
                     let level_w = cache.laplacian[level].width.max(1);
                     let level_h = cache.laplacian[level].height.max(1);
@@ -1723,10 +1735,10 @@ pub(crate) fn render_patch_f32(
 }
 
 #[cfg(test)]
-const SQRT2: f32 = 1.41421356237;
+const SQRT2: f32 = std::f32::consts::SQRT_2;
 
 #[cfg(test)]
-const PI: f32 = 3.14159265359;
+const PI: f32 = std::f32::consts::PI;
 
 #[cfg(test)]
 const ERF_A: f32 = 0.147;

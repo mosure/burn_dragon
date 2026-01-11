@@ -48,14 +48,6 @@ relu_threshold = 0.0
 
 [mode]
 type = "lejepa"
-lambda = 0.02
-sigreg_knots = 17
-sigreg_t_max = 3.0
-sigreg_proj_dim = 256
-recon_weight = 1.0
-# fraction of patches to mask for the MAE-style reconstruction loss
-recon_mask_ratio = 0.75
-recon_hidden_dim = 256
 # total number of views when global_views/local_views are 0
 views = 8
 # enable multi-crop when > 0 (global views use base augmentations)
@@ -75,6 +67,19 @@ artifact_max_images = 4
 artifact_max_views = 3
 # overwrite validation artifacts instead of keeping history
 artifact_overwrite = true
+
+[mode.loss.lejepa]
+enabled = true
+lambda = 0.02
+sigreg_knots = 17
+sigreg_t_max = 3.0
+sigreg_proj_dim = 256
+
+[mode.loss.recon]
+weight = 1.0
+# fraction of patches to mask for the MAE-style reconstruction loss
+mask_ratio = 0.75
+hidden_dim = 256
 
 [augment]
 image_size = 160

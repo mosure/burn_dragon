@@ -4,9 +4,9 @@ const SIGMA_MAX: f32 = 0.5;
 const LOD_LOG2_MIN: f32 = -2.0;
 const LOD_LOG2_MAX: f32 = 1.0;
 const FOVEA_AA_THRESHOLD: f32 = 1.25;
-const LN_2: f32 = 0.69314718056;
-const SQRT2: f32 = 1.41421356237;
-const PI: f32 = 3.14159265359;
+const LN_2: f32 = std::f32::consts::LN_2;
+const SQRT2: f32 = std::f32::consts::SQRT_2;
+const PI: f32 = std::f32::consts::PI;
 const ERF_A: f32 = 0.147;
 const SQRT_PI_OVER_2: f32 = 0.88622692545;
 const LOD_WINDOW: i32 = 3;
@@ -319,7 +319,7 @@ pub fn lod_sigma_from_sigma(sigma: f32) -> f32 {
     let range = (SIGMA_MAX - SIGMA_MIN).max(FOVEA_PARAM_EPS);
     let t = ((sigma - SIGMA_MIN) / range).clamp(0.0, 1.0);
     let log2 = t * (LOD_LOG2_MAX - LOD_LOG2_MIN) + LOD_LOG2_MIN;
-    (log2 * 0.69314718056).exp()
+    (log2 * LN_2).exp()
 }
 
 fn erf_approx(x: f32) -> f32 {

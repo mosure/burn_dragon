@@ -1,7 +1,7 @@
 #![cfg_attr(not(feature = "cli"), allow(dead_code))]
 
 use std::any::TypeId;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -74,7 +74,9 @@ use crate::{
     VisionArtifactOutputMode, VisionDatasetConfig, VisionDatasetDownloadConfig,
     VisionDragonHatchling, VisionDragonHatchlingConfig, VisionDistillationLossConfig,
     VisionFoveaSamplingMode, VisionFoveaScatterMode, VisionFoveaWarpMode, VisionLejepaConfig,
-    VisionMaeConfig, VisionNormalize, VisionPyramidMode, VisionSaccadeConfig, VisionTeacherConfig,
+    VisionLejepaLossConfig, VisionLossConfig, VisionMaeConfig, VisionNormalize,
+    VisionPyramidMode, VisionReconLossConfig, VisionSaccadeCacheConfig, VisionSaccadeConfig,
+    VisionTeacherConfig,
     VisionTeacherVariant, VisionTrainingConfig,
     VisionTrainingHyperparameters, VisionTrainingModeConfig, build_dataset, build_model_config,
     language_model_loss, patchify, unpatchify, vision_distillation_loss,
@@ -142,19 +144,20 @@ const SACCADE_EPS: f32 = 1e-6;
 const SACCADE_TRAJ_TOKENS: usize = 1;
 const SACCADE_SIGMA_MIN: f32 = 0.03;
 const SACCADE_SIGMA_MAX: f32 = 0.5;
-const SACCADE_LN_2: f32 = 0.69314718056;
+const SACCADE_LN_2: f32 = std::f32::consts::LN_2;
 const SACCADE_LOD_LOG2_MIN: f32 = -2.0;
 const SACCADE_LOD_LOG2_MAX: f32 = 1.0;
 const SACCADE_RING_WIDTH: f32 = 0.02;
 const SACCADE_RING_INTENSITY: f32 = 2.0;
 const SACCADE_RING_OUTER_SCALE: f32 = 2.5;
 const SACCADE_RING_OUTER_INTENSITY: f32 = 0.7;
+const SACCADE_RING_INNER_COLOR: [f32; 3] = [60.0 / 255.0, 200.0 / 255.0, 1.0];
 const SACCADE_VIEW_GAP: usize = 2;
 const SACCADE_FOVEA_SUBSAMPLES: usize = 4;
 const SACCADE_FOVEA_LOD_WINDOW: f32 = 3.0;
 const SACCADE_FOVEA_AA_THRESHOLD: f32 = 1.25;
-const SACCADE_FOVEA_SQRT2: f32 = 1.41421356237;
-const SACCADE_FOVEA_PI: f32 = 3.14159265359;
+const SACCADE_FOVEA_SQRT2: f32 = std::f32::consts::SQRT_2;
+const SACCADE_FOVEA_PI: f32 = std::f32::consts::PI;
 const SACCADE_FOVEA_ERF_A: f32 = 0.147;
 const SACCADE_FOVEA_SQRT_PI_OVER_2: f32 = 0.88622692545;
 
@@ -321,13 +324,14 @@ impl<B: BackendTrait> VisionLejepaModel<B> {
     ) -> Self {
         let probe = VisionProbe::new(embed_dim, num_classes, device);
         let probe_loss = CrossEntropyLossConfig::new().init(device);
-        let recon = if config.recon_weight > 0.0 {
+        let recon_weight = config.loss.recon.weight;
+        let recon = if recon_weight > 0.0 {
             if recon_patch_dim == 0 {
                 None
             } else {
                 Some(VisionReconstructionHead::new(
                     embed_dim,
-                    config.recon_hidden_dim,
+                    config.loss.recon.hidden_dim,
                     recon_patch_dim,
                     device,
                 ))
@@ -470,18 +474,24 @@ impl<B: BackendTrait> VisionLejepaModel<B> {
         } else {
             Tensor::cat(embed_groups, 0)
         };
-        let inv = lejepa_invariance_loss(proj.clone());
-        let sigreg = lejepa_sigreg_loss(proj.clone(), &self.config);
-        let lambda = self.config.lambda.clamp(0.0, 1.0);
-        let mut total = inv.clone().mul_scalar(1.0 - lambda) + sigreg.clone().mul_scalar(lambda);
+        let zero = Tensor::<B, 1>::zeros([1], &device);
+        let (inv, sigreg, mut total) = if self.config.loss.lejepa.enabled {
+            let inv = lejepa_invariance_loss(proj.clone());
+            let sigreg = lejepa_sigreg_loss(proj.clone(), &self.config.loss.lejepa);
+            let lambda = self.config.loss.lejepa.lambda.clamp(0.0, 1.0);
+            let total = inv.clone().mul_scalar(1.0 - lambda) + sigreg.clone().mul_scalar(lambda);
+            (inv, sigreg, total)
+        } else {
+            (zero.clone(), zero.clone(), zero.clone())
+        };
         let recon = if recon_enabled {
             let denom = recon_mask_sum.clone().add_scalar(LEJEPA_EPS);
             let recon = recon_loss_sum / denom;
-            let weight = self.config.recon_weight.max(0.0);
+            let weight = self.config.loss.recon.weight.max(0.0);
             total = total + recon.clone().mul_scalar(weight);
             recon
         } else {
-            Tensor::<B, 1>::zeros([1], &device)
+            zero.clone()
         };
 
         let probe_source = probe_embed.as_ref().unwrap_or(&embed);
@@ -592,7 +602,7 @@ impl<B: BackendTrait> VisionLejepaModel<B> {
             &device,
             total,
             tokens,
-            self.config.recon_mask_ratio,
+            self.config.loss.recon.mask_ratio,
             randomize_mask,
         );
         let mask_expanded = mask.clone().unsqueeze_dim::<3>(2);
@@ -712,7 +722,7 @@ impl<B: BackendTrait> VisionMaeModel<B> {
     ) -> Self {
         let recon = VisionReconstructionHead::new(
             embed_dim,
-            config.recon_hidden_dim,
+            config.loss.recon.hidden_dim,
             recon_patch_dim,
             device,
         );
@@ -744,7 +754,9 @@ impl<B: BackendTrait> VisionMaeModel<B> {
             self.recon_loss(images, steps, backprop_steps, randomize_mask, capture_artifacts);
         let denom = mask_sum.clone().add_scalar(LEJEPA_EPS);
         let recon = loss_sum / denom;
-        let total = recon.clone().mul_scalar(self.config.recon_weight.max(0.0));
+        let total = recon
+            .clone()
+            .mul_scalar(self.config.loss.recon.weight.max(0.0));
 
         let artifacts = artifacts.and_then(|(views, residual)| {
             build_lejepa_artifacts(
@@ -807,7 +819,7 @@ impl<B: BackendTrait> VisionMaeModel<B> {
             &device,
             batch,
             tokens,
-            self.config.mask_ratio,
+            self.config.loss.recon.mask_ratio,
             randomize_mask,
         );
         let mask_expanded = mask.clone().unsqueeze_dim::<3>(2);
@@ -861,27 +873,51 @@ impl<B: BackendTrait> VisionMaeModel<B> {
 }
 
 #[derive(Clone, Debug)]
+struct LevelCoordsCacheState<B: BackendTrait> {
+    map: HashMap<(usize, usize), Tensor<B, 2>>,
+    order: VecDeque<(usize, usize)>,
+}
+
+#[derive(Clone, Debug)]
 struct LevelCoordsCache<B: BackendTrait> {
-    inner: Arc<Mutex<HashMap<(usize, usize), Tensor<B, 2>>>>,
+    inner: Arc<Mutex<LevelCoordsCacheState<B>>>,
+    max_entries: usize,
 }
 
 impl<B: BackendTrait> LevelCoordsCache<B> {
-    fn new() -> Self {
+    fn new(max_entries: usize) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(HashMap::new())),
+            inner: Arc::new(Mutex::new(LevelCoordsCacheState {
+                map: HashMap::new(),
+                order: VecDeque::new(),
+            })),
+            max_entries,
         }
     }
 
     fn get_or_build(&self, grid: PatchGrid, device: &B::Device) -> Tensor<B, 2> {
         let key = (grid.height, grid.width);
         if let Ok(cache) = self.inner.lock() {
-            if let Some(coords) = cache.get(&key) {
+            if let Some(coords) = cache.map.get(&key) {
                 return coords.clone();
             }
         }
         let coords = build_level_coords::<B>(grid, device);
+        if self.max_entries == 0 {
+            return coords;
+        }
         if let Ok(mut cache) = self.inner.lock() {
-            cache.insert(key, coords.clone());
+            if !cache.map.contains_key(&key) {
+                cache.order.push_back(key);
+            }
+            cache.map.insert(key, coords.clone());
+            while cache.map.len() > self.max_entries {
+                if let Some(evicted) = cache.order.pop_front() {
+                    cache.map.remove(&evicted);
+                } else {
+                    break;
+                }
+            }
         }
         coords
     }
@@ -919,35 +955,50 @@ impl<B: AutodiffBackend> AutodiffModule<B> for LevelCoordsCache<B> {
     type InnerModule = LevelCoordsCache<B::InnerBackend>;
 
     fn valid(&self) -> Self::InnerModule {
-        LevelCoordsCache::new()
+        LevelCoordsCache::new(self.max_entries)
     }
 }
 
 impl<B: BackendTrait> ModuleDisplayDefault for LevelCoordsCache<B> {
     fn content(&self, content: Content) -> Option<Content> {
-        let entries = self.inner.lock().map(|cache| cache.len()).unwrap_or(0);
-        content.add("entries", &entries).optional()
+        let max_entries = self.max_entries;
+        let entries = self.inner.lock().map(|cache| cache.map.len()).unwrap_or(0);
+        content
+            .add("entries", &entries)
+            .add("max_entries", &max_entries)
+            .optional()
     }
 }
 
 impl<B: BackendTrait> ModuleDisplay for LevelCoordsCache<B> {}
 
 #[derive(Clone, Debug)]
+struct UpsampleWeightsCacheState<B: BackendTrait> {
+    map: HashMap<(usize, usize, usize, usize), Tensor<B, 2>>,
+    order: VecDeque<(usize, usize, usize, usize)>,
+}
+
+#[derive(Clone, Debug)]
 struct UpsampleWeightsCache<B: BackendTrait> {
-    inner: Arc<Mutex<HashMap<(usize, usize, usize, usize), Tensor<B, 2>>>>,
+    inner: Arc<Mutex<UpsampleWeightsCacheState<B>>>,
+    max_entries: usize,
 }
 
 impl<B: BackendTrait> UpsampleWeightsCache<B> {
-    fn new() -> Self {
+    fn new(max_entries: usize) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(HashMap::new())),
+            inner: Arc::new(Mutex::new(UpsampleWeightsCacheState {
+                map: HashMap::new(),
+                order: VecDeque::new(),
+            })),
+            max_entries,
         }
     }
 
     fn get_or_build(&self, from: PatchGrid, to: PatchGrid, device: &B::Device) -> Tensor<B, 2> {
         let key = (from.height, from.width, to.height, to.width);
         if let Ok(cache) = self.inner.lock() {
-            if let Some(weights) = cache.get(&key) {
+            if let Some(weights) = cache.map.get(&key) {
                 return weights.clone();
             }
         }
@@ -969,8 +1020,21 @@ impl<B: BackendTrait> UpsampleWeightsCache<B> {
         }
         let weights =
             Tensor::<B, 2>::from_data(TensorData::new(mapping, [to_tokens, from_tokens]), device);
+        if self.max_entries == 0 {
+            return weights;
+        }
         if let Ok(mut cache) = self.inner.lock() {
-            cache.insert(key, weights.clone());
+            if !cache.map.contains_key(&key) {
+                cache.order.push_back(key);
+            }
+            cache.map.insert(key, weights.clone());
+            while cache.map.len() > self.max_entries {
+                if let Some(evicted) = cache.order.pop_front() {
+                    cache.map.remove(&evicted);
+                } else {
+                    break;
+                }
+            }
         }
         weights
     }
@@ -1008,41 +1072,69 @@ impl<B: AutodiffBackend> AutodiffModule<B> for UpsampleWeightsCache<B> {
     type InnerModule = UpsampleWeightsCache<B::InnerBackend>;
 
     fn valid(&self) -> Self::InnerModule {
-        UpsampleWeightsCache::new()
+        UpsampleWeightsCache::new(self.max_entries)
     }
 }
 
 impl<B: BackendTrait> ModuleDisplayDefault for UpsampleWeightsCache<B> {
     fn content(&self, content: Content) -> Option<Content> {
-        let entries = self.inner.lock().map(|cache| cache.len()).unwrap_or(0);
-        content.add("entries", &entries).optional()
+        let max_entries = self.max_entries;
+        let entries = self.inner.lock().map(|cache| cache.map.len()).unwrap_or(0);
+        content
+            .add("entries", &entries)
+            .add("max_entries", &max_entries)
+            .optional()
     }
 }
 
 impl<B: BackendTrait> ModuleDisplay for UpsampleWeightsCache<B> {}
 
 #[derive(Clone, Debug)]
+struct FoveaBaseGridCacheState<B: BackendTrait> {
+    map: HashMap<usize, Tensor<B, 4>>,
+    order: VecDeque<usize>,
+}
+
+#[derive(Clone, Debug)]
 struct FoveaBaseGridCache<B: BackendTrait> {
-    inner: Arc<Mutex<HashMap<usize, Tensor<B, 4>>>>,
+    inner: Arc<Mutex<FoveaBaseGridCacheState<B>>>,
+    max_entries: usize,
 }
 
 impl<B: BackendTrait> FoveaBaseGridCache<B> {
-    fn new() -> Self {
+    fn new(max_entries: usize) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(HashMap::new())),
+            inner: Arc::new(Mutex::new(FoveaBaseGridCacheState {
+                map: HashMap::new(),
+                order: VecDeque::new(),
+            })),
+            max_entries,
         }
     }
 
     fn get_or_build(&self, patch_size: usize, device: &B::Device) -> Tensor<B, 4> {
         let key = patch_size.max(1);
         if let Ok(cache) = self.inner.lock() {
-            if let Some(grid) = cache.get(&key) {
+            if let Some(grid) = cache.map.get(&key) {
                 return grid.clone();
             }
         }
         let grid = build_foveated_base_grid::<B>(key, device);
+        if self.max_entries == 0 {
+            return grid;
+        }
         if let Ok(mut cache) = self.inner.lock() {
-            cache.insert(key, grid.clone());
+            if !cache.map.contains_key(&key) {
+                cache.order.push_back(key);
+            }
+            cache.map.insert(key, grid.clone());
+            while cache.map.len() > self.max_entries {
+                if let Some(evicted) = cache.order.pop_front() {
+                    cache.map.remove(&evicted);
+                } else {
+                    break;
+                }
+            }
         }
         grid
     }
@@ -1080,14 +1172,18 @@ impl<B: AutodiffBackend> AutodiffModule<B> for FoveaBaseGridCache<B> {
     type InnerModule = FoveaBaseGridCache<B::InnerBackend>;
 
     fn valid(&self) -> Self::InnerModule {
-        FoveaBaseGridCache::new()
+        FoveaBaseGridCache::new(self.max_entries)
     }
 }
 
 impl<B: BackendTrait> ModuleDisplayDefault for FoveaBaseGridCache<B> {
     fn content(&self, content: Content) -> Option<Content> {
-        let entries = self.inner.lock().map(|cache| cache.len()).unwrap_or(0);
-        content.add("entries", &entries).optional()
+        let max_entries = self.max_entries;
+        let entries = self.inner.lock().map(|cache| cache.map.len()).unwrap_or(0);
+        content
+            .add("entries", &entries)
+            .add("max_entries", &max_entries)
+            .optional()
     }
 }
 
@@ -1100,27 +1196,51 @@ struct FoveaJitter<B: BackendTrait> {
 }
 
 #[derive(Clone, Debug)]
+struct FoveaJitterCacheState<B: BackendTrait> {
+    map: HashMap<usize, FoveaJitter<B>>,
+    order: VecDeque<usize>,
+}
+
+#[derive(Clone, Debug)]
 struct FoveaJitterCache<B: BackendTrait> {
-    inner: Arc<Mutex<HashMap<usize, FoveaJitter<B>>>>,
+    inner: Arc<Mutex<FoveaJitterCacheState<B>>>,
+    max_entries: usize,
 }
 
 impl<B: BackendTrait> FoveaJitterCache<B> {
-    fn new() -> Self {
+    fn new(max_entries: usize) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(HashMap::new())),
+            inner: Arc::new(Mutex::new(FoveaJitterCacheState {
+                map: HashMap::new(),
+                order: VecDeque::new(),
+            })),
+            max_entries,
         }
     }
 
     fn get_or_build(&self, patch_size: usize, device: &B::Device) -> FoveaJitter<B> {
         let key = patch_size.max(1);
         if let Ok(cache) = self.inner.lock() {
-            if let Some(jitter) = cache.get(&key) {
+            if let Some(jitter) = cache.map.get(&key) {
                 return jitter.clone();
             }
         }
         let jitter = build_fovea_jitter::<B>(key, device);
+        if self.max_entries == 0 {
+            return jitter;
+        }
         if let Ok(mut cache) = self.inner.lock() {
-            cache.insert(key, jitter.clone());
+            if !cache.map.contains_key(&key) {
+                cache.order.push_back(key);
+            }
+            cache.map.insert(key, jitter.clone());
+            while cache.map.len() > self.max_entries {
+                if let Some(evicted) = cache.order.pop_front() {
+                    cache.map.remove(&evicted);
+                } else {
+                    break;
+                }
+            }
         }
         jitter
     }
@@ -1158,14 +1278,18 @@ impl<B: AutodiffBackend> AutodiffModule<B> for FoveaJitterCache<B> {
     type InnerModule = FoveaJitterCache<B::InnerBackend>;
 
     fn valid(&self) -> Self::InnerModule {
-        FoveaJitterCache::new()
+        FoveaJitterCache::new(self.max_entries)
     }
 }
 
 impl<B: BackendTrait> ModuleDisplayDefault for FoveaJitterCache<B> {
     fn content(&self, content: Content) -> Option<Content> {
-        let entries = self.inner.lock().map(|cache| cache.len()).unwrap_or(0);
-        content.add("entries", &entries).optional()
+        let max_entries = self.max_entries;
+        let entries = self.inner.lock().map(|cache| cache.map.len()).unwrap_or(0);
+        content
+            .add("entries", &entries)
+            .add("max_entries", &max_entries)
+            .optional()
     }
 }
 
@@ -1226,7 +1350,7 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
     ) -> Self {
         let recon = VisionReconstructionHead::new(
             embed_dim,
-            config.recon_hidden_dim,
+            config.loss.recon.hidden_dim,
             recon_patch_dim,
             device,
         );
@@ -1245,6 +1369,7 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
         } else {
             Tensor::<B, 2>::zeros([num_eyes, embed_dim.max(1)], device)
         };
+        let cache_entries = config.cache.max_entries;
         let pyramid_dim = config
             .pyramid_feature_dim
             .filter(|&value| value > 0)
@@ -1276,10 +1401,10 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
             residual_proj,
             saccade_head,
             config,
-            level_coords_cache: LevelCoordsCache::new(),
-            upsample_weights_cache: UpsampleWeightsCache::new(),
-            fovea_grid_cache: FoveaBaseGridCache::new(),
-            fovea_jitter_cache: FoveaJitterCache::new(),
+            level_coords_cache: LevelCoordsCache::new(cache_entries),
+            upsample_weights_cache: UpsampleWeightsCache::new(cache_entries),
+            fovea_grid_cache: FoveaBaseGridCache::new(cache_entries),
+            fovea_jitter_cache: FoveaJitterCache::new(cache_entries),
             pyramid_dim,
             rollout,
         }
@@ -1293,6 +1418,7 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
         }
     }
 
+    #[cfg(any(feature = "benchmark", test))]
     pub(crate) fn pyramid_feature_dim(&self) -> usize {
         self.pyramid_dim
     }
@@ -1349,9 +1475,13 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
             self.recon_loss(images, steps, backprop_steps, randomize_mask, capture_artifacts);
         let denom = mask_sum.clone().add_scalar(LEJEPA_EPS);
         let recon = loss_sum / denom;
-        let lambda = self.config.lambda.clamp(0.0, 1.0);
+        let lambda = if self.config.loss.lejepa.enabled {
+            self.config.loss.lejepa.lambda.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
         let mut total = inv.clone().mul_scalar(1.0 - lambda) + sigreg.clone().mul_scalar(lambda);
-        let recon_weight = self.config.recon_weight.max(0.0);
+        let recon_weight = self.config.loss.recon.weight.max(0.0);
         if recon_weight > 0.0 {
             total = total + recon.clone().mul_scalar(recon_weight);
         }
@@ -1676,7 +1806,12 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
             VisionPyramidMode::Laplacian => self.compose_pyramid(&state_levels, &grids),
         };
         let state_composed_embed = self.project_pyramid_levels(&state_composed);
-        let (inv, sigreg) = self.pyramid_lejepa_loss(&state_composed_embed);
+        let (inv, sigreg) = if self.config.loss.lejepa.enabled {
+            self.pyramid_lejepa_loss(&state_composed_embed)
+        } else {
+            let zero = Tensor::<B, 1>::zeros([1], &device);
+            (zero.clone(), zero)
+        };
 
         let mut loss_sum = Tensor::<B, 1>::zeros([1], &device);
         let mut mask_sum_value = 0.0f32;
@@ -1841,10 +1976,13 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
                 break;
             }
             let cropped = if crop_h != height || crop_w != width {
+                let offset_h = (height - crop_h) / 2;
+                let offset_w = (width - crop_w) / 2;
+                // Center-crop to keep pyramid levels aligned with the base image.
                 current
                     .clone()
-                    .slice_dim(2, 0..crop_h)
-                    .slice_dim(3, 0..crop_w)
+                    .slice_dim(2, offset_h..offset_h + crop_h)
+                    .slice_dim(3, offset_w..offset_w + crop_w)
             } else {
                 current.clone()
             };
@@ -2021,9 +2159,9 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
         let inv = lejepa_invariance_loss(proj.clone());
         let sigreg = lejepa_sigreg_loss_params(
             proj,
-            self.config.sigreg_knots,
-            self.config.sigreg_t_max,
-            self.config.sigreg_proj_dim,
+            self.config.loss.lejepa.sigreg_knots,
+            self.config.loss.lejepa.sigreg_t_max,
+            self.config.loss.lejepa.sigreg_proj_dim,
         );
         (inv, sigreg)
     }
@@ -3995,14 +4133,31 @@ where
                     ));
                 }
             }
-            if lejepa.recon_weight < 0.0 {
-                return Err(anyhow!("lejepa.recon_weight must be >= 0"));
+            if lejepa.loss.recon.weight < 0.0 {
+                return Err(anyhow!("lejepa.loss.recon.weight must be >= 0"));
             }
-            if !(0.0..=1.0).contains(&lejepa.recon_mask_ratio) {
+            if !(0.0..=1.0).contains(&lejepa.loss.recon.mask_ratio) {
                 return Err(anyhow!(
-                    "lejepa.recon_mask_ratio must be in [0, 1] (got {})",
-                    lejepa.recon_mask_ratio
+                    "lejepa.loss.recon.mask_ratio must be in [0, 1] (got {})",
+                    lejepa.loss.recon.mask_ratio
                 ));
+            }
+            if lejepa.loss.lejepa.enabled {
+                if !(0.0..=1.0).contains(&lejepa.loss.lejepa.lambda) {
+                    return Err(anyhow!(
+                        "lejepa.loss.lejepa.lambda must be in [0, 1] (got {})",
+                        lejepa.loss.lejepa.lambda
+                    ));
+                }
+                if lejepa.loss.lejepa.sigreg_knots == 0 {
+                    return Err(anyhow!("lejepa.loss.lejepa.sigreg_knots must be > 0"));
+                }
+                if lejepa.loss.lejepa.sigreg_t_max <= 0.0 {
+                    return Err(anyhow!("lejepa.loss.lejepa.sigreg_t_max must be > 0"));
+                }
+                if lejepa.loss.lejepa.sigreg_proj_dim == 0 {
+                    return Err(anyhow!("lejepa.loss.lejepa.sigreg_proj_dim must be > 0"));
+                }
             }
             let local_train_aug = if local_views > 0 {
                 Some(ImageNetAugmentations::new(
@@ -4065,14 +4220,14 @@ where
             )
         }
         VisionTrainingModeConfig::Mae(mae) => {
-            if !(0.0..=1.0).contains(&mae.mask_ratio) {
+            if !(0.0..=1.0).contains(&mae.loss.recon.mask_ratio) {
                 return Err(anyhow!(
-                    "mae.mask_ratio must be in [0, 1] (got {})",
-                    mae.mask_ratio
+                    "mae.loss.recon.mask_ratio must be in [0, 1] (got {})",
+                    mae.loss.recon.mask_ratio
                 ));
             }
-            if mae.recon_weight < 0.0 {
-                return Err(anyhow!("mae.recon_weight must be >= 0"));
+            if mae.loss.recon.weight < 0.0 {
+                return Err(anyhow!("mae.loss.recon.weight must be >= 0"));
             }
             let train_dataset = Arc::new(ImageNetDataset::new(ImageNetDatasetConfig {
                 root: train_root,
@@ -4116,29 +4271,31 @@ where
             if saccade.inner_steps == 0 {
                 return Err(anyhow!("saccade.inner_steps must be > 0"));
             }
-            if !(0.0..=1.0).contains(&saccade.recon_mask_ratio) {
+            if !(0.0..=1.0).contains(&saccade.loss.recon.mask_ratio) {
                 return Err(anyhow!(
-                    "saccade.recon_mask_ratio must be in [0, 1] (got {})",
-                    saccade.recon_mask_ratio
+                    "saccade.loss.recon.mask_ratio must be in [0, 1] (got {})",
+                    saccade.loss.recon.mask_ratio
                 ));
             }
-            if saccade.recon_weight < 0.0 {
-                return Err(anyhow!("saccade.recon_weight must be >= 0"));
+            if saccade.loss.recon.weight < 0.0 {
+                return Err(anyhow!("saccade.loss.recon.weight must be >= 0"));
             }
-            if !(0.0..=1.0).contains(&saccade.lambda) {
-                return Err(anyhow!(
-                    "saccade.lambda must be in [0, 1] (got {})",
-                    saccade.lambda
-                ));
-            }
-            if saccade.sigreg_knots == 0 {
-                return Err(anyhow!("saccade.sigreg_knots must be > 0"));
-            }
-            if saccade.sigreg_t_max <= 0.0 {
-                return Err(anyhow!("saccade.sigreg_t_max must be > 0"));
-            }
-            if saccade.sigreg_proj_dim == 0 {
-                return Err(anyhow!("saccade.sigreg_proj_dim must be > 0"));
+            if saccade.loss.lejepa.enabled {
+                if !(0.0..=1.0).contains(&saccade.loss.lejepa.lambda) {
+                    return Err(anyhow!(
+                        "saccade.loss.lejepa.lambda must be in [0, 1] (got {})",
+                        saccade.loss.lejepa.lambda
+                    ));
+                }
+                if saccade.loss.lejepa.sigreg_knots == 0 {
+                    return Err(anyhow!("saccade.loss.lejepa.sigreg_knots must be > 0"));
+                }
+                if saccade.loss.lejepa.sigreg_t_max <= 0.0 {
+                    return Err(anyhow!("saccade.loss.lejepa.sigreg_t_max must be > 0"));
+                }
+                if saccade.loss.lejepa.sigreg_proj_dim == 0 {
+                    return Err(anyhow!("saccade.loss.lejepa.sigreg_proj_dim must be > 0"));
+                }
             }
             let train_dataset = Arc::new(ImageNetDataset::new(ImageNetDatasetConfig {
                 root: train_root,
@@ -4313,13 +4470,15 @@ where
             );
             let diagnostics = Some(VisionDiagnostics {
                 metric_prefix: "lejepa".to_string(),
-                inv: true,
-                sigreg: true,
+                inv: model.as_ref().expect("model").config.loss.lejepa.enabled,
+                sigreg: model.as_ref().expect("model").config.loss.lejepa.enabled,
                 recon: model
                     .as_ref()
                     .expect("model")
                     .config
-                    .recon_weight
+                    .loss
+                    .recon
+                    .weight
                     > 0.0,
                 probe: true,
                 artifact_every: model.as_ref().expect("model").config.artifact_every,
@@ -4398,7 +4557,7 @@ where
                 metric_prefix: "mae".to_string(),
                 inv: false,
                 sigreg: false,
-                recon: model_ref.config.recon_weight > 0.0,
+                recon: model_ref.config.loss.recon.weight > 0.0,
                 probe: false,
                 artifact_every: model_ref.config.artifact_every,
                 artifact_output: model_ref.config.artifact_output,
@@ -4474,9 +4633,9 @@ where
             );
             let diagnostics = model.as_ref().map(|model_ref| VisionDiagnostics {
                 metric_prefix: "saccade".to_string(),
-                inv: true,
-                sigreg: true,
-                recon: true,
+                inv: model_ref.config.loss.lejepa.enabled,
+                sigreg: model_ref.config.loss.lejepa.enabled,
+                recon: model_ref.config.loss.recon.weight > 0.0,
                 probe: false,
                 artifact_every: model_ref.config.artifact_every,
                 artifact_output: model_ref.config.artifact_output,
@@ -5441,7 +5600,7 @@ fn normalize_columns<B: BackendTrait>(matrix: Tensor<B, 2>) -> Tensor<B, 2> {
 
 fn lejepa_sigreg_loss<B: BackendTrait>(
     proj: Tensor<B, 3>,
-    config: &VisionLejepaConfig,
+    config: &VisionLejepaLossConfig,
 ) -> Tensor<B, 1> {
     lejepa_sigreg_loss_params(
         proj,
@@ -5895,7 +6054,7 @@ fn saccade_circle_overlay<B: BackendTrait>(
         color,
         SACCADE_RING_OUTER_INTENSITY,
     )?;
-    saccade_ring_overlay(images, mean, sigma, color, 1.0)
+    saccade_ring_overlay(images, mean, sigma, SACCADE_RING_INNER_COLOR, 1.0)
 }
 
 fn saccade_ring_overlay<B: BackendTrait>(
@@ -6068,7 +6227,7 @@ mod lejepa_tests {
         let config = VisionLejepaConfig::default();
 
         let proj = Tensor::<Backend, 3>::random([2, 4, 8], Distribution::Default, &device);
-        let loss = lejepa_sigreg_loss(proj, &config);
+        let loss = lejepa_sigreg_loss(proj, &config.loss.lejepa);
         let value = loss
             .to_data()
             .convert::<f32>()
@@ -6213,13 +6372,21 @@ mod tests {
             pyramid_feature_dim: None,
             inner_steps: 1,
             low_mem_pre_rollout: true,
-            lambda: 0.02,
-            sigreg_knots: 5,
-            sigreg_t_max: 1.0,
-            sigreg_proj_dim: 8,
-            recon_weight: 0.0,
-            recon_mask_ratio: 0.0,
-            recon_hidden_dim: 16,
+            cache: VisionSaccadeCacheConfig::default(),
+            loss: VisionLossConfig {
+                lejepa: VisionLejepaLossConfig {
+                    enabled: true,
+                    lambda: 0.02,
+                    sigreg_knots: 5,
+                    sigreg_t_max: 1.0,
+                    sigreg_proj_dim: 8,
+                },
+                recon: VisionReconLossConfig {
+                    weight: 0.0,
+                    mask_ratio: 0.0,
+                    hidden_dim: 16,
+                },
+            },
             artifact_output: VisionArtifactOutputMode::Images,
             artifact_fps: 4,
             artifact_every: 0,
@@ -7147,6 +7314,7 @@ mod tests {
             .inner
             .lock()
             .expect("level coords cache lock")
+            .map
             .len();
         assert_eq!(len, 1);
     }
@@ -7167,6 +7335,7 @@ mod tests {
             .inner
             .lock()
             .expect("upsample weights cache lock")
+            .map
             .len();
         assert_eq!(len, 1);
     }

@@ -436,6 +436,7 @@ mod train_tests {
             None,
             2,
             1,
+            true,
         );
         let mut iter = loader.iter();
         let batch = iter.next().expect("batch");

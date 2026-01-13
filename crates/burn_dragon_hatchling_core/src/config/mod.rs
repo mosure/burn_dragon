@@ -4,7 +4,10 @@ pub mod train;
 #[cfg(feature = "train")]
 pub mod vision;
 
-pub use core::{ContextStrategyConfig, GenerationConfig, ModelOverrides, TrainingHyperparameters};
+pub use core::{
+    ContextStrategyConfig, GdpoConfig, GdpoHardGate, GenerationConfig, ModelOverrides,
+    TrainingHyperparameters,
+};
 #[cfg(feature = "train")]
 pub use train::{
     DatasetConfig, DatasetSourceConfig, HuggingFaceDatasetConfig, HuggingFaceRecordFormat,
@@ -14,10 +17,14 @@ pub use train::{
 pub use vision::{
     ImagenetteVariant, VisionAugmentationConfig, VisionDatasetConfig, VisionDatasetDownloadConfig,
     VisionArtifactOutputMode, VisionDistillConfig, VisionFoveaSamplingMode, VisionFoveaScatterMode,
-    VisionFoveaWarpMode, VisionLejepaConfig, VisionLejepaLossConfig, VisionLossConfig,
-    VisionMaeConfig, VisionMaeLossConfig, VisionModelConfig, VisionPyramidMode,
+    VisionFoveaWarpMode, VisionLejepaConfig, VisionLejepaLossConfig,
+    VisionLocationEmbeddingConfig, VisionLocationEmbeddingMode, VisionLossConfig, VisionMaeConfig,
+    VisionMaeLossConfig, VisionModelConfig, VisionNullGlimpseMode, VisionPyramidMode,
     VisionReconLossConfig, VisionSaccadeCacheConfig, VisionSaccadeConfig,
-    VisionTeacherConfig, VisionTeacherFeatureConfig, VisionTeacherModelConfig, VisionTeacherVariant,
-    VisionTrainingConfig, VisionTrainingHyperparameters, VisionTrainingModeConfig,
-    load_vision_training_config,
+    VisionSaccadeInfoRewardConfig, VisionSaccadePolicyConfig, VisionTeacherConfig,
+    VisionTeacherFeatureConfig, VisionTeacherModelConfig, VisionTeacherVariant, VisionTrainingConfig,
+    VisionTrainingHyperparameters, VisionTrainingModeConfig, load_vision_training_config,
 };
+
+#[cfg(all(test, feature = "train"))]
+mod tests;

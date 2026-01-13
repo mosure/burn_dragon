@@ -1,11 +1,11 @@
-# Tiny saccade training config (Imagenette auto-download).
+# tiny saccade training config
 
 [dataset]
 imagenet_root = "data/imagenette2-160"
 train_dir = "train"
 val_dir = "val"
-prefetch_batches = 2
-prefetch_workers = 4
+prefetch_batches = 4
+prefetch_workers = 8
 cache_decoded = true
 cache_capacity = 512
 
@@ -17,6 +17,8 @@ variant = "imagenette2-160"
 batch_size = 32
 max_iters = 2000
 log_frequency = 20
+# run GPU memory cleanup every N epochs (0 disables)
+memory_cleanup_every = 1
 rollout_min_steps = 1
 rollout_max_steps = 64
 rollout_backprop_steps = 8
@@ -30,7 +32,7 @@ type = "constant"
 
 [vision]
 image_size = 160
-patch_size = 32
+patch_size = 16
 in_channels = 3
 embed_dim = 128
 steps = 256  # TODO: support infinite streaming
@@ -42,7 +44,7 @@ projection_hidden_dim = 256
 use_cls_token = true
 pos_encoding = "learned2d"
 attention_mode = "row_l1"
-fused_kernels = false
+fused_kernels = true
 relu_threshold = 0.0
 
 [mode]
@@ -53,7 +55,7 @@ num_eyes = 1
 mip_levels = 4
 # how pyramid scales are represented: stacked (raw) or laplacian (residual)
 pyramid_mode = "laplacian"
-# fovea sampling strategy: batched, sequential, or subpatch
+# fovea sampling strategy: batched, sequential, subpatch, cubecl, or wgsl
 fovea_sampling_mode = "batched"
 # fovea warp mode: warped (continuous) or patched (level crop)
 fovea_warp_mode = "warped"
@@ -79,6 +81,46 @@ artifact_max_images = 16
 artifact_max_views = 4
 # overwrite validation artifacts instead of keeping history
 artifact_overwrite = true
+# policy training and side-channel controls (GDPO + location embedding)
+[mode.policy]
+# keep policy gradients separate from recon sampling if enabled
+detach_policy_from_recon = false
+# exploration noise for saccade params when GDPO is enabled
+action_noise_std = 0.05
+
+[mode.policy.location_embedding]
+# location embedding injected into input tokens: none | learned | sinusoidal | quantized
+mode = "none"
+# channel budget for fixed embeddings (unused when mode = none/learned)
+embed_dim = 12
+# quantization bins for quantized mode
+quantize_bins = 32
+# coordinate noise before embedding (0 disables)
+noise_std = 0.0
+
+[mode.policy.info_reward]
+# enable counterfactual info reward (null glimpse vs real)
+enabled = true
+# stride for info reward eval (1 = every step)
+stride = 1
+# null glimpse mode: zero or noise
+null_mode = "zero"
+null_noise_std = 0.05
+
+[mode.policy.gdpo]
+# GDPO advantage conditioning for saccade policy
+enabled = true
+group_size = 2
+hard_weight = 1.0
+easy_weight = 1.0
+policy_weight = 1.0
+# PPO/GRPO clip range (0 disables clipping)
+policy_clip_range = 0.2
+norm_epsilon = 1e-6
+
+[mode.policy.gdpo.hard_gate]
+type = "percentile"
+quantile = 0.5
 
 [mode.cache]
 # cap cached GPU foveation tensors to avoid runaway VRAM on varying shapes

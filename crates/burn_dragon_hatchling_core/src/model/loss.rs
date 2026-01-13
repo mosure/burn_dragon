@@ -3,7 +3,7 @@ use burn::nn::loss::CrossEntropyLossConfig;
 use burn::tensor::activation;
 use burn::tensor::backend::{AutodiffBackend, Backend};
 use burn::tensor::{Int, Tensor};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 const DISTILL_EPS: f32 = 1e-6;
 
@@ -22,7 +22,7 @@ pub fn language_model_loss<B: Backend>(
         .forward(logits_flat, targets_flat)
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct VisionDistillationLossConfig {
     pub patch_mse_weight: f32,
     pub cls_mse_weight: f32,

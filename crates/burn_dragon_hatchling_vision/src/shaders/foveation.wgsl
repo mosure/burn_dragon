@@ -170,22 +170,36 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if patched {
         let min_side = max(min(params.image_size.x, params.image_size.y), 1.0);
         let radius_norm = clamp(radius / min_side, 0.0, 1.0);
-        let level_f = clamp(floor(radius_norm * f32(max_level) + 0.5), 0.0, f32(max_level));
-        let level_u = u32(level_f);
-        let level_dims = textureDimensions(gaussian_tex, level_u);
-        let level_w = max(f32(level_dims.x), 1.0);
-        let level_h = max(f32(level_dims.y), 1.0);
+        let max_level_f = f32(max_level);
+        let level_f = clamp(radius_norm * max_level_f, 0.0, max_level_f);
+        let level0 = u32(floor(level_f));
+        let level1 = min(level0 + 1u, max_level);
+        let t = clamp(level_f - f32(level0), 0.0, 1.0);
+        let level0_dims = textureDimensions(gaussian_tex, level0);
+        let level1_dims = textureDimensions(gaussian_tex, level1);
+        let level0_w = max(f32(level0_dims.x), 1.0);
+        let level0_h = max(f32(level0_dims.y), 1.0);
+        let level1_w = max(f32(level1_dims.x), 1.0);
+        let level1_h = max(f32(level1_dims.y), 1.0);
         let center_norm = params.center * params.inv_image_size;
         let dx = (f32(x) + 0.5) - half;
         let dy = (f32(y) + 0.5) - half;
-        let uv = vec2<f32>(
-            center_norm.x + dx / level_w,
-            center_norm.y + dy / level_h,
+        let uv0 = vec2<f32>(
+            center_norm.x + dx / level0_w,
+            center_norm.y + dy / level0_h,
+        );
+        let uv1 = vec2<f32>(
+            center_norm.x + dx / level1_w,
+            center_norm.y + dy / level1_h,
         );
         if params.mode == 0u {
-            color = sample_gaussian(uv, level_f, lod_sigma, max_level);
+            let sample0 = textureSampleLevel(gaussian_tex, gaussian_sampler, uv0, f32(level0)).xyz;
+            let sample1 = textureSampleLevel(gaussian_tex, gaussian_sampler, uv1, f32(level1)).xyz;
+            color = sample0 + (sample1 - sample0) * t;
         } else {
-            color = sample_laplacian(uv, level_f, lod_sigma, max_level);
+            let sample0 = reconstruct_laplacian(uv0, level0, max_level);
+            let sample1 = reconstruct_laplacian(uv1, level1, max_level);
+            color = sample0 + (sample1 - sample0) * t;
         }
         textureStore(output_tex, vec2<i32>(i32(x), i32(y)), vec4<f32>(clamp(color, vec3(0.0), vec3(1.0)), 1.0));
         return;

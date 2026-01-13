@@ -1,0 +1,590 @@
+use crate::train::prelude::*;
+
+pub(crate) enum ResolvedLrScheduler {
+    Constant(LearningRate),
+    Cosine(CosineAnnealingLrScheduler),
+    Linear(LinearLrScheduler),
+    Exponential(ExponentialLrScheduler),
+    Step(StepLrScheduler),
+    Noam(NoamLrScheduler),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ScheduleSource {
+    Epochs,
+    MaxIters,
+}
+
+impl ScheduleSource {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            ScheduleSource::Epochs => "epochs",
+            ScheduleSource::MaxIters => "max_iters",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TrainSchedule {
+    pub(crate) steps_per_epoch: usize,
+    pub(crate) total_steps: usize,
+    pub(crate) total_epochs: usize,
+    pub(crate) source: ScheduleSource,
+}
+
+pub(crate) struct TrainEnvironment<'a, B>
+where
+    B: AutodiffBackend + Clone + 'static,
+    B::Device: Clone,
+{
+    pub(crate) run_dir: &'a Path,
+    pub(crate) run_name: &'a str,
+    pub(crate) backend_name: &'a str,
+    pub(crate) training: &'a TrainingHyperparameters,
+    pub(crate) model_config: &'a BDHConfig,
+    pub(crate) device: &'a B::Device,
+    pub(crate) train_loader: Arc<dyn DataLoader<B, SequenceBatch<B>>>,
+    pub(crate) valid_loader: Arc<dyn DataLoader<ValidBackend<B>, SequenceBatch<ValidBackend<B>>>>,
+    pub(crate) epochs: usize,
+}
+
+pub(crate) struct VisionTrainEnvironment<'a, B>
+where
+    B: AutodiffBackend + Clone + 'static,
+    B::Device: Clone,
+{
+    pub(crate) run_dir: &'a Path,
+    pub(crate) run_name: &'a str,
+    pub(crate) backend_name: &'a str,
+    pub(crate) training: &'a VisionTrainingHyperparameters,
+    pub(crate) device: &'a B::Device,
+    pub(crate) train_loader: Arc<dyn DataLoader<B, ImageNetBatch<B>>>,
+    pub(crate) valid_loader: Arc<dyn DataLoader<ValidBackend<B>, ImageNetBatch<ValidBackend<B>>>>,
+    pub(crate) epochs: usize,
+}
+
+#[derive(Clone, Copy, Debug, Module)]
+pub(crate) struct VisionRollout {
+    pub(crate) min_steps: usize,
+    pub(crate) max_steps: usize,
+    pub(crate) backprop_steps: usize,
+}
+
+impl VisionRollout {
+    pub(crate) fn sample_steps(&self) -> usize {
+        if self.min_steps >= self.max_steps {
+            self.max_steps
+        } else {
+            thread_rng().gen_range(self.min_steps..=self.max_steps)
+        }
+    }
+
+    pub(crate) fn backprop_steps(&self, steps: usize) -> usize {
+        self.backprop_steps.min(steps).max(1)
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct VisionDiagnostics {
+    pub(crate) metric_prefix: String,
+    pub(crate) inv: bool,
+    pub(crate) sigreg: bool,
+    pub(crate) recon: bool,
+    pub(crate) probe: bool,
+    pub(crate) artifact_every: usize,
+    pub(crate) artifact_output: VisionArtifactOutputMode,
+    pub(crate) artifact_overwrite: bool,
+    pub(crate) artifact_max_images: usize,
+    pub(crate) artifact_fps: u32,
+    pub(crate) normalize_mean: [f32; 3],
+    pub(crate) normalize_std: [f32; 3],
+}
+
+pub(crate) fn train_with_scheduler<B, S>(
+    env: &TrainEnvironment<'_, B>,
+    model: BDH<B>,
+    optimizer: OptimizerAdaptor<AdamW, BDH<B>, B>,
+    scheduler: S,
+) -> Result<BDH<ValidBackend<B>>>
+where
+    B: AutodiffBackend + Clone + 'static,
+    B::Device: Clone,
+    S: LrScheduler + 'static,
+{
+    fs::create_dir_all(env.run_dir)?;
+
+    let metric_every = env.training.log_frequency.max(1);
+    let builder = LearnerBuilder::new(env.run_dir)
+        .num_epochs(env.epochs)
+        .learning_strategy(LearningStrategy::SingleDevice(env.device.clone()))
+        .with_file_checkpointer(BinFileRecorder::<FullPrecisionSettings>::new())
+        .metric_train_numeric(ScalarMetric::<ValidBackend<B>, LossValue<ValidBackend<B>>>::new_every(
+            "Loss",
+            metric_every,
+        ))
+        .metric_valid_numeric(LossMetric::<ValidBackend<B>>::new())
+        .metric_train_numeric(LearningRateMetric::new())
+        .metric_train(DeviceMetric::new("device", env.backend_name))
+        .metric_valid(DeviceMetric::new("device", env.backend_name))
+        .summary();
+
+    info!("run name: {}", env.run_name);
+
+    let learner = builder.build(model, optimizer, scheduler);
+
+    let TrainingResult { model, .. } = learner.fit(
+        Arc::clone(&env.train_loader),
+        Arc::clone(&env.valid_loader),
+    );
+
+    log_theoretical_profile(
+        env.model_config,
+        env.training.batch_size,
+        env.training.block_size,
+        env.backend_name,
+    );
+
+    Ok(model)
+}
+
+pub(crate) fn train_vision_with_scheduler<B, S, M>(
+    env: &VisionTrainEnvironment<'_, B>,
+    model: M,
+    optimizer: OptimizerAdaptor<AdamW, M, B>,
+    scheduler: S,
+    vision_diagnostics: Option<VisionDiagnostics>,
+) -> Result<()>
+where
+    B: AutodiffBackend + Clone + 'static,
+    B::Device: Clone,
+    M: AutodiffModule<B>
+        + TrainStep<ImageNetBatch<B>, VisionTrainItem<B>>
+        + core::fmt::Display
+        + Clone
+        + 'static,
+    M::InnerModule: ValidStep<ImageNetBatch<ValidBackend<B>>, VisionOutput<ValidBackend<B>>>,
+    S: LrScheduler + 'static,
+{
+    fs::create_dir_all(env.run_dir)?;
+
+    let metric_every = env.training.log_frequency.max(1);
+    let mut builder = LearnerBuilder::new(env.run_dir)
+        .num_epochs(env.epochs)
+        .learning_strategy(LearningStrategy::SingleDevice(env.device.clone()))
+        .with_file_checkpointer(BinFileRecorder::<FullPrecisionSettings>::new())
+        .metric_train_numeric(ScalarMetric::<ValidBackend<B>, LossValue<ValidBackend<B>>>::new_every(
+            "Loss",
+            metric_every,
+        ))
+        .metric_valid_numeric(LossMetric::<ValidBackend<B>>::new())
+        .metric_train_numeric(LearningRateMetric::new())
+        .metric_train(DeviceMetric::new("device", env.backend_name))
+        .metric_valid(DeviceMetric::new("device", env.backend_name))
+        .summary();
+
+    info!("vision run name: {}", env.run_name);
+
+    if env.training.memory_cleanup_every > 0 {
+        builder = builder
+            .metric_train(MemoryCleanupMetric::<B>::new(
+                env.device,
+                env.training.memory_cleanup_every,
+            ))
+            .metric_valid(MemoryCleanupMetric::<ValidBackend<B>>::new(
+                env.device,
+                env.training.memory_cleanup_every,
+            ));
+    }
+
+    if let Some(diagnostics) = &vision_diagnostics {
+        let prefix = diagnostics.metric_prefix.as_str();
+        if diagnostics.inv {
+            let name = format!("{prefix}_inv_loss");
+            builder = builder
+                .metric_train_numeric(
+                    ScalarMetric::<ValidBackend<B>, InvLossInput<ValidBackend<B>>>::new_every(
+                        name.as_str(),
+                        metric_every,
+                    ),
+                )
+                .metric_valid_numeric(
+                    ScalarMetric::<ValidBackend<B>, InvLossInput<ValidBackend<B>>>::new_every(
+                        name.as_str(),
+                        metric_every,
+                    ),
+                );
+        }
+        if diagnostics.sigreg {
+            let name = format!("{prefix}_sigreg_loss");
+            builder = builder
+                .metric_train_numeric(
+                    ScalarMetric::<ValidBackend<B>, SigRegLossInput<ValidBackend<B>>>::new_every(
+                        name.as_str(),
+                        metric_every,
+                    ),
+                )
+                .metric_valid_numeric(
+                    ScalarMetric::<ValidBackend<B>, SigRegLossInput<ValidBackend<B>>>::new_every(
+                        name.as_str(),
+                        metric_every,
+                    ),
+                );
+        }
+        if diagnostics.recon {
+            let name = format!("{prefix}_recon_loss");
+            builder = builder
+                .metric_train_numeric(
+                    ScalarMetric::<ValidBackend<B>, ReconLossInput<ValidBackend<B>>>::new_every(
+                        name.as_str(),
+                        metric_every,
+                    ),
+                )
+                .metric_valid_numeric(
+                    ScalarMetric::<ValidBackend<B>, ReconLossInput<ValidBackend<B>>>::new_every(
+                        name.as_str(),
+                        metric_every,
+                    ),
+                );
+        }
+        if diagnostics.probe {
+            let probe_loss = format!("{prefix}_probe_loss");
+            let probe_acc = format!("{prefix}_probe_acc");
+            builder = builder
+                .metric_train_numeric(
+                    ScalarMetric::<ValidBackend<B>, ProbeLossInput<ValidBackend<B>>>::new_every(
+                        probe_loss.as_str(),
+                        metric_every,
+                    ),
+                )
+                .metric_valid_numeric(
+                    ScalarMetric::<ValidBackend<B>, ProbeLossInput<ValidBackend<B>>>::new_every(
+                        probe_loss.as_str(),
+                        metric_every,
+                    ),
+                )
+                .metric_train_numeric(
+                    ScalarMetric::<ValidBackend<B>, ProbeAccInput<ValidBackend<B>>>::new_every(
+                        probe_acc.as_str(),
+                        metric_every,
+                    ),
+                )
+                .metric_valid_numeric(
+                    ScalarMetric::<ValidBackend<B>, ProbeAccInput<ValidBackend<B>>>::new_every(
+                        probe_acc.as_str(),
+                        metric_every,
+                    ),
+                );
+        }
+
+        if diagnostics.artifact_every > 0 {
+            let artifact_dir = env.run_dir.join("artifacts");
+            builder = builder.metric_valid(VisionArtifactMetric::<ValidBackend<B>>::new(
+                artifact_dir,
+                diagnostics.artifact_every,
+                diagnostics.artifact_output,
+                diagnostics.artifact_max_images,
+                diagnostics.artifact_fps,
+                diagnostics.normalize_mean,
+                diagnostics.normalize_std,
+                diagnostics.artifact_overwrite,
+            ));
+        }
+    }
+
+    let learner = builder.build(model, optimizer, scheduler);
+
+    let _result = learner.fit(
+        Arc::clone(&env.train_loader),
+        Arc::clone(&env.valid_loader),
+    );
+
+    Ok(())
+}
+
+pub(crate) fn resolve_lr_scheduler(
+    optimizer_cfg: &OptimizerConfig,
+    total_steps: usize,
+    override_num_iters: Option<usize>,
+    model_config: &BDHConfig,
+) -> Result<ResolvedLrScheduler> {
+    let base_lr = optimizer_cfg.learning_rate;
+    let fallback_iters = total_steps.max(1);
+
+    let schedule = match &optimizer_cfg.lr_schedule {
+        None => ResolvedLrScheduler::Constant(base_lr),
+        Some(LearningRateScheduleConfig::Constant { initial_lr }) => {
+            ResolvedLrScheduler::Constant(initial_lr.unwrap_or(base_lr))
+        }
+        Some(LearningRateScheduleConfig::Cosine {
+            initial_lr,
+            min_lr,
+            num_iters,
+        }) => {
+            let init_lr = initial_lr.unwrap_or(base_lr);
+            let scheduler = CosineAnnealingLrSchedulerConfig::new(
+                init_lr,
+                override_num_iters
+                    .unwrap_or_else(|| num_iters.unwrap_or(fallback_iters))
+                    .max(1),
+            )
+            .with_min_lr(min_lr.unwrap_or(0.0))
+            .init()
+            .map_err(|err| anyhow!("failed to initialize cosine lr scheduler: {err}"))?;
+            ResolvedLrScheduler::Cosine(scheduler)
+        }
+        Some(LearningRateScheduleConfig::Linear {
+            initial_lr,
+            final_lr,
+            num_iters,
+        }) => {
+            let init_lr = initial_lr.unwrap_or(base_lr);
+            let scheduler = LinearLrSchedulerConfig::new(
+                init_lr,
+                *final_lr,
+                override_num_iters
+                    .unwrap_or_else(|| num_iters.unwrap_or(fallback_iters))
+                    .max(1),
+            )
+            .init()
+            .map_err(|err| anyhow!("failed to initialize linear lr scheduler: {err}"))?;
+            ResolvedLrScheduler::Linear(scheduler)
+        }
+        Some(LearningRateScheduleConfig::Exponential { initial_lr, gamma }) => {
+            let init_lr = initial_lr.unwrap_or(base_lr);
+            let scheduler = ExponentialLrSchedulerConfig::new(init_lr, *gamma)
+                .init()
+                .map_err(|err| anyhow!("failed to initialize exponential lr scheduler: {err}"))?;
+            ResolvedLrScheduler::Exponential(scheduler)
+        }
+        Some(LearningRateScheduleConfig::Step {
+            initial_lr,
+            gamma,
+            step_size,
+        }) => {
+            let init_lr = initial_lr.unwrap_or(base_lr);
+            let scheduler =
+                StepLrSchedulerConfig::new(init_lr, step_size.unwrap_or(fallback_iters).max(1))
+                    .with_gamma(*gamma)
+                    .init()
+                    .map_err(|err| anyhow!("failed to initialize step lr scheduler: {err}"))?;
+            ResolvedLrScheduler::Step(scheduler)
+        }
+        Some(LearningRateScheduleConfig::Noam {
+            initial_lr,
+            warmup_steps,
+            model_size,
+        }) => {
+            let init_lr = initial_lr.unwrap_or(base_lr);
+            let mut config = NoamLrSchedulerConfig::new(init_lr);
+            config = config.with_warmup_steps(warmup_steps.unwrap_or(fallback_iters).max(1));
+            config = config.with_model_size(model_size.unwrap_or(model_config.n_embd).max(1));
+            let scheduler = config
+                .init()
+                .map_err(|err| anyhow!("failed to initialize noam lr scheduler: {err}"))?;
+            ResolvedLrScheduler::Noam(scheduler)
+        }
+    };
+
+    Ok(schedule)
+}
+
+pub(crate) fn resolve_vision_lr_scheduler(
+    optimizer_cfg: &OptimizerConfig,
+    total_steps: usize,
+    override_num_iters: Option<usize>,
+    model_config: &VisionDragonHatchlingConfig,
+) -> Result<ResolvedLrScheduler> {
+    let base_lr = optimizer_cfg.learning_rate;
+    let fallback_iters = total_steps.max(1);
+
+    let schedule = match &optimizer_cfg.lr_schedule {
+        None => ResolvedLrScheduler::Constant(base_lr),
+        Some(LearningRateScheduleConfig::Constant { initial_lr }) => {
+            ResolvedLrScheduler::Constant(initial_lr.unwrap_or(base_lr))
+        }
+        Some(LearningRateScheduleConfig::Cosine {
+            initial_lr,
+            min_lr,
+            num_iters,
+        }) => {
+            let init_lr = initial_lr.unwrap_or(base_lr);
+            let scheduler = CosineAnnealingLrSchedulerConfig::new(
+                init_lr,
+                override_num_iters
+                    .unwrap_or_else(|| num_iters.unwrap_or(fallback_iters))
+                    .max(1),
+            )
+            .with_min_lr(min_lr.unwrap_or(0.0))
+            .init()
+            .map_err(|err| anyhow!("failed to initialize cosine lr scheduler: {err}"))?;
+            ResolvedLrScheduler::Cosine(scheduler)
+        }
+        Some(LearningRateScheduleConfig::Linear {
+            initial_lr,
+            final_lr,
+            num_iters,
+        }) => {
+            let init_lr = initial_lr.unwrap_or(base_lr);
+            let scheduler = LinearLrSchedulerConfig::new(
+                init_lr,
+                *final_lr,
+                override_num_iters
+                    .unwrap_or_else(|| num_iters.unwrap_or(fallback_iters))
+                    .max(1),
+            )
+            .init()
+            .map_err(|err| anyhow!("failed to initialize linear lr scheduler: {err}"))?;
+            ResolvedLrScheduler::Linear(scheduler)
+        }
+        Some(LearningRateScheduleConfig::Exponential { initial_lr, gamma }) => {
+            let init_lr = initial_lr.unwrap_or(base_lr);
+            let scheduler = ExponentialLrSchedulerConfig::new(init_lr, *gamma)
+                .init()
+                .map_err(|err| anyhow!("failed to initialize exponential lr scheduler: {err}"))?;
+            ResolvedLrScheduler::Exponential(scheduler)
+        }
+        Some(LearningRateScheduleConfig::Step {
+            initial_lr,
+            gamma,
+            step_size,
+        }) => {
+            let init_lr = initial_lr.unwrap_or(base_lr);
+            let scheduler =
+                StepLrSchedulerConfig::new(init_lr, step_size.unwrap_or(fallback_iters).max(1))
+                    .with_gamma(*gamma)
+                    .init()
+                    .map_err(|err| anyhow!("failed to initialize step lr scheduler: {err}"))?;
+            ResolvedLrScheduler::Step(scheduler)
+        }
+        Some(LearningRateScheduleConfig::Noam {
+            initial_lr,
+            warmup_steps,
+            model_size,
+        }) => {
+            let init_lr = initial_lr.unwrap_or(base_lr);
+            let mut config = NoamLrSchedulerConfig::new(init_lr);
+            config = config.with_warmup_steps(warmup_steps.unwrap_or(fallback_iters).max(1));
+            config = config.with_model_size(model_size.unwrap_or(model_config.embed_dim).max(1));
+            let scheduler = config
+                .init()
+                .map_err(|err| anyhow!("failed to initialize noam lr scheduler: {err}"))?;
+            ResolvedLrScheduler::Noam(scheduler)
+        }
+    };
+
+    Ok(schedule)
+}
+
+pub(crate) fn resolve_train_schedule(
+    training: &TrainingHyperparameters,
+    steps_per_epoch: usize,
+) -> Result<TrainSchedule> {
+    let steps_per_epoch = steps_per_epoch.max(1);
+    match training.epochs {
+        Some(epochs) => {
+            let total_epochs = epochs.max(1);
+            let total_steps = steps_per_epoch
+                .checked_mul(total_epochs)
+                .ok_or_else(|| {
+                    anyhow!(
+                        "training.epochs overflow: steps_per_epoch={steps_per_epoch}, epochs={total_epochs}"
+                    )
+                })?
+                .max(1);
+            Ok(TrainSchedule {
+                steps_per_epoch,
+                total_steps,
+                total_epochs,
+                source: ScheduleSource::Epochs,
+            })
+        }
+        None => {
+            let total_steps = training.max_iters.max(1);
+            let total_epochs = usize::max(1, total_steps.div_ceil(steps_per_epoch));
+            Ok(TrainSchedule {
+                steps_per_epoch,
+                total_steps,
+                total_epochs,
+                source: ScheduleSource::MaxIters,
+            })
+        }
+    }
+}
+
+pub(crate) fn resolve_vision_train_schedule(
+    training: &VisionTrainingHyperparameters,
+    steps_per_epoch: usize,
+) -> Result<TrainSchedule> {
+    let steps_per_epoch = steps_per_epoch.max(1);
+    match training.epochs {
+        Some(epochs) => {
+            let total_epochs = epochs.max(1);
+            let total_steps = steps_per_epoch
+                .checked_mul(total_epochs)
+                .ok_or_else(|| {
+                    anyhow!(
+                        "vision training.epochs overflow: steps_per_epoch={steps_per_epoch}, epochs={total_epochs}"
+                    )
+                })?
+                .max(1);
+            Ok(TrainSchedule {
+                steps_per_epoch,
+                total_steps,
+                total_epochs,
+                source: ScheduleSource::Epochs,
+            })
+        }
+        None => {
+            let total_steps = training.max_iters.max(1);
+            let total_epochs = usize::max(1, total_steps.div_ceil(steps_per_epoch));
+            Ok(TrainSchedule {
+                steps_per_epoch,
+                total_steps,
+                total_epochs,
+                source: ScheduleSource::MaxIters,
+            })
+        }
+    }
+}
+
+pub(crate) fn resolve_vision_rollout(
+    training: &VisionTrainingHyperparameters,
+    max_steps: usize,
+) -> Result<VisionRollout> {
+    let max_steps = max_steps.max(1);
+    let min_steps = training.rollout_min_steps.unwrap_or(max_steps);
+    let max_steps_cfg = training.rollout_max_steps.unwrap_or(max_steps);
+    let backprop_steps = training.rollout_backprop_steps.unwrap_or(max_steps_cfg);
+    if min_steps == 0 || max_steps_cfg == 0 {
+        return Err(anyhow!(
+            "vision rollout steps must be > 0 (min={min_steps}, max={max_steps_cfg})"
+        ));
+    }
+    if backprop_steps == 0 {
+        return Err(anyhow!(
+            "vision rollout_backprop_steps must be > 0 (value={backprop_steps})"
+        ));
+    }
+    if min_steps > max_steps_cfg {
+        return Err(anyhow!(
+            "vision rollout_min_steps ({min_steps}) must be <= rollout_max_steps ({max_steps_cfg})"
+        ));
+    }
+    if max_steps_cfg > max_steps {
+        return Err(anyhow!(
+            "vision rollout_max_steps ({max_steps_cfg}) exceeds vision.steps ({max_steps})"
+        ));
+    }
+    if backprop_steps > max_steps_cfg {
+        return Err(anyhow!(
+            "vision rollout_backprop_steps ({backprop_steps}) must be <= rollout_max_steps ({max_steps_cfg})"
+        ));
+    }
+    Ok(VisionRollout {
+        min_steps,
+        max_steps: max_steps_cfg,
+        backprop_steps,
+    })
+}
+
+

@@ -1,5 +1,6 @@
 #![cfg_attr(not(feature = "cli"), allow(dead_code))]
 
+use std::any::Any;
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
@@ -9,8 +10,11 @@ use burn::tensor::{Int, Tensor};
 use burn::tensor::backend::{AutodiffBackend, Backend as BackendTrait};
 use burn_train::metric::{Adaptor, ItemLazy, LossInput};
 
-use super::LEJEPA_EPS;
-use super::artifacts::{collect_frames, write_video};
+#[cfg(any(feature = "train", feature = "cli"))]
+use cubecl::Runtime;
+
+use crate::train::constants::LEJEPA_EPS;
+use crate::train::artifacts::{collect_frames, write_video};
 use crate::VisionArtifactOutputMode;
 
 pub(crate) struct LanguageModelOutput<B: BackendTrait> {
@@ -37,13 +41,30 @@ impl<B: BackendTrait> Adaptor<LossInput<B>> for LanguageModelOutput<B> {
     }
 }
 
+impl<B: BackendTrait> Adaptor<LossValue<B>> for LanguageModelOutput<B> {
+    fn adapt(&self) -> LossValue<B> {
+        LossValue::new(self.loss.clone())
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct LossValue<B: BackendTrait> {
+    value: Tensor<B, 1>,
+}
+
+impl<B: BackendTrait> LossValue<B> {
+    pub(crate) fn new(value: Tensor<B, 1>) -> Self {
+        Self { value }
+    }
+}
+
 pub(crate) struct LanguageModelTrainItem<B: AutodiffBackend> {
     loss: Tensor<B, 1>,
 }
 
 impl<B: AutodiffBackend> LanguageModelTrainItem<B> {
     pub(crate) fn new(loss: Tensor<B, 1>) -> Self {
-        Self { loss }
+        Self { loss: loss.detach() }
     }
 }
 
@@ -51,7 +72,7 @@ impl<B: AutodiffBackend> ItemLazy for LanguageModelTrainItem<B> {
     type ItemSync = LanguageModelOutput<B::InnerBackend>;
 
     fn sync(self) -> Self::ItemSync {
-        LanguageModelOutput::new(self.loss.inner())
+        LanguageModelOutput::new(self.loss.detach().inner())
     }
 }
 
@@ -122,6 +143,12 @@ impl<B: BackendTrait> ItemLazy for VisionOutput<B> {
 impl<B: BackendTrait> Adaptor<LossInput<B>> for VisionOutput<B> {
     fn adapt(&self) -> LossInput<B> {
         LossInput::new(self.loss.clone())
+    }
+}
+
+impl<B: BackendTrait> Adaptor<LossValue<B>> for VisionOutput<B> {
+    fn adapt(&self) -> LossValue<B> {
+        LossValue::new(self.loss.clone())
     }
 }
 
@@ -235,12 +262,12 @@ impl<B: AutodiffBackend> VisionTrainItem<B> {
         probe_acc: Tensor<B, 1>,
     ) -> Self {
         Self {
-            loss,
-            inv_loss,
-            sigreg_loss,
-            recon_loss,
-            probe_loss,
-            probe_acc,
+            loss: loss.detach(),
+            inv_loss: inv_loss.detach(),
+            sigreg_loss: sigreg_loss.detach(),
+            recon_loss: recon_loss.detach(),
+            probe_loss: probe_loss.detach(),
+            probe_acc: probe_acc.detach(),
         }
     }
 }
@@ -250,12 +277,12 @@ impl<B: AutodiffBackend> ItemLazy for VisionTrainItem<B> {
 
     fn sync(self) -> Self::ItemSync {
         VisionOutput::new(
-            self.loss.inner(),
-            self.inv_loss.inner(),
-            self.sigreg_loss.inner(),
-            self.recon_loss.inner(),
-            self.probe_loss.inner(),
-            self.probe_acc.inner(),
+            self.loss.detach().inner(),
+            self.inv_loss.detach().inner(),
+            self.sigreg_loss.detach().inner(),
+            self.recon_loss.detach().inner(),
+            self.probe_loss.detach().inner(),
+            self.probe_acc.detach().inner(),
             None,
         )
     }
@@ -295,9 +322,16 @@ impl<B: BackendTrait> ScalarValue<B> for ProbeAccInput<B> {
     }
 }
 
+impl<B: BackendTrait> ScalarValue<B> for LossValue<B> {
+    fn value(&self) -> Tensor<B, 1> {
+        self.value.clone()
+    }
+}
+
 pub(crate) struct ScalarMetric<B: BackendTrait, I: ScalarValue<B>> {
     name: Arc<String>,
     last: f64,
+    every: usize,
     _marker: std::marker::PhantomData<(B, I)>,
 }
 
@@ -306,16 +340,18 @@ impl<B: BackendTrait, I: ScalarValue<B>> Clone for ScalarMetric<B, I> {
         Self {
             name: Arc::clone(&self.name),
             last: self.last,
+            every: self.every,
             _marker: std::marker::PhantomData,
         }
     }
 }
 
 impl<B: BackendTrait, I: ScalarValue<B>> ScalarMetric<B, I> {
-    pub(crate) fn new(name: &str) -> Self {
+    pub(crate) fn new_every(name: &str, every: usize) -> Self {
         Self {
             name: Arc::new(name.to_string()),
             last: 0.0,
+            every: every.max(1),
             _marker: std::marker::PhantomData,
         }
     }
@@ -333,15 +369,22 @@ impl<B: BackendTrait, I: ScalarValue<B> + Send + Sync> burn_train::metric::Metri
     fn update(
         &mut self,
         item: &Self::Input,
-        _metadata: &burn_train::metric::MetricMetadata,
+        metadata: &burn_train::metric::MetricMetadata,
     ) -> burn_train::metric::MetricEntry {
+        if self.every > 1 && metadata.iteration % self.every != 0 {
+            return burn_train::metric::MetricEntry::new(
+                Arc::clone(&self.name),
+                burn_train::metric::format_float(self.last, 4),
+                self.last.to_string(),
+            );
+        }
         let value = item
             .value()
-            .to_data()
-            .convert::<f32>()
-            .into_vec::<f32>()
-            .expect("metric value");
-        let value = value.first().copied().unwrap_or(0.0) as f64;
+            .mean()
+            .into_data()
+            .iter::<f64>()
+            .next()
+            .unwrap_or(0.0);
         self.last = value;
         burn_train::metric::MetricEntry::new(
             Arc::clone(&self.name),
@@ -394,6 +437,96 @@ impl burn_train::metric::Metric for DeviceMetric {
             Arc::clone(&self.name),
             self.value.to_string(),
             self.value.to_string(),
+        )
+    }
+
+    fn clear(&mut self) {}
+}
+
+#[cfg(any(feature = "train", feature = "cli"))]
+fn extra_memory_cleanup<B: BackendTrait>(device: &B::Device)
+where
+    B::Device: 'static,
+{
+    #[cfg(feature = "cuda")]
+    {
+        if let Some(cuda_device) = (device as &dyn Any).downcast_ref::<burn_cuda::CudaDevice>() {
+            <cubecl::cuda::CudaRuntime as Runtime>::client(cuda_device).memory_cleanup();
+        }
+    }
+    if let Some(wgpu_device) = (device as &dyn Any).downcast_ref::<burn_wgpu::WgpuDevice>() {
+        <burn_wgpu::WgpuRuntime as Runtime>::client(wgpu_device).memory_cleanup();
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct MemoryCleanupMetric<B: BackendTrait> {
+    name: Arc<String>,
+    device: B::Device,
+    every_epochs: usize,
+    every_iters: usize,
+    last_epoch: Option<usize>,
+}
+
+impl<B: BackendTrait> MemoryCleanupMetric<B> {
+    pub(crate) fn new(device: &B::Device, every_epochs: usize) -> Self {
+        let every_iters = std::env::var("BDH_MEMORY_CLEANUP_ITERS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(0);
+        Self {
+            name: Arc::new("memory_cleanup".to_string()),
+            device: device.clone(),
+            every_epochs,
+            every_iters,
+            last_epoch: None,
+        }
+    }
+}
+
+impl<B: BackendTrait> burn_train::metric::Metric for MemoryCleanupMetric<B>
+where
+    B::Device: 'static,
+{
+    type Input = ();
+
+    fn name(&self) -> burn_train::metric::MetricName {
+        Arc::clone(&self.name)
+    }
+
+    fn update(
+        &mut self,
+        _item: &Self::Input,
+        metadata: &burn_train::metric::MetricMetadata,
+    ) -> burn_train::metric::MetricEntry {
+        if self.every_epochs == 0 {
+            return burn_train::metric::MetricEntry::new(
+                Arc::clone(&self.name),
+                "disabled".to_string(),
+                "0".to_string(),
+            );
+        }
+
+        let epoch = metadata.epoch;
+        let mut cleaned = false;
+        if self.every_iters > 0 && metadata.iteration % self.every_iters == 0 {
+            B::memory_cleanup(&self.device);
+            extra_memory_cleanup::<B>(&self.device);
+            cleaned = true;
+        }
+        if let Some(last_epoch) = self.last_epoch {
+            if epoch != last_epoch && epoch % self.every_epochs == 0 {
+                B::memory_cleanup(&self.device);
+                extra_memory_cleanup::<B>(&self.device);
+                cleaned = true;
+            }
+        }
+        self.last_epoch = Some(epoch);
+
+        burn_train::metric::MetricEntry::new(
+            Arc::clone(&self.name),
+            if cleaned { "cleaned".to_string() } else { "skip".to_string() },
+            if cleaned { "1".to_string() } else { "0".to_string() },
         )
     }
 
@@ -848,13 +981,27 @@ impl<B: BackendTrait> burn_train::metric::Metric for VisionArtifactMetric<B> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::train::artifacts;
+    use crate::train::metrics::*;
     use burn::data::dataloader::Progress;
     use burn_ndarray::NdArray;
     use burn_train::metric::{Metric, MetricMetadata};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::env;
     use tempfile::tempdir;
+
+    #[derive(Clone)]
+    struct CountValue {
+        counter: Arc<AtomicUsize>,
+    }
+
+    impl<B: BackendTrait> ScalarValue<B> for CountValue {
+        fn value(&self) -> Tensor<B, 1> {
+            self.counter.fetch_add(1, Ordering::SeqCst);
+            let device = <B as BackendTrait>::Device::default();
+            Tensor::<B, 1>::zeros([1], &device)
+        }
+    }
 
     fn test_metadata(iteration: usize) -> MetricMetadata {
         MetricMetadata {
@@ -874,6 +1021,21 @@ mod tests {
             iteration,
             lr: None,
         }
+    }
+
+    #[test]
+    fn scalar_metric_respects_every() {
+        type Backend = NdArray<f32>;
+        let counter = Arc::new(AtomicUsize::new(0));
+        let mut metric =
+            ScalarMetric::<Backend, CountValue>::new_every("test_scalar", 2);
+        for iteration in 0..4 {
+            let input = CountValue {
+                counter: Arc::clone(&counter),
+            };
+            metric.update(&input, &test_metadata(iteration));
+        }
+        assert_eq!(counter.load(Ordering::SeqCst), 2);
     }
 
     #[test]

@@ -18,16 +18,21 @@ pub mod wgpu;
 #[cfg(all(target_arch = "wasm32", feature = "web"))]
 pub mod web;
 
-pub use config::{ContextStrategyConfig, GenerationConfig, ModelOverrides, TrainingHyperparameters};
+pub use config::{
+    ContextStrategyConfig, GdpoConfig, GdpoHardGate, GenerationConfig, ModelOverrides,
+    TrainingHyperparameters,
+};
 #[cfg(feature = "train")]
 pub use config::{
     DatasetConfig, DatasetSourceConfig, HuggingFaceDatasetConfig, HuggingFaceRecordFormat,
     ImagenetteVariant, LearningRateScheduleConfig, OptimizerConfig, TrainingConfig,
     VisionArtifactOutputMode, VisionAugmentationConfig, VisionDatasetConfig,
     VisionDatasetDownloadConfig, VisionDistillConfig, VisionFoveaSamplingMode, VisionFoveaWarpMode,
-    VisionFoveaScatterMode, VisionLejepaConfig, VisionLejepaLossConfig, VisionLossConfig,
-    VisionMaeConfig, VisionMaeLossConfig, VisionModelConfig, VisionPyramidMode,
-    VisionReconLossConfig, VisionSaccadeCacheConfig, VisionSaccadeConfig, VisionTeacherConfig,
+    VisionFoveaScatterMode, VisionLejepaConfig, VisionLejepaLossConfig,
+    VisionLocationEmbeddingConfig, VisionLocationEmbeddingMode, VisionLossConfig, VisionMaeConfig,
+    VisionMaeLossConfig, VisionModelConfig, VisionNullGlimpseMode, VisionPyramidMode,
+    VisionReconLossConfig, VisionSaccadeCacheConfig, VisionSaccadeConfig,
+    VisionSaccadeInfoRewardConfig, VisionSaccadePolicyConfig, VisionTeacherConfig,
     VisionTeacherFeatureConfig,
     VisionTeacherModelConfig, VisionTeacherVariant, VisionTrainingConfig,
     VisionTrainingHyperparameters, VisionTrainingModeConfig,

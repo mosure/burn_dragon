@@ -60,6 +60,7 @@ train = [
   "dep:burn_dino",
 ]
 cuda = ["burn-cuda"]
+integration_test = ["train"]
 web = ["burn/webgpu", "burn-wgpu/webgpu", "viz"]
 viz = [
   "dep:bevy",

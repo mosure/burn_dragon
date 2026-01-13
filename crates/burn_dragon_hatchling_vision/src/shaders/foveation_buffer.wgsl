@@ -392,39 +392,58 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if patched {
         let min_side = max(min(base_width, base_height), 1.0);
         let radius_norm = clamp(radius / min_side, 0.0, 1.0);
-        var max_level = f32(level_count - 1u);
+        var max_level_u = level_count - 1u;
         if mode == 1u {
-            max_level = f32(residual_count);
+            max_level_u = residual_count;
         }
-        let level_f = clamp(floor(radius_norm * max_level + 0.5), 0.0, max_level);
-        let level = u32(level_f);
-        var level_w = gaussian_width(level);
-        var level_h = gaussian_height(level);
+        let max_level = f32(max_level_u);
+        let level_f = clamp(radius_norm * max_level, 0.0, max_level);
+        let level0 = u32(floor(level_f));
+        let level1 = min(level0 + 1u, max_level_u);
+        let t = clamp(level_f - f32(level0), 0.0, 1.0);
+        var level0_w = gaussian_width(level0);
+        var level0_h = gaussian_height(level0);
+        var level1_w = gaussian_width(level1);
+        var level1_h = gaussian_height(level1);
         if mode == 1u {
-            if level >= residual_count {
-                level_w = coarse_width();
-                level_h = coarse_height();
+            if level0 >= residual_count {
+                level0_w = coarse_width();
+                level0_h = coarse_height();
             } else {
-                level_w = residual_width(level);
-                level_h = residual_height(level);
+                level0_w = residual_width(level0);
+                level0_h = residual_height(level0);
+            }
+            if level1 >= residual_count {
+                level1_w = coarse_width();
+                level1_h = coarse_height();
+            } else {
+                level1_w = residual_width(level1);
+                level1_h = residual_height(level1);
             }
         }
-        let level_w_f = max(f32(level_w), 1.0);
-        let level_h_f = max(f32(level_h), 1.0);
+        let level0_w_f = max(f32(level0_w), 1.0);
+        let level0_h_f = max(f32(level0_h), 1.0);
+        let level1_w_f = max(f32(level1_w), 1.0);
+        let level1_h_f = max(f32(level1_h), 1.0);
         let dx = base_dx;
         let dy = base_dy;
-        let fx = mean_x + dx / level_w_f;
-        let fy = mean_y + dy / level_h_f;
+        let fx0 = mean_x + dx / level0_w_f;
+        let fy0 = mean_y + dy / level0_h_f;
+        let fx1 = mean_x + dx / level1_w_f;
+        let fy1 = mean_y + dy / level1_h_f;
 
         var channel = 0u;
         loop {
             if channel >= channels {
                 break;
             }
-            var sample = sample_gaussian(b, channel, fx, fy, level_f, lod_sigma, level_count, warp_mode, channels);
+            var sample0 = sample_gaussian_level(level0, b, channel, fx0, fy0, channels);
+            var sample1 = sample_gaussian_level(level1, b, channel, fx1, fy1, channels);
             if mode == 1u {
-                sample = sample_laplacian(b, channel, fx, fy, level_f, lod_sigma, residual_count, warp_mode, channels);
+                sample0 = sample_laplacian_at(level0, b, channel, fx0, fy0, residual_count, channels);
+                sample1 = sample_laplacian_at(level1, b, channel, fx1, fy1, residual_count, channels);
             }
+            let sample = sample0 + (sample1 - sample0) * t;
             let out_index = ((b * channels + channel) * patch_h + y) * patch_w + x;
             output[out_index] = sample;
             channel += 1u;

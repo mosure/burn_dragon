@@ -1,13 +1,10 @@
+use crate::train::prelude::*;
+use crate::train::gdpo;
 use burn::optim::GradientsParams;
 use burn::tensor::Distribution as TensorDistribution;
 use burn::tensor::backend::{AutodiffBackend, Backend as BackendTrait};
 use burn::tensor::{Int, Tensor, TensorData};
-
-use super::{
-    ImageNetBatch, PatchGrid, ValidBackend, VisionDragonHatchling, VisionDragonHatchlingConfig,
-    VisionPyramidMode, VisionRollout, VisionSaccadeConfig, VisionSaccadeModel,
-    SACCADE_FOVEA_SUBSAMPLES, SaccadeLaplacianImages, SaccadeMipLevel,
-};
+use crate::{GdpoConfig, GdpoHardGate};
 
 pub struct VisionSaccadeBench<B: AutodiffBackend> {
     model: VisionSaccadeModel<B>,
@@ -28,6 +25,11 @@ pub struct VisionSaccadeBench<B: AutodiffBackend> {
     residual_pool: Tensor<B, 3>,
     base_grid: Tensor<B, 4>,
     laplacian_images: Option<SaccadeLaplacianImages<B>>,
+    gdpo_hard: Tensor<B, 2>,
+    gdpo_easy: Tensor<B, 2>,
+    gdpo_log_prob_new: Tensor<B, 2>,
+    gdpo_log_prob_old: Tensor<B, 2>,
+    gdpo_config: GdpoConfig,
 }
 
 pub struct VisionScatterBench<B: BackendTrait> {
@@ -132,10 +134,8 @@ impl<B: AutodiffBackend> VisionSaccadeBench<B> {
         let input_context = saccade.project_pyramid_context(input_context);
         let state_context = saccade.mip_weighted_sum(&state_composed, &cached_weights);
         let state_context = saccade.project_pyramid_context(state_context);
-        let fovea_params = Tensor::cat(vec![mean.clone(), sigma.clone()], 2);
-        let fovea_embed = saccade.fovea_proj.forward(fovea_params);
         let input_tokens =
-            saccade.input_proj.forward(input_context) + state_context + fovea_embed;
+            saccade.build_input_tokens(input_context, state_context, mean.clone(), sigma.clone());
         let tokens_in = traj_with_eye.clone() + input_tokens.repeat_dim(1, traj_len);
         let inner_steps = saccade.config.inner_steps.max(1);
         let tokens_out = saccade
@@ -147,12 +147,34 @@ impl<B: AutodiffBackend> VisionSaccadeBench<B> {
             .mean_dim(1)
             .reshape([batch, 1, saccade.pyramid_feature_dim()]);
 
-        let base_grid = super::build_foveated_base_grid::<B>(vision.patch_size, device);
+        let base_grid = build_foveated_base_grid::<B>(vision.patch_size, device);
         let laplacian_images = if matches!(saccade.config.pyramid_mode, VisionPyramidMode::Laplacian)
         {
             saccade.build_laplacian_images(&levels)
         } else {
             None
+        };
+        let gdpo_group = 4usize;
+        let gdpo_hard =
+            Tensor::<B, 2>::random([batch_size, gdpo_group], TensorDistribution::Default, device);
+        let gdpo_easy =
+            Tensor::<B, 2>::random([batch_size, gdpo_group], TensorDistribution::Default, device);
+        let gdpo_batch = batch_size * gdpo_group;
+        let gdpo_log_prob_new = Tensor::<B, 2>::random(
+            [gdpo_batch, 1],
+            TensorDistribution::Normal(0.0, 1.0),
+            device,
+        );
+        let gdpo_log_prob_old = Tensor::<B, 2>::random(
+            [gdpo_batch, 1],
+            TensorDistribution::Normal(0.0, 1.0),
+            device,
+        );
+        let gdpo_config = GdpoConfig {
+            enabled: true,
+            group_size: gdpo_group,
+            hard_gate: GdpoHardGate::Off,
+            ..GdpoConfig::default()
         };
 
         Self {
@@ -174,6 +196,11 @@ impl<B: AutodiffBackend> VisionSaccadeBench<B> {
             residual_pool,
             base_grid,
             laplacian_images,
+            gdpo_hard,
+            gdpo_easy,
+            gdpo_log_prob_new,
+            gdpo_log_prob_old,
+            gdpo_config,
         }
     }
 
@@ -227,11 +254,40 @@ impl<B: AutodiffBackend> VisionSaccadeBench<B> {
             .model
             .mip_weighted_sum(&self.state_composed, &self.cached_weights);
         let state_context = self.model.project_pyramid_context(state_context);
-        let fovea_params = Tensor::cat(vec![self.mean.clone(), self.sigma.clone()], 2);
-        let fovea_embed = self.model.fovea_proj.forward(fovea_params);
-        let input_tokens =
-            self.model.input_proj.forward(input_context) + state_context + fovea_embed;
+        let input_tokens = self.model.build_input_tokens(
+            input_context,
+            state_context,
+            self.mean.clone(),
+            self.sigma.clone(),
+        );
         input_tokens.sum()
+    }
+
+    pub fn stage_gdpo_advantage(&self) -> Tensor<B, 1> {
+        let advantage = gdpo::gdpo_advantage_autodiff::<B>(
+            self.gdpo_hard.clone(),
+            self.gdpo_easy.clone(),
+            &self.gdpo_config,
+        );
+        advantage.sum()
+    }
+
+    pub fn stage_gdpo_policy_loss(&self) -> Tensor<B, 1> {
+        let [scene_batch, group] = self.gdpo_hard.shape().dims::<2>();
+        let batch = scene_batch * group;
+        let advantage = gdpo::gdpo_advantage_autodiff::<B>(
+            self.gdpo_hard.clone(),
+            self.gdpo_easy.clone(),
+            &self.gdpo_config,
+        )
+        .reshape([batch, 1])
+        .detach();
+        gdpo::gdpo_policy_loss(
+            self.gdpo_log_prob_new.clone(),
+            self.gdpo_log_prob_old.clone(),
+            advantage,
+            &self.gdpo_config,
+        )
     }
 
     pub fn stage_fovea_patch(&self) -> Tensor<B, 1> {
@@ -271,7 +327,7 @@ impl<B: AutodiffBackend> VisionSaccadeBench<B> {
         let batch = self.make_batch();
         let losses = self
             .model
-            .forward_losses(batch, self.steps, self.backprop_steps, true, false);
+            .forward_losses_train(batch, self.steps, self.backprop_steps, true, false);
         losses.total
     }
 
@@ -279,7 +335,7 @@ impl<B: AutodiffBackend> VisionSaccadeBench<B> {
         let batch = self.make_batch();
         let losses = self
             .model
-            .forward_losses(batch, self.steps, self.backprop_steps, true, false);
+            .forward_losses_train(batch, self.steps, self.backprop_steps, true, false);
         let total = losses.total.clone();
         let grads = GradientsParams::from_grads(total.backward(), &self.model);
         let grad = grads

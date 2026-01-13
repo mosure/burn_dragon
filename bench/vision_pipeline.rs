@@ -249,6 +249,8 @@ mod vision_bench {
             bench_stage(&mut group, cfg, "mip_pyramid", &bench, VisionSaccadeBench::stage_mip_pyramid);
             bench_stage(&mut group, cfg, "fovea_weights", &bench, VisionSaccadeBench::stage_fovea_weights);
             bench_stage(&mut group, cfg, "fovea_context", &bench, VisionSaccadeBench::stage_fovea_context);
+            bench_stage(&mut group, cfg, "gdpo_advantage", &bench, VisionSaccadeBench::stage_gdpo_advantage);
+            bench_stage(&mut group, cfg, "gdpo_policy_loss", &bench, VisionSaccadeBench::stage_gdpo_policy_loss);
             bench_stage(&mut group, cfg, "token_forward", &bench, VisionSaccadeBench::stage_token_forward);
             bench_stage(&mut group, cfg, "residual_scatter", &bench, VisionSaccadeBench::stage_residual_scatter);
             if profile.include_full {

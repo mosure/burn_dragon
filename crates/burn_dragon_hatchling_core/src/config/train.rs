@@ -2,14 +2,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use toml::Value;
 
 use crate::tokenizer::TokenizerConfig;
 
-use super::{GenerationConfig, ModelOverrides, TrainingHyperparameters};
+use super::{GenerationConfig, GdpoHardGate, ModelOverrides, TrainingHyperparameters};
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct DatasetConfig {
     pub cache_dir: PathBuf,
     #[serde(default = "default_train_split_ratio")]
@@ -20,7 +20,7 @@ pub struct DatasetConfig {
     pub tokenizer: TokenizerConfig,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum DatasetSourceConfig {
     Shakespeare {
@@ -60,7 +60,7 @@ impl Default for DatasetSourceConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct HuggingFaceDatasetConfig {
     pub repo_id: String,
     #[serde(default)]
@@ -81,7 +81,7 @@ pub struct HuggingFaceDatasetConfig {
     pub max_records: Option<usize>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum HuggingFaceRecordFormat {
     #[default]
@@ -91,7 +91,7 @@ pub enum HuggingFaceRecordFormat {
     Csv,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct OptimizerConfig {
     pub learning_rate: f64,
     pub weight_decay: f32,
@@ -99,7 +99,7 @@ pub struct OptimizerConfig {
     pub lr_schedule: Option<LearningRateScheduleConfig>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum LearningRateScheduleConfig {
     Constant {
@@ -144,7 +144,7 @@ pub enum LearningRateScheduleConfig {
     },
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct TrainingConfig {
     pub dataset: DatasetConfig,
     pub training: TrainingHyperparameters,
@@ -152,6 +152,193 @@ pub struct TrainingConfig {
     pub generation: GenerationConfig,
     #[serde(default)]
     pub model: ModelOverrides,
+}
+
+impl TrainingConfig {
+    pub fn validate(&self) -> Result<()> {
+        if self.training.block_size == 0 {
+            return Err(anyhow!("training.block_size must be > 0"));
+        }
+        if self.training.batch_size == 0 {
+            return Err(anyhow!("training.batch_size must be > 0"));
+        }
+        if self.training.max_iters == 0 {
+            return Err(anyhow!("training.max_iters must be > 0"));
+        }
+        if self.training.log_frequency == 0 {
+            return Err(anyhow!("training.log_frequency must be > 0"));
+        }
+        if let Some(epochs) = self.training.epochs {
+            if epochs == 0 {
+                return Err(anyhow!("training.epochs must be > 0"));
+            }
+        }
+        if self.optimizer.learning_rate <= 0.0 {
+            return Err(anyhow!("optimizer.learning_rate must be > 0"));
+        }
+        if self.optimizer.weight_decay < 0.0 {
+            return Err(anyhow!("optimizer.weight_decay must be >= 0"));
+        }
+        if !(0.0 < self.dataset.train_split_ratio && self.dataset.train_split_ratio <= 1.0) {
+            return Err(anyhow!(
+                "dataset.train_split_ratio must be in (0, 1] (got {})",
+                self.dataset.train_split_ratio
+            ));
+        }
+        if let Some(max_tokens) = self.generation.max_tokens {
+            if max_tokens <= 0 {
+                return Err(anyhow!("generation.max_tokens must be > 0"));
+            }
+        }
+        if self.generation.temperature <= 0.0 {
+            return Err(anyhow!("generation.temperature must be > 0"));
+        }
+        if let Some(top_k) = self.generation.top_k {
+            if top_k == 0 {
+                return Err(anyhow!("generation.top_k must be > 0"));
+            }
+        }
+
+        match &self.dataset.source {
+            DatasetSourceConfig::HuggingFace(config) => {
+                if config.repo_id.trim().is_empty() {
+                    return Err(anyhow!("dataset.repo_id must not be empty"));
+                }
+                if config.train_files.is_empty() {
+                    return Err(anyhow!("dataset.train_files must not be empty"));
+                }
+                if config.text_fields.is_empty() {
+                    return Err(anyhow!("dataset.text_fields must not be empty"));
+                }
+            }
+            DatasetSourceConfig::DeepMath { max_records, .. }
+            | DatasetSourceConfig::TinyChat { max_records, .. }
+            | DatasetSourceConfig::WebscaleRl { max_records, .. }
+            | DatasetSourceConfig::PoetryFoundation { max_records, .. } => {
+                if matches!(max_records, Some(0)) {
+                    return Err(anyhow!("dataset.max_records must be > 0 when set"));
+                }
+            }
+            DatasetSourceConfig::Shakespeare { .. } => {}
+        }
+
+        if let Some(gdpo) = &self.training.gdpo {
+            if gdpo.enabled {
+                if gdpo.group_size == 0 {
+                    return Err(anyhow!("training.gdpo.group_size must be > 0"));
+                }
+                if gdpo.hard_weight < 0.0 {
+                    return Err(anyhow!("training.gdpo.hard_weight must be >= 0"));
+                }
+                if gdpo.easy_weight < 0.0 {
+                    return Err(anyhow!("training.gdpo.easy_weight must be >= 0"));
+                }
+                if gdpo.policy_weight < 0.0 {
+                    return Err(anyhow!("training.gdpo.policy_weight must be >= 0"));
+                }
+                if gdpo.policy_clip_range < 0.0 {
+                    return Err(anyhow!("training.gdpo.policy_clip_range must be >= 0"));
+                }
+                if let GdpoHardGate::Percentile { quantile } = gdpo.hard_gate {
+                    if !(0.0..=1.0).contains(&quantile) {
+                        return Err(anyhow!(
+                            "training.gdpo.hard_gate.quantile must be in [0, 1] (got {})",
+                            quantile
+                        ));
+                    }
+                }
+            }
+        }
+
+        if let Some(n_layer) = self.model.n_layer {
+            if n_layer == 0 {
+                return Err(anyhow!("model.n_layer must be > 0 when set"));
+            }
+        }
+        if let Some(n_embd) = self.model.n_embd {
+            if n_embd == 0 {
+                return Err(anyhow!("model.n_embd must be > 0 when set"));
+            }
+        }
+        if let Some(n_head) = self.model.n_head {
+            if n_head == 0 {
+                return Err(anyhow!("model.n_head must be > 0 when set"));
+            }
+        }
+        if let Some(multiplier) = self.model.mlp_internal_dim_multiplier {
+            if multiplier == 0 {
+                return Err(anyhow!("model.mlp_internal_dim_multiplier must be > 0 when set"));
+            }
+        }
+        if let Some(dropout) = self.model.dropout {
+            if dropout < 0.0 {
+                return Err(anyhow!("model.dropout must be >= 0"));
+            }
+        }
+        if let Some(block_size) = self.model.block_size {
+            if block_size == 0 {
+                return Err(anyhow!("model.block_size must be > 0 when set"));
+            }
+        }
+
+        if let Some(schedule) = &self.optimizer.lr_schedule {
+            match schedule {
+                LearningRateScheduleConfig::Constant { initial_lr }
+                | LearningRateScheduleConfig::Cosine { initial_lr, .. }
+                | LearningRateScheduleConfig::Linear { initial_lr, .. }
+                | LearningRateScheduleConfig::Exponential { initial_lr, .. }
+                | LearningRateScheduleConfig::Step { initial_lr, .. }
+                | LearningRateScheduleConfig::Noam { initial_lr, .. } => {
+                    if matches!(initial_lr.as_ref(), Some(value) if *value <= 0.0) {
+                        return Err(anyhow!("optimizer.lr_schedule.initial_lr must be > 0"));
+                    }
+                }
+            }
+
+            match schedule {
+                LearningRateScheduleConfig::Cosine { min_lr, num_iters, .. } => {
+                    if matches!(min_lr.as_ref(), Some(value) if *value < 0.0) {
+                        return Err(anyhow!("optimizer.lr_schedule.min_lr must be >= 0"));
+                    }
+                    if matches!(num_iters, Some(0)) {
+                        return Err(anyhow!("optimizer.lr_schedule.num_iters must be > 0"));
+                    }
+                }
+                LearningRateScheduleConfig::Linear { final_lr, num_iters, .. } => {
+                    if *final_lr < 0.0 {
+                        return Err(anyhow!("optimizer.lr_schedule.final_lr must be >= 0"));
+                    }
+                    if matches!(num_iters, Some(0)) {
+                        return Err(anyhow!("optimizer.lr_schedule.num_iters must be > 0"));
+                    }
+                }
+                LearningRateScheduleConfig::Exponential { gamma, .. } => {
+                    if *gamma <= 0.0 {
+                        return Err(anyhow!("optimizer.lr_schedule.gamma must be > 0"));
+                    }
+                }
+                LearningRateScheduleConfig::Step { gamma, step_size, .. } => {
+                    if *gamma <= 0.0 {
+                        return Err(anyhow!("optimizer.lr_schedule.gamma must be > 0"));
+                    }
+                    if matches!(step_size, Some(0)) {
+                        return Err(anyhow!("optimizer.lr_schedule.step_size must be > 0"));
+                    }
+                }
+                LearningRateScheduleConfig::Noam { warmup_steps, model_size, .. } => {
+                    if matches!(warmup_steps, Some(0)) {
+                        return Err(anyhow!("optimizer.lr_schedule.warmup_steps must be > 0"));
+                    }
+                    if matches!(model_size, Some(0)) {
+                        return Err(anyhow!("optimizer.lr_schedule.model_size must be > 0"));
+                    }
+                }
+                LearningRateScheduleConfig::Constant { .. } => {}
+            }
+        }
+
+        Ok(())
+    }
 }
 
 pub fn load_training_config(paths: &[PathBuf]) -> Result<TrainingConfig> {
@@ -323,6 +510,7 @@ mod tests {
                 log_frequency: 50,
                 fast_train: false,
                 context_strategy: ContextStrategyConfig::Infinite,
+                gdpo: None,
             }
         );
         assert!((config.optimizer.learning_rate - 0.0005).abs() < f64::EPSILON);

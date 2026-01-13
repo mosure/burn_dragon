@@ -46,6 +46,7 @@ benchmark = ["burn_dragon_hatchling_core/benchmark"]
 cli = ["burn_dragon_hatchling_core/cli"]
 train = ["burn_dragon_hatchling_core/train"]
 cuda = ["burn_dragon_hatchling_core/cuda"]
+integration_test = ["burn_dragon_hatchling_core/integration_test"]
 web = ["burn_dragon_hatchling_core/web"]
 viz = ["burn_dragon_hatchling_core/viz"]
 
@@ -97,9 +98,6 @@ opt-level = "z"
 lto = "fat"
 codegen-units = 1
 panic = "abort"
-
-[patch.crates-io]
-bevy_burn = { path = "crates/bevy_burn" }
 
 
 [lib]

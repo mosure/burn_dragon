@@ -13,7 +13,7 @@ use byte::ByteTokenizer;
 #[cfg(feature = "train")]
 use char_vocab::CharVocab;
 #[cfg(feature = "train")]
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 pub trait Tokenizer: Send + Sync {
     fn encode(&self, text: &str, add_bos: bool, add_eos: bool) -> Vec<u32>;
@@ -30,7 +30,7 @@ pub trait Tokenizer: Send + Sync {
 pub type SharedTokenizer = Arc<dyn Tokenizer>;
 
 #[cfg(feature = "train")]
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct TokenizerConfig {
     #[serde(default)]
     pub vocab_path: Option<PathBuf>,
@@ -49,7 +49,7 @@ impl Default for TokenizerConfig {
 }
 
 #[cfg(feature = "train")]
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TokenizerKind {
     Char(CharTokenizerConfig),
@@ -57,7 +57,7 @@ pub enum TokenizerKind {
 }
 
 #[cfg(feature = "train")]
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct CharTokenizerConfig {
     #[serde(default = "default_true")]
     pub include_unknown: bool,
@@ -73,7 +73,7 @@ impl Default for CharTokenizerConfig {
 }
 
 #[cfg(feature = "train")]
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct ByteTokenizerConfig {
     #[serde(default = "default_true")]
     pub add_special_tokens: bool,

@@ -499,7 +499,7 @@ impl fmt::Display for ArtifactWriteOutcome {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::train::artifacts::*;
     use avirus::AVI;
 
     fn sample_frames() -> Vec<ArtifactFrame> {

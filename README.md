@@ -21,6 +21,7 @@ burn inference and training of [dragon hatchling](https://arxiv.org/abs/2509.265
 - [x] sparsity metrics and visualization
 - [x] vision dragon hatchling [cortical column/stack](https://arxiv.org/abs/2412.18354)
 - [x] recurrent, foveated saccade training and inference
+- [x] [GDPO](https://arxiv.org/abs/2601.05242)
 - [ ] adaptive tool discovery
 - [ ] conditional (deep) gating
 - [ ] document-coherent dataloading and scale mixup

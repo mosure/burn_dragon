@@ -2148,6 +2148,7 @@ mod imagenet {
         device: B::Device,
         prefetch_batches: usize,
         prefetch_workers: usize,
+        prefetch_to_device: bool,
     }
 
     impl<B: Backend> Clone for ImageNetDataLoader<B> {
@@ -2161,6 +2162,7 @@ mod imagenet {
                 device: self.device.clone(),
                 prefetch_batches: self.prefetch_batches,
                 prefetch_workers: self.prefetch_workers,
+                prefetch_to_device: self.prefetch_to_device,
             }
         }
     }
@@ -2174,6 +2176,7 @@ mod imagenet {
             total_steps: Option<usize>,
             prefetch_batches: usize,
             prefetch_workers: usize,
+            prefetch_to_device: bool,
         ) -> Self {
             let steps_per_epoch = if steps_per_epoch == 0 {
                 dataset.steps_per_epoch(batch_size)
@@ -2184,6 +2187,13 @@ mod imagenet {
             let total_steps = total_steps.filter(|value| *value > 0);
             let consumed_steps = total_steps.as_ref().map(|_| Arc::new(AtomicUsize::new(0)));
             let prefetch_batches = prefetch_batches.min(steps_per_epoch);
+            let prefetch_to_device = prefetch_to_device && prefetch_batches > 0;
+            let min_prefetch = if prefetch_to_device { 2 } else { 1 };
+            let prefetch_batches = if prefetch_batches == 0 {
+                0
+            } else {
+                prefetch_batches.max(min_prefetch)
+            };
             let prefetch_workers = if prefetch_batches == 0 {
                 0
             } else {
@@ -2199,6 +2209,7 @@ mod imagenet {
                 device: device.clone(),
                 prefetch_batches,
                 prefetch_workers,
+                prefetch_to_device,
             }
         }
     }
@@ -2206,7 +2217,8 @@ mod imagenet {
     impl<B> DataLoader<B, ImageNetBatch<B>> for ImageNetDataLoader<B>
     where
         B: Backend + 'static,
-        B::Device: Clone,
+        B::Device: Clone + Send + Sync + 'static,
+        ImageNetBatch<B>: Send,
     {
         fn iter<'a>(&'a self) -> Box<dyn DataLoaderIterator<ImageNetBatch<B>> + 'a> {
             let steps_total =
@@ -2228,6 +2240,8 @@ mod imagenet {
                     steps_total,
                     self.prefetch_batches,
                     self.prefetch_workers,
+                    &self.device,
+                    self.prefetch_to_device,
                 ))
             } else {
                 None
@@ -2259,6 +2273,7 @@ mod imagenet {
                 device: device.clone(),
                 prefetch_batches: self.prefetch_batches,
                 prefetch_workers: self.prefetch_workers,
+                prefetch_to_device: self.prefetch_to_device,
             })
         }
 
@@ -2276,57 +2291,121 @@ mod imagenet {
                 device: self.device.clone(),
                 prefetch_batches: self.prefetch_batches,
                 prefetch_workers: self.prefetch_workers,
+                prefetch_to_device: self.prefetch_to_device,
             })
         }
     }
 
-    struct ImageNetPrefetcher {
-        rx: Option<mpsc::Receiver<Result<ImageNetBatchData>>>,
+    enum ImageNetPrefetchItem<B: Backend> {
+        Data(ImageNetBatchData),
+        Batch(ImageNetBatch<B>),
+    }
+
+    struct ImageNetPrefetcher<B: Backend> {
+        rx: Option<mpsc::Receiver<Result<ImageNetPrefetchItem<B>>>>,
         stop: Arc<AtomicBool>,
         handles: Vec<thread::JoinHandle<()>>,
     }
 
-    impl ImageNetPrefetcher {
+    impl<B> ImageNetPrefetcher<B>
+    where
+        B: Backend + 'static,
+        B::Device: Clone + Send + Sync + 'static,
+        ImageNetBatch<B>: Send,
+    {
         fn new(
             dataset: Arc<ImageNetDataset>,
             batch_size: usize,
             steps_total: usize,
             prefetch_batches: usize,
             prefetch_workers: usize,
+            device: &B::Device,
+            prefetch_to_device: bool,
         ) -> Self {
             let workers = prefetch_workers.max(1);
             let (tx, rx) = mpsc::sync_channel(prefetch_batches.max(1));
             let remaining = Arc::new(AtomicUsize::new(steps_total));
             let stop = Arc::new(AtomicBool::new(false));
-            let mut handles = Vec::with_capacity(workers);
+            let mut handles = Vec::with_capacity(workers + if prefetch_to_device { 1 } else { 0 });
 
-            for _ in 0..workers {
-                let dataset = Arc::clone(&dataset);
-                let tx = tx.clone();
-                let remaining = Arc::clone(&remaining);
+            if prefetch_to_device {
+                let (data_tx, data_rx) = mpsc::sync_channel(prefetch_batches.max(1));
+                for _ in 0..workers {
+                    let dataset = Arc::clone(&dataset);
+                    let tx = data_tx.clone();
+                    let remaining = Arc::clone(&remaining);
+                    let stop = Arc::clone(&stop);
+                    let handle = thread::spawn(move || {
+                        loop {
+                            if stop.load(Ordering::Relaxed) {
+                                break;
+                            }
+                            let decremented = remaining.fetch_update(
+                                Ordering::AcqRel,
+                                Ordering::Acquire,
+                                |value| value.checked_sub(1),
+                            );
+                            if decremented.is_err() {
+                                break;
+                            }
+                            let result = dataset.sample_batch_data(batch_size);
+                            if tx.send(result).is_err() {
+                                break;
+                            }
+                        }
+                    });
+                    handles.push(handle);
+                }
+                drop(data_tx);
+
+                let device = device.clone();
                 let stop = Arc::clone(&stop);
                 let handle = thread::spawn(move || {
-                    loop {
+                    for data in data_rx {
                         if stop.load(Ordering::Relaxed) {
                             break;
                         }
-                        let decremented = remaining.fetch_update(
-                            Ordering::AcqRel,
-                            Ordering::Acquire,
-                            |value| value.checked_sub(1),
-                        );
-                        if decremented.is_err() {
-                            break;
-                        }
-                        let result = dataset.sample_batch_data(batch_size);
-                        if tx.send(result).is_err() {
+                        let item = match data {
+                            Ok(data) => Ok(ImageNetPrefetchItem::Batch(data.into_batch::<B>(&device))),
+                            Err(err) => Err(err),
+                        };
+                        if tx.send(item).is_err() {
                             break;
                         }
                     }
                 });
                 handles.push(handle);
+            } else {
+                for _ in 0..workers {
+                    let dataset = Arc::clone(&dataset);
+                    let tx = tx.clone();
+                    let remaining = Arc::clone(&remaining);
+                    let stop = Arc::clone(&stop);
+                    let handle = thread::spawn(move || {
+                        loop {
+                            if stop.load(Ordering::Relaxed) {
+                                break;
+                            }
+                            let decremented = remaining.fetch_update(
+                                Ordering::AcqRel,
+                                Ordering::Acquire,
+                                |value| value.checked_sub(1),
+                            );
+                            if decremented.is_err() {
+                                break;
+                            }
+                            let result = dataset
+                                .sample_batch_data(batch_size)
+                                .map(ImageNetPrefetchItem::Data);
+                            if tx.send(result).is_err() {
+                                break;
+                            }
+                        }
+                    });
+                    handles.push(handle);
+                }
+                drop(tx);
             }
-            drop(tx);
 
             Self {
                 rx: Some(rx),
@@ -2335,13 +2414,13 @@ mod imagenet {
             }
         }
 
-        fn recv(&mut self) -> Option<Result<ImageNetBatchData>> {
+        fn recv(&mut self) -> Option<Result<ImageNetPrefetchItem<B>>> {
             let rx = self.rx.as_ref()?;
             rx.recv().ok()
         }
     }
 
-    impl Drop for ImageNetPrefetcher {
+    impl<B: Backend> Drop for ImageNetPrefetcher<B> {
         fn drop(&mut self) {
             self.stop.store(true, Ordering::Relaxed);
             self.rx.take();
@@ -2359,7 +2438,7 @@ mod imagenet {
         step: usize,
         total_steps: Option<usize>,
         consumed_steps: Option<Arc<AtomicUsize>>,
-        prefetcher: Option<ImageNetPrefetcher>,
+        prefetcher: Option<ImageNetPrefetcher<B>>,
     }
 
     impl<B: Backend> Iterator for ImageNetIterator<B> {
@@ -2381,19 +2460,18 @@ mod imagenet {
                     counter.fetch_add(1, Ordering::Relaxed);
                 }
             }
-            let batch_data = if let Some(prefetcher) = &mut self.prefetcher {
+            let batch = if let Some(prefetcher) = &mut self.prefetcher {
                 match prefetcher.recv() {
-                    Some(Ok(data)) => data,
+                    Some(Ok(ImageNetPrefetchItem::Batch(batch))) => batch,
+                    Some(Ok(ImageNetPrefetchItem::Data(data))) => data.into_batch(&self.device),
                     Some(Err(err)) => panic!("imagenet prefetch error: {err}"),
                     None => panic!("imagenet prefetch channel closed early"),
                 }
             } else {
-                self.dataset
-                    .sample_batch_data(self.batch_size)
-                    .unwrap_or_else(|err| panic!("imagenet batch failed: {err}"))
+                self.dataset.sample_batch(self.batch_size, &self.device)
             };
 
-            Some(batch_data.into_batch(&self.device))
+            Some(batch)
         }
     }
 

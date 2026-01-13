@@ -5,15 +5,15 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow};
 use burn::module::{AutodiffModule, Content, Module, ModuleDisplay, ModuleDisplayDefault};
 use burn::tensor::backend::{AutodiffBackend, Backend};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use toml::Value;
 
 use crate::model::{FusedKernelConfig, SpatialPositionalEncodingKind, VisionAttentionMode};
 use crate::model::VisionDistillationLossConfig;
 
-use super::OptimizerConfig;
+use super::{GdpoConfig, GdpoHardGate, OptimizerConfig};
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum VisionPyramidMode {
     Stacked,
@@ -43,7 +43,7 @@ impl ModuleDisplayDefault for VisionPyramidMode {
 
 impl ModuleDisplay for VisionPyramidMode {}
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum VisionFoveaSamplingMode {
     Batched,
@@ -79,7 +79,7 @@ impl ModuleDisplayDefault for VisionFoveaSamplingMode {
 
 impl ModuleDisplay for VisionFoveaSamplingMode {}
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum VisionFoveaWarpMode {
     Warped,
@@ -109,7 +109,7 @@ impl ModuleDisplayDefault for VisionFoveaWarpMode {
 
 impl ModuleDisplay for VisionFoveaWarpMode {}
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum VisionFoveaScatterMode {
     Tensor,
@@ -141,7 +141,173 @@ impl ModuleDisplayDefault for VisionFoveaScatterMode {
 
 impl ModuleDisplay for VisionFoveaScatterMode {}
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum VisionLocationEmbeddingMode {
+    None,
+    Learned,
+    Sinusoidal,
+    Quantized,
+}
+
+impl Default for VisionLocationEmbeddingMode {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
+impl fmt::Display for VisionLocationEmbeddingMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::None => write!(f, "none"),
+            Self::Learned => write!(f, "learned"),
+            Self::Sinusoidal => write!(f, "sinusoidal"),
+            Self::Quantized => write!(f, "quantized"),
+        }
+    }
+}
+
+impl ModuleDisplayDefault for VisionLocationEmbeddingMode {
+    fn content(&self, content: Content) -> Option<Content> {
+        content.add_formatted(self).optional()
+    }
+}
+
+impl ModuleDisplay for VisionLocationEmbeddingMode {}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(default)]
+pub struct VisionLocationEmbeddingConfig {
+    pub mode: VisionLocationEmbeddingMode,
+    pub embed_dim: usize,
+    pub quantize_bins: usize,
+    pub noise_std: f32,
+}
+
+impl Default for VisionLocationEmbeddingConfig {
+    fn default() -> Self {
+        Self {
+            mode: VisionLocationEmbeddingMode::None,
+            embed_dim: 12,
+            quantize_bins: 32,
+            noise_std: 0.0,
+        }
+    }
+}
+
+impl ModuleDisplayDefault for VisionLocationEmbeddingConfig {
+    fn content(&self, content: Content) -> Option<Content> {
+        content
+            .add("mode", &self.mode)
+            .add("embed_dim", &self.embed_dim)
+            .add("quantize_bins", &self.quantize_bins)
+            .add("noise_std", &self.noise_std)
+            .optional()
+    }
+}
+
+impl ModuleDisplay for VisionLocationEmbeddingConfig {}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum VisionNullGlimpseMode {
+    Zero,
+    Noise,
+}
+
+impl Default for VisionNullGlimpseMode {
+    fn default() -> Self {
+        Self::Zero
+    }
+}
+
+impl fmt::Display for VisionNullGlimpseMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Zero => write!(f, "zero"),
+            Self::Noise => write!(f, "noise"),
+        }
+    }
+}
+
+impl ModuleDisplayDefault for VisionNullGlimpseMode {
+    fn content(&self, content: Content) -> Option<Content> {
+        content.add_formatted(self).optional()
+    }
+}
+
+impl ModuleDisplay for VisionNullGlimpseMode {}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(default)]
+pub struct VisionSaccadeInfoRewardConfig {
+    pub enabled: bool,
+    pub stride: usize,
+    pub null_mode: VisionNullGlimpseMode,
+    pub null_noise_std: f32,
+}
+
+impl Default for VisionSaccadeInfoRewardConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            stride: 1,
+            null_mode: VisionNullGlimpseMode::Zero,
+            null_noise_std: 0.05,
+        }
+    }
+}
+
+impl ModuleDisplayDefault for VisionSaccadeInfoRewardConfig {
+    fn content(&self, content: Content) -> Option<Content> {
+        content
+            .add("enabled", &self.enabled)
+            .add("stride", &self.stride)
+            .add("null_mode", &self.null_mode)
+            .add("null_noise_std", &self.null_noise_std)
+            .optional()
+    }
+}
+
+impl ModuleDisplay for VisionSaccadeInfoRewardConfig {}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(default)]
+pub struct VisionSaccadePolicyConfig {
+    pub location_embedding: VisionLocationEmbeddingConfig,
+    pub detach_policy_from_recon: bool,
+    pub action_noise_std: f32,
+    pub info_reward: VisionSaccadeInfoRewardConfig,
+    pub gdpo: GdpoConfig,
+}
+
+impl Default for VisionSaccadePolicyConfig {
+    fn default() -> Self {
+        Self {
+            location_embedding: VisionLocationEmbeddingConfig::default(),
+            detach_policy_from_recon: false,
+            action_noise_std: 0.05,
+            info_reward: VisionSaccadeInfoRewardConfig::default(),
+            gdpo: GdpoConfig::default(),
+        }
+    }
+}
+
+impl ModuleDisplayDefault for VisionSaccadePolicyConfig {
+    fn content(&self, content: Content) -> Option<Content> {
+        content
+            .add("location_embedding", &self.location_embedding)
+            .add("detach_policy_from_recon", &self.detach_policy_from_recon)
+            .add("action_noise_std", &self.action_noise_std)
+            .add("info_reward", &self.info_reward)
+            .add("gdpo", &self.gdpo)
+            .optional()
+    }
+}
+
+impl ModuleDisplay for VisionSaccadePolicyConfig {}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum VisionArtifactOutputMode {
     Images,
@@ -173,7 +339,7 @@ impl ModuleDisplayDefault for VisionArtifactOutputMode {
 
 impl ModuleDisplay for VisionArtifactOutputMode {}
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct VisionTrainingConfig {
     pub dataset: VisionDatasetConfig,
     pub training: VisionTrainingHyperparameters,
@@ -185,7 +351,77 @@ pub struct VisionTrainingConfig {
     pub mode: VisionTrainingModeConfig,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+impl VisionTrainingConfig {
+    pub fn validate(&self) -> Result<()> {
+        if self.training.batch_size == 0 {
+            return Err(anyhow!("training.batch_size must be > 0"));
+        }
+        if self.training.max_iters == 0 {
+            return Err(anyhow!("training.max_iters must be > 0"));
+        }
+        if self.training.log_frequency == 0 {
+            return Err(anyhow!("training.log_frequency must be > 0"));
+        }
+        if let Some(epochs) = self.training.epochs {
+            if epochs == 0 {
+                return Err(anyhow!("training.epochs must be > 0"));
+            }
+        }
+
+        if self.vision.image_size == 0 {
+            return Err(anyhow!("vision.image_size must be > 0"));
+        }
+        if self.vision.patch_size == 0 {
+            return Err(anyhow!("vision.patch_size must be > 0"));
+        }
+        if self.vision.in_channels == 0 {
+            return Err(anyhow!("vision.in_channels must be > 0"));
+        }
+        if self.vision.embed_dim == 0 {
+            return Err(anyhow!("vision.embed_dim must be > 0"));
+        }
+        if self.vision.steps == 0 {
+            return Err(anyhow!("vision.steps must be > 0"));
+        }
+        if self.vision.n_head == 0 {
+            return Err(anyhow!("vision.n_head must be > 0"));
+        }
+        if self.vision.mlp_internal_dim_multiplier == 0 {
+            return Err(anyhow!(
+                "vision.mlp_internal_dim_multiplier must be > 0"
+            ));
+        }
+        if self.vision.projection_dim == 0 {
+            return Err(anyhow!("vision.projection_dim must be > 0"));
+        }
+        if self.vision.projection_hidden_dim == 0 {
+            return Err(anyhow!("vision.projection_hidden_dim must be > 0"));
+        }
+        if self.vision.dropout < 0.0 {
+            return Err(anyhow!("vision.dropout must be >= 0"));
+        }
+        if matches!(self.vision.pos_max_height, Some(0)) {
+            return Err(anyhow!("vision.pos_max_height must be > 0 when set"));
+        }
+        if matches!(self.vision.pos_max_width, Some(0)) {
+            return Err(anyhow!("vision.pos_max_width must be > 0 when set"));
+        }
+
+        validate_vision_rollout(&self.training, self.vision.steps)?;
+        validate_vision_mode(&self.mode, &self.vision)?;
+
+        if self.optimizer.learning_rate <= 0.0 {
+            return Err(anyhow!("optimizer.learning_rate must be > 0"));
+        }
+        if self.optimizer.weight_decay < 0.0 {
+            return Err(anyhow!("optimizer.weight_decay must be >= 0"));
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum VisionTrainingModeConfig {
     Distill(VisionDistillConfig),
@@ -200,7 +436,7 @@ impl Default for VisionTrainingModeConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
 pub struct VisionDistillConfig {
     #[serde(default)]
@@ -218,7 +454,7 @@ impl Default for VisionDistillConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum VisionTeacherConfig {
     Features(VisionTeacherFeatureConfig),
@@ -231,7 +467,7 @@ impl Default for VisionTeacherConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
 pub struct VisionTeacherFeatureConfig {
     pub train_cls_path: PathBuf,
@@ -255,7 +491,7 @@ impl Default for VisionTeacherFeatureConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct VisionTeacherModelConfig {
     pub checkpoint_path: PathBuf,
     #[serde(default)]
@@ -272,7 +508,7 @@ pub struct VisionTeacherModelConfig {
     pub patch_tokens: Option<usize>,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum VisionTeacherVariant {
     #[default]
@@ -282,7 +518,7 @@ pub enum VisionTeacherVariant {
     Vitg,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
 pub struct VisionLejepaLossConfig {
     pub enabled: bool,
@@ -318,7 +554,7 @@ impl ModuleDisplayDefault for VisionLejepaLossConfig {
 
 impl ModuleDisplay for VisionLejepaLossConfig {}
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
 pub struct VisionReconLossConfig {
     pub weight: f32,
@@ -348,7 +584,7 @@ impl ModuleDisplayDefault for VisionReconLossConfig {
 
 impl ModuleDisplay for VisionReconLossConfig {}
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
 pub struct VisionLossConfig {
     pub lejepa: VisionLejepaLossConfig,
@@ -375,7 +611,7 @@ impl ModuleDisplayDefault for VisionLossConfig {
 
 impl ModuleDisplay for VisionLossConfig {}
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
 pub struct VisionMaeLossConfig {
     pub recon: VisionReconLossConfig,
@@ -401,7 +637,7 @@ impl ModuleDisplayDefault for VisionMaeLossConfig {
 
 impl ModuleDisplay for VisionMaeLossConfig {}
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
 pub struct VisionLejepaConfig {
     pub loss: VisionLossConfig,
@@ -497,7 +733,7 @@ impl ModuleDisplayDefault for VisionLejepaConfig {
 
 impl ModuleDisplay for VisionLejepaConfig {}
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
 pub struct VisionMaeConfig {
     pub loss: VisionMaeLossConfig,
@@ -575,7 +811,7 @@ impl ModuleDisplayDefault for VisionMaeConfig {
 
 impl ModuleDisplay for VisionMaeConfig {}
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
 pub struct VisionSaccadeCacheConfig {
     pub max_entries: usize,
@@ -595,7 +831,7 @@ impl ModuleDisplayDefault for VisionSaccadeCacheConfig {
 
 impl ModuleDisplay for VisionSaccadeCacheConfig {}
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
 pub struct VisionSaccadeConfig {
     pub num_eyes: usize,
@@ -608,6 +844,7 @@ pub struct VisionSaccadeConfig {
     pub pyramid_feature_dim: Option<usize>,
     pub inner_steps: usize,
     pub low_mem_pre_rollout: bool,
+    pub policy: VisionSaccadePolicyConfig,
     pub cache: VisionSaccadeCacheConfig,
     pub loss: VisionLossConfig,
     pub artifact_output: VisionArtifactOutputMode,
@@ -631,6 +868,7 @@ impl Default for VisionSaccadeConfig {
             pyramid_feature_dim: None,
             inner_steps: 1,
             low_mem_pre_rollout: true,
+            policy: VisionSaccadePolicyConfig::default(),
             cache: VisionSaccadeCacheConfig::default(),
             loss: VisionLossConfig::default(),
             artifact_output: VisionArtifactOutputMode::Mp4,
@@ -692,6 +930,7 @@ impl ModuleDisplayDefault for VisionSaccadeConfig {
             .add("pyramid_feature_dim", &self.pyramid_feature_dim)
             .add("inner_steps", &self.inner_steps)
             .add("low_mem_pre_rollout", &self.low_mem_pre_rollout)
+            .add("policy", &self.policy)
             .add("cache", &self.cache)
             .add("loss", &self.loss)
             .add("artifact_output", &self.artifact_output)
@@ -706,7 +945,7 @@ impl ModuleDisplayDefault for VisionSaccadeConfig {
 
 impl ModuleDisplay for VisionSaccadeConfig {}
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum VisionDatasetDownloadConfig {
     Imagenette {
@@ -715,7 +954,7 @@ pub enum VisionDatasetDownloadConfig {
     },
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum ImagenetteVariant {
     #[default]
@@ -724,13 +963,17 @@ pub enum ImagenetteVariant {
 }
 
 fn default_prefetch_batches() -> usize {
-    2
+    4
 }
 
 fn default_prefetch_workers() -> usize {
     std::thread::available_parallelism()
-        .map(|count| count.get().min(4))
-        .unwrap_or(2)
+        .map(|count| count.get().min(8))
+        .unwrap_or(4)
+}
+
+fn default_prefetch_to_device() -> bool {
+    true
 }
 
 fn default_cache_decoded() -> bool {
@@ -741,7 +984,7 @@ fn default_cache_capacity() -> usize {
     512
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
 pub struct VisionDatasetConfig {
     pub imagenet_root: PathBuf,
@@ -753,6 +996,8 @@ pub struct VisionDatasetConfig {
     pub prefetch_batches: usize,
     #[serde(default = "default_prefetch_workers")]
     pub prefetch_workers: usize,
+    #[serde(default = "default_prefetch_to_device")]
+    pub prefetch_to_device: bool,
     #[serde(default = "default_cache_decoded")]
     pub cache_decoded: bool,
     #[serde(default = "default_cache_capacity")]
@@ -769,13 +1014,14 @@ impl Default for VisionDatasetConfig {
             download: None,
             prefetch_batches: default_prefetch_batches(),
             prefetch_workers: default_prefetch_workers(),
+            prefetch_to_device: default_prefetch_to_device(),
             cache_decoded: default_cache_decoded(),
             cache_capacity: default_cache_capacity(),
         }
     }
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
 pub struct VisionTrainingHyperparameters {
     pub batch_size: usize,
@@ -783,6 +1029,8 @@ pub struct VisionTrainingHyperparameters {
     pub epochs: Option<usize>,
     pub max_iters: usize,
     pub log_frequency: usize,
+    #[serde(default)]
+    pub memory_cleanup_every: usize,
     #[serde(default)]
     pub rollout_min_steps: Option<usize>,
     #[serde(default)]
@@ -798,6 +1046,7 @@ impl Default for VisionTrainingHyperparameters {
             epochs: None,
             max_iters: 1000,
             log_frequency: 50,
+            memory_cleanup_every: 0,
             rollout_min_steps: None,
             rollout_max_steps: None,
             rollout_backprop_steps: None,
@@ -805,7 +1054,7 @@ impl Default for VisionTrainingHyperparameters {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
 pub struct VisionModelConfig {
     pub image_size: usize,
@@ -883,7 +1132,7 @@ impl VisionModelConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
 pub struct VisionAugmentationConfig {
     pub image_size: usize,
@@ -954,6 +1203,248 @@ pub fn load_vision_training_config(paths: &[PathBuf]) -> Result<VisionTrainingCo
     value
         .try_into::<VisionTrainingConfig>()
         .map_err(|err| anyhow!(err))
+}
+
+fn validate_vision_rollout(
+    training: &VisionTrainingHyperparameters,
+    max_steps: usize,
+) -> Result<()> {
+    let max_steps = max_steps.max(1);
+    let min_steps = training.rollout_min_steps.unwrap_or(max_steps);
+    let max_steps_cfg = training.rollout_max_steps.unwrap_or(max_steps);
+    let backprop_steps = training.rollout_backprop_steps.unwrap_or(max_steps_cfg);
+    if min_steps == 0 || max_steps_cfg == 0 {
+        return Err(anyhow!(
+            "vision rollout steps must be > 0 (min={min_steps}, max={max_steps_cfg})"
+        ));
+    }
+    if backprop_steps == 0 {
+        return Err(anyhow!(
+            "vision rollout_backprop_steps must be > 0 (value={backprop_steps})"
+        ));
+    }
+    if min_steps > max_steps_cfg {
+        return Err(anyhow!(
+            "vision rollout_min_steps ({min_steps}) must be <= rollout_max_steps ({max_steps_cfg})"
+        ));
+    }
+    if max_steps_cfg > max_steps {
+        return Err(anyhow!(
+            "vision rollout_max_steps ({max_steps_cfg}) exceeds vision.steps ({max_steps})"
+        ));
+    }
+    if backprop_steps > max_steps_cfg {
+        return Err(anyhow!(
+            "vision rollout_backprop_steps ({backprop_steps}) must be <= rollout_max_steps ({max_steps_cfg})"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_vision_mode(mode: &VisionTrainingModeConfig, vision: &VisionModelConfig) -> Result<()> {
+    match mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            validate_distill_loss(&distill.loss)?;
+            match &distill.teacher {
+                VisionTeacherConfig::Features(config) => {
+                    if config.feature_dim == 0 {
+                        return Err(anyhow!("mode.teacher.feature_dim must be > 0"));
+                    }
+                    if matches!(config.patch_tokens, Some(0)) {
+                        return Err(anyhow!("mode.teacher.patch_tokens must be > 0 when set"));
+                    }
+                }
+                VisionTeacherConfig::Model(config) => {
+                    if matches!(config.image_size, Some(0)) {
+                        return Err(anyhow!("mode.teacher.image_size must be > 0 when set"));
+                    }
+                    if matches!(config.patch_size, Some(0)) {
+                        return Err(anyhow!("mode.teacher.patch_size must be > 0 when set"));
+                    }
+                    if matches!(config.feature_dim, Some(0)) {
+                        return Err(anyhow!("mode.teacher.feature_dim must be > 0 when set"));
+                    }
+                    if matches!(config.patch_tokens, Some(0)) {
+                        return Err(anyhow!("mode.teacher.patch_tokens must be > 0 when set"));
+                    }
+                }
+            }
+        }
+        VisionTrainingModeConfig::Lejepa(lejepa) => {
+            if lejepa.views == 0 {
+                return Err(anyhow!("mode.views must be > 0"));
+            }
+            if lejepa.local_image_size == 0 {
+                return Err(anyhow!("mode.local_image_size must be > 0"));
+            }
+            if !(0.0..=1.0).contains(&lejepa.local_min_scale) {
+                return Err(anyhow!(
+                    "mode.local_min_scale must be in [0, 1] (got {})",
+                    lejepa.local_min_scale
+                ));
+            }
+            if !(0.0..=1.0).contains(&lejepa.local_max_scale) {
+                return Err(anyhow!(
+                    "mode.local_max_scale must be in [0, 1] (got {})",
+                    lejepa.local_max_scale
+                ));
+            }
+            if lejepa.local_min_scale > lejepa.local_max_scale {
+                return Err(anyhow!(
+                    "mode.local_min_scale ({}) must be <= mode.local_max_scale ({})",
+                    lejepa.local_min_scale,
+                    lejepa.local_max_scale
+                ));
+            }
+            validate_lejepa_loss(&lejepa.loss.lejepa)?;
+            validate_recon_loss("mode.loss.recon", &lejepa.loss.recon)?;
+        }
+        VisionTrainingModeConfig::Mae(mae) => {
+            validate_recon_loss("mode.loss.recon", &mae.loss.recon)?;
+        }
+        VisionTrainingModeConfig::Saccade(saccade) => {
+            if saccade.num_eyes == 0 {
+                return Err(anyhow!("saccade.num_eyes must be > 0"));
+            }
+            if saccade.mip_levels == 0 {
+                return Err(anyhow!("saccade.mip_levels must be > 0"));
+            }
+            if saccade.inner_steps == 0 {
+                return Err(anyhow!("saccade.inner_steps must be > 0"));
+            }
+            if saccade.fovea_subpatch_size > 0
+                && saccade.fovea_subpatch_size > vision.patch_size
+            {
+                return Err(anyhow!(
+                    "saccade.fovea_subpatch_size ({}) must be <= vision.patch_size ({})",
+                    saccade.fovea_subpatch_size,
+                    vision.patch_size
+                ));
+            }
+            if matches!(saccade.pyramid_feature_dim, Some(0)) {
+                return Err(anyhow!(
+                    "saccade.pyramid_feature_dim must be > 0 when set"
+                ));
+            }
+            if saccade.cache.max_entries == 0 {
+                return Err(anyhow!("saccade.cache.max_entries must be > 0"));
+            }
+            if saccade.policy.info_reward.stride == 0 {
+                return Err(anyhow!(
+                    "saccade.policy.info_reward.stride must be > 0"
+                ));
+            }
+            if saccade.policy.location_embedding.quantize_bins < 2 {
+                return Err(anyhow!(
+                    "saccade.policy.location_embedding.quantize_bins must be >= 2"
+                ));
+            }
+            validate_recon_loss("saccade.loss.recon", &saccade.loss.recon)?;
+            validate_lejepa_loss(&saccade.loss.lejepa)?;
+
+            if saccade.policy.gdpo.enabled {
+                if saccade.policy.gdpo.group_size == 0 {
+                    return Err(anyhow!("saccade.policy.gdpo.group_size must be > 0"));
+                }
+                if saccade.policy.action_noise_std <= 0.0 {
+                    return Err(anyhow!(
+                        "saccade.policy.action_noise_std must be > 0 when gdpo is enabled"
+                    ));
+                }
+                if saccade.policy.gdpo.hard_weight < 0.0 {
+                    return Err(anyhow!(
+                        "saccade.policy.gdpo.hard_weight must be >= 0"
+                    ));
+                }
+                if saccade.policy.gdpo.easy_weight < 0.0 {
+                    return Err(anyhow!(
+                        "saccade.policy.gdpo.easy_weight must be >= 0"
+                    ));
+                }
+                if saccade.policy.gdpo.policy_weight < 0.0 {
+                    return Err(anyhow!(
+                        "saccade.policy.gdpo.policy_weight must be >= 0"
+                    ));
+                }
+                if saccade.policy.gdpo.policy_clip_range < 0.0 {
+                    return Err(anyhow!(
+                        "saccade.policy.gdpo.policy_clip_range must be >= 0"
+                    ));
+                }
+                if let GdpoHardGate::Percentile { quantile } = saccade.policy.gdpo.hard_gate
+                {
+                    if !(0.0..=1.0).contains(&quantile) {
+                        return Err(anyhow!(
+                            "saccade.policy.gdpo.hard_gate.quantile must be in [0, 1] (got {})",
+                            quantile
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_recon_loss(label: &str, loss: &VisionReconLossConfig) -> Result<()> {
+    if !(0.0..=1.0).contains(&loss.mask_ratio) {
+        return Err(anyhow!(
+            "{label}.mask_ratio must be in [0, 1] (got {})",
+            loss.mask_ratio
+        ));
+    }
+    if loss.weight < 0.0 {
+        return Err(anyhow!("{label}.weight must be >= 0"));
+    }
+    if loss.hidden_dim == 0 {
+        return Err(anyhow!("{label}.hidden_dim must be > 0"));
+    }
+    Ok(())
+}
+
+fn validate_lejepa_loss(loss: &VisionLejepaLossConfig) -> Result<()> {
+    if loss.enabled {
+        if !(0.0..=1.0).contains(&loss.lambda) {
+            return Err(anyhow!(
+                "mode.loss.lejepa.lambda must be in [0, 1] (got {})",
+                loss.lambda
+            ));
+        }
+        if loss.sigreg_knots == 0 {
+            return Err(anyhow!("mode.loss.lejepa.sigreg_knots must be > 0"));
+        }
+        if loss.sigreg_t_max <= 0.0 {
+            return Err(anyhow!("mode.loss.lejepa.sigreg_t_max must be > 0"));
+        }
+        if loss.sigreg_proj_dim == 0 {
+            return Err(anyhow!(
+                "mode.loss.lejepa.sigreg_proj_dim must be > 0"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_distill_loss(loss: &VisionDistillationLossConfig) -> Result<()> {
+    if loss.patch_mse_weight < 0.0 {
+        return Err(anyhow!("mode.loss.patch_mse_weight must be >= 0"));
+    }
+    if loss.cls_mse_weight < 0.0 {
+        return Err(anyhow!("mode.loss.cls_mse_weight must be >= 0"));
+    }
+    if loss.cls_cosine_weight < 0.0 {
+        return Err(anyhow!("mode.loss.cls_cosine_weight must be >= 0"));
+    }
+    if loss.rel_weight < 0.0 {
+        return Err(anyhow!("mode.loss.rel_weight must be >= 0"));
+    }
+    if loss.rel_tau <= 0.0 {
+        return Err(anyhow!("mode.loss.rel_tau must be > 0"));
+    }
+    if matches!(loss.rel_sample_tokens, Some(0)) {
+        return Err(anyhow!("mode.loss.rel_sample_tokens must be > 0 when set"));
+    }
+    Ok(())
 }
 
 fn load_value(path: &Path) -> Result<Value> {

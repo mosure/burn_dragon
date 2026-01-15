@@ -1,6 +1,6 @@
 use crate::train::prelude::*;
 use crate::train::gdpo;
-use burn::optim::GradientsParams;
+use burn::optim::{GradientsAccumulator, GradientsParams, Optimizer};
 use burn::tensor::Distribution as TensorDistribution;
 use burn::tensor::backend::{AutodiffBackend, Backend as BackendTrait};
 use burn::tensor::{Int, Tensor, TensorData};
@@ -38,6 +38,19 @@ pub struct VisionScatterBench<B: BackendTrait> {
     tokens: Tensor<B, 3>,
 }
 
+pub struct VisionInputProjectionBench<B: BackendTrait> {
+    projection: VisionSaccadeInputProjection<B>,
+    tokens: Tensor<B, 3>,
+}
+
+pub struct VisionSaccadeTrainStepBench<B: AutodiffBackend> {
+    model: Option<VisionSaccadeModel<B>>,
+    optimizer: OptimizerAdaptor<AdamW, VisionSaccadeModel<B>, B>,
+    lr: LearningRate,
+    rollout_steps: usize,
+    backprop_steps: usize,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct FoveaKernelEstimate {
     pub levels: usize,
@@ -62,8 +75,17 @@ impl<B: AutodiffBackend> VisionSaccadeBench<B> {
             max_steps: steps,
             backprop_steps: backprop_steps.min(steps).max(1),
         };
-        let saccade =
-            VisionSaccadeModel::new(model, saccade, vision.embed_dim, rollout, recon_patch_dim, device);
+        let saccade = VisionSaccadeModel::new(
+            model,
+            saccade,
+            vision.embed_dim,
+            vision.patch_size,
+            rollout,
+            recon_patch_dim,
+            1,
+            0,
+            device,
+        );
 
         let images = Tensor::<B, 4>::random(
             [
@@ -207,7 +229,8 @@ impl<B: AutodiffBackend> VisionSaccadeBench<B> {
     pub fn fovea_patch_kernel_estimate(&self) -> FoveaKernelEstimate {
         let levels = self.model.build_mip_pyramid(self.images.clone(), self.patch_size);
         let level_count = levels.len();
-        let subsamples = SACCADE_FOVEA_SUBSAMPLES * SACCADE_FOVEA_SUBSAMPLES;
+        let subsamples_axis = self.model.config.fovea_subsamples.max(1);
+        let subsamples = subsamples_axis * subsamples_axis;
         let grid_sample_calls = level_count;
         let unfused_grid_sample_calls = level_count.saturating_mul(subsamples);
         FoveaKernelEstimate {
@@ -360,6 +383,134 @@ impl<B: AutodiffBackend> VisionSaccadeBench<B> {
 
 }
 
+impl<B: AutodiffBackend> VisionSaccadeTrainStepBench<B> {
+    pub fn new(
+        vision: VisionDragonHatchlingConfig,
+        saccade: VisionSaccadeConfig,
+        training: &VisionTrainingHyperparameters,
+        optimizer_cfg: &OptimizerConfig,
+        device: &B::Device,
+    ) -> Result<Self> {
+        let rollout = resolve_vision_rollout(training, vision.steps)?;
+        let recon_patch_dim = vision.patch_size * vision.patch_size * vision.in_channels;
+        let model = VisionDragonHatchling::<B>::new(vision.clone(), device);
+        let saccade = VisionSaccadeModel::new(
+            model,
+            saccade,
+            vision.embed_dim,
+            vision.patch_size,
+            rollout,
+            recon_patch_dim,
+            training.batch_repeats,
+            training.train_repeat_chunk,
+            device,
+        );
+        let rollout_steps = saccade.rollout.max_steps;
+        let backprop_steps = saccade.rollout.backprop_steps(rollout_steps);
+        let optimizer = AdamWConfig::new()
+            .with_weight_decay(optimizer_cfg.weight_decay)
+            .init::<B, VisionSaccadeModel<B>>();
+        let lr = optimizer_cfg.learning_rate;
+        Ok(Self {
+            model: Some(saccade),
+            optimizer,
+            lr,
+            rollout_steps,
+            backprop_steps,
+        })
+    }
+
+    pub fn train_step(&mut self, batch: ImageNetBatch<B>) -> Tensor<B, 1> {
+        let mut model = self.model.take().expect("saccade model");
+        let repeats = model.train_repeats.max(1);
+        if repeats == 1 {
+            let losses = model.forward_losses_train(
+                batch,
+                self.rollout_steps,
+                self.backprop_steps,
+                true,
+                false,
+            );
+            let grads = losses.total.clone().backward();
+            let grads = GradientsParams::from_grads(grads, &model);
+            let loss = losses.total.detach();
+            model = self.optimizer.step(self.lr, model, grads);
+            self.model = Some(model);
+            return loss;
+        }
+
+        let scale = 1.0 / repeats as f32;
+        let repeat_chunk = train_repeat_chunk(repeats, model.train_repeat_chunk);
+        let mut grads = GradientsAccumulator::new();
+        let mut loss_sum: Option<Tensor<B, 1>> = None;
+        let mut consumed = 0;
+        while consumed < repeats {
+            let chunk = (repeats - consumed).min(repeat_chunk);
+            let batch_chunk = if chunk == 1 {
+                batch.clone()
+            } else {
+                batch.repeat_batch(chunk)
+            };
+            let losses = model.forward_losses_train(
+                batch_chunk,
+                self.rollout_steps,
+                self.backprop_steps,
+                true,
+                false,
+            );
+            let loss_scaled = losses.total.clone().mul_scalar(scale * chunk as f32);
+            let grads_step = GradientsParams::from_grads(loss_scaled.backward(), &model);
+            grads.accumulate(&model, grads_step);
+            let weight = chunk as f32;
+            loss_sum = Some(match loss_sum {
+                Some(accum) => accum + losses.total.clone().mul_scalar(weight),
+                None => losses.total.clone().mul_scalar(weight),
+            });
+            consumed += chunk;
+        }
+        let grads = grads.grads();
+        let loss = loss_sum
+            .expect("repeat loss")
+            .mul_scalar(scale)
+            .detach();
+        model = self.optimizer.step(self.lr, model, grads);
+        self.model = Some(model);
+        loss
+    }
+}
+
+impl<B: BackendTrait> VisionInputProjectionBench<B> {
+    pub fn new(
+        embed_dim: usize,
+        patch_size: usize,
+        token_count: usize,
+        batch: usize,
+        config: VisionSaccadeInputProjectionConfig,
+        device: &B::Device,
+    ) -> Self {
+        let projection = VisionSaccadeInputProjection::new(
+            embed_dim,
+            patch_size,
+            &config,
+            device,
+        );
+        let tokens = Tensor::<B, 3>::random(
+            [batch, token_count, embed_dim],
+            TensorDistribution::Default,
+            device,
+        );
+        Self { projection, tokens }
+    }
+
+    pub fn param_count(&self) -> usize {
+        self.projection.param_count()
+    }
+
+    pub fn forward(&self) -> Tensor<B, 1> {
+        self.projection.forward(self.tokens.clone()).sum()
+    }
+}
+
 impl<B: BackendTrait> VisionScatterBench<B> {
     pub fn new(
         vision: VisionDragonHatchlingConfig,
@@ -377,8 +528,17 @@ impl<B: BackendTrait> VisionScatterBench<B> {
             max_steps: 1,
             backprop_steps: 1,
         };
-        let saccade =
-            VisionSaccadeModel::new(model, saccade, vision.embed_dim, rollout, recon_patch_dim, device);
+        let saccade = VisionSaccadeModel::new(
+            model,
+            saccade,
+            vision.embed_dim,
+            vision.patch_size,
+            rollout,
+            recon_patch_dim,
+            1,
+            0,
+            device,
+        );
 
         let weights = Tensor::<B, 3>::random(
             [batch_size, out_tokens.max(1), in_tokens.max(1)],

@@ -8,31 +8,21 @@ const LN_2: f32 = std::f32::consts::LN_2;
 const SQRT2: f32 = std::f32::consts::SQRT_2;
 const PI: f32 = std::f32::consts::PI;
 const ERF_A: f32 = 0.147;
-const SQRT_PI_OVER_2: f32 = 0.88622692545;
+const SQRT_PI_OVER_2: f32 = 0.886_226_95;
 const LOD_WINDOW: i32 = 3;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum PyramidMode {
     Stacked,
+    #[default]
     Laplacian,
 }
 
-impl Default for PyramidMode {
-    fn default() -> Self {
-        Self::Laplacian
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum FoveaWarpMode {
+    #[default]
     Warped,
     Patched,
-}
-
-impl Default for FoveaWarpMode {
-    fn default() -> Self {
-        Self::Warped
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -338,11 +328,11 @@ fn erf_approx(x: f32) -> f32 {
     let sign = if x >= 0.0 { 1.0 } else { -1.0 };
     let ax = x.abs();
     let t = 1.0 / (1.0 + 0.3275911 * ax);
-    let a1 = 0.254829592;
-    let a2 = -0.284496736;
-    let a3 = 1.421413741;
-    let a4 = -1.453152027;
-    let a5 = 1.061405429;
+    let a1 = 0.254_829_6;
+    let a2 = -0.284_496_72;
+    let a3 = 1.421_413_8;
+    let a4 = -1.453_152_1;
+    let a5 = 1.061_405_4;
     let y = 1.0
         - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * (-ax * ax).exp();
     sign * y
@@ -375,6 +365,7 @@ fn foveated_warp(u: f32, sigma: f32, radius: f32) -> FoveaWarp {
     FoveaWarp { offset, deriv }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn sample_gaussian_foveated(
     levels: &[CpuImageLevel],
     dx: f32,
@@ -429,6 +420,7 @@ fn sample_gaussian_foveated(
     color
 }
 
+#[allow(clippy::too_many_arguments)]
 fn sample_laplacian_foveated(
     residuals: &[CpuImageLevel],
     coarse: &CpuImageLevel,
@@ -578,8 +570,8 @@ fn build_laplacian_pyramid(gaussian: &[CpuImageLevel]) -> (Vec<CpuImageLevel>, C
         let next = &gaussian[idx + 1];
         let up = resample(next, current.width, current.height);
         let mut data = vec![0.0; current.width * current.height * 3];
-        for i in 0..data.len() {
-            data[i] = current.data[i] - up.data[i];
+        for (idx, value) in data.iter_mut().enumerate() {
+            *value = current.data[idx] - up.data[idx];
         }
         residuals.push(CpuImageLevel {
             width: current.width,
@@ -599,12 +591,12 @@ fn downsample(level: &CpuImageLevel) -> CpuImageLevel {
     for y in 0..new_h {
         for x in 0..new_w {
             let mut accum = [0.0; 3];
-            for ky in 0..5 {
-                let wy = weights[ky];
+            for (ky, wy) in weights.iter().enumerate() {
+                let wy = *wy;
                 let sy = (y * 2).saturating_add(ky).saturating_sub(2);
                 let sy = sy.min(level.height - 1);
-                for kx in 0..5 {
-                    let wx = weights[kx];
+                for (kx, wx) in weights.iter().enumerate() {
+                    let wx = *wx;
                     let sx = (x * 2).saturating_add(kx).saturating_sub(2);
                     let sx = sx.min(level.width - 1);
                     let weight = wx * wy;

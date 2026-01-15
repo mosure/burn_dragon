@@ -6,7 +6,7 @@ pub mod vision;
 
 pub use core::{
     ContextStrategyConfig, GdpoConfig, GdpoHardGate, GenerationConfig, ModelOverrides,
-    TrainingHyperparameters,
+    TrainingHyperparameters, WgpuBackend, WgpuMemoryConfig, WgpuRuntimeConfig,
 };
 #[cfg(feature = "train")]
 pub use train::{
@@ -21,6 +21,8 @@ pub use vision::{
     VisionLocationEmbeddingConfig, VisionLocationEmbeddingMode, VisionLossConfig, VisionMaeConfig,
     VisionMaeLossConfig, VisionModelConfig, VisionNullGlimpseMode, VisionPyramidMode,
     VisionReconLossConfig, VisionSaccadeCacheConfig, VisionSaccadeConfig,
+    VisionSaccadeInputProjectionConfig, VisionSaccadeInputProjectionCnnConfig,
+    VisionSaccadeInputProjectionMicroVitConfig, VisionTbpttConfig,
     VisionSaccadeInfoRewardConfig, VisionSaccadePolicyConfig, VisionTeacherConfig,
     VisionTeacherFeatureConfig, VisionTeacherModelConfig, VisionTeacherVariant, VisionTrainingConfig,
     VisionTrainingHyperparameters, VisionTrainingModeConfig, load_vision_training_config,

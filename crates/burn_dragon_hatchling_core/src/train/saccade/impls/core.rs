@@ -6,8 +6,11 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
         model: VisionDragonHatchling<B>,
         config: VisionSaccadeConfig,
         embed_dim: usize,
+        patch_size: usize,
         rollout: VisionRollout,
         recon_patch_dim: usize,
+        train_repeats: usize,
+        train_repeat_chunk: usize,
         device: &B::Device,
     ) -> Self {
         let recon = VisionReconstructionHead::new(
@@ -16,11 +19,9 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
             recon_patch_dim,
             device,
         );
-        let trajectory_token = Tensor::<B, 2>::random(
-            [SACCADE_TRAJ_TOKENS, embed_dim.max(1)],
-            TensorDistribution::Normal(0.0, 0.02),
-            device,
-        );
+        let traj_tokens = config.traj_tokens.max(1);
+        let trajectory_token =
+            Tensor::<B, 2>::zeros([traj_tokens, embed_dim.max(1)], device);
         let num_eyes = config.num_eyes.max(1);
         let eye_token = if num_eyes > 1 {
             Tensor::<B, 2>::random(
@@ -37,7 +38,12 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
             .filter(|&value| value > 0)
             .unwrap_or(embed_dim)
             .max(1);
-        let input_proj = VisionSaccadeProjection::new(embed_dim, embed_dim, device);
+        let input_proj = VisionSaccadeInputProjection::new(
+            embed_dim,
+            patch_size,
+            &config.input_projection,
+            device,
+        );
         let fovea_proj = VisionSaccadeProjection::new(3, embed_dim, device);
         let pyramid_in_proj = if pyramid_dim != embed_dim {
             Some(VisionSaccadeProjection::new(embed_dim, pyramid_dim, device))
@@ -69,6 +75,8 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
             fovea_jitter_cache: FoveaJitterCache::new(cache_entries),
             pyramid_dim,
             rollout,
+            train_repeats: train_repeats.max(1),
+            train_repeat_chunk,
         }
     }
 
@@ -116,10 +124,9 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
         }
     }
 
-    pub(crate) fn recon_loss_per_sample_from_state(
+    fn recon_loss_per_sample_from_projected_levels_inner(
         &self,
         state_levels: &[Tensor<B, 3>],
-        grids: &[PatchGrid],
         target_patches: &[Tensor<B, 3>],
         capture_base: bool,
     ) -> (
@@ -131,16 +138,11 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
             .first()
             .map(|level| level.device())
             .unwrap_or_default();
-        let state_composed = match self.config.pyramid_mode {
-            VisionPyramidMode::Stacked => state_levels.to_vec(),
-            VisionPyramidMode::Laplacian => self.compose_pyramid(state_levels, grids),
-        };
-        let state_composed_embed = self.project_pyramid_levels(&state_composed);
         let mut loss_sum: Option<Tensor<B, 1>> = None;
         let mut mask_sum_value = 0.0f32;
         let mut base_pair = None;
         for (level_idx, (state_level, target_level)) in
-            state_composed_embed.iter().zip(target_patches.iter()).enumerate()
+            state_levels.iter().zip(target_patches.iter()).enumerate()
         {
             let pred_patches = self.recon.forward(state_level.clone());
             let [batch, level_tokens, patch_dim] = pred_patches.shape().dims::<3>();
@@ -171,10 +173,214 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
             return (zero.clone(), zero, None);
         }
         let [batch] = loss_sum.shape().dims::<1>();
-        let mask_sum = Tensor::<B, 1>::from_data(
-            TensorData::new(vec![mask_sum_value; batch], [batch]),
-            &device,
-        );
+        let mask_sum = Tensor::<B, 1>::ones([batch], &device).mul_scalar(mask_sum_value);
+        (loss_sum, mask_sum, base_pair)
+    }
+
+    fn recon_loss_per_sample_from_projected_levels(
+        &self,
+        state_levels: &[Tensor<B, 3>],
+        target_patches: &[Tensor<B, 3>],
+        capture_base: bool,
+    ) -> (
+        Tensor<B, 1>,
+        Tensor<B, 1>,
+        Option<(Tensor<B, 3>, Tensor<B, 3>)>,
+    ) {
+        let device = state_levels
+            .first()
+            .map(|level| level.device())
+            .unwrap_or_default();
+        let [batch, _, _] = state_levels
+            .first()
+            .map(|level| level.shape().dims::<3>())
+            .unwrap_or([0, 0, 0]);
+        if batch == 0 {
+            let zero = Tensor::<B, 1>::zeros([1], &device);
+            return (zero.clone(), zero, None);
+        }
+
+        let chunk_override = if self.config.recon_batch_chunk > 0 {
+            Some(self.config.recon_batch_chunk)
+        } else {
+            None
+        };
+        let max_elems = self.config.recon_max_elems.max(1);
+        let [_, tokens, dim] = state_levels
+            .first()
+            .map(|level| level.shape().dims::<3>())
+            .unwrap_or([batch, 0, 0]);
+        let denom = tokens.max(1).saturating_mul(dim.max(1));
+        let auto_chunk = if denom == 0 {
+            batch
+        } else {
+            (max_elems / denom).max(1).min(batch)
+        };
+        let chunk = chunk_override.unwrap_or(auto_chunk).max(1).min(batch);
+        if batch <= chunk {
+            return self.recon_loss_per_sample_from_projected_levels_inner(
+                state_levels,
+                target_patches,
+                capture_base,
+            );
+        }
+
+        let mut loss_chunks = Vec::new();
+        let mut mask_chunks = Vec::new();
+        let mut base_pair = None;
+        let mut start = 0;
+        while start < batch {
+            let end = (start + chunk).min(batch);
+            let state_chunk: Vec<Tensor<B, 3>> = state_levels
+                .iter()
+                .map(|level| level.clone().slice_dim(0, start..end))
+                .collect();
+            let target_chunk: Vec<Tensor<B, 3>> = target_patches
+                .iter()
+                .map(|level| level.clone().slice_dim(0, start..end))
+                .collect();
+            let (loss_chunk, mask_chunk, base_chunk) =
+                self.recon_loss_per_sample_from_projected_levels_inner(
+                    &state_chunk,
+                    &target_chunk,
+                    capture_base && base_pair.is_none(),
+                );
+            loss_chunks.push(loss_chunk);
+            mask_chunks.push(mask_chunk);
+            if base_pair.is_none() {
+                base_pair = base_chunk;
+            }
+            start = end;
+        }
+
+        let loss_sum = if loss_chunks.is_empty() {
+            Tensor::<B, 1>::zeros([1], &device)
+        } else {
+            Tensor::cat(loss_chunks, 0)
+        };
+        let mask_sum = if mask_chunks.is_empty() {
+            Tensor::<B, 1>::zeros([1], &device)
+        } else {
+            Tensor::cat(mask_chunks, 0)
+        };
+        (loss_sum, mask_sum, base_pair)
+    }
+
+    fn recon_loss_per_sample_from_state_inner(
+        &self,
+        state_levels: &[Tensor<B, 3>],
+        grids: &[PatchGrid],
+        target_patches: &[Tensor<B, 3>],
+        capture_base: bool,
+    ) -> (
+        Tensor<B, 1>,
+        Tensor<B, 1>,
+        Option<(Tensor<B, 3>, Tensor<B, 3>)>,
+    ) {
+        let state_composed = match self.config.pyramid_mode {
+            VisionPyramidMode::Stacked => state_levels.to_vec(),
+            VisionPyramidMode::Laplacian => self.compose_pyramid(state_levels, grids),
+        };
+        let state_composed_embed = self.project_pyramid_levels(&state_composed);
+        self.recon_loss_per_sample_from_projected_levels_inner(
+            &state_composed_embed,
+            target_patches,
+            capture_base,
+        )
+    }
+
+    pub(crate) fn recon_loss_per_sample_from_state(
+        &self,
+        state_levels: &[Tensor<B, 3>],
+        grids: &[PatchGrid],
+        target_patches: &[Tensor<B, 3>],
+        capture_base: bool,
+    ) -> (
+        Tensor<B, 1>,
+        Tensor<B, 1>,
+        Option<(Tensor<B, 3>, Tensor<B, 3>)>,
+    ) {
+        let device = state_levels
+            .first()
+            .map(|level| level.device())
+            .unwrap_or_default();
+        let [batch, _, _] = state_levels
+            .first()
+            .map(|level| level.shape().dims::<3>())
+            .unwrap_or([0, 0, 0]);
+        if batch == 0 {
+            let zero = Tensor::<B, 1>::zeros([1], &device);
+            return (zero.clone(), zero, None);
+        }
+
+        let chunk_override = if self.config.recon_batch_chunk > 0 {
+            Some(self.config.recon_batch_chunk)
+        } else {
+            None
+        };
+        let max_elems = self.config.recon_max_elems.max(1);
+        let [_, tokens, dim] = state_levels
+            .first()
+            .map(|level| level.shape().dims::<3>())
+            .unwrap_or([batch, 0, 0]);
+        let mut approx_dim = dim.max(1);
+        if self.pyramid_out_proj.is_some() {
+            approx_dim = approx_dim.saturating_mul(2);
+        }
+        let denom = tokens.max(1).saturating_mul(approx_dim.max(1));
+        let auto_chunk = if denom == 0 {
+            batch
+        } else {
+            (max_elems / denom).max(1).min(batch)
+        };
+        let chunk = chunk_override.unwrap_or(auto_chunk).max(1).min(batch);
+        if batch <= chunk {
+            return self.recon_loss_per_sample_from_state_inner(
+                state_levels,
+                grids,
+                target_patches,
+                capture_base,
+            );
+        }
+
+        let mut loss_chunks = Vec::new();
+        let mut mask_chunks = Vec::new();
+        let mut base_pair = None;
+        let mut start = 0;
+        while start < batch {
+            let end = (start + chunk).min(batch);
+            let state_chunk: Vec<Tensor<B, 3>> = state_levels
+                .iter()
+                .map(|level| level.clone().slice_dim(0, start..end))
+                .collect();
+            let target_chunk: Vec<Tensor<B, 3>> = target_patches
+                .iter()
+                .map(|level| level.clone().slice_dim(0, start..end))
+                .collect();
+            let (loss_chunk, mask_chunk, base_chunk) =
+                self.recon_loss_per_sample_from_state_inner(
+                    &state_chunk,
+                    grids,
+                    &target_chunk,
+                    capture_base && base_pair.is_none(),
+                );
+            loss_chunks.push(loss_chunk);
+            mask_chunks.push(mask_chunk);
+            if base_pair.is_none() {
+                base_pair = base_chunk;
+            }
+            start = end;
+        }
+        let loss_sum = if loss_chunks.is_empty() {
+            Tensor::<B, 1>::zeros([1], &device)
+        } else {
+            Tensor::cat(loss_chunks, 0)
+        };
+        let mask_sum = if mask_chunks.is_empty() {
+            Tensor::<B, 1>::zeros([1], &device)
+        } else {
+            Tensor::cat(mask_chunks, 0)
+        };
         (loss_sum, mask_sum, base_pair)
     }
 
@@ -182,8 +388,14 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
         self.fovea_grid_cache.get_or_build(patch_size, device)
     }
 
-    pub(crate) fn fovea_jitter(&self, patch_size: usize, device: &B::Device) -> FoveaJitter<B> {
-        self.fovea_jitter_cache.get_or_build(patch_size, device)
+    pub(crate) fn fovea_jitter(
+        &self,
+        patch_size: usize,
+        subsamples_axis: usize,
+        device: &B::Device,
+    ) -> FoveaJitter<B> {
+        self.fovea_jitter_cache
+            .get_or_build(patch_size, subsamples_axis, device)
     }
 
     pub(crate) fn build_gdpo_policy_loss<F>(
@@ -251,15 +463,16 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
         backprop_steps: usize,
         randomize_mask: bool,
         capture_artifacts: bool,
-        policy_loss_fn: F,
+        mut policy_loss_fn: F,
     ) -> VisionSaccadeLosses<B>
     where
-        F: FnOnce(GdpoPolicyInputs<B>) -> Option<Tensor<B, 1>>,
+        F: FnMut(GdpoPolicyInputs<B>) -> Option<Tensor<B, 1>>,
     {
         let ImageNetBatch { images, labels, .. } = batch;
         let gdpo = &self.config.policy.gdpo;
         let gdpo_group = gdpo.group_size.max(1);
-        let (images, labels) = if gdpo.enabled && gdpo_group > 1 {
+        let gdpo_active = gdpo.enabled && !capture_artifacts;
+        let (images, labels) = if gdpo_active && gdpo_group > 1 {
             (
                 images.repeat_dim(0, gdpo_group),
                 labels.repeat_dim(0, gdpo_group),
@@ -286,7 +499,26 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
         if recon_weight > 0.0 {
             total = total + recon.clone().mul_scalar(recon_weight);
         }
-        let policy_loss = gdpo_inputs.and_then(policy_loss_fn);
+        let policy_loss = gdpo_inputs.and_then(|inputs| {
+            let mut sum: Option<Tensor<B, 1>> = None;
+            let mut count = 0usize;
+            for input in inputs {
+                if let Some(loss) = policy_loss_fn(input) {
+                    count += 1;
+                    sum = Some(match sum {
+                        Some(accum) => accum + loss,
+                        None => loss,
+                    });
+                }
+            }
+            sum.map(|loss| {
+                if count > 1 {
+                    loss.mul_scalar(1.0 / count as f32)
+                } else {
+                    loss
+                }
+            })
+        });
         if let Some(policy_loss) = policy_loss {
             total = total + policy_loss;
         }
@@ -330,37 +562,26 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
         Tensor<B, 1>,
         Tensor<B, 1>,
         Option<(Vec<Tensor<B, 4>>, Tensor<B, 3>, Option<Tensor<B, 5>>, Vec<String>)>,
-        Option<GdpoPolicyInputs<B>>,
+        Option<Vec<GdpoPolicyInputs<B>>>,
     ) {
         let device = images.device();
         let _ = randomize_mask;
         let [batch, channels, height, width] = images.shape().dims::<4>();
-        let patch = {
-            self.model.patch_embed_raw(images.clone())
-        };
-        let [_, tokens, embed_dim] = patch.tokens.shape().dims::<3>();
-        let grid_h = patch.grid.height;
-        let grid_w = patch.grid.width;
-        if grid_h == 0 || grid_w == 0 || grid_h * grid_w != tokens {
-            let zero = Tensor::<B, 1>::zeros([1], &device);
-            return (zero.clone(), zero.clone(), zero.clone(), zero, None, None);
-        }
-        let patch_size = height / grid_h;
-        if patch_size == 0 || height % grid_h != 0 || width % grid_w != 0 {
-            let zero = Tensor::<B, 1>::zeros([1], &device);
-            return (zero.clone(), zero.clone(), zero.clone(), zero, None, None);
-        }
-
-        let mip_levels = {
-            self.build_mip_pyramid(images.clone(), patch_size)
-        };
+        let patch_size = self.model.patch_size().max(1);
+        let mip_levels = self.build_mip_pyramid(images.clone(), patch_size);
         if mip_levels.is_empty() {
             let zero = Tensor::<B, 1>::zeros([1], &device);
             return (zero.clone(), zero.clone(), zero.clone(), zero, None, None);
         }
         let input_levels: Vec<Tensor<B, 3>> =
             mip_levels.iter().map(|level| level.tokens.clone()).collect();
+        let embed_dim = input_levels
+            .first()
+            .map(|level| level.shape().dims::<3>()[2])
+            .unwrap_or(0)
+            .max(1);
         let grids: Vec<PatchGrid> = mip_levels.iter().map(|level| level.grid).collect();
+        let tokens = grids.first().map(|grid| grid.num_patches()).unwrap_or(0);
         let target_patches: Vec<Tensor<B, 3>> = mip_levels
             .iter()
             .map(|level| patchify(level.image.clone(), patch_size))
@@ -380,6 +601,7 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
         let traj_len = self.trajectory_token.val().shape().dims::<2>()[0].max(1);
         let num_eyes = self.config.num_eyes.max(1);
         let inner_steps = self.config.inner_steps.max(1);
+        let traj_update_alpha = self.config.traj_update_alpha;
 
         let base_traj = self
             .trajectory_token
@@ -394,6 +616,19 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
         let rollout_steps = steps.max(1);
         let backprop_steps = backprop_steps.max(1).min(rollout_steps);
         let detach_until = rollout_steps.saturating_sub(backprop_steps);
+        let tbptt_step_count = self.config.tbptt.step_count;
+        let tbptt_step_count = if tbptt_step_count == 0 {
+            0
+        } else {
+            tbptt_step_count.max(1).min(backprop_steps)
+        };
+        let tbptt_enabled = tbptt_step_count > 0;
+        let mut tbptt_step_idx = 0usize;
+        let mut tbptt_chunks = 0usize;
+        let mut tbptt_loss_sum: Option<Tensor<B, 1>> = None;
+        let mut tbptt_mask_sum: Option<Tensor<B, 1>> = None;
+        let mut tbptt_inv_sum: Option<Tensor<B, 1>> = None;
+        let mut tbptt_sigreg_sum: Option<Tensor<B, 1>> = None;
         let low_mem_pre_rollout = self.config.low_mem_pre_rollout;
         let capture_traj = capture_artifacts
             && self
@@ -413,8 +648,9 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
         };
         let mut last_patch_views: Option<Vec<Tensor<B, 4>>> = None;
         let gdpo = &self.config.policy.gdpo;
-        let gdpo_enabled = gdpo.enabled;
+        let gdpo_enabled = gdpo.enabled && !capture_artifacts;
         let gdpo_group = gdpo.group_size.max(1);
+        let gdpo_policy_enabled = gdpo_enabled && gdpo.policy_weight > 0.0;
         let info_reward_enabled = gdpo_enabled && self.config.policy.info_reward.enabled;
         let info_stride = self.config.policy.info_reward.stride.max(1);
         let detach_policy_from_recon = self.config.policy.detach_policy_from_recon;
@@ -433,8 +669,25 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
         } else {
             None
         };
+        let mut tbptt_policy_inputs = if gdpo_policy_enabled {
+            Some(Vec::new())
+        } else {
+            None
+        };
+        let mut started_backprop = false;
         for step_idx in 0..rollout_steps {
             let pre_rollout = low_mem_pre_rollout && step_idx + 1 <= detach_until;
+            let in_backprop = step_idx + 1 > detach_until;
+            if tbptt_enabled && in_backprop && !started_backprop {
+                started_backprop = true;
+                if gdpo_enabled {
+                    log_prob_sum = Some(Tensor::<B, 2>::zeros([batch, 1], &device));
+                    log_prob_sum_old = Some(Tensor::<B, 2>::zeros([batch, 1], &device));
+                }
+                if info_reward_enabled {
+                    hard_reward = Some(Tensor::<B, 1>::zeros([batch], &device));
+                }
+            }
             let anchor_traj =
                 low_mem_pre_rollout && detach_until > 0 && step_idx + 1 == detach_until + 1;
             let state_composed = match self.config.pyramid_mode {
@@ -528,10 +781,12 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
                 if let Some(steps) = &mut step_traj {
                     steps.push((mean_detached.clone(), sigma_detached.clone()));
                 }
-                // Reuse fovea weights for both context and residual scatter to keep updates localized
-                // to the sampled region of the pyramid.
-                let weights = {
-                    self.mip_gaussian_weights(&mip_levels, mean.clone(), sigma.clone())
+                let weights_context =
+                    self.mip_gaussian_weights(&mip_levels, mean.clone(), sigma.clone());
+                let weights_scatter = if matches!(self.config.pyramid_mode, VisionPyramidMode::Laplacian) {
+                    self.mip_spatial_weights(&mip_levels, mean.clone(), sigma.clone())
+                } else {
+                    weights_context.clone()
                 };
                 let patch_image = {
                     self.foveated_patch_image(
@@ -556,7 +811,7 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
                 }
                 let input_context = patch_tokens;
                 let state_context = {
-                    let context = self.mip_weighted_sum(&state_composed, &weights);
+                    let context = self.mip_weighted_sum(&state_composed, &weights_context);
                     self.project_pyramid_context(context)
                 };
                 let input_tokens =
@@ -578,8 +833,14 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
                     .clone()
                     .mean_dim(1)
                     .reshape([batch, 1, self.pyramid_dim]);
-                let next_traj = out_tokens;
-                for (update, weights) in updates.iter_mut().zip(weights.iter()) {
+                let next_traj = if traj_update_alpha >= 1.0 {
+                    out_tokens
+                } else {
+                    let keep = 1.0 - traj_update_alpha;
+                    traj.clone().mul_scalar(keep)
+                        + out_tokens.clone().mul_scalar(traj_update_alpha)
+                };
+                for (update, weights) in updates.iter_mut().zip(weights_scatter.iter()) {
                     let update_eye = {
                         self.weighted_sum_tokens(
                             weights.clone().swap_dims(1, 2),
@@ -606,7 +867,7 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
                         let residual_pool_null = residual_null
                             .mean_dim(1)
                             .reshape([batch, 1, self.pyramid_dim]);
-                        for (update, weights) in updates_null.iter_mut().zip(weights.iter()) {
+                        for (update, weights) in updates_null.iter_mut().zip(weights_scatter.iter()) {
                             let update_eye_null = self.weighted_sum_tokens(
                                 weights.clone().swap_dims(1, 2),
                                 residual_pool_null.clone(),
@@ -718,49 +979,155 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
                     *level = level.clone().detach();
                 }
             }
+            if tbptt_enabled && in_backprop {
+                tbptt_step_idx += 1;
+                let chunk_done = tbptt_step_idx >= tbptt_step_count || step_idx + 1 == rollout_steps;
+                if chunk_done {
+                    tbptt_step_idx = 0;
+                    tbptt_chunks += 1;
+                    let state_composed = match self.config.pyramid_mode {
+                        VisionPyramidMode::Stacked => state_levels.clone(),
+                        VisionPyramidMode::Laplacian => self.compose_pyramid(&state_levels, &grids),
+                    };
+                    let state_composed_embed = self.project_pyramid_levels(&state_composed);
+                    let (inv, sigreg) = if self.config.loss.lejepa.enabled {
+                        self.pyramid_lejepa_loss(&state_composed_embed)
+                    } else {
+                        let zero = Tensor::<B, 1>::zeros([1], &device);
+                        (zero.clone(), zero)
+                    };
+                    let (loss_per_sample, mask_per_sample, _) = self
+                        .recon_loss_per_sample_from_projected_levels(
+                            &state_composed_embed,
+                            &target_patches,
+                            false,
+                        );
+                    let loss_sum = loss_per_sample.clone().sum();
+                    let mask_sum = mask_per_sample.clone().sum();
+                    tbptt_loss_sum = Some(match tbptt_loss_sum {
+                        Some(accum) => accum + loss_sum.clone(),
+                        None => loss_sum,
+                    });
+                    tbptt_mask_sum = Some(match tbptt_mask_sum {
+                        Some(accum) => accum + mask_sum.clone(),
+                        None => mask_sum,
+                    });
+                    tbptt_inv_sum = Some(match tbptt_inv_sum {
+                        Some(accum) => accum + inv.clone(),
+                        None => inv,
+                    });
+                    tbptt_sigreg_sum = Some(match tbptt_sigreg_sum {
+                        Some(accum) => accum + sigreg.clone(),
+                        None => sigreg,
+                    });
+                    if let Some(gdpo_inputs) = tbptt_policy_inputs.as_mut() {
+                        let recon_per_sample =
+                            loss_per_sample / mask_per_sample.add_scalar(LEJEPA_EPS);
+                        let hard_reward = hard_reward
+                            .take()
+                            .unwrap_or_else(|| Tensor::<B, 1>::zeros([batch], &device));
+                        let log_prob_sum = log_prob_sum
+                            .take()
+                            .unwrap_or_else(|| Tensor::<B, 2>::zeros([batch, 1], &device));
+                        let log_prob_sum_old = log_prob_sum_old
+                            .take()
+                            .unwrap_or_else(|| Tensor::<B, 2>::zeros([batch, 1], &device));
+                        gdpo_inputs.push(GdpoPolicyInputs {
+                            hard_reward,
+                            recon_per_sample,
+                            log_prob_sum,
+                            log_prob_sum_old,
+                            gdpo_group,
+                        });
+                    }
+                    if step_idx + 1 < rollout_steps {
+                        if gdpo_enabled {
+                            log_prob_sum = Some(Tensor::<B, 2>::zeros([batch, 1], &device));
+                            log_prob_sum_old = Some(Tensor::<B, 2>::zeros([batch, 1], &device));
+                        }
+                        if info_reward_enabled {
+                            hard_reward = Some(Tensor::<B, 1>::zeros([batch], &device));
+                        }
+                        trajs = trajs.into_iter().map(|traj| traj.detach()).collect();
+                        for level in &mut state_levels {
+                            *level = level.clone().detach();
+                        }
+                    }
+                }
+            }
         }
 
-        let state_composed = match self.config.pyramid_mode {
-            VisionPyramidMode::Stacked => state_levels.clone(),
-            VisionPyramidMode::Laplacian => self.compose_pyramid(&state_levels, &grids),
-        };
-        let state_composed_embed = self.project_pyramid_levels(&state_composed);
-        let (inv, sigreg) = if self.config.loss.lejepa.enabled {
-            self.pyramid_lejepa_loss(&state_composed_embed)
-        } else {
+        let (loss_sum, mask_sum, inv, sigreg, gdpo_inputs, base_pair) = if tbptt_enabled {
             let zero = Tensor::<B, 1>::zeros([1], &device);
-            (zero.clone(), zero)
-        };
-
-        let (loss_per_sample, mask_per_sample, base_pair) =
-            self.recon_loss_per_sample_from_state(
-                &state_levels,
-                &grids,
-                &target_patches,
-                capture_artifacts,
-            );
-        let loss_sum = loss_per_sample.clone().sum();
-        let mask_sum = mask_per_sample.clone().sum();
-        let recon_per_sample = loss_per_sample / mask_per_sample.add_scalar(LEJEPA_EPS);
-        let gdpo_inputs = if gdpo_enabled && gdpo.policy_weight > 0.0 {
-            let hard_reward = hard_reward
-                .take()
-                .unwrap_or_else(|| Tensor::<B, 1>::zeros([batch], &device));
-            let log_prob_sum = log_prob_sum
-                .take()
-                .unwrap_or_else(|| Tensor::<B, 2>::zeros([batch, 1], &device));
-            let log_prob_sum_old = log_prob_sum_old
-                .take()
-                .unwrap_or_else(|| Tensor::<B, 2>::zeros([batch, 1], &device));
-            Some(GdpoPolicyInputs {
-                hard_reward,
-                recon_per_sample,
-                log_prob_sum,
-                log_prob_sum_old,
-                gdpo_group,
-            })
+            let chunk_count = tbptt_chunks.max(1) as f32;
+            let inv_sum = tbptt_inv_sum.unwrap_or_else(|| zero.clone());
+            let sigreg_sum = tbptt_sigreg_sum.unwrap_or_else(|| zero.clone());
+            let inv = inv_sum.mul_scalar(1.0 / chunk_count);
+            let sigreg = sigreg_sum.mul_scalar(1.0 / chunk_count);
+            let loss_sum = tbptt_loss_sum.unwrap_or_else(|| zero.clone());
+            let mask_sum = tbptt_mask_sum.unwrap_or_else(|| zero.clone());
+            let base_pair = if capture_artifacts {
+                let (_, _, base_pair) = self.recon_loss_per_sample_from_state(
+                    &state_levels,
+                    &grids,
+                    &target_patches,
+                    true,
+                );
+                base_pair
+            } else {
+                None
+            };
+            (
+                loss_sum,
+                mask_sum,
+                inv,
+                sigreg,
+                tbptt_policy_inputs,
+                base_pair,
+            )
         } else {
-            None
+            let state_composed = match self.config.pyramid_mode {
+                VisionPyramidMode::Stacked => state_levels.clone(),
+                VisionPyramidMode::Laplacian => self.compose_pyramid(&state_levels, &grids),
+            };
+            let state_composed_embed = self.project_pyramid_levels(&state_composed);
+            let (inv, sigreg) = if self.config.loss.lejepa.enabled {
+                self.pyramid_lejepa_loss(&state_composed_embed)
+            } else {
+                let zero = Tensor::<B, 1>::zeros([1], &device);
+                (zero.clone(), zero)
+            };
+
+            let (loss_per_sample, mask_per_sample, base_pair) =
+                self.recon_loss_per_sample_from_projected_levels(
+                    &state_composed_embed,
+                    &target_patches,
+                    capture_artifacts,
+                );
+            let loss_sum = loss_per_sample.clone().sum();
+            let mask_sum = mask_per_sample.clone().sum();
+            let recon_per_sample = loss_per_sample / mask_per_sample.add_scalar(LEJEPA_EPS);
+            let gdpo_inputs = if gdpo_policy_enabled {
+                let hard_reward = hard_reward
+                    .take()
+                    .unwrap_or_else(|| Tensor::<B, 1>::zeros([batch], &device));
+                let log_prob_sum = log_prob_sum
+                    .take()
+                    .unwrap_or_else(|| Tensor::<B, 2>::zeros([batch, 1], &device));
+                let log_prob_sum_old = log_prob_sum_old
+                    .take()
+                    .unwrap_or_else(|| Tensor::<B, 2>::zeros([batch, 1], &device));
+                Some(vec![GdpoPolicyInputs {
+                    hard_reward,
+                    recon_per_sample,
+                    log_prob_sum,
+                    log_prob_sum_old,
+                    gdpo_group,
+                }])
+            } else {
+                None
+            };
+            (loss_sum, mask_sum, inv, sigreg, gdpo_inputs, base_pair)
         };
         let (pred_base, target_base) = if let Some((pred, target)) = base_pair {
             (Some(pred), Some(target))
@@ -768,7 +1135,7 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
             (None, None)
         };
 
-        let artifacts = if capture_artifacts && batch > 0 {
+        let artifacts = if capture_artifacts && batch > 0 && tokens > 0 {
             let pred_first = pred_base.clone().unwrap_or_else(|| {
                 Tensor::<B, 3>::zeros([batch, tokens, patch_size * patch_size * channels], &device)
             });

@@ -4,7 +4,7 @@ use crate::ContextStrategyConfig;
 use crate::{
     FusedKernelConfig, SpatialPositionalEncodingKind, VisionAttentionMode, VisionLossConfig,
     VisionPyramidMode, VisionReconLossConfig, VisionSaccadeCacheConfig,
-    VisionSaccadePolicyConfig,
+    VisionSaccadeInputProjectionConfig, VisionSaccadePolicyConfig, VisionTbpttConfig,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use crate::{VisionTrainingModeConfig, load_vision_training_config};
@@ -70,17 +70,27 @@ fn make_saccade_model_with_dims<B: BackendTrait>(
     let model = VisionDragonHatchling::<B>::new(vision_config.clone(), device);
     let saccade_config = VisionSaccadeConfig {
         num_eyes,
+        traj_tokens: 1,
+        traj_update_alpha: 1.0,
         mip_levels: 3,
         pyramid_mode: VisionPyramidMode::Laplacian,
         fovea_sampling_mode: VisionFoveaSamplingMode::Sequential,
         fovea_warp_mode: VisionFoveaWarpMode::Warped,
+        fovea_subsamples: 4,
+        fovea_radius_scale: 1.0,
         fovea_subpatch_size: 0,
         fovea_scatter_mode: VisionFoveaScatterMode::Tensor,
+        grid_sample_max_mb: 512,
+        mip_concat_max_mb: 512,
         pyramid_feature_dim: None,
         inner_steps: 1,
         low_mem_pre_rollout: true,
+        recon_batch_chunk: 0,
+        recon_max_elems: 50_000_000,
+        tbptt: VisionTbpttConfig::default(),
         policy: VisionSaccadePolicyConfig::default(),
         cache: VisionSaccadeCacheConfig::default(),
+        input_projection: VisionSaccadeInputProjectionConfig::default(),
         loss: VisionLossConfig {
             lejepa: VisionLejepaLossConfig {
                 enabled: true,
@@ -113,8 +123,11 @@ fn make_saccade_model_with_dims<B: BackendTrait>(
         model,
         saccade_config,
         vision_config.embed_dim,
+        vision_config.patch_size,
         rollout,
         recon_patch_dim,
+        1,
+        0,
         device,
     );
     (saccade, vision_config)
@@ -140,6 +153,37 @@ fn make_test_image(channels: usize, height: usize, width: usize) -> Vec<f32> {
         }
     }
     data
+}
+
+#[test]
+fn patch_embed_supports_large_patches() {
+    type Backend = NdArray<f32>;
+    let device = <Backend as BackendTrait>::Device::default();
+    let vision_config = VisionDragonHatchlingConfig {
+        image_size: 160,
+        patch_size: 64,
+        in_channels: 3,
+        embed_dim: 16,
+        steps: 1,
+        n_head: 2,
+        mlp_internal_dim_multiplier: 2,
+        dropout: 0.0,
+        projection_dim: 16,
+        projection_hidden_dim: 16,
+        use_cls_token: true,
+        pos_encoding: SpatialPositionalEncodingKind::Learned2d,
+        pos_max_height: 3,
+        pos_max_width: 3,
+        attention_mode: VisionAttentionMode::RowL1,
+        fused_kernels: FusedKernelConfig::default(),
+    };
+    let model = VisionDragonHatchling::<Backend>::new(vision_config, &device);
+    let images =
+        Tensor::<Backend, 4>::random([1, 3, 160, 160], TensorDistribution::Default, &device);
+    let patch = model.patch_embed_raw(images);
+    assert_eq!(patch.grid.height, 3);
+    assert_eq!(patch.grid.width, 3);
+    assert_eq!(patch.tokens.shape().dims::<3>()[1], 9);
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -607,18 +651,38 @@ fn assert_tensor_finite<B: BackendTrait, const D: usize>(tensor: Tensor<B, D>) {
     );
 }
 
+fn assert_tensor_nonzero<B: BackendTrait, const D: usize>(tensor: Tensor<B, D>, eps: f32) {
+    let values = tensor
+        .to_data()
+        .convert::<f32>()
+        .into_vec::<f32>()
+        .expect("tensor vec");
+    assert!(!values.is_empty(), "tensor has no values");
+    let mut max_abs = 0.0f32;
+    for value in values {
+        let abs = value.abs();
+        if abs > max_abs {
+            max_abs = abs;
+        }
+    }
+    assert!(
+        max_abs > eps,
+        "tensor max abs {max_abs} <= {eps}"
+    );
+}
+
 fn saccade_eye_step<B: BackendTrait>(
     saccade: &VisionSaccadeModel<B>,
     images: Tensor<B, 4>,
     eye_idx: usize,
 ) -> (Tensor<B, 3>, Vec<Tensor<B, 3>>) {
     let device = images.device();
-    let [batch, _channels, height, _width] = images.shape().dims::<4>();
+    let [batch, _channels, _height, _width] = images.shape().dims::<4>();
     let patch = saccade.model.patch_embed_raw(images.clone());
     let grid_h = patch.grid.height;
     let grid_w = patch.grid.width;
     assert!(grid_h > 0 && grid_w > 0);
-    let patch_size = height / grid_h;
+    let patch_size = saccade.model.patch_size().max(1);
     assert!(patch_size > 0);
 
     let mip_levels = saccade.build_mip_pyramid(images, patch_size);
@@ -1014,13 +1078,13 @@ fn saccade_mip_gaussian_weights_normalize() {
 }
 
 #[test]
-fn saccade_fovea_params_use_single_trajectory_token() {
+fn saccade_fovea_params_use_configured_trajectory_tokens() {
     type Backend = NdArray<f32>;
     let device = <Backend as BackendTrait>::Device::default();
     let (saccade, _vision_config) = make_saccade_model::<Backend>(&device, 1);
     let embed_dim = saccade.trajectory_token.val().shape().dims::<2>()[1];
     let traj_len = saccade.trajectory_token.val().shape().dims::<2>()[0].max(1);
-    assert_eq!(traj_len, SACCADE_TRAJ_TOKENS);
+    assert_eq!(traj_len, saccade.config.traj_tokens.max(1));
 
     let base_traj = saccade
         .trajectory_token
@@ -1050,7 +1114,10 @@ fn saccade_fovea_params_use_single_trajectory_token() {
     let weights = saccade_weights_for_eye(&saccade, traj_with_eye, &levels, embed_dim);
     for weight in weights {
         let shape = weight.shape().dims::<3>();
-        assert_eq!(shape[1], 1, "fovea weights should use a single token");
+        assert_eq!(
+            shape[1], traj_len,
+            "fovea weights should track the configured trajectory token count"
+        );
     }
 }
 
@@ -1166,6 +1233,109 @@ fn saccade_step_produces_finite_grads() {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
+fn wgpu_foveation_custom_backward_produces_grads() {
+    type Backend = Autodiff<Wgpu<f32>>;
+    if !crate::train::foveation::wgsl::supports_backend::<Wgpu<f32>>() {
+        return;
+    }
+
+    let device = burn_wgpu::WgpuDevice::default();
+    init_wgpu_test_runtime(&device);
+
+    let (mut saccade, _vision_config) = make_saccade_model_with_dims::<Backend>(&device, 1, 16, 16, 4);
+    saccade.config.pyramid_mode = VisionPyramidMode::Stacked;
+    saccade.config.fovea_sampling_mode = VisionFoveaSamplingMode::Wgsl;
+    saccade.config.fovea_warp_mode = VisionFoveaWarpMode::Warped;
+    saccade.config.mip_levels = 2;
+
+    let data = make_test_image(3, 16, 16);
+    let images = Tensor::<Backend, 4>::from_data(
+        TensorData::new(data, [1, 3, 16, 16]),
+        &device,
+    );
+    let patch_size = saccade.model.patch_size().max(1);
+    let levels = saccade.build_mip_pyramid(images, patch_size);
+    let base_grid = build_foveated_base_grid::<Backend>(patch_size, &device);
+
+    let mean_raw = Tensor::<Backend, 2>::from_data(
+        TensorData::new(vec![0.25, -0.1], [1, 2]),
+        &device,
+    )
+    .require_grad();
+    let sigma_raw = Tensor::<Backend, 2>::from_data(
+        TensorData::new(vec![0.05], [1, 1]),
+        &device,
+    )
+    .require_grad();
+    let mean = activation::sigmoid(mean_raw.clone());
+    let sigma = activation::sigmoid(sigma_raw.clone())
+        .mul_scalar(0.3)
+        .add_scalar(0.05);
+
+    let patch = saccade.foveated_patch_image(&levels, &base_grid, mean, sigma, None);
+    let grads = patch.mean().backward();
+
+    let mean_grad = mean_raw.grad(&grads).expect("mean_raw grad");
+    let sigma_grad = sigma_raw.grad(&grads).expect("sigma_raw grad");
+    assert_tensor_finite(mean_grad.clone());
+    assert_tensor_finite(sigma_grad.clone());
+    assert_tensor_nonzero(mean_grad, 1e-6);
+    assert_tensor_nonzero(sigma_grad, 1e-6);
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "cuda"))]
+#[test]
+fn cuda_foveation_custom_backward_produces_grads() {
+    type Backend = Autodiff<Cuda<f32>>;
+    if !crate::train::foveation::cubecl::supports_backend::<Cuda<f32>>() {
+        return;
+    }
+
+    let device = burn_cuda::CudaDevice::default();
+
+    let (mut saccade, _vision_config) = make_saccade_model_with_dims::<Backend>(&device, 1, 16, 16, 4);
+    saccade.config.pyramid_mode = VisionPyramidMode::Stacked;
+    saccade.config.fovea_sampling_mode = VisionFoveaSamplingMode::Cubecl;
+    saccade.config.fovea_warp_mode = VisionFoveaWarpMode::Warped;
+    saccade.config.mip_levels = 2;
+
+    let data = make_test_image(3, 16, 16);
+    let images = Tensor::<Backend, 4>::from_data(
+        TensorData::new(data, [1, 3, 16, 16]),
+        &device,
+    );
+    let patch_size = saccade.model.patch_size().max(1);
+    let levels = saccade.build_mip_pyramid(images, patch_size);
+    let base_grid = build_foveated_base_grid::<Backend>(patch_size, &device);
+
+    let mean_raw = Tensor::<Backend, 2>::from_data(
+        TensorData::new(vec![0.25, -0.1], [1, 2]),
+        &device,
+    )
+    .require_grad();
+    let sigma_raw = Tensor::<Backend, 2>::from_data(
+        TensorData::new(vec![0.05], [1, 1]),
+        &device,
+    )
+    .require_grad();
+    let mean = activation::sigmoid(mean_raw.clone());
+    let sigma = activation::sigmoid(sigma_raw.clone())
+        .mul_scalar(0.3)
+        .add_scalar(0.05);
+
+    let patch = saccade.foveated_patch_image(&levels, &base_grid, mean, sigma, None);
+    let grads = patch.mean().backward();
+
+    let mean_grad = mean_raw.grad(&grads).expect("mean_raw grad");
+    let sigma_grad = sigma_raw.grad(&grads).expect("sigma_raw grad");
+    assert_tensor_finite(mean_grad.clone());
+    assert_tensor_finite(sigma_grad.clone());
+    assert_tensor_nonzero(mean_grad, 1e-6);
+    assert_tensor_nonzero(sigma_grad, 1e-6);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
 fn wgpu_text_memory_stays_bounded_across_epochs() {
     type Backend = Autodiff<Wgpu<f32>>;
     let device = burn_wgpu::WgpuDevice::default();
@@ -1241,8 +1411,11 @@ fn wgpu_vision_saccade_memory_stays_bounded_across_epochs() {
         model,
         saccade_config,
         vision_config.embed_dim,
+        vision_config.patch_size,
         rollout,
         recon_patch_dim,
+        config.training.batch_repeats,
+        config.training.train_repeat_chunk,
         &device,
     );
 
@@ -1417,8 +1590,11 @@ fn cuda_vision_saccade_memory_stays_bounded_across_epochs() {
         model,
         saccade_config,
         vision_config.embed_dim,
+        vision_config.patch_size,
         rollout,
         recon_patch_dim,
+        config.training.batch_repeats,
+        config.training.train_repeat_chunk,
         &device,
     );
 

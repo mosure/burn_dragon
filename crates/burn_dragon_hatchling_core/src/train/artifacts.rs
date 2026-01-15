@@ -6,8 +6,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::{env, fmt};
 use std::time::{SystemTime, UNIX_EPOCH};
-#[cfg(test)]
-use std::sync::Mutex;
 
 use anyhow::{Context, Result, anyhow};
 use image::RgbImage;
@@ -15,14 +13,6 @@ use image::RgbImage;
 use crate::config::VisionArtifactOutputMode;
 
 pub(crate) const ARTIFACT_DEFAULT_FPS: u32 = 4;
-
-#[cfg(test)]
-static FFMPEG_ENV_LOCK: Mutex<()> = Mutex::new(());
-
-#[cfg(test)]
-pub(crate) fn lock_ffmpeg_env() -> std::sync::MutexGuard<'static, ()> {
-    FFMPEG_ENV_LOCK.lock().expect("ffmpeg env lock")
-}
 
 #[derive(Clone, Debug)]
 pub(crate) struct ArtifactFrame {
@@ -83,6 +73,7 @@ pub(crate) fn write_video(
     sample_idx: usize,
     frames: &[ArtifactFrame],
     fps: u32,
+    ffmpeg_path: Option<&Path>,
 ) -> Result<ArtifactWriteOutcome> {
     if frames.is_empty() {
         return Err(anyhow!("no frames to write"));
@@ -97,7 +88,7 @@ pub(crate) fn write_video(
         VisionArtifactOutputMode::Avi => {
             let filename = video_filename(output_mode, overwrite, iteration, sample_idx);
             let path = output_dir.join(filename);
-            write_avi(&path, frames, fps)?;
+            write_avi(&path, frames, fps, ffmpeg_path)?;
             Ok(ArtifactWriteOutcome {
                 saved: 1,
                 mode: VisionArtifactOutputMode::Avi,
@@ -107,7 +98,7 @@ pub(crate) fn write_video(
         VisionArtifactOutputMode::Mp4 => {
             let filename = video_filename(output_mode, overwrite, iteration, sample_idx);
             let path = output_dir.join(filename);
-            match write_mp4(&path, frames, fps) {
+            match write_mp4(&path, frames, fps, ffmpeg_path) {
                 Ok(()) => Ok(ArtifactWriteOutcome {
                     saved: 1,
                     mode: VisionArtifactOutputMode::Mp4,
@@ -121,7 +112,7 @@ pub(crate) fn write_video(
                         sample_idx,
                     );
                     let fallback_path = output_dir.join(fallback_name);
-                    write_avi(&fallback_path, frames, fps)?;
+                    write_avi(&fallback_path, frames, fps, ffmpeg_path)?;
                     Ok(ArtifactWriteOutcome {
                         saved: 1,
                         mode: VisionArtifactOutputMode::Avi,
@@ -158,9 +149,10 @@ fn video_filename(
     }
 }
 
-fn write_mp4(path: &Path, frames: &[ArtifactFrame], fps: u32) -> Result<()> {
+fn write_mp4(path: &Path, frames: &[ArtifactFrame], fps: u32, ffmpeg_path: Option<&Path>) -> Result<()> {
     let output_path = prepare_output_path(path)?;
-    let ffmpeg = find_ffmpeg().ok_or_else(|| anyhow!("ffmpeg not found"))?;
+    let ffmpeg =
+        resolve_ffmpeg(ffmpeg_path).ok_or_else(|| anyhow!("ffmpeg not found"))?;
     let temp_dir = create_temp_dir("artifact_frames")?;
     let temp_path = temp_dir.as_path();
     for (idx, frame) in frames.iter().enumerate() {
@@ -200,17 +192,10 @@ fn write_mp4(path: &Path, frames: &[ArtifactFrame], fps: u32) -> Result<()> {
     }
 }
 
-fn find_ffmpeg() -> Option<PathBuf> {
-    if let Ok(path) = env::var("FFMPEG") {
-        let candidate = PathBuf::from(path);
-        if candidate.exists() {
-            return Some(candidate);
-        }
-    }
-    if let Ok(path) = env::var("FFMPEG_PATH") {
-        let candidate = PathBuf::from(path);
-        if candidate.exists() {
-            return Some(candidate);
+fn resolve_ffmpeg(ffmpeg_path: Option<&Path>) -> Option<PathBuf> {
+    if let Some(path) = ffmpeg_path {
+        if path.exists() {
+            return Some(path.to_path_buf());
         }
     }
     let status = Command::new("ffmpeg")
@@ -235,18 +220,24 @@ fn create_temp_dir(prefix: &str) -> Result<PathBuf> {
     Ok(base)
 }
 
-fn write_avi(path: &Path, frames: &[ArtifactFrame], fps: u32) -> Result<()> {
-    if env::var("FFMPEG").is_ok() {
-        if let Ok(()) = write_avi_ffmpeg(path, frames, fps) {
+fn write_avi(path: &Path, frames: &[ArtifactFrame], fps: u32, ffmpeg_path: Option<&Path>) -> Result<()> {
+    if ffmpeg_path.is_some() {
+        if let Ok(()) = write_avi_ffmpeg(path, frames, fps, ffmpeg_path) {
             return Ok(());
         }
     }
     write_avi_raw(path, frames, fps)
 }
 
-fn write_avi_ffmpeg(path: &Path, frames: &[ArtifactFrame], fps: u32) -> Result<()> {
+fn write_avi_ffmpeg(
+    path: &Path,
+    frames: &[ArtifactFrame],
+    fps: u32,
+    ffmpeg_path: Option<&Path>,
+) -> Result<()> {
     let output_path = prepare_output_path(path)?;
-    let ffmpeg = find_ffmpeg().ok_or_else(|| anyhow!("ffmpeg not found"))?;
+    let ffmpeg =
+        resolve_ffmpeg(ffmpeg_path).ok_or_else(|| anyhow!("ffmpeg not found"))?;
     let temp_dir = create_temp_dir("artifact_frames")?;
     let temp_path = temp_dir.as_path();
     for (idx, frame) in frames.iter().enumerate() {
@@ -585,7 +576,6 @@ mod tests {
 
     #[test]
     fn mp4_writer_uses_stub_ffmpeg() {
-        let _guard = lock_ffmpeg_env();
         let temp_dir = create_temp_dir("mp4_test").expect("temp dir");
         let bin_dir = temp_dir.join("bin");
         fs::create_dir_all(&bin_dir).expect("bin dir");
@@ -597,18 +587,11 @@ type nul > "%OUT%"
 exit /b 0
 "#;
         fs::write(&script_path, script).expect("write stub");
-        let original = env::var("FFMPEG").ok();
-        unsafe { env::set_var("FFMPEG", &script_path) };
 
         let output = temp_dir.join("sample.mp4");
-        write_mp4(&output, &sample_frames(), 8).expect("mp4 write");
+        write_mp4(&output, &sample_frames(), 8, Some(&script_path))
+            .expect("mp4 write");
         assert!(output.is_file());
-
-        if let Some(original) = original {
-            unsafe { env::set_var("FFMPEG", original) };
-        } else {
-            unsafe { env::remove_var("FFMPEG") };
-        }
         let _ = fs::remove_dir_all(&temp_dir);
     }
 

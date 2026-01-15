@@ -62,6 +62,21 @@ pub(crate) fn downsample_image<B: BackendTrait>(images: Tensor<B, 4>) -> Option<
     Some(conv2d(padded, kernel, None, options))
 }
 
+pub(crate) fn train_repeat_chunk(repeats: usize, override_chunk: usize) -> usize {
+    let repeats = repeats.max(1);
+    let default_chunk = if repeats >= 8 { 2 } else { repeats.min(4) };
+    let chunk = if override_chunk > 0 {
+        override_chunk
+    } else {
+        default_chunk
+    };
+    chunk.min(repeats)
+}
+
+pub(crate) fn limit_bytes_from_mb(limit_mb: usize) -> u64 {
+    (limit_mb as u64).saturating_mul(1024 * 1024)
+}
+
 pub(crate) fn should_fix_grid<B: BackendTrait>() -> bool
 where
     B::Device: 'static,
@@ -133,10 +148,43 @@ pub(crate) fn grid_from_fx_fy<B: BackendTrait>(
 pub(crate) fn grid_sample_2d_bilinear<B: BackendTrait>(
     tensor: Tensor<B, 4>,
     grid: Tensor<B, 4>,
+    max_bytes: u64,
 ) -> Tensor<B, 4> {
-    let [_, _, height_in, width_in] = tensor.shape().dims::<4>();
+    let [batch, channels, height_in, width_in] = tensor.shape().dims::<4>();
     let grid = fix_grid_for_burn::<B>(grid, height_in, width_in);
-    tensor.grid_sample_2d(grid, InterpolateMode::Bilinear)
+    let [_, out_h, out_w, _] = grid.shape().dims::<4>();
+    if channels <= 1 || batch == 0 || out_h == 0 || out_w == 0 {
+        return tensor.grid_sample_2d(grid, InterpolateMode::Bilinear);
+    }
+    // Conservative estimate: bilinear sampling touches 4 neighbors per output element.
+    let bytes_per_elem = 4u64;
+    let elems_per_channel = (batch as u64)
+        .saturating_mul(out_h as u64)
+        .saturating_mul(out_w as u64);
+    let bytes_per_channel = elems_per_channel
+        .saturating_mul(bytes_per_elem)
+        .saturating_mul(4);
+    let estimated_bytes = bytes_per_channel.saturating_mul(channels as u64);
+    if max_bytes == 0 {
+        return tensor.grid_sample_2d(grid, InterpolateMode::Bilinear);
+    }
+    if estimated_bytes <= max_bytes {
+        return tensor.grid_sample_2d(grid, InterpolateMode::Bilinear);
+    }
+    let max_channels = (max_bytes / bytes_per_channel).max(1) as usize;
+    if max_channels >= channels {
+        return tensor.grid_sample_2d(grid, InterpolateMode::Bilinear);
+    }
+    let mut chunks = Vec::new();
+    let mut start = 0;
+    while start < channels {
+        let end = (start + max_channels).min(channels);
+        let slice = tensor.clone().slice_dim(1, start..end);
+        let sampled = slice.grid_sample_2d(grid.clone(), InterpolateMode::Bilinear);
+        chunks.push(sampled);
+        start = end;
+    }
+    Tensor::cat(chunks, 1)
 }
 
 pub(crate) fn build_foveated_base_grid<B: BackendTrait>(
@@ -159,8 +207,13 @@ pub(crate) fn build_foveated_base_grid<B: BackendTrait>(
         .unsqueeze_dim::<4>(0)
 }
 
-pub(crate) fn build_fovea_jitter<B: BackendTrait>(full_patch_h: usize, device: &B::Device) -> FoveaJitter<B> {
-    let subsamples = SACCADE_FOVEA_SUBSAMPLES * SACCADE_FOVEA_SUBSAMPLES;
+pub(crate) fn build_fovea_jitter<B: BackendTrait>(
+    full_patch_h: usize,
+    subsamples_axis: usize,
+    device: &B::Device,
+) -> FoveaJitter<B> {
+    let subsamples_axis = subsamples_axis.max(1);
+    let subsamples = subsamples_axis * subsamples_axis;
     let full_half = full_patch_h as f32 * 0.5;
     let scale = if full_half > 0.0 {
         1.0 / full_half
@@ -169,10 +222,10 @@ pub(crate) fn build_fovea_jitter<B: BackendTrait>(full_patch_h: usize, device: &
     };
     let mut jitter_values = Vec::with_capacity(subsamples * 2);
     let mut sequential = Vec::with_capacity(subsamples);
-    for sy in 0..SACCADE_FOVEA_SUBSAMPLES {
-        for sx in 0..SACCADE_FOVEA_SUBSAMPLES {
-            let jitter_x = (sx as f32 + 0.5) / SACCADE_FOVEA_SUBSAMPLES as f32 - 0.5;
-            let jitter_y = (sy as f32 + 0.5) / SACCADE_FOVEA_SUBSAMPLES as f32 - 0.5;
+    for sy in 0..subsamples_axis {
+        for sx in 0..subsamples_axis {
+            let jitter_x = (sx as f32 + 0.5) / subsamples_axis as f32 - 0.5;
+            let jitter_y = (sy as f32 + 0.5) / subsamples_axis as f32 - 0.5;
             let jitter_x = jitter_x * scale;
             let jitter_y = jitter_y * scale;
             jitter_values.push(jitter_x);

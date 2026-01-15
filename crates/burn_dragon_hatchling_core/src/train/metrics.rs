@@ -5,6 +5,10 @@ use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
+#[cfg(feature = "integration_test")]
+use std::sync::Mutex;
+#[cfg(feature = "integration_test")]
+use std::sync::OnceLock;
 
 use burn::tensor::{Int, Tensor};
 use burn::tensor::backend::{AutodiffBackend, Backend as BackendTrait};
@@ -332,6 +336,7 @@ pub(crate) struct ScalarMetric<B: BackendTrait, I: ScalarValue<B>> {
     name: Arc<String>,
     last: f64,
     every: usize,
+    initialized: bool,
     _marker: std::marker::PhantomData<(B, I)>,
 }
 
@@ -341,6 +346,7 @@ impl<B: BackendTrait, I: ScalarValue<B>> Clone for ScalarMetric<B, I> {
             name: Arc::clone(&self.name),
             last: self.last,
             every: self.every,
+            initialized: self.initialized,
             _marker: std::marker::PhantomData,
         }
     }
@@ -352,6 +358,7 @@ impl<B: BackendTrait, I: ScalarValue<B>> ScalarMetric<B, I> {
             name: Arc::new(name.to_string()),
             last: 0.0,
             every: every.max(1),
+            initialized: false,
             _marker: std::marker::PhantomData,
         }
     }
@@ -371,7 +378,7 @@ impl<B: BackendTrait, I: ScalarValue<B> + Send + Sync> burn_train::metric::Metri
         item: &Self::Input,
         metadata: &burn_train::metric::MetricMetadata,
     ) -> burn_train::metric::MetricEntry {
-        if self.every > 1 && metadata.iteration % self.every != 0 {
+        if self.every > 1 && metadata.iteration % self.every != 0 && self.initialized {
             return burn_train::metric::MetricEntry::new(
                 Arc::clone(&self.name),
                 burn_train::metric::format_float(self.last, 4),
@@ -386,6 +393,7 @@ impl<B: BackendTrait, I: ScalarValue<B> + Send + Sync> burn_train::metric::Metri
             .next()
             .unwrap_or(0.0);
         self.last = value;
+        self.initialized = true;
         burn_train::metric::MetricEntry::new(
             Arc::clone(&self.name),
             burn_train::metric::format_float(value, 4),
@@ -395,6 +403,7 @@ impl<B: BackendTrait, I: ScalarValue<B> + Send + Sync> burn_train::metric::Metri
 
     fn clear(&mut self) {
         self.last = 0.0;
+        self.initialized = false;
     }
 }
 
@@ -403,6 +412,108 @@ impl<B: BackendTrait, I: ScalarValue<B> + Send + Sync> burn_train::metric::Numer
 {
     fn value(&self) -> burn_train::metric::NumericEntry {
         burn_train::metric::NumericEntry::Value(self.last)
+    }
+}
+
+#[cfg(feature = "integration_test")]
+fn loss_trace_storage() -> &'static Mutex<Vec<f32>> {
+    static TRACE: OnceLock<Mutex<Vec<f32>>> = OnceLock::new();
+    TRACE.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+#[cfg(feature = "integration_test")]
+pub fn loss_trace_reset() {
+    if let Ok(mut trace) = loss_trace_storage().lock() {
+        trace.clear();
+    }
+}
+
+#[cfg(feature = "integration_test")]
+pub fn loss_trace_take() -> Vec<f32> {
+    if let Ok(mut trace) = loss_trace_storage().lock() {
+        let mut out = Vec::new();
+        std::mem::swap(&mut *trace, &mut out);
+        out
+    } else {
+        Vec::new()
+    }
+}
+
+#[cfg(feature = "integration_test")]
+pub fn loss_trace_len() -> usize {
+    if let Ok(trace) = loss_trace_storage().lock() {
+        trace.len()
+    } else {
+        0
+    }
+}
+
+#[cfg(feature = "integration_test")]
+#[derive(Clone)]
+pub(crate) struct LossTraceMetric<B: BackendTrait> {
+    name: Arc<String>,
+    every: usize,
+    last: f64,
+    initialized: bool,
+    _marker: std::marker::PhantomData<B>,
+}
+
+#[cfg(feature = "integration_test")]
+impl<B: BackendTrait> LossTraceMetric<B> {
+    pub(crate) fn new(name: &str, every: usize) -> Self {
+        let every = every.max(1);
+        Self {
+            name: Arc::new(name.to_string()),
+            every,
+            last: 0.0,
+            initialized: false,
+            _marker: std::marker::PhantomData,
+        }
+    }
+}
+
+#[cfg(feature = "integration_test")]
+impl<B: BackendTrait> burn_train::metric::Metric for LossTraceMetric<B> {
+    type Input = LossValue<B>;
+
+    fn name(&self) -> burn_train::metric::MetricName {
+        Arc::clone(&self.name)
+    }
+
+    fn update(
+        &mut self,
+        item: &Self::Input,
+        metadata: &burn_train::metric::MetricMetadata,
+    ) -> burn_train::metric::MetricEntry {
+        if self.every > 1 && metadata.iteration % self.every != 0 && self.initialized {
+            return burn_train::metric::MetricEntry::new(
+                Arc::clone(&self.name),
+                burn_train::metric::format_float(self.last, 4),
+                self.last.to_string(),
+            );
+        }
+        let value = item
+            .value()
+            .mean()
+            .into_data()
+            .iter::<f64>()
+            .next()
+            .unwrap_or(0.0) as f32;
+        self.last = value as f64;
+        self.initialized = true;
+        if let Ok(mut trace) = loss_trace_storage().lock() {
+            trace.push(value);
+        }
+        burn_train::metric::MetricEntry::new(
+            Arc::clone(&self.name),
+            burn_train::metric::format_float(value as f64, 4),
+            value.to_string(),
+        )
+    }
+
+    fn clear(&mut self) {
+        self.last = 0.0;
+        self.initialized = false;
     }
 }
 
@@ -459,6 +570,17 @@ where
     }
 }
 
+fn allow_memory_cleanup<B: BackendTrait>(device: &B::Device, allow_cuda_cleanup: bool) -> bool
+where
+    B::Device: 'static,
+{
+    #[cfg(feature = "cuda")]
+    if (device as &dyn Any).downcast_ref::<burn_cuda::CudaDevice>().is_some() {
+        return allow_cuda_cleanup;
+    }
+    true
+}
+
 #[derive(Clone)]
 pub(crate) struct MemoryCleanupMetric<B: BackendTrait> {
     name: Arc<String>,
@@ -466,20 +588,23 @@ pub(crate) struct MemoryCleanupMetric<B: BackendTrait> {
     every_epochs: usize,
     every_iters: usize,
     last_epoch: Option<usize>,
+    allow_cuda_cleanup: bool,
 }
 
 impl<B: BackendTrait> MemoryCleanupMetric<B> {
-    pub(crate) fn new(device: &B::Device, every_epochs: usize) -> Self {
-        let every_iters = std::env::var("BDH_MEMORY_CLEANUP_ITERS")
-            .ok()
-            .and_then(|value| value.parse::<usize>().ok())
-            .unwrap_or(0);
+    pub(crate) fn new(
+        device: &B::Device,
+        every_epochs: usize,
+        every_iters: usize,
+        allow_cuda_cleanup: bool,
+    ) -> Self {
         Self {
             name: Arc::new("memory_cleanup".to_string()),
             device: device.clone(),
             every_epochs,
             every_iters,
             last_epoch: None,
+            allow_cuda_cleanup,
         }
     }
 }
@@ -499,7 +624,8 @@ where
         _item: &Self::Input,
         metadata: &burn_train::metric::MetricMetadata,
     ) -> burn_train::metric::MetricEntry {
-        if self.every_epochs == 0 {
+        let allow_cleanup = allow_memory_cleanup::<B>(&self.device, self.allow_cuda_cleanup);
+        if self.every_epochs == 0 && self.every_iters == 0 {
             return burn_train::metric::MetricEntry::new(
                 Arc::clone(&self.name),
                 "disabled".to_string(),
@@ -509,13 +635,21 @@ where
 
         let epoch = metadata.epoch;
         let mut cleaned = false;
-        if self.every_iters > 0 && metadata.iteration % self.every_iters == 0 {
+        if allow_cleanup && self.every_iters > 0 && metadata.iteration % self.every_iters == 0 {
+            let _guard = crate::device::device_allocation_lock().lock().ok();
+            B::sync(&self.device);
             B::memory_cleanup(&self.device);
             extra_memory_cleanup::<B>(&self.device);
             cleaned = true;
         }
         if let Some(last_epoch) = self.last_epoch {
-            if epoch != last_epoch && epoch % self.every_epochs == 0 {
+            if allow_cleanup
+                && self.every_epochs > 0
+                && epoch != last_epoch
+                && epoch % self.every_epochs == 0
+            {
+                let _guard = crate::device::device_allocation_lock().lock().ok();
+                B::sync(&self.device);
                 B::memory_cleanup(&self.device);
                 extra_memory_cleanup::<B>(&self.device);
                 cleaned = true;
@@ -525,7 +659,13 @@ where
 
         burn_train::metric::MetricEntry::new(
             Arc::clone(&self.name),
-            if cleaned { "cleaned".to_string() } else { "skip".to_string() },
+            if cleaned {
+                "cleaned".to_string()
+            } else if !allow_cleanup {
+                "disabled".to_string()
+            } else {
+                "skip".to_string()
+            },
             if cleaned { "1".to_string() } else { "0".to_string() },
         )
     }
@@ -546,6 +686,7 @@ pub(crate) struct VisionArtifactMetric<B: BackendTrait> {
     mean: [f32; 3],
     std: [f32; 3],
     overwrite: bool,
+    ffmpeg_path: Option<PathBuf>,
     _marker: std::marker::PhantomData<B>,
 }
 
@@ -559,6 +700,7 @@ impl<B: BackendTrait> VisionArtifactMetric<B> {
         mean: [f32; 3],
         std: [f32; 3],
         overwrite: bool,
+        ffmpeg_path: Option<PathBuf>,
     ) -> Self {
         Self {
             name: Arc::new("vision_artifacts".to_string()),
@@ -572,6 +714,7 @@ impl<B: BackendTrait> VisionArtifactMetric<B> {
             mean,
             std,
             overwrite,
+            ffmpeg_path,
             _marker: std::marker::PhantomData,
         }
     }
@@ -699,6 +842,7 @@ impl<B: BackendTrait> burn_train::metric::Metric for VisionArtifactMetric<B> {
                     batch_idx,
                     &frames,
                     self.fps,
+                    self.ffmpeg_path.as_deref(),
                 ) {
                     Ok(outcome) => outcome,
                     Err(_) => {
@@ -981,13 +1125,11 @@ impl<B: BackendTrait> burn_train::metric::Metric for VisionArtifactMetric<B> {
 
 #[cfg(test)]
 mod tests {
-    use crate::train::artifacts;
     use crate::train::metrics::*;
     use burn::data::dataloader::Progress;
     use burn_ndarray::NdArray;
     use burn_train::metric::{Metric, MetricMetadata};
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::env;
     use tempfile::tempdir;
 
     #[derive(Clone)]
@@ -1052,6 +1194,7 @@ mod tests {
             [0.0, 0.0, 0.0],
             [1.0, 1.0, 1.0],
             true,
+            None,
         );
         let views = Tensor::<Backend, 5>::zeros([1, 1, 3, 4, 4], &device);
         let patch_norms = Tensor::<Backend, 3>::zeros([1, 2, 2], &device);
@@ -1084,6 +1227,7 @@ mod tests {
             [0.0, 0.0, 0.0],
             [1.0, 1.0, 1.0],
             true,
+            None,
         );
         let views = Tensor::<Backend, 5>::zeros([1, 1, 3, 4, 4], &device);
         let patch_norms = Tensor::<Backend, 3>::zeros([1, 2, 2], &device);
@@ -1126,6 +1270,7 @@ mod tests {
             [0.0, 0.0, 0.0],
             [1.0, 1.0, 1.0],
             false,
+            None,
         );
         let views = Tensor::<Backend, 5>::zeros([1, 1, 3, 4, 4], &device);
         let patch_norms = Tensor::<Backend, 3>::zeros([1, 2, 2], &device);
@@ -1158,6 +1303,7 @@ mod tests {
             [0.0, 0.0, 0.0],
             [1.0, 1.0, 1.0],
             true,
+            None,
         );
         let views = Tensor::<Backend, 5>::zeros([2, 1, 3, 4, 4], &device);
         let patch_norms = Tensor::<Backend, 3>::zeros([2, 2, 2], &device);
@@ -1191,9 +1337,6 @@ mod tests {
         type Backend = NdArray<f32>;
         let device = <Backend as BackendTrait>::Device::default();
         let output_dir = tempdir().expect("tempdir");
-        let _guard = artifacts::lock_ffmpeg_env();
-        let original = env::var("FFMPEG").ok();
-        unsafe { env::remove_var("FFMPEG") };
         let mut metric = VisionArtifactMetric::<Backend>::new(
             output_dir.path().to_path_buf(),
             1,
@@ -1203,6 +1346,7 @@ mod tests {
             [0.0, 0.0, 0.0],
             [1.0, 1.0, 1.0],
             true,
+            None,
         );
         let frames = Tensor::<Backend, 5>::zeros([1, 2, 3, 4, 4], &device);
         let input = VisionArtifactInput {
@@ -1221,11 +1365,6 @@ mod tests {
         let key_path = output_dir.path().join("vision_artifacts_key.txt");
         assert!(key_path.is_file());
 
-        if let Some(original) = original {
-            unsafe { env::set_var("FFMPEG", original) };
-        } else {
-            unsafe { env::remove_var("FFMPEG") };
-        }
     }
 
     #[test]
@@ -1233,7 +1372,6 @@ mod tests {
         type Backend = NdArray<f32>;
         let device = <Backend as BackendTrait>::Device::default();
         let output_dir = tempdir().expect("tempdir");
-        let _guard = artifacts::lock_ffmpeg_env();
         let bin_dir = output_dir.path().join("bin");
         fs::create_dir_all(&bin_dir).expect("bin dir");
         let script_path = bin_dir.join("ffmpeg.cmd");
@@ -1244,9 +1382,6 @@ type nul > "%OUT%"
 exit /b 0
 "#;
         fs::write(&script_path, script).expect("write stub");
-        let original = env::var("FFMPEG").ok();
-        unsafe { env::set_var("FFMPEG", &script_path) };
-
         let mut metric = VisionArtifactMetric::<Backend>::new(
             output_dir.path().to_path_buf(),
             1,
@@ -1256,6 +1391,7 @@ exit /b 0
             [0.0, 0.0, 0.0],
             [1.0, 1.0, 1.0],
             true,
+            Some(script_path.clone()),
         );
         let frames = Tensor::<Backend, 5>::zeros([1, 2, 3, 4, 4], &device);
         let input = VisionArtifactInput {
@@ -1272,10 +1408,5 @@ exit /b 0
         let key_path = output_dir.path().join("vision_artifacts_key.txt");
         assert!(key_path.is_file());
 
-        if let Some(original) = original {
-            unsafe { env::set_var("FFMPEG", original) };
-        } else {
-            unsafe { env::remove_var("FFMPEG") };
-        }
     }
 }

@@ -398,7 +398,7 @@ mod tests {
 
         let expected = [(-0.5_f32).exp(), (-1.0_f32).exp()];
         for (value, exp) in values.iter().zip(expected.iter()) {
-            assert!((value - exp).abs() < 1e-6);
+            assert!((*value - *exp).abs() < 1e-6);
         }
     }
 

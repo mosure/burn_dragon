@@ -24,16 +24,6 @@ where
     if vision_config.patch_size == 0 {
         return Err(anyhow!("vision.patch_size must be > 0"));
     }
-    if !vision_config
-        .image_size
-        .is_multiple_of(vision_config.patch_size)
-    {
-        return Err(anyhow!(
-            "vision.image_size must be divisible by vision.patch_size ({} % {} != 0)",
-            vision_config.image_size,
-            vision_config.patch_size
-        ));
-    }
     if config.augment.image_size != vision_config.image_size {
         return Err(anyhow!(
             "augment.image_size ({}) must match vision.image_size ({})",
@@ -49,7 +39,7 @@ where
 
     maybe_download_vision_dataset(&config.dataset)?;
 
-    let grid = vision_config.image_size / vision_config.patch_size;
+    let grid = (vision_config.image_size + vision_config.patch_size - 1) / vision_config.patch_size;
     let student_patch_tokens = grid * grid;
 
     let normalize =
@@ -135,7 +125,7 @@ where
                         .filter(|tokens| *tokens != student_patch_tokens)
                     {
                         return Err(anyhow!(
-                            "teacher.patch_tokens ({}) must match (image_size/patch_size)^2 ({})",
+                            "teacher.patch_tokens ({}) must match ceil(image_size/patch_size)^2 ({})",
                             tokens,
                             student_patch_tokens
                         ));
@@ -154,6 +144,7 @@ where
                         local_views: 0,
                         cache_decoded: config.dataset.cache_decoded,
                         cache_capacity: config.dataset.cache_capacity,
+                        cache_preprocessed: config.dataset.cache_preprocessed,
                     })?;
                     let train_records = train_dataset.len();
                     let train_teacher = Arc::new(DinoFeatureStore::new(
@@ -178,6 +169,7 @@ where
                         local_views: 0,
                         cache_decoded: config.dataset.cache_decoded,
                         cache_capacity: config.dataset.cache_capacity,
+                        cache_preprocessed: config.dataset.cache_preprocessed,
                     })?;
                     let val_records = val_dataset.len();
                     let val_teacher = Arc::new(DinoFeatureStore::new(
@@ -208,7 +200,7 @@ where
                             patch_size
                         ));
                     }
-                    let teacher_grid = image_size / patch_size;
+                    let teacher_grid = (image_size + patch_size - 1) / patch_size;
                     let teacher_tokens = teacher_grid * teacher_grid;
                     if teacher_tokens != student_patch_tokens {
                         return Err(anyhow!(
@@ -222,7 +214,7 @@ where
                         .filter(|tokens| *tokens != teacher_tokens)
                     {
                         return Err(anyhow!(
-                            "teacher.patch_tokens ({}) must match (image_size/patch_size)^2 ({})",
+                            "teacher.patch_tokens ({}) must match ceil(image_size/patch_size)^2 ({})",
                             tokens,
                             teacher_tokens
                         ));
@@ -277,6 +269,7 @@ where
                         local_views: 0,
                         cache_decoded: config.dataset.cache_decoded,
                         cache_capacity: config.dataset.cache_capacity,
+                        cache_preprocessed: config.dataset.cache_preprocessed,
                     })?);
                     let val_dataset = Arc::new(ImageNetDataset::new(ImageNetDatasetConfig {
                         root: val_root,
@@ -290,6 +283,7 @@ where
                         local_views: 0,
                         cache_decoded: config.dataset.cache_decoded,
                         cache_capacity: config.dataset.cache_capacity,
+                        cache_preprocessed: config.dataset.cache_preprocessed,
                     })?);
 
                     (train_dataset, val_dataset, Some(Box::new(teacher_model)))
@@ -400,6 +394,7 @@ where
                 local_views,
                 cache_decoded: config.dataset.cache_decoded,
                 cache_capacity: config.dataset.cache_capacity,
+                        cache_preprocessed: config.dataset.cache_preprocessed,
             })?);
             let val_dataset = Arc::new(ImageNetDataset::new(ImageNetDatasetConfig {
                 root: val_root,
@@ -413,6 +408,7 @@ where
                 local_views,
                 cache_decoded: config.dataset.cache_decoded,
                 cache_capacity: config.dataset.cache_capacity,
+                        cache_preprocessed: config.dataset.cache_preprocessed,
             })?);
 
             (
@@ -445,6 +441,7 @@ where
                 local_views: 0,
                 cache_decoded: config.dataset.cache_decoded,
                 cache_capacity: config.dataset.cache_capacity,
+                        cache_preprocessed: config.dataset.cache_preprocessed,
             })?);
             let val_dataset = Arc::new(ImageNetDataset::new(ImageNetDatasetConfig {
                 root: val_root,
@@ -458,6 +455,7 @@ where
                 local_views: 0,
                 cache_decoded: config.dataset.cache_decoded,
                 cache_capacity: config.dataset.cache_capacity,
+                        cache_preprocessed: config.dataset.cache_preprocessed,
             })?);
 
             (
@@ -563,6 +561,7 @@ where
                 local_views: 0,
                 cache_decoded: config.dataset.cache_decoded,
                 cache_capacity: config.dataset.cache_capacity,
+                        cache_preprocessed: config.dataset.cache_preprocessed,
             })?);
             let val_dataset = Arc::new(ImageNetDataset::new(ImageNetDatasetConfig {
                 root: val_root,
@@ -576,6 +575,7 @@ where
                 local_views: 0,
                 cache_decoded: config.dataset.cache_decoded,
                 cache_capacity: config.dataset.cache_capacity,
+                        cache_preprocessed: config.dataset.cache_preprocessed,
             })?);
 
             (
@@ -599,6 +599,8 @@ where
         schedule.source.as_str()
     );
 
+    let prefetch_to_device = config.dataset.prefetch_to_device;
+
     let train_loader: Arc<dyn DataLoader<B, ImageNetBatch<B>>> =
         Arc::new(ImageNetDataLoader::<B>::new(
             Arc::clone(&train_dataset),
@@ -608,7 +610,7 @@ where
             Some(total_steps),
             config.dataset.prefetch_batches,
             config.dataset.prefetch_workers,
-            config.dataset.prefetch_to_device,
+            prefetch_to_device,
         ));
 
     let val_steps_per_epoch = val_dataset.steps_per_epoch(training.batch_size);
@@ -625,7 +627,7 @@ where
             None,
             config.dataset.prefetch_batches,
             config.dataset.prefetch_workers,
-            config.dataset.prefetch_to_device,
+            prefetch_to_device,
         ));
 
     let scheduler_iters = match schedule.source {
@@ -745,6 +747,7 @@ where
                 artifact_fps: model.as_ref().expect("model").config.artifact_fps,
                 normalize_mean: config.augment.normalize_mean,
                 normalize_std: config.augment.normalize_std,
+                ffmpeg_path: training.ffmpeg_path.clone(),
             });
             match scheduler {
                 ResolvedLrScheduler::Constant(lr) => train_vision_with_scheduler(
@@ -823,6 +826,7 @@ where
                 artifact_fps: model_ref.config.artifact_fps,
                 normalize_mean: config.augment.normalize_mean,
                 normalize_std: config.augment.normalize_std,
+                ffmpeg_path: training.ffmpeg_path.clone(),
             });
             match scheduler {
                 ResolvedLrScheduler::Constant(lr) => train_vision_with_scheduler(
@@ -879,8 +883,11 @@ where
                 model,
                 saccade,
                 vision_config.embed_dim,
+                vision_config.patch_size,
                 rollout,
                 recon_patch_dim,
+                training.batch_repeats,
+                training.train_repeat_chunk,
                 &device,
             ));
             let mut optim = Some(
@@ -901,6 +908,7 @@ where
                 artifact_fps: model_ref.config.artifact_fps,
                 normalize_mean: config.augment.normalize_mean,
                 normalize_std: config.augment.normalize_std,
+                ffmpeg_path: training.ffmpeg_path.clone(),
             });
             match scheduler {
                 ResolvedLrScheduler::Constant(lr) => train_vision_with_scheduler(

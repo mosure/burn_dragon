@@ -27,7 +27,7 @@ pub(crate) use burn::module::{AutodiffModule, Content, Module, ModuleDisplay, Mo
 pub(crate) use burn::nn::loss::CrossEntropyLossConfig;
 pub(crate) use burn::nn::{LayerNorm, LayerNormConfig, Linear, LinearConfig};
 pub(crate) use burn::optim::adaptor::OptimizerAdaptor;
-pub(crate) use burn::optim::{AdamW, AdamWConfig, GradientsParams, LearningRate};
+pub(crate) use burn::optim::{AdamW, AdamWConfig, GradientsAccumulator, GradientsParams, LearningRate};
 pub(crate) use burn::tensor::Distribution as TensorDistribution;
 pub(crate) use burn::tensor::activation;
 pub(crate) use burn::tensor::module::conv2d;
@@ -74,6 +74,8 @@ pub(crate) use crate::{
     VisionFoveaSamplingMode, VisionFoveaScatterMode, VisionFoveaWarpMode, VisionLejepaConfig,
     VisionLejepaLossConfig, VisionMaeConfig, VisionNormalize,
     VisionPyramidMode, VisionSaccadeConfig, VisionTeacherConfig,
+    VisionSaccadeInputProjectionConfig, VisionSaccadeInputProjectionCnnConfig,
+    VisionSaccadeInputProjectionMicroVitConfig,
     VisionTeacherVariant, VisionTrainingConfig,
     VisionTrainingHyperparameters, VisionTrainingModeConfig, build_dataset, build_model_config,
     language_model_loss, patchify, unpatchify, vision_distillation_loss,

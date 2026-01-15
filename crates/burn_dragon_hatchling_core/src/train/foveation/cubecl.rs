@@ -81,6 +81,7 @@ pub(crate) fn try_foveated_patch_cubecl<B: BackendTrait>(
     radius_px: &BurnTensor<B, 3>,
     lod_sigma: &BurnTensor<B, 3>,
     laplacian_images: Option<&SaccadeLaplacianImages<B>>,
+    grid_sample_max_bytes: u64,
 ) -> Option<BurnTensor<B, 4>>
 where
     B::FloatTensorPrimitive: 'static,
@@ -213,7 +214,7 @@ where
             } else {
                 grid.repeat_dim(0, batch)
             };
-            let upsampled = grid_sample_2d_bilinear::<B>(current, grid);
+            let upsampled = grid_sample_2d_bilinear::<B>(current, grid, grid_sample_max_bytes);
             current = upsampled + residual.clone();
             recon.push(current.clone());
         }

@@ -6,7 +6,9 @@ use burn::optim::{AdamWConfig, GradientsParams, LearningRate, Optimizer};
 use burn::tensor::backend::{AutodiffBackend, Backend as BackendTrait};
 use burn::tensor::{Int, Tensor, TensorData};
 use burn_autodiff::Autodiff;
-use burn_dragon_hatchling::{BDH, BDHConfig, language_model_loss, wgpu::init_runtime};
+use burn_dragon_hatchling::{
+    BDH, BDHConfig, WgpuRuntimeConfig, language_model_loss, wgpu::init_runtime,
+};
 use burn_wgpu::Wgpu;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
@@ -44,7 +46,10 @@ const TRAIN_CONFIGS: &[TrainConfig] = &[
 ];
 
 fn training_step_bench(c: &mut Criterion) {
-    run_training_backend::<Autodiff<Wgpu<f32>>, _>(c, "wgpu", init_runtime);
+    let wgpu_config = WgpuRuntimeConfig::default();
+    run_training_backend::<Autodiff<Wgpu<f32>>, _>(c, "wgpu", |device| {
+        init_runtime(device, &wgpu_config);
+    });
 
     #[cfg(feature = "cuda")]
     run_training_backend::<Autodiff<Cuda<f32>>, _>(c, "cuda", |_| {});

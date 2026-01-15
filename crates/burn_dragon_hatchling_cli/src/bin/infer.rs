@@ -79,10 +79,12 @@ fn run() -> Result<()> {
                     &config,
                     &args,
                     "wgpu",
-                    init_runtime,
+                    |device| init_runtime(device, &config.wgpu),
                 );
             }
-            infer_backend::<Wgpu<f32>, _>(&config, &args, "wgpu", init_runtime)
+            infer_backend::<Wgpu<f32>, _>(&config, &args, "wgpu", |device| {
+                init_runtime(device, &config.wgpu)
+            })
         }
         BackendArg::Cuda => {
             #[cfg(feature = "cuda")]

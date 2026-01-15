@@ -13,18 +13,21 @@ mod vision_bench {
     use burn_dragon_hatchling::{
         ImageNetAugmentations, ImageNetSplit, VisionAugmentationConfig, VisionDragonHatchlingConfig,
         VisionFoveaSamplingMode, VisionFoveaScatterMode, VisionFoveaWarpMode, VisionPyramidMode,
-        VisionSaccadeConfig, VisionNormalize,
+        VisionSaccadeConfig, VisionNormalize, WgpuRuntimeConfig, wgpu::init_runtime,
     };
     use burn_dragon_hatchling_vision::foveation;
     use burn_dragon_hatchling_vision::FOVEATION_SHADER;
     use burn_dragon_hatchling::train::bench::{VisionSaccadeBench, VisionScatterBench};
-    use burn_wgpu::{self, RuntimeOptions, Wgpu, WgpuDevice, graphics};
+    use burn_wgpu::{Wgpu, WgpuDevice};
     use bytemuck::{Pod, Zeroable};
     use half::f16;
     use image::{DynamicImage, RgbImage};
     use rand::SeedableRng;
     use rand::rngs::StdRng;
+    use serde::Deserialize;
     use std::hint::black_box;
+    use std::fs;
+    use std::path::PathBuf;
     use std::sync::Once;
     use wgpu::util::DeviceExt;
 
@@ -91,6 +94,28 @@ mod vision_bench {
             ("patched", foveation::FoveaWarpMode::Patched),
         ];
 
+    #[derive(Debug, Default, Deserialize)]
+    struct BenchSettings {
+        #[serde(default)]
+        full: bool,
+        #[serde(default)]
+        include_cuda: bool,
+    }
+
+    #[derive(Debug, Default, Deserialize)]
+    struct BenchConfig {
+        #[serde(default)]
+        bench: BenchSettings,
+        #[serde(default)]
+        wgpu: WgpuRuntimeConfig,
+    }
+
+    fn load_bench_config() -> BenchConfig {
+        let path = PathBuf::from("config").join("vision_pipeline_bench.toml");
+        let contents = fs::read_to_string(&path).expect("read bench config");
+        toml::from_str(&contents).expect("parse bench config")
+    }
+
     struct BenchProfile {
         configs: &'static [VisionBenchConfig],
         sampling_modes: &'static [(&'static str, VisionFoveaSamplingMode)],
@@ -103,9 +128,9 @@ mod vision_bench {
         include_cuda: bool,
     }
 
-    fn bench_profile() -> BenchProfile {
-        let full = std::env::var("BDH_BENCH_FULL").is_ok();
-        let include_cuda = std::env::var("BDH_BENCH_CUDA").is_ok();
+    fn bench_profile(settings: &BenchSettings) -> BenchProfile {
+        let full = settings.full;
+        let include_cuda = settings.include_cuda;
         BenchProfile {
             configs: if full { VISION_CONFIGS } else { &VISION_CONFIGS[..1] },
             sampling_modes: if full {
@@ -163,11 +188,13 @@ mod vision_bench {
     }
 
     pub fn vision_pipeline_bench(c: &mut Criterion) {
-        let profile = bench_profile();
+        let bench_config = load_bench_config();
+        let profile = bench_profile(&bench_config.bench);
+        let wgpu_config = bench_config.wgpu;
         bench_foveation_baselines(c, &profile);
-        bench_scatter_modes(c, &profile);
+        bench_scatter_modes(c, &profile, &wgpu_config);
         run_vision_backend::<Autodiff<Wgpu<f32>>, _>(c, "wgpu", &profile, |device| {
-            init_wgpu_runtime(device);
+            init_wgpu_runtime(device, &wgpu_config);
         });
 
         #[cfg(feature = "cuda")]
@@ -176,10 +203,10 @@ mod vision_bench {
         }
     }
 
-    fn init_wgpu_runtime(device: &WgpuDevice) {
+    fn init_wgpu_runtime(device: &WgpuDevice, config: &WgpuRuntimeConfig) {
         static INIT: Once = Once::new();
         INIT.call_once(|| {
-            burn_wgpu::init_setup::<graphics::AutoGraphicsApi>(device, RuntimeOptions::default());
+            init_runtime(device, config);
         });
     }
 
@@ -295,9 +322,13 @@ mod vision_bench {
         group.finish();
     }
 
-    fn bench_scatter_modes(c: &mut Criterion, profile: &BenchProfile) {
+    fn bench_scatter_modes(
+        c: &mut Criterion,
+        profile: &BenchProfile,
+        wgpu_config: &WgpuRuntimeConfig,
+    ) {
         let device = WgpuDevice::default();
-        init_wgpu_runtime(&device);
+        init_wgpu_runtime(&device, wgpu_config);
         <Wgpu<f32> as BackendTrait>::seed(&device, 7);
 
         let mut group = c.benchmark_group("vision_scatter/wgpu");

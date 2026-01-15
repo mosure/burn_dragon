@@ -20,12 +20,13 @@ type = "shakespeare"
 # type = "hugging_face"
 # format = "parquet"        # or "jsonl" / "text" / "csv"
 # repo_id = "zwhe99/DeepMath-103K"
+# token = "hf_xxx"         # optional access token (overrides HF_TOKEN if set)
 # revision = "main"         # optional ref (tag/branch/sha)
 # train_files = ["data/train.parquet"]
 # validation_files = ["data/validation.parquet"]
 # text_fields = ["text"]
 # max_records = 1024        # optional sampling cap for prototyping
-# authentication follows HF defaults (HF_TOKEN or huggingface-cli login)
+# authentication uses dataset.token if set, otherwise falls back to HF_TOKEN or huggingface-cli login
 
 [dataset.tokenizer]
 # type accepts "char" (default) or "byte"

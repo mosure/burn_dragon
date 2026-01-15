@@ -11,7 +11,7 @@ use toml::Value;
 use crate::model::{FusedKernelConfig, SpatialPositionalEncodingKind, VisionAttentionMode};
 use crate::model::VisionDistillationLossConfig;
 
-use super::{GdpoConfig, GdpoHardGate, OptimizerConfig};
+use super::{GdpoConfig, GdpoHardGate, OptimizerConfig, WgpuRuntimeConfig};
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -148,11 +148,13 @@ pub enum VisionLocationEmbeddingMode {
     Learned,
     Sinusoidal,
     Quantized,
+    Rope,
+    Pope,
 }
 
 impl Default for VisionLocationEmbeddingMode {
     fn default() -> Self {
-        Self::None
+        Self::Pope
     }
 }
 
@@ -163,6 +165,8 @@ impl fmt::Display for VisionLocationEmbeddingMode {
             Self::Learned => write!(f, "learned"),
             Self::Sinusoidal => write!(f, "sinusoidal"),
             Self::Quantized => write!(f, "quantized"),
+            Self::Rope => write!(f, "rope"),
+            Self::Pope => write!(f, "pope"),
         }
     }
 }
@@ -187,7 +191,7 @@ pub struct VisionLocationEmbeddingConfig {
 impl Default for VisionLocationEmbeddingConfig {
     fn default() -> Self {
         Self {
-            mode: VisionLocationEmbeddingMode::None,
+            mode: VisionLocationEmbeddingMode::default(),
             embed_dim: 12,
             quantize_bins: 32,
             noise_std: 0.0,
@@ -344,6 +348,8 @@ pub struct VisionTrainingConfig {
     pub dataset: VisionDatasetConfig,
     pub training: VisionTrainingHyperparameters,
     pub optimizer: OptimizerConfig,
+    #[serde(default)]
+    pub wgpu: WgpuRuntimeConfig,
     pub vision: VisionModelConfig,
     #[serde(default)]
     pub augment: VisionAugmentationConfig,
@@ -361,6 +367,14 @@ impl VisionTrainingConfig {
         }
         if self.training.log_frequency == 0 {
             return Err(anyhow!("training.log_frequency must be > 0"));
+        }
+        if self.training.batch_repeats == 0 {
+            return Err(anyhow!("training.batch_repeats must be > 0"));
+        }
+        if self.training.trace_train_loss_every == 0 {
+            return Err(anyhow!(
+                "training.trace_train_loss_every must be > 0"
+            ));
         }
         if let Some(epochs) = self.training.epochs {
             if epochs == 0 {
@@ -833,17 +847,158 @@ impl ModuleDisplay for VisionSaccadeCacheConfig {}
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
+pub struct VisionTbpttConfig {
+    pub step_count: usize,
+}
+
+impl Default for VisionTbpttConfig {
+    fn default() -> Self {
+        Self { step_count: 0 }
+    }
+}
+
+impl ModuleDisplayDefault for VisionTbpttConfig {
+    fn content(&self, content: Content) -> Option<Content> {
+        content.add("step_count", &self.step_count).optional()
+    }
+}
+
+impl ModuleDisplay for VisionTbpttConfig {}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum VisionSaccadeInputProjectionConfig {
+    Linear,
+    Cnn(VisionSaccadeInputProjectionCnnConfig),
+    RadialMicroVit(VisionSaccadeInputProjectionMicroVitConfig),
+}
+
+impl Default for VisionSaccadeInputProjectionConfig {
+    fn default() -> Self {
+        Self::Linear
+    }
+}
+
+impl ModuleDisplayDefault for VisionSaccadeInputProjectionConfig {
+    fn content(&self, content: Content) -> Option<Content> {
+        match self {
+            VisionSaccadeInputProjectionConfig::Linear => {
+                content.add("type", "linear").optional()
+            }
+            VisionSaccadeInputProjectionConfig::Cnn(cfg) => content
+                .add("type", "cnn")
+                .add("config", cfg)
+                .optional(),
+            VisionSaccadeInputProjectionConfig::RadialMicroVit(cfg) => content
+                .add("type", "radial_micro_vit")
+                .add("config", cfg)
+                .optional(),
+        }
+    }
+}
+
+impl ModuleDisplay for VisionSaccadeInputProjectionConfig {}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(default)]
+pub struct VisionSaccadeInputProjectionCnnConfig {
+    pub channels: Option<usize>,
+    pub blocks: usize,
+    pub kernel: usize,
+    pub expansion: usize,
+}
+
+impl Default for VisionSaccadeInputProjectionCnnConfig {
+    fn default() -> Self {
+        Self {
+            channels: None,
+            blocks: 0,
+            kernel: 0,
+            expansion: 2,
+        }
+    }
+}
+
+impl ModuleDisplayDefault for VisionSaccadeInputProjectionCnnConfig {
+    fn content(&self, content: Content) -> Option<Content> {
+        content
+            .add("channels", &self.channels)
+            .add("blocks", &self.blocks)
+            .add("kernel", &self.kernel)
+            .add("expansion", &self.expansion)
+            .optional()
+    }
+}
+
+impl ModuleDisplay for VisionSaccadeInputProjectionCnnConfig {}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(default)]
+pub struct VisionSaccadeInputProjectionMicroVitConfig {
+    pub layers: usize,
+    pub heads: usize,
+    pub mlp_ratio: usize,
+    pub radial_hidden_dim: usize,
+    pub radial_scale: f32,
+}
+
+impl Default for VisionSaccadeInputProjectionMicroVitConfig {
+    fn default() -> Self {
+        Self {
+            layers: 0,
+            heads: 0,
+            mlp_ratio: 2,
+            radial_hidden_dim: 0,
+            radial_scale: 1.0,
+        }
+    }
+}
+
+impl ModuleDisplayDefault for VisionSaccadeInputProjectionMicroVitConfig {
+    fn content(&self, content: Content) -> Option<Content> {
+        content
+            .add("layers", &self.layers)
+            .add("heads", &self.heads)
+            .add("mlp_ratio", &self.mlp_ratio)
+            .add("radial_hidden_dim", &self.radial_hidden_dim)
+            .add("radial_scale", &self.radial_scale)
+            .optional()
+    }
+}
+
+impl ModuleDisplay for VisionSaccadeInputProjectionMicroVitConfig {}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(default)]
 pub struct VisionSaccadeConfig {
     pub num_eyes: usize,
+    pub traj_tokens: usize,
+    #[serde(default = "default_traj_update_alpha")]
+    pub traj_update_alpha: f32,
     pub mip_levels: usize,
     pub pyramid_mode: VisionPyramidMode,
     pub fovea_sampling_mode: VisionFoveaSamplingMode,
     pub fovea_warp_mode: VisionFoveaWarpMode,
+    #[serde(default = "default_fovea_subsamples")]
+    pub fovea_subsamples: usize,
+    #[serde(default = "default_fovea_radius_scale")]
+    pub fovea_radius_scale: f32,
     pub fovea_subpatch_size: usize,
     pub fovea_scatter_mode: VisionFoveaScatterMode,
+    #[serde(default)]
+    pub input_projection: VisionSaccadeInputProjectionConfig,
+    #[serde(default = "default_grid_sample_max_mb")]
+    pub grid_sample_max_mb: usize,
+    #[serde(default = "default_mip_concat_max_mb")]
+    pub mip_concat_max_mb: usize,
     pub pyramid_feature_dim: Option<usize>,
     pub inner_steps: usize,
     pub low_mem_pre_rollout: bool,
+    #[serde(default)]
+    pub recon_batch_chunk: usize,
+    #[serde(default = "default_recon_max_elems")]
+    pub recon_max_elems: usize,
+    pub tbptt: VisionTbpttConfig,
     pub policy: VisionSaccadePolicyConfig,
     pub cache: VisionSaccadeCacheConfig,
     pub loss: VisionLossConfig,
@@ -859,15 +1014,25 @@ impl Default for VisionSaccadeConfig {
     fn default() -> Self {
         Self {
             num_eyes: 1,
+            traj_tokens: 1,
+            traj_update_alpha: default_traj_update_alpha(),
             mip_levels: 4,
             pyramid_mode: VisionPyramidMode::Laplacian,
             fovea_sampling_mode: VisionFoveaSamplingMode::Batched,
             fovea_warp_mode: VisionFoveaWarpMode::Warped,
+            fovea_subsamples: default_fovea_subsamples(),
+            fovea_radius_scale: default_fovea_radius_scale(),
             fovea_subpatch_size: 0,
             fovea_scatter_mode: VisionFoveaScatterMode::Tensor,
+            input_projection: VisionSaccadeInputProjectionConfig::default(),
+            grid_sample_max_mb: default_grid_sample_max_mb(),
+            mip_concat_max_mb: default_mip_concat_max_mb(),
             pyramid_feature_dim: None,
             inner_steps: 1,
             low_mem_pre_rollout: true,
+            recon_batch_chunk: 0,
+            recon_max_elems: default_recon_max_elems(),
+            tbptt: VisionTbpttConfig::default(),
             policy: VisionSaccadePolicyConfig::default(),
             cache: VisionSaccadeCacheConfig::default(),
             loss: VisionLossConfig::default(),
@@ -921,15 +1086,25 @@ impl ModuleDisplayDefault for VisionSaccadeConfig {
     fn content(&self, content: Content) -> Option<Content> {
         content
             .add("num_eyes", &self.num_eyes)
+            .add("traj_tokens", &self.traj_tokens)
+            .add("traj_update_alpha", &self.traj_update_alpha)
             .add("mip_levels", &self.mip_levels)
             .add("pyramid_mode", &self.pyramid_mode)
             .add("fovea_sampling_mode", &self.fovea_sampling_mode)
             .add("fovea_warp_mode", &self.fovea_warp_mode)
+            .add("fovea_subsamples", &self.fovea_subsamples)
+            .add("fovea_radius_scale", &self.fovea_radius_scale)
             .add("fovea_subpatch_size", &self.fovea_subpatch_size)
             .add("fovea_scatter_mode", &self.fovea_scatter_mode)
+            .add("input_projection", &self.input_projection)
+            .add("grid_sample_max_mb", &self.grid_sample_max_mb)
+            .add("mip_concat_max_mb", &self.mip_concat_max_mb)
             .add("pyramid_feature_dim", &self.pyramid_feature_dim)
             .add("inner_steps", &self.inner_steps)
             .add("low_mem_pre_rollout", &self.low_mem_pre_rollout)
+            .add("recon_batch_chunk", &self.recon_batch_chunk)
+            .add("recon_max_elems", &self.recon_max_elems)
+            .add("tbptt", &self.tbptt)
             .add("policy", &self.policy)
             .add("cache", &self.cache)
             .add("loss", &self.loss)
@@ -966,6 +1141,26 @@ fn default_prefetch_batches() -> usize {
     4
 }
 
+fn default_batch_repeats() -> usize {
+    1
+}
+
+fn default_trace_train_loss_every() -> usize {
+    1
+}
+
+fn default_fovea_subsamples() -> usize {
+    1
+}
+
+fn default_fovea_radius_scale() -> f32 {
+    1.0
+}
+
+fn default_traj_update_alpha() -> f32 {
+    1.0
+}
+
 fn default_prefetch_workers() -> usize {
     std::thread::available_parallelism()
         .map(|count| count.get().min(8))
@@ -982,6 +1177,22 @@ fn default_cache_decoded() -> bool {
 
 fn default_cache_capacity() -> usize {
     512
+}
+
+fn default_cache_preprocessed() -> bool {
+    false
+}
+
+fn default_grid_sample_max_mb() -> usize {
+    512
+}
+
+fn default_mip_concat_max_mb() -> usize {
+    512
+}
+
+fn default_recon_max_elems() -> usize {
+    50_000_000
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -1002,6 +1213,8 @@ pub struct VisionDatasetConfig {
     pub cache_decoded: bool,
     #[serde(default = "default_cache_capacity")]
     pub cache_capacity: usize,
+    #[serde(default = "default_cache_preprocessed")]
+    pub cache_preprocessed: bool,
 }
 
 impl Default for VisionDatasetConfig {
@@ -1017,6 +1230,7 @@ impl Default for VisionDatasetConfig {
             prefetch_to_device: default_prefetch_to_device(),
             cache_decoded: default_cache_decoded(),
             cache_capacity: default_cache_capacity(),
+            cache_preprocessed: default_cache_preprocessed(),
         }
     }
 }
@@ -1029,14 +1243,28 @@ pub struct VisionTrainingHyperparameters {
     pub epochs: Option<usize>,
     pub max_iters: usize,
     pub log_frequency: usize,
+    #[serde(default = "default_batch_repeats")]
+    pub batch_repeats: usize,
+    #[serde(default)]
+    pub train_repeat_chunk: usize,
     #[serde(default)]
     pub memory_cleanup_every: usize,
+    #[serde(default)]
+    pub memory_cleanup_iters: usize,
+    #[serde(default)]
+    pub disable_cuda_memory_cleanup: bool,
+    #[serde(default)]
+    pub trace_train_loss: bool,
+    #[serde(default = "default_trace_train_loss_every")]
+    pub trace_train_loss_every: usize,
     #[serde(default)]
     pub rollout_min_steps: Option<usize>,
     #[serde(default)]
     pub rollout_max_steps: Option<usize>,
     #[serde(default)]
     pub rollout_backprop_steps: Option<usize>,
+    #[serde(default)]
+    pub ffmpeg_path: Option<PathBuf>,
 }
 
 impl Default for VisionTrainingHyperparameters {
@@ -1046,10 +1274,17 @@ impl Default for VisionTrainingHyperparameters {
             epochs: None,
             max_iters: 1000,
             log_frequency: 50,
+            batch_repeats: 1,
+            train_repeat_chunk: 0,
             memory_cleanup_every: 0,
+            memory_cleanup_iters: 0,
+            disable_cuda_memory_cleanup: false,
+            trace_train_loss: false,
+            trace_train_loss_every: default_trace_train_loss_every(),
             rollout_min_steps: None,
             rollout_max_steps: None,
             rollout_backprop_steps: None,
+            ffmpeg_path: None,
         }
     }
 }
@@ -1104,7 +1339,8 @@ impl Default for VisionModelConfig {
 
 impl VisionModelConfig {
     pub fn build(&self) -> crate::model::VisionDragonHatchlingConfig {
-        let grid = (self.image_size / self.patch_size).max(1);
+        let patch_size = self.patch_size.max(1);
+        let grid = (self.image_size + patch_size - 1) / patch_size;
         let kernels = FusedKernelConfig {
             enabled: self.fused_kernels,
             relu_threshold: self.relu_threshold,
@@ -1306,12 +1542,46 @@ fn validate_vision_mode(mode: &VisionTrainingModeConfig, vision: &VisionModelCon
             if saccade.num_eyes == 0 {
                 return Err(anyhow!("saccade.num_eyes must be > 0"));
             }
+            if saccade.traj_tokens == 0 {
+                return Err(anyhow!("saccade.traj_tokens must be > 0"));
+            }
+            if !(0.0..=1.0).contains(&saccade.traj_update_alpha) {
+                return Err(anyhow!(
+                    "saccade.traj_update_alpha must be in [0, 1] (got {})",
+                    saccade.traj_update_alpha
+                ));
+            }
             if saccade.mip_levels == 0 {
                 return Err(anyhow!("saccade.mip_levels must be > 0"));
             }
             if saccade.inner_steps == 0 {
                 return Err(anyhow!("saccade.inner_steps must be > 0"));
             }
+            if saccade.fovea_subsamples == 0 {
+                return Err(anyhow!("saccade.fovea_subsamples must be > 0"));
+            }
+            if saccade.fovea_radius_scale <= 0.0 {
+                return Err(anyhow!(
+                    "saccade.fovea_radius_scale must be > 0 (got {})",
+                    saccade.fovea_radius_scale
+                ));
+            }
+            if saccade.grid_sample_max_mb == 0 {
+                return Err(anyhow!(
+                    "saccade.grid_sample_max_mb must be > 0"
+                ));
+            }
+            if saccade.mip_concat_max_mb == 0 {
+                return Err(anyhow!(
+                    "saccade.mip_concat_max_mb must be > 0"
+                ));
+            }
+            if saccade.recon_max_elems == 0 {
+                return Err(anyhow!(
+                    "saccade.recon_max_elems must be > 0"
+                ));
+            }
+            validate_input_projection(&saccade.input_projection)?;
             if saccade.fovea_subpatch_size > 0
                 && saccade.fovea_subpatch_size > vision.patch_size
             {
@@ -1384,6 +1654,35 @@ fn validate_vision_mode(mode: &VisionTrainingModeConfig, vision: &VisionModelCon
         }
     }
     Ok(())
+}
+
+fn validate_input_projection(config: &VisionSaccadeInputProjectionConfig) -> Result<()> {
+    match config {
+        VisionSaccadeInputProjectionConfig::Linear => Ok(()),
+        VisionSaccadeInputProjectionConfig::Cnn(cfg) => {
+            if matches!(cfg.channels, Some(0)) {
+                return Err(anyhow!("saccade.input_projection.channels must be > 0 when set"));
+            }
+            if cfg.expansion == 0 {
+                return Err(anyhow!("saccade.input_projection.expansion must be > 0"));
+            }
+            if cfg.kernel != 0 && cfg.kernel % 2 == 0 {
+                return Err(anyhow!("saccade.input_projection.kernel must be odd when set"));
+            }
+            Ok(())
+        }
+        VisionSaccadeInputProjectionConfig::RadialMicroVit(cfg) => {
+            if cfg.mlp_ratio == 0 {
+                return Err(anyhow!("saccade.input_projection.mlp_ratio must be > 0"));
+            }
+            if cfg.radial_scale <= 0.0 {
+                return Err(anyhow!(
+                    "saccade.input_projection.radial_scale must be > 0"
+                ));
+            }
+            Ok(())
+        }
+    }
 }
 
 fn validate_recon_loss(label: &str, loss: &VisionReconLossConfig) -> Result<()> {

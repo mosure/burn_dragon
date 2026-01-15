@@ -7,7 +7,9 @@ use toml::Value;
 
 use crate::tokenizer::TokenizerConfig;
 
-use super::{GenerationConfig, GdpoHardGate, ModelOverrides, TrainingHyperparameters};
+use super::{
+    GenerationConfig, GdpoHardGate, ModelOverrides, TrainingHyperparameters, WgpuRuntimeConfig,
+};
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct DatasetConfig {
@@ -63,6 +65,8 @@ impl Default for DatasetSourceConfig {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct HuggingFaceDatasetConfig {
     pub repo_id: String,
+    #[serde(default)]
+    pub token: Option<String>,
     #[serde(default)]
     pub revision: Option<String>,
     #[serde(default)]
@@ -150,6 +154,8 @@ pub struct TrainingConfig {
     pub training: TrainingHyperparameters,
     pub optimizer: OptimizerConfig,
     pub generation: GenerationConfig,
+    #[serde(default)]
+    pub wgpu: WgpuRuntimeConfig,
     #[serde(default)]
     pub model: ModelOverrides,
 }

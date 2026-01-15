@@ -54,7 +54,7 @@ pub fn run_cli() -> Result<()> {
             BackendArg::Wgpu => train_vision_backend::<Autodiff<Wgpu<f32>>, _>(
                 &config,
                 "wgpu",
-                init_runtime,
+                |device| init_runtime(device, &config.wgpu),
             ),
             BackendArg::Cuda => {
                 #[cfg(feature = "cuda")]
@@ -88,7 +88,7 @@ pub fn run_cli() -> Result<()> {
             &config,
             Arc::clone(&dataset),
             "wgpu",
-            init_runtime,
+            |device| init_runtime(device, &config.wgpu),
         ),
         BackendArg::Cuda => {
             #[cfg(feature = "cuda")]

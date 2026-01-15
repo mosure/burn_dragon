@@ -183,6 +183,7 @@ impl<B: BackendTrait> VisionSaccadeInputProjection<B> {
             .forward(tokens)
     }
 
+    #[cfg(any(test, feature = "benchmark"))]
     pub(crate) fn param_count(&self) -> usize {
         self.param_count
     }

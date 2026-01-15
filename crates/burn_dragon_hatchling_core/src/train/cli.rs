@@ -6,6 +6,28 @@ use crate::train::train::train_backend;
 use crate::train::vision::train_vision_backend;
 
 #[cfg(feature = "cli")]
+fn run_in_training_thread<F, T>(name: &str, work: F) -> Result<T>
+where
+    F: FnOnce() -> Result<T> + Send + 'static,
+    T: Send + 'static,
+{
+    #[cfg(target_os = "windows")]
+    {
+        let handle = std::thread::Builder::new()
+            .name(name.to_string())
+            .spawn(work)
+            .context("spawn training thread")?;
+        return handle
+            .join()
+            .map_err(|_| anyhow!("training thread panicked"))?;
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        work()
+    }
+}
+
+#[cfg(feature = "cli")]
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Train the Baby Dragon Hatchling model")]
 struct Cli {
@@ -47,10 +69,11 @@ pub fn run_cli() -> Result<()> {
     let args = Cli::parse();
 
     if matches!(args.command, Some(Command::Vision)) {
+        let backend = args.train.backend;
         let mut config_paths = vec![PathBuf::from("config/vision_base.toml")];
         config_paths.extend(args.train.config.clone());
         let config = load_vision_training_config(&config_paths)?;
-        return match args.train.backend {
+        return run_in_training_thread("vision-train", move || match backend {
             BackendArg::Wgpu => train_vision_backend::<Autodiff<Wgpu<f32>>, _>(
                 &config,
                 "wgpu",
@@ -68,9 +91,10 @@ pub fn run_cli() -> Result<()> {
                     ))
                 }
             }
-        };
+        });
     }
 
+    let backend = args.train.backend;
     let mut config_paths = vec![PathBuf::from("config/base.toml")];
     config_paths.extend(args.train.config.clone());
     let config = load_training_config(&config_paths)?;
@@ -83,7 +107,7 @@ pub fn run_cli() -> Result<()> {
 
     let dataset = prepare_dataset(&config.dataset, &config.training)?;
 
-    match args.train.backend {
+    run_in_training_thread("train", move || match backend {
         BackendArg::Wgpu => train_backend::<Autodiff<Wgpu<f32>>, _>(
             &config,
             Arc::clone(&dataset),
@@ -102,7 +126,7 @@ pub fn run_cli() -> Result<()> {
                 ))
             }
         }
-    }
+    })
 }
 
 

@@ -1,6 +1,200 @@
 use crate::train::prelude::*;
 use crate::train::gdpo;
 
+struct SaccadeRolloutContext<B: BackendTrait> {
+    device: B::Device,
+    images: Tensor<B, 4>,
+    batch: usize,
+    channels: usize,
+    height: usize,
+    width: usize,
+    patch_size: usize,
+    embed_dim: usize,
+    tokens: usize,
+    mip_levels: Vec<SaccadeMipLevel<B>>,
+    grids: Vec<PatchGrid>,
+    target_patches: Vec<Tensor<B, 3>>,
+    laplacian_images: Option<SaccadeLaplacianImages<B>>,
+    base_grid: Tensor<B, 4>,
+    traj_len: usize,
+    num_eyes: usize,
+    inner_steps: usize,
+    traj_update_alpha: f32,
+    rollout_steps: usize,
+    detach_until: usize,
+    tbptt_step_count: usize,
+    tbptt_enabled: bool,
+    low_mem_pre_rollout: bool,
+    capture_traj: bool,
+    capture_artifacts: bool,
+    gdpo_enabled: bool,
+    gdpo_group: usize,
+    gdpo_policy_enabled: bool,
+    info_reward_enabled: bool,
+    info_stride: usize,
+    detach_policy_from_recon: bool,
+}
+
+struct SaccadeArtifactState<B: BackendTrait> {
+    traj_steps: Vec<Vec<(Tensor<B, 2>, Tensor<B, 2>)>>,
+    frame_steps: Vec<Tensor<B, 4>>,
+    last_patch_views: Vec<Tensor<B, 4>>,
+}
+
+impl<B: BackendTrait> SaccadeArtifactState<B> {
+    fn new(rollout_steps: usize, capture_traj: bool, capture_artifacts: bool) -> Self {
+        let traj_steps = if capture_traj {
+            Vec::with_capacity(rollout_steps)
+        } else {
+            Vec::new()
+        };
+        let frame_steps = if capture_artifacts {
+            Vec::with_capacity(rollout_steps)
+        } else {
+            Vec::new()
+        };
+        Self {
+            traj_steps,
+            frame_steps,
+            last_patch_views: Vec::new(),
+        }
+    }
+}
+
+struct SaccadeRolloutState<B: BackendTrait> {
+    trajs: Vec<Tensor<B, 3>>,
+    state_levels: Vec<Tensor<B, 3>>,
+    artifacts: SaccadeArtifactState<B>,
+    log_prob_sum: Option<Tensor<B, 2>>,
+    log_prob_sum_old: Option<Tensor<B, 2>>,
+    hard_reward: Option<Tensor<B, 1>>,
+    tbptt_policy_inputs: Vec<GdpoPolicyInputs<B>>,
+    tbptt_step_idx: usize,
+    tbptt_chunks: usize,
+    tbptt_loss_sum: Option<Tensor<B, 1>>,
+    tbptt_mask_sum: Option<Tensor<B, 1>>,
+    tbptt_inv_sum: Option<Tensor<B, 1>>,
+    tbptt_sigreg_sum: Option<Tensor<B, 1>>,
+    started_backprop: bool,
+}
+
+impl<B: BackendTrait> SaccadeRolloutState<B> {
+    fn new(
+        trajs: Vec<Tensor<B, 3>>,
+        state_levels: Vec<Tensor<B, 3>>,
+        log_prob_sum: Option<Tensor<B, 2>>,
+        log_prob_sum_old: Option<Tensor<B, 2>>,
+        hard_reward: Option<Tensor<B, 1>>,
+        capture_traj: bool,
+        capture_artifacts: bool,
+        rollout_steps: usize,
+    ) -> Self {
+        let artifacts = SaccadeArtifactState::new(rollout_steps, capture_traj, capture_artifacts);
+        Self {
+            trajs,
+            state_levels,
+            artifacts,
+            log_prob_sum,
+            log_prob_sum_old,
+            hard_reward,
+            tbptt_policy_inputs: Vec::new(),
+            tbptt_step_idx: 0,
+            tbptt_chunks: 0,
+            tbptt_loss_sum: None,
+            tbptt_mask_sum: None,
+            tbptt_inv_sum: None,
+            tbptt_sigreg_sum: None,
+            started_backprop: false,
+        }
+    }
+
+    fn reset_policy_accumulators(
+        &mut self,
+        gdpo_enabled: bool,
+        info_reward_enabled: bool,
+        batch: usize,
+        device: &B::Device,
+    ) {
+        if gdpo_enabled {
+            self.log_prob_sum = Some(Tensor::<B, 2>::zeros([batch, 1], device));
+            self.log_prob_sum_old = Some(Tensor::<B, 2>::zeros([batch, 1], device));
+        }
+        if info_reward_enabled {
+            self.hard_reward = Some(Tensor::<B, 1>::zeros([batch], device));
+        }
+    }
+}
+
+struct SaccadeStepScratch<B: BackendTrait> {
+    updates: Vec<Tensor<B, 3>>,
+    updates_null: Vec<Tensor<B, 3>>,
+    step_capture: SaccadeStepCapture<B>,
+    next_trajs: Vec<Tensor<B, 3>>,
+}
+
+struct SaccadeStepCapture<B: BackendTrait> {
+    traj: Vec<(Tensor<B, 2>, Tensor<B, 2>)>,
+    patches: Vec<Tensor<B, 4>>,
+}
+
+impl<B: BackendTrait> SaccadeStepCapture<B> {
+    fn new() -> Self {
+        Self {
+            traj: Vec::new(),
+            patches: Vec::new(),
+        }
+    }
+
+    fn reset(&mut self, num_eyes: usize, capture_traj: bool, capture_artifacts: bool) {
+        self.traj.clear();
+        self.patches.clear();
+        if capture_traj || capture_artifacts {
+            self.traj.reserve(num_eyes);
+        }
+        if capture_artifacts {
+            self.patches.reserve(num_eyes);
+        }
+    }
+}
+
+impl<B: BackendTrait> SaccadeStepScratch<B> {
+    fn new() -> Self {
+        Self {
+            updates: Vec::new(),
+            updates_null: Vec::new(),
+            step_capture: SaccadeStepCapture::new(),
+            next_trajs: Vec::new(),
+        }
+    }
+
+    fn reset_for_step(
+        &mut self,
+        state_levels: &[Tensor<B, 3>],
+        device: &B::Device,
+        num_eyes: usize,
+        capture_traj: bool,
+        capture_artifacts: bool,
+        collect_info: bool,
+    ) {
+        self.updates = state_levels
+            .iter()
+            .map(|level| Tensor::<B, 3>::zeros(level.shape().dims::<3>(), device))
+            .collect();
+        self.updates_null = if collect_info {
+            state_levels
+                .iter()
+                .map(|level| Tensor::<B, 3>::zeros(level.shape().dims::<3>(), device))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        self.step_capture
+            .reset(num_eyes, capture_traj, capture_artifacts);
+        self.next_trajs.clear();
+        self.next_trajs.reserve(num_eyes);
+    }
+}
+
 impl<B: BackendTrait> VisionSaccadeModel<B> {
     pub(crate) fn new(
         model: VisionDragonHatchling<B>,
@@ -549,6 +743,623 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
         }
     }
 
+    fn run_recon_rollout(
+        &self,
+        ctx: &SaccadeRolloutContext<B>,
+        state: &mut SaccadeRolloutState<B>,
+        scratch: &mut SaccadeStepScratch<B>,
+    ) {
+        for step_idx in 0..ctx.rollout_steps {
+            let pre_rollout = ctx.low_mem_pre_rollout && step_idx + 1 <= ctx.detach_until;
+            let in_backprop = step_idx + 1 > ctx.detach_until;
+            if ctx.tbptt_enabled && in_backprop && !state.started_backprop {
+                state.started_backprop = true;
+                state.reset_policy_accumulators(
+                    ctx.gdpo_enabled,
+                    ctx.info_reward_enabled,
+                    ctx.batch,
+                    &ctx.device,
+                );
+            }
+            let anchor_traj = ctx.low_mem_pre_rollout
+                && ctx.detach_until > 0
+                && step_idx + 1 == ctx.detach_until + 1;
+            let state_composed = match self.config.pyramid_mode {
+                VisionPyramidMode::Stacked => state.state_levels.clone(),
+                VisionPyramidMode::Laplacian => {
+                    self.compose_pyramid(&state.state_levels, &ctx.grids)
+                }
+            };
+            let collect_info = ctx.info_reward_enabled && (step_idx % ctx.info_stride == 0);
+            scratch.reset_for_step(
+                &state.state_levels,
+                &ctx.device,
+                ctx.num_eyes,
+                ctx.capture_traj,
+                ctx.capture_artifacts,
+                collect_info,
+            );
+            for eye_idx in 0..ctx.num_eyes {
+                let mut traj = state.trajs[eye_idx].clone();
+                if pre_rollout {
+                    traj = traj.detach();
+                } else if anchor_traj {
+                    let anchor = self
+                        .trajectory_token
+                        .val()
+                        .reshape([1, ctx.traj_len, ctx.embed_dim])
+                        .repeat_dim(0, ctx.batch);
+                    traj = traj + (anchor.clone() - anchor.detach());
+                }
+                let eye_embed = self
+                    .eye_token
+                    .val()
+                    .slice_dim(0, eye_idx..eye_idx + 1)
+                    .reshape([1, 1, ctx.embed_dim])
+                    .repeat_dim(0, ctx.batch)
+                    .repeat_dim(1, ctx.traj_len);
+                let eye_embed = Self::detach_if(eye_embed, pre_rollout);
+                let traj_with_eye = traj.clone() + eye_embed.clone();
+                let traj_with_eye = Self::detach_if(traj_with_eye, pre_rollout);
+                let traj_summary = traj_with_eye
+                    .clone()
+                    .mean_dim(1)
+                    .reshape([ctx.batch, 1, ctx.embed_dim]);
+                let params = self.saccade_head.forward(traj_summary);
+                let params = Self::detach_if(params, pre_rollout);
+                let (mean_raw, sigma_raw) = self.decode_saccade_params(params);
+                let mean_raw = Self::detach_if(mean_raw, pre_rollout);
+                let sigma_raw = Self::detach_if(sigma_raw, pre_rollout);
+                let (mean_action, sigma_action) = if ctx.gdpo_enabled {
+                    let sample = self.sample_policy_action(mean_raw.clone(), sigma_raw.clone());
+                    let log_prob_eye = sample.log_prob.sum_dim(1).reshape([ctx.batch, 1]);
+                    if let Some(log_prob_sum) = state.log_prob_sum.as_mut() {
+                        *log_prob_sum = log_prob_sum.clone() + log_prob_eye.clone();
+                    }
+                    if let Some(log_prob_sum_old) = state.log_prob_sum_old.as_mut() {
+                        *log_prob_sum_old = log_prob_sum_old.clone() + log_prob_eye.detach();
+                    }
+                    (sample.mean, sample.sigma)
+                } else {
+                    (mean_raw.clone(), sigma_raw.clone())
+                };
+                let mean = if ctx.detach_policy_from_recon {
+                    mean_action.clone().detach()
+                } else {
+                    mean_action.clone()
+                };
+                let sigma = if ctx.detach_policy_from_recon {
+                    sigma_action.clone().detach()
+                } else {
+                    sigma_action.clone()
+                };
+                let mean_step = mean.clone().mean_dim(1).reshape([ctx.batch, 2]);
+                let sigma_step = sigma.clone().mean_dim(1).reshape([ctx.batch, 1]);
+                let mean_detached = mean_step.clone().detach();
+                let sigma_detached = sigma_step.clone().detach();
+                if ctx.capture_traj || ctx.capture_artifacts {
+                    scratch
+                        .step_capture
+                        .traj
+                        .push((mean_detached.clone(), sigma_detached.clone()));
+                }
+                let weights_context =
+                    self.mip_gaussian_weights(&ctx.mip_levels, mean.clone(), sigma.clone());
+                let weights_scatter = if matches!(
+                    self.config.pyramid_mode,
+                    VisionPyramidMode::Laplacian
+                ) {
+                    self.mip_spatial_weights(&ctx.mip_levels, mean.clone(), sigma.clone())
+                } else {
+                    weights_context.clone()
+                };
+                let patch_image = self.foveated_patch_image(
+                    &ctx.mip_levels,
+                    &ctx.base_grid,
+                    mean_step.clone(),
+                    sigma_step.clone(),
+                    ctx.laplacian_images.as_ref(),
+                );
+                let patch_tokens = self.model.patch_embed_raw(patch_image.clone()).tokens;
+                let patch_tokens = Self::detach_if(patch_tokens, pre_rollout);
+                let null_patch_tokens = if collect_info {
+                    Some(self.null_patch_tokens(&patch_tokens))
+                } else {
+                    None
+                };
+                if ctx.capture_artifacts {
+                    scratch.step_capture.patches.push(patch_image);
+                }
+                let input_context = patch_tokens;
+                let state_context = {
+                    let context = self.mip_weighted_sum(&state_composed, &weights_context);
+                    self.project_pyramid_context(context)
+                };
+                let input_tokens = self.build_input_tokens(
+                    input_context,
+                    state_context.clone(),
+                    mean.clone(),
+                    sigma.clone(),
+                );
+                let input_tokens = Self::detach_if(input_tokens, pre_rollout);
+                let input_tokens = input_tokens.repeat_dim(1, ctx.traj_len);
+                let tokens_in = traj_with_eye.clone() + input_tokens;
+                let out_tokens = self
+                    .model
+                    .forward_tokens_embed_steps(tokens_in, ctx.inner_steps)
+                    .patch_tokens;
+                let out_tokens = Self::detach_if(out_tokens, pre_rollout);
+                let residual = self.residual_proj.forward(out_tokens.clone());
+                let residual = Self::detach_if(residual, pre_rollout);
+                let residual_pool = residual
+                    .clone()
+                    .mean_dim(1)
+                    .reshape([ctx.batch, 1, self.pyramid_dim]);
+                let next_traj = if ctx.traj_update_alpha >= 1.0 {
+                    out_tokens
+                } else {
+                    let keep = 1.0 - ctx.traj_update_alpha;
+                    traj.clone().mul_scalar(keep)
+                        + out_tokens.clone().mul_scalar(ctx.traj_update_alpha)
+                };
+                for (update, weights) in scratch.updates.iter_mut().zip(weights_scatter.iter()) {
+                    let update_eye = self.weighted_sum_tokens(
+                        weights.clone().swap_dims(1, 2),
+                        residual_pool.clone(),
+                    );
+                    *update = update.clone() + update_eye;
+                }
+                if collect_info {
+                    if let Some(null_patch_tokens) = null_patch_tokens {
+                        let input_tokens_null = self.build_input_tokens(
+                            null_patch_tokens,
+                            state_context.clone(),
+                            mean.clone(),
+                            sigma.clone(),
+                        );
+                        let input_tokens_null = input_tokens_null.repeat_dim(1, ctx.traj_len);
+                        let tokens_in_null = traj_with_eye.clone() + input_tokens_null;
+                        let out_tokens_null = self
+                            .model
+                            .forward_tokens_embed_steps(tokens_in_null, ctx.inner_steps)
+                            .patch_tokens;
+                        let residual_null = self.residual_proj.forward(out_tokens_null);
+                        let residual_pool_null = residual_null
+                            .mean_dim(1)
+                            .reshape([ctx.batch, 1, self.pyramid_dim]);
+                        for (update, weights) in
+                            scratch.updates_null.iter_mut().zip(weights_scatter.iter())
+                        {
+                            let update_eye_null = self.weighted_sum_tokens(
+                                weights.clone().swap_dims(1, 2),
+                                residual_pool_null.clone(),
+                            );
+                            *update = update.clone() + update_eye_null;
+                        }
+                    }
+                }
+                scratch.next_trajs.push(next_traj);
+            }
+            let state_real: Vec<Tensor<B, 3>> = state
+                .state_levels
+                .iter()
+                .zip(scratch.updates.iter())
+                .map(|(state, update)| state.clone() + update.clone())
+                .collect();
+            let state_null = if collect_info {
+                Some(
+                    state
+                        .state_levels
+                        .iter()
+                        .zip(scratch.updates_null.iter())
+                        .map(|(state, update)| state.clone() + update.clone())
+                        .collect::<Vec<_>>(),
+                )
+            } else {
+                None
+            };
+            state.state_levels = state_real;
+            if collect_info {
+                if let (Some(hard_reward), Some(state_null)) =
+                    (state.hard_reward.as_mut(), state_null)
+                {
+                    let (real_sum, real_mask, _) = self.recon_loss_per_sample_from_state(
+                        &state.state_levels,
+                        &ctx.grids,
+                        &ctx.target_patches,
+                        false,
+                    );
+                    let (null_sum, null_mask, _) = self.recon_loss_per_sample_from_state(
+                        &state_null,
+                        &ctx.grids,
+                        &ctx.target_patches,
+                        false,
+                    );
+                    let real = real_sum / real_mask.add_scalar(LEJEPA_EPS);
+                    let null = null_sum / null_mask.add_scalar(LEJEPA_EPS);
+                    *hard_reward = hard_reward.clone() + (null - real);
+                }
+            }
+            if ctx.capture_traj || ctx.capture_artifacts {
+                let step_traj = std::mem::take(&mut scratch.step_capture.traj);
+                if ctx.capture_artifacts {
+                    let state_composed = match self.config.pyramid_mode {
+                        VisionPyramidMode::Stacked => state.state_levels.clone(),
+                        VisionPyramidMode::Laplacian => {
+                            self.compose_pyramid(&state.state_levels, &ctx.grids)
+                        }
+                    };
+                    let pred_patches = self
+                        .recon
+                        .forward(self.project_pyramid_level(state_composed[0].clone()));
+                    let recon_view = unpatchify(
+                        pred_patches,
+                        ctx.patch_size,
+                        ctx.height,
+                        ctx.width,
+                        ctx.channels,
+                    );
+                    let mut input_frame = ctx.images.clone();
+                    let mut appended_patch = false;
+                    for (eye_idx, (mean, sigma)) in step_traj.iter().enumerate() {
+                        if let Some(overlay) = saccade_circle_overlay(
+                            input_frame.clone(),
+                            mean.clone(),
+                            sigma.clone(),
+                            saccade_eye_color(eye_idx),
+                        ) {
+                            input_frame = overlay;
+                        }
+                    }
+                    let mut frame_views = Vec::new();
+                    let push_view = |views: &mut Vec<Tensor<B, 4>>, view: Tensor<B, 4>| {
+                        if !views.is_empty() && SACCADE_VIEW_GAP > 0 {
+                            views.push(view_separator_like(&view, SACCADE_VIEW_GAP));
+                        }
+                        views.push(view);
+                    };
+                    push_view(&mut frame_views, input_frame);
+                    let step_patches = std::mem::take(&mut scratch.step_capture.patches);
+                    if !step_patches.is_empty() {
+                        if let Some(patch_views) = saccade_patch_views(step_patches, ctx.height)
+                        {
+                            state.artifacts.last_patch_views = patch_views
+                                .iter()
+                                .map(|view| view.clone().detach())
+                                .collect();
+                            for patch_view in patch_views {
+                                push_view(&mut frame_views, patch_view);
+                            }
+                            appended_patch = true;
+                        }
+                    }
+                    if !appended_patch && !state.artifacts.last_patch_views.is_empty() {
+                        for patch_view in &state.artifacts.last_patch_views {
+                            push_view(&mut frame_views, patch_view.clone());
+                        }
+                    }
+                    push_view(&mut frame_views, recon_view);
+                    let frame = Tensor::cat(frame_views, 3);
+                    state.artifacts.frame_steps.push(frame);
+                }
+                if ctx.capture_traj {
+                    state.artifacts.traj_steps.push(step_traj);
+                }
+            }
+            state.trajs.clear();
+            state.trajs.append(&mut scratch.next_trajs);
+            if step_idx + 1 <= ctx.detach_until {
+                for traj in &mut state.trajs {
+                    *traj = traj.clone().detach();
+                }
+                for level in &mut state.state_levels {
+                    *level = level.clone().detach();
+                }
+            }
+            if ctx.tbptt_enabled && in_backprop {
+                state.tbptt_step_idx += 1;
+                let chunk_done = state.tbptt_step_idx >= ctx.tbptt_step_count
+                    || step_idx + 1 == ctx.rollout_steps;
+                if chunk_done {
+                    state.tbptt_step_idx = 0;
+                    state.tbptt_chunks += 1;
+                    let state_composed = match self.config.pyramid_mode {
+                        VisionPyramidMode::Stacked => state.state_levels.clone(),
+                        VisionPyramidMode::Laplacian => {
+                            self.compose_pyramid(&state.state_levels, &ctx.grids)
+                        }
+                    };
+                    let state_composed_embed = self.project_pyramid_levels(&state_composed);
+                    let (inv, sigreg) = if self.config.loss.lejepa.enabled {
+                        self.pyramid_lejepa_loss(&state_composed_embed)
+                    } else {
+                        let zero = Tensor::<B, 1>::zeros([1], &ctx.device);
+                        (zero.clone(), zero)
+                    };
+                    let (loss_per_sample, mask_per_sample, _) =
+                        self.recon_loss_per_sample_from_projected_levels(
+                            &state_composed_embed,
+                            &ctx.target_patches,
+                            false,
+                        );
+                    let loss_sum = loss_per_sample.clone().sum();
+                    let mask_sum = mask_per_sample.clone().sum();
+                    state.tbptt_loss_sum = Some(match state.tbptt_loss_sum.take() {
+                        Some(accum) => accum + loss_sum.clone(),
+                        None => loss_sum,
+                    });
+                    state.tbptt_mask_sum = Some(match state.tbptt_mask_sum.take() {
+                        Some(accum) => accum + mask_sum.clone(),
+                        None => mask_sum,
+                    });
+                    state.tbptt_inv_sum = Some(match state.tbptt_inv_sum.take() {
+                        Some(accum) => accum + inv.clone(),
+                        None => inv,
+                    });
+                    state.tbptt_sigreg_sum = Some(match state.tbptt_sigreg_sum.take() {
+                        Some(accum) => accum + sigreg.clone(),
+                        None => sigreg,
+                    });
+                    if ctx.gdpo_policy_enabled {
+                        let recon_per_sample =
+                            loss_per_sample / mask_per_sample.add_scalar(LEJEPA_EPS);
+                        let hard_reward = state
+                            .hard_reward
+                            .take()
+                            .unwrap_or_else(|| Tensor::<B, 1>::zeros([ctx.batch], &ctx.device));
+                        let log_prob_sum = state.log_prob_sum.take().unwrap_or_else(|| {
+                            Tensor::<B, 2>::zeros([ctx.batch, 1], &ctx.device)
+                        });
+                        let log_prob_sum_old = state.log_prob_sum_old.take().unwrap_or_else(|| {
+                            Tensor::<B, 2>::zeros([ctx.batch, 1], &ctx.device)
+                        });
+                        state.tbptt_policy_inputs.push(GdpoPolicyInputs {
+                            hard_reward,
+                            recon_per_sample,
+                            log_prob_sum,
+                            log_prob_sum_old,
+                            gdpo_group: ctx.gdpo_group,
+                        });
+                    }
+                    if step_idx + 1 < ctx.rollout_steps {
+                        state.reset_policy_accumulators(
+                            ctx.gdpo_enabled,
+                            ctx.info_reward_enabled,
+                            ctx.batch,
+                            &ctx.device,
+                        );
+                        for traj in &mut state.trajs {
+                            *traj = traj.clone().detach();
+                        }
+                        for level in &mut state.state_levels {
+                            *level = level.clone().detach();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn finalize_recon_loss(
+        &self,
+        ctx: &SaccadeRolloutContext<B>,
+        state: &mut SaccadeRolloutState<B>,
+    ) -> (
+        Tensor<B, 1>,
+        Tensor<B, 1>,
+        Tensor<B, 1>,
+        Tensor<B, 1>,
+        Option<Vec<GdpoPolicyInputs<B>>>,
+        Option<(Tensor<B, 3>, Tensor<B, 3>)>,
+    ) {
+        if ctx.tbptt_enabled {
+            let zero = Tensor::<B, 1>::zeros([1], &ctx.device);
+            let chunk_count = state.tbptt_chunks.max(1) as f32;
+            let inv_sum = state.tbptt_inv_sum.take().unwrap_or_else(|| zero.clone());
+            let sigreg_sum = state
+                .tbptt_sigreg_sum
+                .take()
+                .unwrap_or_else(|| zero.clone());
+            let inv = inv_sum.mul_scalar(1.0 / chunk_count);
+            let sigreg = sigreg_sum.mul_scalar(1.0 / chunk_count);
+            let loss_sum = state.tbptt_loss_sum.take().unwrap_or_else(|| zero.clone());
+            let mask_sum = state.tbptt_mask_sum.take().unwrap_or_else(|| zero.clone());
+            let base_pair = if ctx.capture_artifacts {
+                let (_, _, base_pair) = self.recon_loss_per_sample_from_state(
+                    &state.state_levels,
+                    &ctx.grids,
+                    &ctx.target_patches,
+                    true,
+                );
+                base_pair
+            } else {
+                None
+            };
+            let gdpo_inputs = if ctx.gdpo_policy_enabled {
+                Some(std::mem::take(&mut state.tbptt_policy_inputs))
+            } else {
+                None
+            };
+            (loss_sum, mask_sum, inv, sigreg, gdpo_inputs, base_pair)
+        } else {
+            let state_composed = match self.config.pyramid_mode {
+                VisionPyramidMode::Stacked => state.state_levels.clone(),
+                VisionPyramidMode::Laplacian => {
+                    self.compose_pyramid(&state.state_levels, &ctx.grids)
+                }
+            };
+            let state_composed_embed = self.project_pyramid_levels(&state_composed);
+            let (inv, sigreg) = if self.config.loss.lejepa.enabled {
+                self.pyramid_lejepa_loss(&state_composed_embed)
+            } else {
+                let zero = Tensor::<B, 1>::zeros([1], &ctx.device);
+                (zero.clone(), zero)
+            };
+            let (loss_per_sample, mask_per_sample, base_pair) =
+                self.recon_loss_per_sample_from_projected_levels(
+                    &state_composed_embed,
+                    &ctx.target_patches,
+                    ctx.capture_artifacts,
+                );
+            let loss_sum = loss_per_sample.clone().sum();
+            let mask_sum = mask_per_sample.clone().sum();
+            let recon_per_sample = loss_per_sample / mask_per_sample.add_scalar(LEJEPA_EPS);
+            let gdpo_inputs = if ctx.gdpo_policy_enabled {
+                let hard_reward = state
+                    .hard_reward
+                    .take()
+                    .unwrap_or_else(|| Tensor::<B, 1>::zeros([ctx.batch], &ctx.device));
+                let log_prob_sum = state.log_prob_sum.take().unwrap_or_else(|| {
+                    Tensor::<B, 2>::zeros([ctx.batch, 1], &ctx.device)
+                });
+                let log_prob_sum_old = state.log_prob_sum_old.take().unwrap_or_else(|| {
+                    Tensor::<B, 2>::zeros([ctx.batch, 1], &ctx.device)
+                });
+                Some(vec![GdpoPolicyInputs {
+                    hard_reward,
+                    recon_per_sample,
+                    log_prob_sum,
+                    log_prob_sum_old,
+                    gdpo_group: ctx.gdpo_group,
+                }])
+            } else {
+                None
+            };
+            (loss_sum, mask_sum, inv, sigreg, gdpo_inputs, base_pair)
+        }
+    }
+
+    fn build_recon_artifacts(
+        &self,
+        ctx: &SaccadeRolloutContext<B>,
+        state: &mut SaccadeRolloutState<B>,
+        base_pair: Option<(Tensor<B, 3>, Tensor<B, 3>)>,
+    ) -> Option<(Vec<Tensor<B, 4>>, Tensor<B, 3>, Option<Tensor<B, 5>>, Vec<String>)> {
+        if !ctx.capture_artifacts || ctx.batch == 0 || ctx.tokens == 0 {
+            return None;
+        }
+        let (pred_base, target_base) = if let Some((pred, target)) = base_pair {
+            (Some(pred), Some(target))
+        } else {
+            (None, None)
+        };
+        let pred_first = pred_base.clone().unwrap_or_else(|| {
+            Tensor::<B, 3>::zeros(
+                [ctx.batch, ctx.tokens, ctx.patch_size * ctx.patch_size * ctx.channels],
+                &ctx.device,
+            )
+        });
+        let target_first = target_base.clone().unwrap_or_else(|| {
+            Tensor::<B, 3>::zeros(
+                [ctx.batch, ctx.tokens, ctx.patch_size * ctx.patch_size * ctx.channels],
+                &ctx.device,
+            )
+        });
+        let recon_view = unpatchify(
+            pred_first.clone(),
+            ctx.patch_size,
+            ctx.height,
+            ctx.width,
+            ctx.channels,
+        );
+        let residual = pred_first - target_first;
+        let mut target_width = ctx.width;
+        if !state.artifacts.last_patch_views.is_empty() {
+            for patch_view in &state.artifacts.last_patch_views {
+                target_width = target_width.max(patch_view.shape().dims::<4>()[3]);
+            }
+        }
+        let mut images_view = ctx.images.clone();
+        if let Some(last_step) = state.artifacts.traj_steps.last() {
+            for (eye_idx, (mean, sigma)) in last_step.iter().enumerate() {
+                if let Some(overlay) = saccade_circle_overlay(
+                    images_view.clone(),
+                    mean.clone(),
+                    sigma.clone(),
+                    saccade_eye_color(eye_idx),
+                ) {
+                    images_view = overlay;
+                }
+            }
+        }
+        let images_view = pad_view_width(images_view, target_width);
+        let recon_view = pad_view_width(recon_view, target_width);
+        let patch_views = if state.artifacts.last_patch_views.is_empty() {
+            None
+        } else {
+            let patch_views = std::mem::take(&mut state.artifacts.last_patch_views);
+            Some(
+                patch_views
+                    .into_iter()
+                    .map(|patch_view| pad_view_width_centered(patch_view, target_width))
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let mut views = Vec::new();
+        let mut legend = Vec::new();
+        views.push(images_view);
+        legend.push("input_with_fovea".to_string());
+        if let Some(patch_views) = patch_views {
+            for (eye_idx, patch_view) in patch_views.into_iter().enumerate() {
+                views.push(patch_view);
+                legend.push(format!("foveated_patch_eye_{eye_idx}"));
+            }
+        }
+        views.push(recon_view);
+        legend.push("reconstruction".to_string());
+        if !state.artifacts.traj_steps.is_empty() {
+            let steps = std::mem::take(&mut state.artifacts.traj_steps);
+            let max_extra = self
+                .config
+                .artifact_max_views
+                .saturating_sub(views.len());
+            let mut remaining = max_extra;
+            for idx in select_trajectory_indices(steps.len(), max_extra) {
+                for (eye_idx, (mean, sigma)) in steps[idx].iter().enumerate() {
+                    if remaining == 0 {
+                        break;
+                    }
+                    if let Some(view) = saccade_circle_overlay(
+                        ctx.images.clone(),
+                        mean.clone(),
+                        sigma.clone(),
+                        saccade_eye_color(eye_idx),
+                    ) {
+                        views.push(pad_view_width(view, target_width));
+                        legend.push(format!(
+                            "trajectory_overlay_step_{idx}_eye_{eye_idx}"
+                        ));
+                        remaining = remaining.saturating_sub(1);
+                    }
+                }
+                if remaining == 0 {
+                    break;
+                }
+            }
+        }
+        let frames = if state.artifacts.frame_steps.is_empty() {
+            None
+        } else {
+            let frames = std::mem::take(&mut state.artifacts.frame_steps);
+            if frames.is_empty() {
+                None
+            } else {
+                let mut max_width = 0;
+                for frame in &frames {
+                    let width = frame.shape().dims::<4>()[3];
+                    max_width = max_width.max(width);
+                }
+                let mut stacked = Vec::with_capacity(frames.len());
+                for frame in frames {
+                    let frame = pad_view_width(frame, max_width);
+                    stacked.push(frame.unsqueeze_dim::<5>(1));
+                }
+                Some(Tensor::cat(stacked, 1))
+            }
+        };
+        Some((views, residual, frames, legend))
+    }
+
     pub(crate) fn recon_loss(
         &self,
         images: Tensor<B, 4>,
@@ -588,11 +1399,10 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
             .collect();
         let input_residuals = match self.config.pyramid_mode {
             VisionPyramidMode::Stacked => input_levels.clone(),
-            VisionPyramidMode::Laplacian => {
-                self.decompose_pyramid(&input_levels, &grids)
-            }
+            VisionPyramidMode::Laplacian => self.decompose_pyramid(&input_levels, &grids),
         };
-        let laplacian_images = if matches!(self.config.pyramid_mode, VisionPyramidMode::Laplacian) {
+        let laplacian_images = if matches!(self.config.pyramid_mode, VisionPyramidMode::Laplacian)
+        {
             self.build_laplacian_images(&mip_levels)
         } else {
             None
@@ -608,8 +1418,8 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
             .val()
             .reshape([1, traj_len, embed_dim])
             .repeat_dim(0, batch);
-        let mut trajs = vec![base_traj; num_eyes];
-        let mut state_levels: Vec<Tensor<B, 3>> = input_residuals
+        let trajs = vec![base_traj; num_eyes];
+        let state_levels: Vec<Tensor<B, 3>> = input_residuals
             .iter()
             .map(|level| Tensor::<B, 3>::zeros(level.shape().dims::<3>(), &device))
             .collect();
@@ -623,30 +1433,13 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
             tbptt_step_count.max(1).min(backprop_steps)
         };
         let tbptt_enabled = tbptt_step_count > 0;
-        let mut tbptt_step_idx = 0usize;
-        let mut tbptt_chunks = 0usize;
-        let mut tbptt_loss_sum: Option<Tensor<B, 1>> = None;
-        let mut tbptt_mask_sum: Option<Tensor<B, 1>> = None;
-        let mut tbptt_inv_sum: Option<Tensor<B, 1>> = None;
-        let mut tbptt_sigreg_sum: Option<Tensor<B, 1>> = None;
         let low_mem_pre_rollout = self.config.low_mem_pre_rollout;
         let capture_traj = capture_artifacts
             && self
                 .config
                 .artifact_max_views
                 .saturating_sub(3)
-            > 0;
-        let mut traj_steps = if capture_traj {
-            Some(Vec::with_capacity(rollout_steps))
-        } else {
-            None
-        };
-        let mut frame_steps = if capture_artifacts {
-            Some(Vec::with_capacity(rollout_steps))
-        } else {
-            None
-        };
-        let mut last_patch_views: Option<Vec<Tensor<B, 4>>> = None;
+                > 0;
         let gdpo = &self.config.policy.gdpo;
         let gdpo_enabled = gdpo.enabled && !capture_artifacts;
         let gdpo_group = gdpo.group_size.max(1);
@@ -654,586 +1447,71 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
         let info_reward_enabled = gdpo_enabled && self.config.policy.info_reward.enabled;
         let info_stride = self.config.policy.info_reward.stride.max(1);
         let detach_policy_from_recon = self.config.policy.detach_policy_from_recon;
-        let mut log_prob_sum = if gdpo_enabled {
+        let log_prob_sum = if gdpo_enabled {
             Some(Tensor::<B, 2>::zeros([batch, 1], &device))
         } else {
             None
         };
-        let mut log_prob_sum_old = if gdpo_enabled {
+        let log_prob_sum_old = if gdpo_enabled {
             Some(Tensor::<B, 2>::zeros([batch, 1], &device))
         } else {
             None
         };
-        let mut hard_reward = if info_reward_enabled {
+        let hard_reward = if info_reward_enabled {
             Some(Tensor::<B, 1>::zeros([batch], &device))
         } else {
             None
         };
-        let mut tbptt_policy_inputs = if gdpo_policy_enabled {
-            Some(Vec::new())
-        } else {
-            None
-        };
-        let mut started_backprop = false;
-        for step_idx in 0..rollout_steps {
-            let pre_rollout = low_mem_pre_rollout && step_idx + 1 <= detach_until;
-            let in_backprop = step_idx + 1 > detach_until;
-            if tbptt_enabled && in_backprop && !started_backprop {
-                started_backprop = true;
-                if gdpo_enabled {
-                    log_prob_sum = Some(Tensor::<B, 2>::zeros([batch, 1], &device));
-                    log_prob_sum_old = Some(Tensor::<B, 2>::zeros([batch, 1], &device));
-                }
-                if info_reward_enabled {
-                    hard_reward = Some(Tensor::<B, 1>::zeros([batch], &device));
-                }
-            }
-            let anchor_traj =
-                low_mem_pre_rollout && detach_until > 0 && step_idx + 1 == detach_until + 1;
-            let state_composed = match self.config.pyramid_mode {
-                VisionPyramidMode::Stacked => state_levels.clone(),
-                VisionPyramidMode::Laplacian => self.compose_pyramid(&state_levels, &grids),
-            };
-            let mut updates: Vec<Tensor<B, 3>> = state_levels
-                .iter()
-                .map(|level| Tensor::<B, 3>::zeros(level.shape().dims::<3>(), &device))
-                .collect();
-            let collect_info = info_reward_enabled && (step_idx % info_stride == 0);
-            let mut updates_null: Option<Vec<Tensor<B, 3>>> = if collect_info {
-                Some(
-                    state_levels
-                        .iter()
-                        .map(|level| Tensor::<B, 3>::zeros(level.shape().dims::<3>(), &device))
-                        .collect(),
-                )
-            } else {
-                None
-            };
-            let mut step_traj = if capture_traj || capture_artifacts {
-                Some(Vec::with_capacity(num_eyes))
-            } else {
-                None
-            };
-            let mut step_patches = if capture_artifacts {
-                Some(Vec::with_capacity(num_eyes))
-            } else {
-                None
-            };
-            let mut next_trajs = Vec::with_capacity(num_eyes);
-            for eye_idx in 0..num_eyes {
-                let mut traj = trajs[eye_idx].clone();
-                if pre_rollout {
-                    traj = traj.detach();
-                } else if anchor_traj {
-                    let anchor = self
-                        .trajectory_token
-                        .val()
-                        .reshape([1, traj_len, embed_dim])
-                        .repeat_dim(0, batch);
-                    traj = traj + (anchor.clone() - anchor.detach());
-                }
-                let eye_embed = self
-                    .eye_token
-                    .val()
-                    .slice_dim(0, eye_idx..eye_idx + 1)
-                    .reshape([1, 1, embed_dim])
-                    .repeat_dim(0, batch)
-                    .repeat_dim(1, traj_len);
-                let eye_embed = Self::detach_if(eye_embed, pre_rollout);
-                let traj_with_eye = traj.clone() + eye_embed.clone();
-                let traj_with_eye = Self::detach_if(traj_with_eye, pre_rollout);
-                let traj_summary = traj_with_eye
-                    .clone()
-                    .mean_dim(1)
-                    .reshape([batch, 1, embed_dim]);
-                let params = self.saccade_head.forward(traj_summary);
-                let params = Self::detach_if(params, pre_rollout);
-                let (mean_raw, sigma_raw) = self.decode_saccade_params(params);
-                let mean_raw = Self::detach_if(mean_raw, pre_rollout);
-                let sigma_raw = Self::detach_if(sigma_raw, pre_rollout);
-                let (mean_action, sigma_action) = if gdpo_enabled {
-                    let sample = self.sample_policy_action(mean_raw.clone(), sigma_raw.clone());
-                    let log_prob_eye = sample.log_prob.sum_dim(1).reshape([batch, 1]);
-                    if let Some(log_prob_sum) = log_prob_sum.as_mut() {
-                        *log_prob_sum = log_prob_sum.clone() + log_prob_eye.clone();
-                    }
-                    if let Some(log_prob_sum_old) = log_prob_sum_old.as_mut() {
-                        *log_prob_sum_old = log_prob_sum_old.clone() + log_prob_eye.detach();
-                    }
-                    (sample.mean, sample.sigma)
-                } else {
-                    (mean_raw.clone(), sigma_raw.clone())
-                };
-                let mean = if detach_policy_from_recon {
-                    mean_action.clone().detach()
-                } else {
-                    mean_action.clone()
-                };
-                let sigma = if detach_policy_from_recon {
-                    sigma_action.clone().detach()
-                } else {
-                    sigma_action.clone()
-                };
-                let mean_step = mean.clone().mean_dim(1).reshape([batch, 2]);
-                let sigma_step = sigma.clone().mean_dim(1).reshape([batch, 1]);
-                let mean_detached = mean_step.clone().detach();
-                let sigma_detached = sigma_step.clone().detach();
-                if let Some(steps) = &mut step_traj {
-                    steps.push((mean_detached.clone(), sigma_detached.clone()));
-                }
-                let weights_context =
-                    self.mip_gaussian_weights(&mip_levels, mean.clone(), sigma.clone());
-                let weights_scatter = if matches!(self.config.pyramid_mode, VisionPyramidMode::Laplacian) {
-                    self.mip_spatial_weights(&mip_levels, mean.clone(), sigma.clone())
-                } else {
-                    weights_context.clone()
-                };
-                let patch_image = {
-                    self.foveated_patch_image(
-                        &mip_levels,
-                        &base_grid,
-                        mean_step.clone(),
-                        sigma_step.clone(),
-                        laplacian_images.as_ref(),
-                    )
-                };
-                let patch_tokens = {
-                    self.model.patch_embed_raw(patch_image.clone()).tokens
-                };
-                let patch_tokens = Self::detach_if(patch_tokens, pre_rollout);
-                let null_patch_tokens = if collect_info {
-                    Some(self.null_patch_tokens(&patch_tokens))
-                } else {
-                    None
-                };
-                if let Some(step_patches) = step_patches.as_mut() {
-                    step_patches.push(patch_image);
-                }
-                let input_context = patch_tokens;
-                let state_context = {
-                    let context = self.mip_weighted_sum(&state_composed, &weights_context);
-                    self.project_pyramid_context(context)
-                };
-                let input_tokens =
-                    self.build_input_tokens(input_context, state_context.clone(), mean.clone(), sigma.clone());
-                let input_tokens = Self::detach_if(input_tokens, pre_rollout);
-                let input_tokens = input_tokens.repeat_dim(1, traj_len);
-                let tokens_in = traj_with_eye.clone() + input_tokens;
-                let out_tokens = {
-                    self.model
-                        .forward_tokens_embed_steps(tokens_in, inner_steps)
-                        .patch_tokens
-                };
-                let out_tokens = Self::detach_if(out_tokens, pre_rollout);
-                let residual = {
-                    self.residual_proj.forward(out_tokens.clone())
-                };
-                let residual = Self::detach_if(residual, pre_rollout);
-                let residual_pool = residual
-                    .clone()
-                    .mean_dim(1)
-                    .reshape([batch, 1, self.pyramid_dim]);
-                let next_traj = if traj_update_alpha >= 1.0 {
-                    out_tokens
-                } else {
-                    let keep = 1.0 - traj_update_alpha;
-                    traj.clone().mul_scalar(keep)
-                        + out_tokens.clone().mul_scalar(traj_update_alpha)
-                };
-                for (update, weights) in updates.iter_mut().zip(weights_scatter.iter()) {
-                    let update_eye = {
-                        self.weighted_sum_tokens(
-                            weights.clone().swap_dims(1, 2),
-                            residual_pool.clone(),
-                        )
-                    };
-                    *update = update.clone() + update_eye;
-                }
-                if let Some(updates_null) = updates_null.as_mut() {
-                    if let Some(null_patch_tokens) = null_patch_tokens {
-                        let input_tokens_null = self.build_input_tokens(
-                            null_patch_tokens,
-                            state_context.clone(),
-                            mean.clone(),
-                            sigma.clone(),
-                        );
-                        let input_tokens_null = input_tokens_null.repeat_dim(1, traj_len);
-                        let tokens_in_null = traj_with_eye.clone() + input_tokens_null;
-                        let out_tokens_null = self
-                            .model
-                            .forward_tokens_embed_steps(tokens_in_null, inner_steps)
-                            .patch_tokens;
-                        let residual_null = self.residual_proj.forward(out_tokens_null);
-                        let residual_pool_null = residual_null
-                            .mean_dim(1)
-                            .reshape([batch, 1, self.pyramid_dim]);
-                        for (update, weights) in updates_null.iter_mut().zip(weights_scatter.iter()) {
-                            let update_eye_null = self.weighted_sum_tokens(
-                                weights.clone().swap_dims(1, 2),
-                                residual_pool_null.clone(),
-                            );
-                            *update = update.clone() + update_eye_null;
-                        }
-                    }
-                }
-                next_trajs.push(next_traj);
-            }
-            let state_real: Vec<Tensor<B, 3>> = state_levels
-                .iter()
-                .zip(updates.iter())
-                .map(|(state, update)| state.clone() + update.clone())
-                .collect();
-            let state_null = updates_null.as_ref().map(|updates_null| {
-                state_levels
-                    .iter()
-                    .zip(updates_null.iter())
-                    .map(|(state, update)| state.clone() + update.clone())
-                    .collect::<Vec<_>>()
-            });
-            state_levels = state_real;
-            if collect_info {
-                if let (Some(hard_reward), Some(state_null)) =
-                    (hard_reward.as_mut(), state_null)
-                {
-                    let (real_sum, real_mask, _) = self.recon_loss_per_sample_from_state(
-                        &state_levels,
-                        &grids,
-                        &target_patches,
-                        false,
-                    );
-                    let (null_sum, null_mask, _) = self.recon_loss_per_sample_from_state(
-                        &state_null,
-                        &grids,
-                        &target_patches,
-                        false,
-                    );
-                    let real = real_sum / real_mask.add_scalar(LEJEPA_EPS);
-                    let null = null_sum / null_mask.add_scalar(LEJEPA_EPS);
-                    *hard_reward = hard_reward.clone() + (null - real);
-                }
-            }
-            if let Some(step_traj) = step_traj {
-                if capture_traj {
-                    if let Some(steps) = &mut traj_steps {
-                        steps.push(step_traj.clone());
-                    }
-                }
-                if let Some(frames) = &mut frame_steps {
-                    let state_composed = match self.config.pyramid_mode {
-                        VisionPyramidMode::Stacked => state_levels.clone(),
-                        VisionPyramidMode::Laplacian => self.compose_pyramid(&state_levels, &grids),
-                    };
-                    let pred_patches = self
-                        .recon
-                        .forward(self.project_pyramid_level(state_composed[0].clone()));
-                    let recon_view =
-                        unpatchify(pred_patches, patch_size, height, width, channels);
-                    let mut input_frame = images.clone();
-                    let mut appended_patch = false;
-                    for (eye_idx, (mean, sigma)) in step_traj.iter().enumerate() {
-                        if let Some(overlay) = saccade_circle_overlay(
-                            input_frame.clone(),
-                            mean.clone(),
-                            sigma.clone(),
-                            saccade_eye_color(eye_idx),
-                        ) {
-                            input_frame = overlay;
-                        }
-                    }
-                    let mut frame_views = Vec::new();
-                    let push_view = |views: &mut Vec<Tensor<B, 4>>, view: Tensor<B, 4>| {
-                        if !views.is_empty() && SACCADE_VIEW_GAP > 0 {
-                            views.push(view_separator_like(&view, SACCADE_VIEW_GAP));
-                        }
-                        views.push(view);
-                    };
-                    push_view(&mut frame_views, input_frame);
-                    if let Some(step_patches) = step_patches {
-                        if let Some(patch_views) =
-                            saccade_patch_views(step_patches, height)
-                        {
-                            last_patch_views =
-                                Some(patch_views.iter().map(|view| view.clone().detach()).collect());
-                            for patch_view in patch_views {
-                                push_view(&mut frame_views, patch_view);
-                            }
-                            appended_patch = true;
-                        }
-                    }
-                    if !appended_patch {
-                        if let Some(patch_views) = last_patch_views.clone() {
-                            for patch_view in patch_views {
-                                push_view(&mut frame_views, patch_view);
-                            }
-                        }
-                    }
-                    push_view(&mut frame_views, recon_view);
-                    let frame = Tensor::cat(frame_views, 3);
-                    frames.push(frame);
-                }
-            }
-            trajs = next_trajs;
-            if step_idx + 1 <= detach_until {
-                trajs = trajs.into_iter().map(|traj| traj.detach()).collect();
-                for level in &mut state_levels {
-                    *level = level.clone().detach();
-                }
-            }
-            if tbptt_enabled && in_backprop {
-                tbptt_step_idx += 1;
-                let chunk_done = tbptt_step_idx >= tbptt_step_count || step_idx + 1 == rollout_steps;
-                if chunk_done {
-                    tbptt_step_idx = 0;
-                    tbptt_chunks += 1;
-                    let state_composed = match self.config.pyramid_mode {
-                        VisionPyramidMode::Stacked => state_levels.clone(),
-                        VisionPyramidMode::Laplacian => self.compose_pyramid(&state_levels, &grids),
-                    };
-                    let state_composed_embed = self.project_pyramid_levels(&state_composed);
-                    let (inv, sigreg) = if self.config.loss.lejepa.enabled {
-                        self.pyramid_lejepa_loss(&state_composed_embed)
-                    } else {
-                        let zero = Tensor::<B, 1>::zeros([1], &device);
-                        (zero.clone(), zero)
-                    };
-                    let (loss_per_sample, mask_per_sample, _) = self
-                        .recon_loss_per_sample_from_projected_levels(
-                            &state_composed_embed,
-                            &target_patches,
-                            false,
-                        );
-                    let loss_sum = loss_per_sample.clone().sum();
-                    let mask_sum = mask_per_sample.clone().sum();
-                    tbptt_loss_sum = Some(match tbptt_loss_sum {
-                        Some(accum) => accum + loss_sum.clone(),
-                        None => loss_sum,
-                    });
-                    tbptt_mask_sum = Some(match tbptt_mask_sum {
-                        Some(accum) => accum + mask_sum.clone(),
-                        None => mask_sum,
-                    });
-                    tbptt_inv_sum = Some(match tbptt_inv_sum {
-                        Some(accum) => accum + inv.clone(),
-                        None => inv,
-                    });
-                    tbptt_sigreg_sum = Some(match tbptt_sigreg_sum {
-                        Some(accum) => accum + sigreg.clone(),
-                        None => sigreg,
-                    });
-                    if let Some(gdpo_inputs) = tbptt_policy_inputs.as_mut() {
-                        let recon_per_sample =
-                            loss_per_sample / mask_per_sample.add_scalar(LEJEPA_EPS);
-                        let hard_reward = hard_reward
-                            .take()
-                            .unwrap_or_else(|| Tensor::<B, 1>::zeros([batch], &device));
-                        let log_prob_sum = log_prob_sum
-                            .take()
-                            .unwrap_or_else(|| Tensor::<B, 2>::zeros([batch, 1], &device));
-                        let log_prob_sum_old = log_prob_sum_old
-                            .take()
-                            .unwrap_or_else(|| Tensor::<B, 2>::zeros([batch, 1], &device));
-                        gdpo_inputs.push(GdpoPolicyInputs {
-                            hard_reward,
-                            recon_per_sample,
-                            log_prob_sum,
-                            log_prob_sum_old,
-                            gdpo_group,
-                        });
-                    }
-                    if step_idx + 1 < rollout_steps {
-                        if gdpo_enabled {
-                            log_prob_sum = Some(Tensor::<B, 2>::zeros([batch, 1], &device));
-                            log_prob_sum_old = Some(Tensor::<B, 2>::zeros([batch, 1], &device));
-                        }
-                        if info_reward_enabled {
-                            hard_reward = Some(Tensor::<B, 1>::zeros([batch], &device));
-                        }
-                        trajs = trajs.into_iter().map(|traj| traj.detach()).collect();
-                        for level in &mut state_levels {
-                            *level = level.clone().detach();
-                        }
-                    }
-                }
-            }
-        }
+        // Heap-allocate rollout buffers to keep the stack frame small.
+        let ctx = Box::new(SaccadeRolloutContext {
+            device,
+            images,
+            batch,
+            channels,
+            height,
+            width,
+            patch_size,
+            embed_dim,
+            tokens,
+            mip_levels,
+            grids,
+            target_patches,
+            laplacian_images,
+            base_grid,
+            traj_len,
+            num_eyes,
+            inner_steps,
+            traj_update_alpha,
+            rollout_steps,
+            detach_until,
+            tbptt_step_count,
+            tbptt_enabled,
+            low_mem_pre_rollout,
+            capture_traj,
+            capture_artifacts,
+            gdpo_enabled,
+            gdpo_group,
+            gdpo_policy_enabled,
+            info_reward_enabled,
+            info_stride,
+            detach_policy_from_recon,
+        });
+        let mut state = Box::new(SaccadeRolloutState::new(
+            trajs,
+            state_levels,
+            log_prob_sum,
+            log_prob_sum_old,
+            hard_reward,
+            capture_traj,
+            capture_artifacts,
+            rollout_steps,
+        ));
+        let mut scratch = Box::new(SaccadeStepScratch::new());
 
-        let (loss_sum, mask_sum, inv, sigreg, gdpo_inputs, base_pair) = if tbptt_enabled {
-            let zero = Tensor::<B, 1>::zeros([1], &device);
-            let chunk_count = tbptt_chunks.max(1) as f32;
-            let inv_sum = tbptt_inv_sum.unwrap_or_else(|| zero.clone());
-            let sigreg_sum = tbptt_sigreg_sum.unwrap_or_else(|| zero.clone());
-            let inv = inv_sum.mul_scalar(1.0 / chunk_count);
-            let sigreg = sigreg_sum.mul_scalar(1.0 / chunk_count);
-            let loss_sum = tbptt_loss_sum.unwrap_or_else(|| zero.clone());
-            let mask_sum = tbptt_mask_sum.unwrap_or_else(|| zero.clone());
-            let base_pair = if capture_artifacts {
-                let (_, _, base_pair) = self.recon_loss_per_sample_from_state(
-                    &state_levels,
-                    &grids,
-                    &target_patches,
-                    true,
-                );
-                base_pair
-            } else {
-                None
-            };
-            (
-                loss_sum,
-                mask_sum,
-                inv,
-                sigreg,
-                tbptt_policy_inputs,
-                base_pair,
-            )
-        } else {
-            let state_composed = match self.config.pyramid_mode {
-                VisionPyramidMode::Stacked => state_levels.clone(),
-                VisionPyramidMode::Laplacian => self.compose_pyramid(&state_levels, &grids),
-            };
-            let state_composed_embed = self.project_pyramid_levels(&state_composed);
-            let (inv, sigreg) = if self.config.loss.lejepa.enabled {
-                self.pyramid_lejepa_loss(&state_composed_embed)
-            } else {
-                let zero = Tensor::<B, 1>::zeros([1], &device);
-                (zero.clone(), zero)
-            };
-
-            let (loss_per_sample, mask_per_sample, base_pair) =
-                self.recon_loss_per_sample_from_projected_levels(
-                    &state_composed_embed,
-                    &target_patches,
-                    capture_artifacts,
-                );
-            let loss_sum = loss_per_sample.clone().sum();
-            let mask_sum = mask_per_sample.clone().sum();
-            let recon_per_sample = loss_per_sample / mask_per_sample.add_scalar(LEJEPA_EPS);
-            let gdpo_inputs = if gdpo_policy_enabled {
-                let hard_reward = hard_reward
-                    .take()
-                    .unwrap_or_else(|| Tensor::<B, 1>::zeros([batch], &device));
-                let log_prob_sum = log_prob_sum
-                    .take()
-                    .unwrap_or_else(|| Tensor::<B, 2>::zeros([batch, 1], &device));
-                let log_prob_sum_old = log_prob_sum_old
-                    .take()
-                    .unwrap_or_else(|| Tensor::<B, 2>::zeros([batch, 1], &device));
-                Some(vec![GdpoPolicyInputs {
-                    hard_reward,
-                    recon_per_sample,
-                    log_prob_sum,
-                    log_prob_sum_old,
-                    gdpo_group,
-                }])
-            } else {
-                None
-            };
-            (loss_sum, mask_sum, inv, sigreg, gdpo_inputs, base_pair)
-        };
-        let (pred_base, target_base) = if let Some((pred, target)) = base_pair {
-            (Some(pred), Some(target))
-        } else {
-            (None, None)
-        };
-
-        let artifacts = if capture_artifacts && batch > 0 && tokens > 0 {
-            let pred_first = pred_base.clone().unwrap_or_else(|| {
-                Tensor::<B, 3>::zeros([batch, tokens, patch_size * patch_size * channels], &device)
-            });
-            let target_first = target_base.clone().unwrap_or_else(|| {
-                Tensor::<B, 3>::zeros([batch, tokens, patch_size * patch_size * channels], &device)
-            });
-            let recon_view = unpatchify(pred_first.clone(), patch_size, height, width, channels);
-            let residual = pred_first - target_first;
-            let mut target_width = width;
-            if let Some(patch_views) = &last_patch_views {
-                for patch_view in patch_views {
-                    target_width = target_width.max(patch_view.shape().dims::<4>()[3]);
-                }
-            }
-            let mut images_view = images.clone();
-            if let Some(steps) = traj_steps.as_ref() {
-                if let Some(last_step) = steps.last() {
-                    for (eye_idx, (mean, sigma)) in last_step.iter().enumerate() {
-                        if let Some(overlay) = saccade_circle_overlay(
-                            images_view.clone(),
-                            mean.clone(),
-                            sigma.clone(),
-                            saccade_eye_color(eye_idx),
-                        ) {
-                            images_view = overlay;
-                        }
-                    }
-                }
-            }
-            let images_view = pad_view_width(images_view, target_width);
-            let recon_view = pad_view_width(recon_view, target_width);
-            let patch_views = last_patch_views.map(|patch_views| {
-                patch_views
-                    .into_iter()
-                    .map(|patch_view| pad_view_width_centered(patch_view, target_width))
-                    .collect::<Vec<_>>()
-            });
-            let mut views = Vec::new();
-            let mut legend = Vec::new();
-            views.push(images_view);
-            legend.push("input_with_fovea".to_string());
-            if let Some(patch_views) = patch_views {
-                for (eye_idx, patch_view) in patch_views.into_iter().enumerate() {
-                    views.push(patch_view);
-                    legend.push(format!("foveated_patch_eye_{eye_idx}"));
-                }
-            }
-            views.push(recon_view);
-            legend.push("reconstruction".to_string());
-            if let Some(steps) = traj_steps {
-                let max_extra = self
-                    .config
-                    .artifact_max_views
-                    .saturating_sub(views.len());
-                let mut remaining = max_extra;
-                for idx in select_trajectory_indices(steps.len(), max_extra) {
-                    for (eye_idx, (mean, sigma)) in steps[idx].iter().enumerate() {
-                        if remaining == 0 {
-                            break;
-                        }
-                        if let Some(view) = saccade_circle_overlay(
-                            images.clone(),
-                            mean.clone(),
-                            sigma.clone(),
-                            saccade_eye_color(eye_idx),
-                        ) {
-                            views.push(pad_view_width(view, target_width));
-                            legend.push(format!(
-                                "trajectory_overlay_step_{idx}_eye_{eye_idx}"
-                            ));
-                            remaining = remaining.saturating_sub(1);
-                        }
-                    }
-                    if remaining == 0 {
-                        break;
-                    }
-                }
-            }
-            let frames = frame_steps.and_then(|frames| {
-                if frames.is_empty() {
-                    return None;
-                }
-                let mut max_width = 0;
-                for frame in &frames {
-                    let width = frame.shape().dims::<4>()[3];
-                    max_width = max_width.max(width);
-                }
-                let mut stacked = Vec::with_capacity(frames.len());
-                for frame in frames {
-                    let frame = pad_view_width(frame, max_width);
-                    stacked.push(frame.unsqueeze_dim::<5>(1));
-                }
-                Some(Tensor::cat(stacked, 1))
-            });
-            Some((views, residual, frames, legend))
-        } else {
-            None
-        };
+        self.run_recon_rollout(&ctx, &mut state, &mut scratch);
+        let (loss_sum, mask_sum, inv, sigreg, gdpo_inputs, base_pair) =
+            self.finalize_recon_loss(&ctx, &mut state);
+        let artifacts = self.build_recon_artifacts(&ctx, &mut state, base_pair);
 
         (loss_sum, mask_sum, inv, sigreg, artifacts, gdpo_inputs)
     }

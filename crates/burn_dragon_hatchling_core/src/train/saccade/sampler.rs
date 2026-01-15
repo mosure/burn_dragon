@@ -23,8 +23,17 @@ impl<B: BackendTrait> SaccadeFoveationSampler<B> {
             max_steps: 1,
             backprop_steps: 1,
         };
-        let saccade =
-            VisionSaccadeModel::new(model, saccade, vision.embed_dim, rollout, recon_patch_dim, device);
+        let saccade = VisionSaccadeModel::new(
+            model,
+            saccade,
+            vision.embed_dim,
+            vision.patch_size,
+            rollout,
+            recon_patch_dim,
+            1,
+            0,
+            device,
+        );
         let base_grid = build_foveated_base_grid::<B>(vision.patch_size, device);
         Self {
             saccade,
@@ -306,7 +315,14 @@ impl<B: AutodiffBackend> TrainStep<ImageNetBatch<B>, VisionTrainItem<B>> for Vis
 impl<B: BackendTrait> ValidStep<ImageNetBatch<B>, VisionOutput<B>> for VisionMaeModel<B> {
     fn step(&self, batch: ImageNetBatch<B>) -> VisionOutput<B> {
         let backprop_steps = self.rollout.backprop_steps(self.rollout.max_steps);
-        let losses = self.forward_losses(batch, self.rollout.max_steps, backprop_steps, false, true);
+        let capture_artifacts = self.config.artifact_every > 0;
+        let losses = self.forward_losses(
+            batch,
+            self.rollout.max_steps,
+            backprop_steps,
+            false,
+            capture_artifacts,
+        );
         let zero = Tensor::<B, 1>::zeros([1], &losses.total.device());
         VisionOutput::new(
             losses.total,
@@ -349,29 +365,97 @@ impl<B: AutodiffBackend> TrainStep<ImageNetBatch<B>, VisionTrainItem<B>> for Vis
     fn step(&self, batch: ImageNetBatch<B>) -> TrainOutput<VisionTrainItem<B>> {
         let rollout_steps = self.rollout.sample_steps();
         let backprop_steps = self.rollout.backprop_steps(rollout_steps);
-        let losses = self.forward_losses_train(batch, rollout_steps, backprop_steps, true, false);
-        let grads = losses.total.clone().backward();
-        let zero = Tensor::<B, 1>::zeros([1], &losses.total.device());
+        let repeats = self.train_repeats.max(1);
+        if repeats == 1 {
+            let losses =
+                self.forward_losses_train(batch, rollout_steps, backprop_steps, true, false);
+            let grads = losses.total.clone().backward();
+            let zero = Tensor::<B, 1>::zeros([1], &losses.total.device());
+            return TrainOutput::new(
+                self,
+                grads,
+                VisionTrainItem::new(
+                    losses.total,
+                    losses.inv,
+                    losses.sigreg,
+                    losses.recon,
+                    zero.clone(),
+                    zero,
+                ),
+            );
+        }
 
-        TrainOutput::new(
-            self,
+        let scale = 1.0 / repeats as f32;
+        let repeat_chunk = train_repeat_chunk(repeats, self.train_repeat_chunk);
+        let mut grads = GradientsAccumulator::new();
+        let mut total_sum: Option<Tensor<B, 1>> = None;
+        let mut inv_sum: Option<Tensor<B, 1>> = None;
+        let mut sigreg_sum: Option<Tensor<B, 1>> = None;
+        let mut recon_sum: Option<Tensor<B, 1>> = None;
+        let mut consumed = 0;
+
+        while consumed < repeats {
+            let chunk = (repeats - consumed).min(repeat_chunk);
+            let batch_chunk = if chunk == 1 {
+                batch.clone()
+            } else {
+                batch.repeat_batch(chunk)
+            };
+            let losses = self.forward_losses_train(
+                batch_chunk,
+                rollout_steps,
+                backprop_steps,
+                true,
+                false,
+            );
+            let chunk_scale = scale * chunk as f32;
+            let loss_scaled = losses.total.clone().mul_scalar(chunk_scale);
+            let grads_step = GradientsParams::from_grads(loss_scaled.backward(), self);
+            grads.accumulate(self, grads_step);
+            let weight = chunk as f32;
+            total_sum = Some(match total_sum {
+                Some(accum) => accum + losses.total.clone().mul_scalar(weight),
+                None => losses.total.clone().mul_scalar(weight),
+            });
+            inv_sum = Some(match inv_sum {
+                Some(accum) => accum + losses.inv.clone().mul_scalar(weight),
+                None => losses.inv.clone().mul_scalar(weight),
+            });
+            sigreg_sum = Some(match sigreg_sum {
+                Some(accum) => accum + losses.sigreg.clone().mul_scalar(weight),
+                None => losses.sigreg.clone().mul_scalar(weight),
+            });
+            recon_sum = Some(match recon_sum {
+                Some(accum) => accum + losses.recon.clone().mul_scalar(weight),
+                None => losses.recon.clone().mul_scalar(weight),
+            });
+            consumed += chunk;
+        }
+
+        let total = total_sum.expect("repeat loss").mul_scalar(scale);
+        let inv = inv_sum.expect("repeat inv").mul_scalar(scale);
+        let sigreg = sigreg_sum.expect("repeat sigreg").mul_scalar(scale);
+        let recon = recon_sum.expect("repeat recon").mul_scalar(scale);
+        let grads = grads.grads();
+        let zero = Tensor::<B, 1>::zeros([1], &total.device());
+        TrainOutput {
             grads,
-            VisionTrainItem::new(
-                losses.total,
-                losses.inv,
-                losses.sigreg,
-                losses.recon,
-                zero.clone(),
-                zero,
-            ),
-        )
+            item: VisionTrainItem::new(total, inv, sigreg, recon, zero.clone(), zero),
+        }
     }
 }
 
 impl<B: BackendTrait> ValidStep<ImageNetBatch<B>, VisionOutput<B>> for VisionSaccadeModel<B> {
     fn step(&self, batch: ImageNetBatch<B>) -> VisionOutput<B> {
         let backprop_steps = self.rollout.backprop_steps(self.rollout.max_steps);
-        let losses = self.forward_losses(batch, self.rollout.max_steps, backprop_steps, false, true);
+        let capture_artifacts = self.config.artifact_every > 0;
+        let losses = self.forward_losses(
+            batch,
+            self.rollout.max_steps,
+            backprop_steps,
+            false,
+            capture_artifacts,
+        );
         let zero = Tensor::<B, 1>::zeros([1], &losses.total.device());
         VisionOutput::new(
             losses.total,

@@ -136,6 +136,7 @@ fn deepmath_config(
 
     HuggingFaceDatasetConfig {
         repo_id: "zwhe99/DeepMath-103K".to_string(),
+        token: None,
         revision: revision.clone(),
         format: HuggingFaceRecordFormat::Parquet,
         train_files,
@@ -153,6 +154,7 @@ fn tinychat_config(
 ) -> HuggingFaceDatasetConfig {
     HuggingFaceDatasetConfig {
         repo_id: "starhopp3r/TinyChat".to_string(),
+        token: None,
         revision: revision.clone(),
         format: HuggingFaceRecordFormat::Text,
         train_files: vec!["tinychat.txt".to_string()],
@@ -175,6 +177,7 @@ fn webscale_rl_config(
 
     HuggingFaceDatasetConfig {
         repo_id: "Salesforce/Webscale-RL".to_string(),
+        token: None,
         revision: revision.clone(),
         format: HuggingFaceRecordFormat::Parquet,
         train_files,
@@ -202,6 +205,7 @@ fn poetry_foundation_config(
 ) -> HuggingFaceDatasetConfig {
     HuggingFaceDatasetConfig {
         repo_id: "suayptalha/Poetry-Foundation-Poems".to_string(),
+        token: None,
         revision: revision.clone(),
         format: HuggingFaceRecordFormat::Csv,
         train_files: vec!["PoetryFoundationData.csv".to_string()],

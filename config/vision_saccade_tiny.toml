@@ -6,22 +6,36 @@ train_dir = "train"
 val_dir = "val"
 prefetch_batches = 4
 prefetch_workers = 8
+prefetch_to_device = true
 cache_decoded = true
-cache_capacity = 512
+cache_capacity = 16384
+cache_preprocessed = true
 
 [dataset.download]
 type = "imagenette"
 variant = "imagenette2-160"
 
 [training]
-batch_size = 32
+batch_size = 64
 max_iters = 2000
 log_frequency = 20
 # run GPU memory cleanup every N epochs (0 disables)
-memory_cleanup_every = 1
-rollout_min_steps = 1
-rollout_max_steps = 64
-rollout_backprop_steps = 8
+memory_cleanup_every = 0
+# run GPU memory cleanup every N iterations (0 disables)
+memory_cleanup_iters = 0
+# disable CUDA allocator cleanup even if memory_cleanup_* is set
+disable_cuda_memory_cleanup = false
+# repeat chunk size for batch_repeats (0 uses auto)
+train_repeat_chunk = 0
+# capture per-iteration loss samples (integration tests only)
+trace_train_loss = false
+trace_train_loss_every = 1
+# optional ffmpeg path for mp4/avi encoding
+# ffmpeg_path = "C:/path/to/ffmpeg"
+rollout_min_steps = 16
+rollout_max_steps = 16
+rollout_backprop_steps = 16
+batch_repeats = 1
 
 [optimizer]
 learning_rate = 0.0005
@@ -30,17 +44,22 @@ weight_decay = 0.05
 [optimizer.lr_schedule]
 type = "constant"
 
+[wgpu]
+backend = "auto"
+memory = "subslices"
+# tasks_max = 1024
+
 [vision]
 image_size = 160
-patch_size = 16
+patch_size = 32
 in_channels = 3
-embed_dim = 128
+embed_dim = 256
 steps = 256  # TODO: support infinite streaming
-n_head = 4
+n_head = 8
 mlp_internal_dim_multiplier = 4
 dropout = 0.1
-projection_dim = 128
-projection_hidden_dim = 256
+projection_dim = 256
+projection_hidden_dim = 512
 use_cls_token = true
 pos_encoding = "learned2d"
 attention_mode = "row_l1"
@@ -51,6 +70,10 @@ relu_threshold = 0.0
 type = "saccade"
 # number of parallel foveated streams (eyes) sharing the same recurrent pyramid
 num_eyes = 1
+# number of recurrent trajectory tokens processed per rollout step
+traj_tokens = 1
+# blend factor for recurrent trajectory updates (1.0 = full overwrite)
+traj_update_alpha = 0.7
 # number of MIP levels (2x downsample per level) used for Gaussian sampling
 mip_levels = 4
 # how pyramid scales are represented: stacked (raw) or laplacian (residual)
@@ -59,12 +82,24 @@ pyramid_mode = "laplacian"
 fovea_sampling_mode = "batched"
 # fovea warp mode: warped (continuous) or patched (level crop)
 fovea_warp_mode = "warped"
+# jitter subsamples per axis for fovea anti-aliasing (1 = off)
+fovea_subsamples = 1
+# scale applied to sigma to compute the fovea radius
+fovea_radius_scale = 1.5
 # subpatch size for "subpatch" sampling (0 uses full patch)
 fovea_subpatch_size = 0
 # fovea scatter mode for feature pyramid updates
 fovea_scatter_mode = "tensor"
+# max working set size for grid_sample chunking (MB)
+grid_sample_max_mb = 512
+# max matmul size for mip concat (MB)
+mip_concat_max_mb = 512
+# override recon batch chunk (0 uses auto)
+recon_batch_chunk = 0
+# max elements for recon chunking
+recon_max_elems = 50000000
 # feature pyramid embedding dim (unset uses model embed_dim)
-pyramid_feature_dim = 64
+pyramid_feature_dim = 256
 # inner recurrent steps per rollout step
 inner_steps = 1
 # pre-rollout steps always run without grad to keep memory stable
@@ -81,17 +116,37 @@ artifact_max_images = 16
 artifact_max_views = 4
 # overwrite validation artifacts instead of keeping history
 artifact_overwrite = true
+# input projection module: linear | cnn | radial_micro_vit
+[mode.input_projection]
+type = "linear"
+# cnn params
+# channels = 256
+# blocks = 2
+# kernel = 5
+# expansion = 2
+
+# radial micro-ViT params
+# layers = 2
+# heads = 4
+# mlp_ratio = 2
+# radial_hidden_dim = 128
+# radial_scale = 1.0
+
+# truncated BPTT chunk size (0 disables)
+[mode.tbptt]
+step_count = 0
 # policy training and side-channel controls (GDPO + location embedding)
 [mode.policy]
 # keep policy gradients separate from recon sampling if enabled
 detach_policy_from_recon = false
 # exploration noise for saccade params when GDPO is enabled
-action_noise_std = 0.05
+action_noise_std = 0.02
 
 [mode.policy.location_embedding]
-# location embedding injected into input tokens: none | learned | sinusoidal | quantized
-mode = "none"
-# channel budget for fixed embeddings (unused when mode = none/learned)
+# location embedding injected into input tokens: none | learned | sinusoidal | quantized | rope | pope
+mode = "pope"
+# channel budget for fixed/rotary embeddings (unused when mode = none/learned)
+# PoPE treats this as d (complex channels), producing 2*d real channels.
 embed_dim = 12
 # quantization bins for quantized mode
 quantize_bins = 32
@@ -100,7 +155,7 @@ noise_std = 0.0
 
 [mode.policy.info_reward]
 # enable counterfactual info reward (null glimpse vs real)
-enabled = true
+enabled = false
 # stride for info reward eval (1 = every step)
 stride = 1
 # null glimpse mode: zero or noise
@@ -110,7 +165,7 @@ null_noise_std = 0.05
 [mode.policy.gdpo]
 # GDPO advantage conditioning for saccade policy
 enabled = true
-group_size = 2
+group_size = 4
 hard_weight = 1.0
 easy_weight = 1.0
 policy_weight = 1.0
@@ -144,21 +199,21 @@ hidden_dim = 256
 [augment]
 image_size = 160
 resize_short = 160
-min_scale = 0.08
+min_scale = 1.0
 max_scale = 1.0
-min_aspect_ratio = 0.75
-max_aspect_ratio = 1.3333334
-flip_prob = 0.5
-color_jitter_prob = 0.8
-brightness = 0.4
-contrast = 0.4
-saturation = 0.2
-hue = 0.1
-grayscale_prob = 0.2
-blur_prob = 0.5
-blur_sigma_min = 0.1
-blur_sigma_max = 2.0
-solarize_prob = 0.2
+min_aspect_ratio = 1.0
+max_aspect_ratio = 1.0
+flip_prob = 0.0
+color_jitter_prob = 0.0
+brightness = 0.0
+contrast = 0.0
+saturation = 0.0
+hue = 0.0
+grayscale_prob = 0.0
+blur_prob = 0.0
+blur_sigma_min = 0.0
+blur_sigma_max = 0.0
+solarize_prob = 0.0
 solarize_threshold = 128
 normalize_mean = [0.485, 0.456, 0.406]
 normalize_std = [0.229, 0.224, 0.225]

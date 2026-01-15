@@ -27,23 +27,7 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
             if height < patch_size || width < patch_size {
                 break;
             }
-            let crop_h = height - (height % patch_size);
-            let crop_w = width - (width % patch_size);
-            if crop_h == 0 || crop_w == 0 {
-                break;
-            }
-            let cropped = if crop_h != height || crop_w != width {
-                let offset_h = (height - crop_h) / 2;
-                let offset_w = (width - crop_w) / 2;
-                // Center-crop to keep pyramid levels aligned with the base image.
-                current
-                    .clone()
-                    .slice_dim(2, offset_h..offset_h + crop_h)
-                    .slice_dim(3, offset_w..offset_w + crop_w)
-            } else {
-                current.clone()
-            };
-            let patch = self.model.patch_embed_raw(cropped.clone());
+            let patch = self.model.patch_embed_raw(current.clone());
             let grid = patch.grid;
             if grid.height == 0 || grid.width == 0 {
                 break;
@@ -52,13 +36,13 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
             levels.push(SaccadeMipLevel {
                 tokens,
                 grid,
-                image: cropped.clone(),
+                image: current.clone(),
             });
 
             if level + 1 == max_levels {
                 break;
             }
-            let next = downsample_image(cropped.clone());
+            let next = downsample_image(current.clone());
             if let Some(next) = next {
                 current = next;
             } else {
@@ -75,6 +59,7 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
         if levels.len() < 2 {
             return None;
         }
+        let grid_sample_max_bytes = limit_bytes_from_mb(self.config.grid_sample_max_mb);
         let device = levels
             .first()
             .map(|level| level.image.device())
@@ -94,7 +79,8 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
             } else {
                 grid.repeat_dim(0, batch)
             };
-            let upsampled = grid_sample_2d_bilinear::<B>(next.clone(), grid);
+            let upsampled =
+                grid_sample_2d_bilinear::<B>(next.clone(), grid, grid_sample_max_bytes);
             residuals.push(current.clone() - upsampled);
         }
         let coarse = levels
@@ -237,7 +223,10 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
         }
 
         let mean_flat = mean.reshape([batch * traj_tokens, 2]);
-        let sigma_flat = sigma.reshape([batch * traj_tokens, 1]);
+        let sigma_scaled = sigma
+            .mul_scalar(self.config.fovea_radius_scale)
+            .clamp_min(SACCADE_EPS);
+        let sigma_flat = sigma_scaled.reshape([batch * traj_tokens, 1]);
         let lod_sigma = self
             .lod_sigma_from_sigma(sigma_flat.clone())
             .clamp_min(SACCADE_EPS);
@@ -304,6 +293,55 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
             let tokens_len = level.tokens.shape().dims::<3>()[1].max(1);
             let denom = total.clone().repeat_dim(1, tokens_len);
             let weights = (weights / denom).reshape([batch, traj_tokens, tokens_len]);
+            weights_out.push(weights);
+        }
+        weights_out
+    }
+
+    pub(crate) fn mip_spatial_weights(
+        &self,
+        levels: &[SaccadeMipLevel<B>],
+        mean: Tensor<B, 3>,
+        sigma: Tensor<B, 3>,
+    ) -> Vec<Tensor<B, 3>> {
+        let [batch, traj_tokens, _] = mean.shape().dims::<3>();
+        let device = mean.device();
+        let level_count = levels.len();
+        if level_count == 0 {
+            return Vec::new();
+        }
+
+        let mean_flat = mean.reshape([batch * traj_tokens, 2]);
+        let sigma_scaled = sigma
+            .mul_scalar(self.config.fovea_radius_scale)
+            .clamp_min(SACCADE_EPS);
+        let sigma_flat = sigma_scaled.reshape([batch * traj_tokens, 1]);
+
+        let mut weights_out = Vec::with_capacity(level_count);
+        for level in levels.iter() {
+            let coords = self.level_coords_cached(level.grid, &device);
+            let tokens_len = level.tokens.shape().dims::<3>()[1].max(1);
+            let coords = coords.reshape([1, tokens_len, 2]);
+            let diff = mean_flat.clone().unsqueeze_dim::<3>(1) - coords;
+            let dist2 = diff
+                .powf_scalar(2.0)
+                .sum_dim(2)
+                .reshape([batch * traj_tokens, tokens_len]);
+            let sigma2 = sigma_flat
+                .clone()
+                .powf_scalar(2.0)
+                .add_scalar(SACCADE_EPS)
+                .repeat_dim(1, tokens_len);
+            let spatial = (dist2 / sigma2.mul_scalar(2.0))
+                .mul_scalar(-1.0)
+                .exp();
+            let denom = spatial
+                .clone()
+                .sum_dim(1)
+                .reshape([batch * traj_tokens, 1])
+                .add_scalar(SACCADE_EPS)
+                .repeat_dim(1, tokens_len);
+            let weights = (spatial / denom).reshape([batch, traj_tokens, tokens_len]);
             weights_out.push(weights);
         }
         weights_out

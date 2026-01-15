@@ -330,8 +330,8 @@ pub(crate) struct FoveaJitter<B: BackendTrait> {
 
 #[derive(Clone, Debug)]
 pub(crate) struct FoveaJitterCacheState<B: BackendTrait> {
-    pub(crate) map: HashMap<usize, FoveaJitter<B>>,
-    pub(crate) order: VecDeque<usize>,
+    pub(crate) map: HashMap<(usize, usize), FoveaJitter<B>>,
+    pub(crate) order: VecDeque<(usize, usize)>,
 }
 
 #[derive(Clone, Debug)]
@@ -351,14 +351,19 @@ impl<B: BackendTrait> FoveaJitterCache<B> {
         }
     }
 
-    pub(crate) fn get_or_build(&self, patch_size: usize, device: &B::Device) -> FoveaJitter<B> {
-        let key = patch_size.max(1);
+    pub(crate) fn get_or_build(
+        &self,
+        patch_size: usize,
+        subsamples_axis: usize,
+        device: &B::Device,
+    ) -> FoveaJitter<B> {
+        let key = (patch_size.max(1), subsamples_axis.max(1));
         if let Ok(cache) = self.inner.lock() {
             if let Some(jitter) = cache.map.get(&key) {
                 return jitter.clone();
             }
         }
-        let jitter = build_fovea_jitter::<B>(key, device);
+        let jitter = build_fovea_jitter::<B>(key.0, key.1, device);
         if self.max_entries == 0 {
             return jitter;
         }
@@ -436,7 +441,7 @@ pub(crate) struct VisionSaccadeModel<B: BackendTrait> {
     pub(crate) trajectory_token: Param<Tensor<B, 2>>,
     // Per-eye identity bias to keep multi-eye rollouts disentangled.
     pub(crate) eye_token: Param<Tensor<B, 2>>,
-    pub(crate) input_proj: VisionSaccadeProjection<B>,
+    pub(crate) input_proj: VisionSaccadeInputProjection<B>,
     pub(crate) fovea_proj: VisionSaccadeProjection<B>,
     pub(crate) pyramid_in_proj: Option<VisionSaccadeProjection<B>>,
     pub(crate) pyramid_out_proj: Option<VisionSaccadeProjection<B>>,
@@ -451,6 +456,10 @@ pub(crate) struct VisionSaccadeModel<B: BackendTrait> {
     pub(crate) pyramid_dim: usize,
     #[module(ignore)]
     pub(crate) rollout: VisionRollout,
+    #[module(ignore)]
+    pub(crate) train_repeats: usize,
+    #[module(ignore)]
+    pub(crate) train_repeat_chunk: usize,
 }
 
 pub(crate) struct VisionSaccadeLosses<B: BackendTrait> {

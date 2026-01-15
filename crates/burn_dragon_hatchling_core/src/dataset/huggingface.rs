@@ -6,7 +6,7 @@ use std::path::Path;
 use burn::tensor::backend::Backend;
 use csv::ReaderBuilder;
 use hf_hub::api::sync::ApiBuilder;
-use hf_hub::{Cache, Repo, RepoType};
+use hf_hub::{Repo, RepoType};
 use parquet::file::reader::{FileReader, SerializedFileReader};
 use parquet::record::RowAccessor;
 use serde_json::Value;
@@ -53,9 +53,11 @@ impl HuggingFaceDataset {
         let hf_cache_dir = cache_dir.join("huggingface");
         fs::create_dir_all(&hf_cache_dir)?;
 
-        let token = std::env::var("HF_TOKEN")
-            .ok()
-            .or_else(|| Cache::from_env().token());
+        let token = hf_cfg
+            .token
+            .clone()
+            .or_else(|| std::env::var("HF_TOKEN").ok())
+            .filter(|value| !value.trim().is_empty());
 
         let mut api_builder = ApiBuilder::new().with_cache_dir(hf_cache_dir);
         if let Some(token) = token {

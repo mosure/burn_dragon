@@ -23,6 +23,8 @@ mod lejepa_tests;
 
 #[cfg(feature = "integration_test")]
 pub use gdpo::{gdpo_cpu_fallbacks, gdpo_reset_cpu_fallbacks};
+#[cfg(feature = "integration_test")]
+pub use metrics::{loss_trace_len, loss_trace_reset, loss_trace_take};
 #[cfg(feature = "cli")]
 pub use cli::run_cli;
 #[cfg(feature = "integration_test")]

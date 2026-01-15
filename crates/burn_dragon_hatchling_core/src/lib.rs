@@ -1,6 +1,7 @@
 #![recursion_limit = "256"]
 
 pub mod config;
+pub(crate) mod device;
 #[cfg(feature = "train")]
 pub mod dataset;
 pub mod generation;
@@ -20,7 +21,7 @@ pub mod web;
 
 pub use config::{
     ContextStrategyConfig, GdpoConfig, GdpoHardGate, GenerationConfig, ModelOverrides,
-    TrainingHyperparameters,
+    TrainingHyperparameters, WgpuBackend, WgpuMemoryConfig, WgpuRuntimeConfig,
 };
 #[cfg(feature = "train")]
 pub use config::{
@@ -32,6 +33,8 @@ pub use config::{
     VisionLocationEmbeddingConfig, VisionLocationEmbeddingMode, VisionLossConfig, VisionMaeConfig,
     VisionMaeLossConfig, VisionModelConfig, VisionNullGlimpseMode, VisionPyramidMode,
     VisionReconLossConfig, VisionSaccadeCacheConfig, VisionSaccadeConfig,
+    VisionSaccadeInputProjectionConfig, VisionSaccadeInputProjectionCnnConfig,
+    VisionSaccadeInputProjectionMicroVitConfig, VisionTbpttConfig,
     VisionSaccadeInfoRewardConfig, VisionSaccadePolicyConfig, VisionTeacherConfig,
     VisionTeacherFeatureConfig,
     VisionTeacherModelConfig, VisionTeacherVariant, VisionTrainingConfig,

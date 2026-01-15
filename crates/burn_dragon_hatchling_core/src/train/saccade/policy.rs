@@ -115,6 +115,15 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
                     config,
                 ))
             }
+            VisionLocationEmbeddingMode::Rope | VisionLocationEmbeddingMode::Pope => {
+                Some(rotary_location_embedding(
+                    mean,
+                    sigma,
+                    embed_dim,
+                    config,
+                    matches!(config.mode, VisionLocationEmbeddingMode::Pope),
+                ))
+            }
         }
     }
 }
@@ -189,4 +198,202 @@ fn fixed_location_embedding<B: BackendTrait>(
     } else {
         embed
     }
+}
+
+fn rotary_location_embedding<B: BackendTrait>(
+    mean: Tensor<B, 3>,
+    sigma: Tensor<B, 3>,
+    embed_dim: usize,
+    config: &crate::VisionLocationEmbeddingConfig,
+    use_polar: bool,
+) -> Tensor<B, 3> {
+    let device = mean.device();
+    let [batch, traj_tokens, _] = mean.shape().dims::<3>();
+    let requested_dim = config.embed_dim.min(embed_dim);
+    let (rotary_dim, target_dim) = if use_polar {
+        // PoPE uses complex channels (d), which expand to 2*d real channels.
+        let base_dim = config.embed_dim.min(embed_dim / 2);
+        let rotary_dim = base_dim.saturating_mul(2);
+        (rotary_dim, rotary_dim)
+    } else {
+        let rotary_dim = requested_dim - (requested_dim % 2);
+        (rotary_dim, requested_dim)
+    };
+    if batch == 0 || traj_tokens == 0 || rotary_dim == 0 {
+        return Tensor::<B, 3>::zeros([batch.max(1), traj_tokens.max(1), embed_dim], &device);
+    }
+
+    let sigma_norm = sigma
+        .clone()
+        .sub_scalar(SACCADE_SIGMA_MIN)
+        .div_scalar((SACCADE_SIGMA_MAX - SACCADE_SIGMA_MIN).max(SACCADE_EPS))
+        .clamp_min(0.0)
+        .clamp_max(1.0);
+    let mut coords = if use_polar {
+        pope_coords(mean, sigma_norm)
+    } else {
+        Tensor::cat(vec![mean, sigma_norm], 2)
+    };
+    if config.noise_std > 0.0 {
+        let noise = Tensor::<B, 3>::random(
+            coords.shape().dims::<3>(),
+            TensorDistribution::Normal(0.0, config.noise_std as f64),
+            &device,
+        );
+        coords = coords + noise;
+    }
+
+    let [_, _, axes] = coords.shape().dims::<3>();
+    if use_polar {
+        let angle = coords
+            .clone()
+            .slice_dim(2, 0..1)
+            .clamp_min(-0.5)
+            .clamp_max(0.5);
+        let rest = coords
+            .slice_dim(2, 1..axes)
+            .clamp_min(0.0)
+            .clamp_max(1.0);
+        coords = Tensor::cat(vec![angle, rest], 2);
+    } else {
+        coords = coords.clamp_min(0.0).clamp_max(1.0);
+    }
+
+    let dims = if use_polar {
+        pope_rotary_dims_per_axis(rotary_dim, axes)
+    } else {
+        rotary_dims_per_axis(rotary_dim, axes)
+    };
+    let coords = coords.reshape([batch * traj_tokens, axes]);
+    let mut features = Vec::with_capacity(rotary_dim);
+    for (axis, axis_dim) in dims.iter().enumerate() {
+        if *axis_dim == 0 {
+            continue;
+        }
+        let freq_count = axis_dim / 2;
+        let mut inv_freq = Vec::with_capacity(freq_count);
+        let denom = freq_count.max(1) as f32;
+        for idx in 0..freq_count {
+            inv_freq.push(1.0 / 10000.0_f32.powf(idx as f32 / denom));
+        }
+        let inv_freq =
+            Tensor::<B, 1>::from_data(TensorData::new(inv_freq, [freq_count]), &device)
+                .reshape([1, freq_count])
+                .repeat_dim(0, batch * traj_tokens);
+        let coord = coords.clone().slice_dim(1, axis..axis + 1);
+        let phase = coord
+            .repeat_dim(1, freq_count)
+            .mul_scalar(2.0 * PI)
+            * inv_freq;
+        features.push(phase.clone().sin());
+        features.push(phase.cos());
+    }
+    if features.is_empty() {
+        return Tensor::<B, 3>::zeros([batch.max(1), traj_tokens.max(1), embed_dim], &device);
+    }
+
+    let mut embed = Tensor::cat(features, 1).reshape([batch, traj_tokens, rotary_dim]);
+    if rotary_dim < target_dim {
+        let pad = Tensor::<B, 3>::zeros([batch, traj_tokens, target_dim - rotary_dim], &device);
+        embed = Tensor::cat(vec![embed, pad], 2);
+    }
+    if target_dim < embed_dim {
+        let pad = Tensor::<B, 3>::zeros([batch, traj_tokens, embed_dim - target_dim], &device);
+        Tensor::cat(vec![embed, pad], 2)
+    } else {
+        embed
+    }
+}
+
+fn pope_coords<B: BackendTrait>(
+    mean: Tensor<B, 3>,
+    sigma_norm: Tensor<B, 3>,
+) -> Tensor<B, 3> {
+    let dx = mean.clone().sub_scalar(0.5).slice_dim(2, 0..1);
+    let dy = mean.sub_scalar(0.5).slice_dim(2, 1..2);
+    let r = (dx.clone().powf_scalar(2.0) + dy.clone().powf_scalar(2.0)).sqrt();
+    let max_r = (0.5_f32 * 0.5_f32 + 0.5_f32 * 0.5_f32).sqrt();
+    let r_norm = r
+        .clone()
+        .div_scalar(max_r.max(SACCADE_EPS))
+        .clamp_min(0.0)
+        .clamp_max(1.0);
+    let theta = approx_atan2(dy, dx).div_scalar(2.0 * PI);
+    Tensor::cat(vec![theta, r_norm, sigma_norm], 2)
+}
+
+fn approx_atan2<B: BackendTrait>(y: Tensor<B, 3>, x: Tensor<B, 3>) -> Tensor<B, 3> {
+    let device = y.device();
+    let shape = y.shape().dims::<3>();
+    let ones = Tensor::<B, 3>::ones(shape, &device);
+    let abs_y = y.clone().abs().add_scalar(1e-6);
+    let x_ge_zero = x.clone().greater_equal_elem(0.0);
+    let r_pos = (x.clone().sub(abs_y.clone())).div(x.clone().add(abs_y.clone()));
+    let r_neg = (x.clone().add(abs_y.clone())).div(abs_y.clone().sub(x.clone()));
+    let r = r_neg.mask_where(x_ge_zero.clone(), r_pos);
+    let base_pos = ones.clone().mul_scalar(PI * 0.25);
+    let base_neg = ones.clone().mul_scalar(PI * 0.75);
+    let base = base_neg.mask_where(x_ge_zero.clone(), base_pos);
+    let r2 = r.clone().powf_scalar(2.0);
+    let angle = base + r.clone().mul(r2.mul_scalar(0.1963).add_scalar(-0.9817));
+    let sign = ones
+        .clone()
+        .mul_scalar(-1.0)
+        .mask_where(y.clone().greater_equal_elem(0.0), ones);
+    sign * angle
+}
+
+fn pope_rotary_dims_per_axis(rotary_dim: usize, axes: usize) -> Vec<usize> {
+    if axes == 0 || rotary_dim == 0 {
+        return Vec::new();
+    }
+    if axes != 3 {
+        return rotary_dims_per_axis(rotary_dim, axes);
+    }
+    let rotary_dim = rotary_dim - (rotary_dim % 2);
+    if rotary_dim == 0 {
+        return Vec::new();
+    }
+    let mut dims = vec![0; 3];
+    let mut remaining = rotary_dim;
+    if remaining >= 2 {
+        dims[0] = 2;
+        remaining -= 2;
+    }
+    if remaining >= 4 {
+        dims[1] = 2;
+        dims[2] = 2;
+        remaining -= 4;
+    }
+    let slots = remaining / 2;
+    if slots > 0 {
+        let weights = [2usize, 1, 1];
+        let total_weight = weights.iter().sum::<usize>().max(1);
+        let mut allocated = [0usize; 3];
+        for (axis, weight) in weights.iter().enumerate() {
+            allocated[axis] = slots * weight / total_weight;
+        }
+        let used_slots: usize = allocated.iter().sum();
+        let leftover = slots.saturating_sub(used_slots);
+        allocated[0] += leftover;
+        for axis in 0..3 {
+            dims[axis] += allocated[axis] * 2;
+        }
+    }
+    dims
+}
+
+fn rotary_dims_per_axis(rotary_dim: usize, axes: usize) -> Vec<usize> {
+    if axes == 0 || rotary_dim == 0 {
+        return Vec::new();
+    }
+    let mut dims = vec![0; axes];
+    let mut remaining = rotary_dim;
+    let mut idx = 0usize;
+    while remaining >= 2 {
+        dims[idx] += 2;
+        remaining -= 2;
+        idx = (idx + 1) % axes;
+    }
+    dims
 }

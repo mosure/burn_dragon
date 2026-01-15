@@ -4,7 +4,8 @@ use std::hint::black_box;
 
 use burn::tensor::backend::Backend as BackendTrait;
 use burn_dragon_hatchling::{
-    BDH, BDHConfig, ContextStrategy, GenerationSettings, generate_tokens, wgpu::init_runtime,
+    BDH, BDHConfig, ContextStrategy, GenerationSettings, WgpuRuntimeConfig, generate_tokens,
+    wgpu::init_runtime,
 };
 use burn_wgpu::Wgpu;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
@@ -44,7 +45,10 @@ const STORAGE_BUFFER_LIMIT_BYTES: u64 = 1 << 30; // ~1 GiB limit on most wgpu dr
 const FLOAT_BYTES: u64 = std::mem::size_of::<f32>() as u64;
 
 fn inference_bench(c: &mut Criterion) {
-    run_inference_backend::<Wgpu<f32>, _, _>(c, "wgpu", init_runtime, skip_reason_wgpu);
+    let wgpu_config = WgpuRuntimeConfig::default();
+    run_inference_backend::<Wgpu<f32>, _, _>(c, "wgpu", |device| {
+        init_runtime(device, &wgpu_config);
+    }, skip_reason_wgpu);
 
     #[cfg(feature = "cuda")]
     run_inference_backend::<Cuda<f32>, _, _>(c, "cuda", |_| {}, |_, _| None);

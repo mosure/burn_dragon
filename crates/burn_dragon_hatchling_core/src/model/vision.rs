@@ -3,7 +3,9 @@ use burn::module::{
     ModuleVisitor, Param,
 };
 use burn::nn::conv::{Conv2d, Conv2dConfig};
-use burn::nn::{Dropout, DropoutConfig, LayerNorm, LayerNormConfig, Linear, LinearConfig};
+use burn::nn::{
+    Dropout, DropoutConfig, LayerNorm, LayerNormConfig, Linear, LinearConfig, PaddingConfig2d,
+};
 use burn::tensor::backend::{AutodiffBackend, Backend};
 use burn::tensor::{Distribution as TensorDistribution, Tensor, TensorData, activation};
 use serde::{Deserialize, Serialize};
@@ -155,7 +157,7 @@ impl Default for VisionDragonHatchlingConfig {
     fn default() -> Self {
         let image_size = 224;
         let patch_size = 16;
-        let grid = (image_size / patch_size).max(1);
+        let grid = div_ceil(image_size, patch_size).max(1);
         Self {
             image_size,
             patch_size,
@@ -210,9 +212,90 @@ pub struct PatchEmbedOutput<B: Backend> {
     pub grid: PatchGrid,
 }
 
+const PATCH_EMBED_EXPANSION: usize = 4;
+const PATCH_EMBED_BLOCKS_PER_STAGE: usize = 1;
+
+#[derive(Module, Debug)]
+struct PatchConvNeXtBlock<B: Backend> {
+    depthwise: Conv2d<B>,
+    pointwise_in: Conv2d<B>,
+    pointwise_out: Conv2d<B>,
+}
+
+impl<B: Backend> PatchConvNeXtBlock<B> {
+    fn new(channels: usize, expansion: usize, device: &B::Device) -> Self {
+        let expansion = expansion.max(1);
+        let depthwise = Conv2dConfig::new([channels, channels], [3, 3])
+            .with_padding(PaddingConfig2d::Same)
+            .with_groups(channels.max(1))
+            .init(device);
+        let pointwise_in = Conv2dConfig::new([channels, channels.saturating_mul(expansion)], [1, 1])
+            .init(device);
+        let pointwise_out =
+            Conv2dConfig::new([channels.saturating_mul(expansion), channels], [1, 1]).init(device);
+        Self {
+            depthwise,
+            pointwise_in,
+            pointwise_out,
+        }
+    }
+
+    fn forward(&self, x: Tensor<B, 4>) -> Tensor<B, 4> {
+        let residual = x.clone();
+        let x = self.depthwise.forward(x);
+        let x = activation::gelu(x);
+        let x = self.pointwise_in.forward(x);
+        let x = activation::gelu(x);
+        let x = self.pointwise_out.forward(x);
+        x + residual
+    }
+}
+
+#[derive(Module, Debug)]
+struct PatchEmbedStage<B: Backend> {
+    downsample: Conv2d<B>,
+    blocks: Vec<PatchConvNeXtBlock<B>>,
+}
+
+impl<B: Backend> PatchEmbedStage<B> {
+    fn new(
+        in_channels: usize,
+        out_channels: usize,
+        stride: usize,
+        blocks: usize,
+        expansion: usize,
+        device: &B::Device,
+    ) -> Self {
+        let stride = stride.max(1);
+        let kernel = patch_kernel_for_stride(stride);
+        let padding = if stride > 1 {
+            PaddingConfig2d::Valid
+        } else {
+            PaddingConfig2d::Same
+        };
+        let downsample = Conv2dConfig::new([in_channels.max(1), out_channels.max(1)], [kernel, kernel])
+            .with_stride([stride, stride])
+            .with_padding(padding)
+            .init(device);
+        let blocks = (0..blocks.max(1))
+            .map(|_| PatchConvNeXtBlock::new(out_channels.max(1), expansion, device))
+            .collect();
+        Self { downsample, blocks }
+    }
+
+    fn forward(&self, mut x: Tensor<B, 4>) -> Tensor<B, 4> {
+        x = self.downsample.forward(x);
+        for block in &self.blocks {
+            x = block.forward(x);
+        }
+        x
+    }
+}
+
 #[derive(Module, Debug)]
 pub struct PatchEmbed<B: Backend> {
-    conv: Conv2d<B>,
+    stages: Vec<PatchEmbedStage<B>>,
+    proj: Conv2d<B>,
     pos_encoding: SpatialPositionalEncoding<B>,
     patch_size: usize,
     embed_dim: usize,
@@ -220,12 +303,27 @@ pub struct PatchEmbed<B: Backend> {
 
 impl<B: Backend> PatchEmbed<B> {
     pub fn new(config: &VisionDragonHatchlingConfig, device: &B::Device) -> Self {
-        let conv = Conv2dConfig::new(
-            [config.in_channels, config.embed_dim],
-            [config.patch_size, config.patch_size],
-        )
-        .with_stride([config.patch_size, config.patch_size])
-        .init(device);
+        let patch_size = config.patch_size.max(1);
+        let mut strides = patch_downsample_strides(patch_size);
+        if strides.is_empty() {
+            strides.push(1);
+        }
+        let hidden_dim = (config.embed_dim / 2).max(16).min(config.embed_dim.max(1));
+        let mut stages = Vec::with_capacity(strides.len());
+        let mut in_channels = config.in_channels.max(1);
+        for stride in strides {
+            stages.push(PatchEmbedStage::new(
+                in_channels,
+                hidden_dim,
+                stride,
+                PATCH_EMBED_BLOCKS_PER_STAGE,
+                PATCH_EMBED_EXPANSION,
+                device,
+            ));
+            in_channels = hidden_dim;
+        }
+        let proj = Conv2dConfig::new([in_channels.max(1), config.embed_dim.max(1)], [1, 1])
+            .init(device);
         let pos_encoding = SpatialPositionalEncoding::new(
             config.pos_encoding,
             config.pos_max_height,
@@ -234,9 +332,10 @@ impl<B: Backend> PatchEmbed<B> {
             device,
         );
         Self {
-            conv,
+            stages,
+            proj,
             pos_encoding,
-            patch_size: config.patch_size,
+            patch_size,
             embed_dim: config.embed_dim,
         }
     }
@@ -251,13 +350,26 @@ impl<B: Backend> PatchEmbed<B> {
     }
 
     pub fn forward_raw(&self, images: Tensor<B, 4>) -> PatchEmbedOutput<B> {
-        let [batch, _, height, width] = images.shape().dims::<4>();
-        assert!(
-            height.is_multiple_of(self.patch_size) && width.is_multiple_of(self.patch_size),
-            "image size must be divisible by patch size"
-        );
-
-        let patches = self.conv.forward(images);
+        let [batch, channels, height, width] = images.shape().dims::<4>();
+        let device = images.device();
+        let patch_size = self.patch_size.max(1);
+        let padded_h = div_ceil(height, patch_size) * patch_size;
+        let padded_w = div_ceil(width, patch_size) * patch_size;
+        let mut patches = images;
+        let pad_w = padded_w.saturating_sub(width);
+        let pad_h = padded_h.saturating_sub(height);
+        if pad_w > 0 {
+            let pad = Tensor::<B, 4>::zeros([batch, channels, height, pad_w], &device);
+            patches = Tensor::cat(vec![patches, pad], 3);
+        }
+        if pad_h > 0 {
+            let pad = Tensor::<B, 4>::zeros([batch, channels, pad_h, padded_w], &device);
+            patches = Tensor::cat(vec![patches, pad], 2);
+        }
+        for stage in &self.stages {
+            patches = stage.forward(patches);
+        }
+        let patches = self.proj.forward(patches);
         let [_, _, grid_h, grid_w] = patches.shape().dims::<4>();
         let tokens = patches
             .reshape([batch, self.embed_dim, grid_h * grid_w])
@@ -274,6 +386,44 @@ impl<B: Backend> PatchEmbed<B> {
 
     pub fn add_position(&self, tokens: Tensor<B, 3>, grid: PatchGrid) -> Tensor<B, 3> {
         self.pos_encoding.add_position(tokens, grid)
+    }
+
+    pub fn patch_size(&self) -> usize {
+        self.patch_size
+    }
+}
+
+fn div_ceil(value: usize, divisor: usize) -> usize {
+    if divisor == 0 {
+        0
+    } else {
+        (value + divisor - 1) / divisor
+    }
+}
+
+fn patch_downsample_strides(patch_size: usize) -> Vec<usize> {
+    let mut remaining = patch_size.max(1);
+    let mut strides = Vec::new();
+    while remaining > 1 {
+        if remaining % 4 == 0 {
+            strides.push(4);
+            remaining /= 4;
+        } else if remaining % 2 == 0 {
+            strides.push(2);
+            remaining /= 2;
+        } else {
+            strides.push(remaining);
+            remaining = 1;
+        }
+    }
+    strides
+}
+
+fn patch_kernel_for_stride(stride: usize) -> usize {
+    if stride <= 1 {
+        3
+    } else {
+        stride
     }
 }
 
@@ -314,12 +464,23 @@ pub fn pool_patch_tokens<B: Backend>(
 
 pub fn patchify<B: Backend>(images: Tensor<B, 4>, patch_size: usize) -> Tensor<B, 3> {
     let [batch, channels, height, width] = images.shape().dims::<4>();
-    assert!(
-        height.is_multiple_of(patch_size) && width.is_multiple_of(patch_size),
-        "patchify expects height/width divisible by patch size"
-    );
-    let grid_h = height / patch_size;
-    let grid_w = width / patch_size;
+    let patch_size = patch_size.max(1);
+    let grid_h = div_ceil(height, patch_size);
+    let grid_w = div_ceil(width, patch_size);
+    let padded_h = grid_h * patch_size;
+    let padded_w = grid_w * patch_size;
+    let device = images.device();
+    let mut images = images;
+    let pad_w = padded_w.saturating_sub(width);
+    let pad_h = padded_h.saturating_sub(height);
+    if pad_w > 0 {
+        let pad = Tensor::<B, 4>::zeros([batch, channels, height, pad_w], &device);
+        images = Tensor::cat(vec![images, pad], 3);
+    }
+    if pad_h > 0 {
+        let pad = Tensor::<B, 4>::zeros([batch, channels, pad_h, padded_w], &device);
+        images = Tensor::cat(vec![images, pad], 2);
+    }
     images
         .reshape([batch, channels, grid_h, patch_size, grid_w, patch_size])
         .swap_dims(1, 2)
@@ -341,18 +502,26 @@ pub fn unpatchify<B: Backend>(
 ) -> Tensor<B, 4> {
     let [batch, tokens, patch_dim] = patches.shape().dims::<3>();
     assert!(patch_dim > 0, "unpatchify expects non-empty patch dim");
-    let grid_h = height / patch_size;
-    let grid_w = width / patch_size;
+    let patch_size = patch_size.max(1);
+    let grid_h = div_ceil(height, patch_size);
+    let grid_w = div_ceil(width, patch_size);
     assert!(
         grid_h * grid_w == tokens,
         "unpatchify expects token count to match grid"
     );
-    patches
+    let padded_h = grid_h * patch_size;
+    let padded_w = grid_w * patch_size;
+    let image = patches
         .reshape([batch, grid_h, grid_w, channels, patch_size, patch_size])
         .swap_dims(3, 4)
         .swap_dims(2, 4)
         .swap_dims(1, 2)
-        .reshape([batch, channels, height, width])
+        .reshape([batch, channels, padded_h, padded_w]);
+    if padded_h == height && padded_w == width {
+        image
+    } else {
+        image.slice_dim(2, 0..height).slice_dim(3, 0..width)
+    }
 }
 
 #[derive(Module, Debug)]
@@ -611,6 +780,10 @@ impl<B: Backend> VisionDragonHatchling<B> {
 
     pub fn patch_embed_raw(&self, images: Tensor<B, 4>) -> PatchEmbedOutput<B> {
         self.patch_embed.forward_raw(images)
+    }
+
+    pub fn patch_size(&self) -> usize {
+        self.patch_embed.patch_size()
     }
 
     pub fn add_patch_position(&self, tokens: Tensor<B, 3>, grid: PatchGrid) -> Tensor<B, 3> {
@@ -1322,14 +1495,47 @@ mod imagenet {
             self.image_size as usize
         }
 
-        pub fn apply(&self, image: DynamicImage, rng: &mut impl Rng) -> RgbImage {
+        pub fn is_deterministic(&self) -> bool {
+            match self.split {
+                ImageNetSplit::Val => true,
+                ImageNetSplit::Train => {
+                    self.flip_prob <= 0.0
+                        && self.color_jitter_prob <= 0.0
+                        && self.grayscale_prob <= 0.0
+                        && self.blur_prob <= 0.0
+                        && self.solarize_prob <= 0.0
+                        && (self.min_scale - 1.0).abs() <= f32::EPSILON
+                        && (self.max_scale - 1.0).abs() <= f32::EPSILON
+                        && (self.min_aspect_ratio - 1.0).abs() <= f32::EPSILON
+                        && (self.max_aspect_ratio - 1.0).abs() <= f32::EPSILON
+                }
+            }
+        }
+
+        pub fn apply(&self, image: &DynamicImage, rng: &mut impl Rng) -> RgbImage {
             match self.split {
                 ImageNetSplit::Train => self.apply_train(image, rng),
                 ImageNetSplit::Val => self.apply_val(image),
             }
         }
 
-        fn apply_train(&self, image: DynamicImage, rng: &mut impl Rng) -> RgbImage {
+        fn apply_train(&self, image: &DynamicImage, rng: &mut impl Rng) -> RgbImage {
+            if self.flip_prob <= 0.0
+                && self.color_jitter_prob <= 0.0
+                && self.grayscale_prob <= 0.0
+                && self.blur_prob <= 0.0
+                && self.solarize_prob <= 0.0
+                && (self.min_scale - 1.0).abs() <= f32::EPSILON
+                && (self.max_scale - 1.0).abs() <= f32::EPSILON
+                && (self.min_aspect_ratio - 1.0).abs() <= f32::EPSILON
+                && (self.max_aspect_ratio - 1.0).abs() <= f32::EPSILON
+            {
+                let (width, height) = image.dimensions();
+                if width == self.image_size && height == self.image_size {
+                    return image.to_rgb8();
+                }
+            }
+
             let mut image = self.random_resized_crop(image, rng);
 
             if self.flip_prob > 0.0 && rng.r#gen::<f32>() < self.flip_prob {
@@ -1376,7 +1582,7 @@ mod imagenet {
             image.to_rgb8()
         }
 
-        fn apply_val(&self, image: DynamicImage) -> RgbImage {
+        fn apply_val(&self, image: &DynamicImage) -> RgbImage {
             let (width, height) = image.dimensions();
             let target = self.resize_short.max(1);
 
@@ -1393,15 +1599,24 @@ mod imagenet {
             cropped.to_rgb8()
         }
 
-        fn random_resized_crop(&self, image: DynamicImage, rng: &mut impl Rng) -> DynamicImage {
+        fn random_resized_crop(&self, image: &DynamicImage, rng: &mut impl Rng) -> DynamicImage {
             let (width, height) = image.dimensions();
             let area = (width * height) as f32;
             let log_min = self.min_aspect_ratio.ln();
             let log_max = self.max_aspect_ratio.ln();
 
             for _ in 0..10 {
-                let target = rng.gen_range(self.min_scale..self.max_scale) * area;
-                let aspect = rng.gen_range(log_min..log_max).exp();
+                let scale = if self.min_scale >= self.max_scale {
+                    self.min_scale
+                } else {
+                    rng.gen_range(self.min_scale..self.max_scale)
+                };
+                let aspect = if self.min_aspect_ratio >= self.max_aspect_ratio {
+                    self.min_aspect_ratio
+                } else {
+                    rng.gen_range(log_min..log_max).exp()
+                };
+                let target = scale * area;
                 let new_width = (target * aspect).sqrt().round() as u32;
                 let new_height = (target / aspect).sqrt().round() as u32;
 
@@ -1465,14 +1680,22 @@ mod imagenet {
 
         pub fn apply(&self, image: &RgbImage, buffer: &mut Vec<f32>) {
             let (width, height) = image.dimensions();
-            for channel in 0..IMAGE_CHANNELS {
-                for y in 0..height {
-                    for x in 0..width {
-                        let pixel = image.get_pixel(x, y).0[channel] as f32 / 255.0;
-                        let value = (pixel - self.mean[channel]) / self.std[channel];
-                        buffer.push(value);
-                    }
-                }
+            let pixels = (width * height) as usize;
+            if pixels == 0 {
+                return;
+            }
+            let start = buffer.len();
+            buffer.resize(start + pixels * IMAGE_CHANNELS, 0.0);
+            let raw = image.as_raw();
+            let stride = pixels;
+            for idx in 0..pixels {
+                let base = idx * IMAGE_CHANNELS;
+                let r = raw[base] as f32 / 255.0;
+                let g = raw[base + 1] as f32 / 255.0;
+                let b = raw[base + 2] as f32 / 255.0;
+                buffer[start + idx] = (r - self.mean[0]) / self.std[0];
+                buffer[start + stride + idx] = (g - self.mean[1]) / self.std[1];
+                buffer[start + 2 * stride + idx] = (b - self.mean[2]) / self.std[2];
             }
         }
     }
@@ -1640,6 +1863,7 @@ mod imagenet {
         pub local_views: usize,
         pub cache_decoded: bool,
         pub cache_capacity: usize,
+        pub cache_preprocessed: bool,
     }
 
     #[derive(Clone, Debug)]
@@ -1747,6 +1971,7 @@ mod imagenet {
         global_views: usize,
         local_views: usize,
         cache: Option<ImageCache>,
+        preprocessed_cache: Option<Vec<Arc<Vec<f32>>>>,
     }
 
     impl ImageNetDataset {
@@ -1771,7 +1996,13 @@ mod imagenet {
                 None
             };
 
-            Ok(Self {
+            let allow_preprocessed = config.cache_preprocessed
+                && global_views == 1
+                && local_views == 0
+                && config.augmentations.is_deterministic()
+                && config.cache_capacity >= samples.len();
+
+            let mut dataset = Self {
                 samples,
                 num_classes,
                 augmentations: config.augmentations,
@@ -1781,7 +2012,14 @@ mod imagenet {
                 global_views,
                 local_views,
                 cache,
-            })
+                preprocessed_cache: None,
+            };
+
+            if allow_preprocessed {
+                dataset.preprocessed_cache = Some(dataset.build_preprocessed_cache()?);
+            }
+
+            Ok(dataset)
         }
 
         pub fn with_teacher(mut self, teacher: Arc<DinoFeatureStore>) -> Self {
@@ -1808,18 +2046,33 @@ mod imagenet {
             self.len().div_ceil(batch_size).max(1)
         }
 
-        fn load_image_cached(&self, path: &Path) -> Result<DynamicImage> {
+        fn load_image_cached(&self, path: &Path) -> Result<Arc<DynamicImage>> {
             if let Some(cache) = &self.cache {
                 if let Some(image) = cache.get(path) {
-                    return Ok((*image).clone());
+                    return Ok(image);
                 }
             }
 
-            let image = load_image(path)?;
+            let image = Arc::new(load_image(path)?);
             if let Some(cache) = &self.cache {
-                cache.insert(path.to_path_buf(), Arc::new(image.clone()));
+                cache.insert(path.to_path_buf(), Arc::clone(&image));
             }
             Ok(image)
+        }
+
+        fn build_preprocessed_cache(&self) -> Result<Vec<Arc<Vec<f32>>>> {
+            let mut cache = Vec::with_capacity(self.samples.len());
+            let mut rng = rand::rngs::StdRng::seed_from_u64(0);
+            let image_size = self.augmentations.image_size();
+            let buffer_len = image_size * image_size * IMAGE_CHANNELS;
+            for sample in &self.samples {
+                let image = self.load_image_cached(&sample.path)?;
+                let aug = self.augmentations.apply(image.as_ref(), &mut rng);
+                let mut buffer = Vec::with_capacity(buffer_len);
+                self.normalize.apply(&aug, &mut buffer);
+                cache.push(Arc::new(buffer));
+            }
+            Ok(cache)
         }
 
         pub fn sample_batch<B: Backend>(
@@ -1898,14 +2151,20 @@ mod imagenet {
 
             for &index in &indices {
                 let sample = &self.samples[index];
+                if let Some(preprocessed_cache) = &self.preprocessed_cache {
+                    if let Some(cached) = preprocessed_cache.get(index) {
+                        images.extend_from_slice(cached.as_ref());
+                        labels.push(sample.label as i64);
+                        continue;
+                    }
+                }
                 let image = self.load_image_cached(&sample.path)?;
                 if self.global_views == 1 && self.local_views == 0 {
-                    let primary = self.augmentations.apply(image, &mut rng);
+                    let primary = self.augmentations.apply(image.as_ref(), &mut rng);
                     self.normalize.apply(&primary, &mut images);
                 } else {
                     for view_idx in 0..self.global_views {
-                        let view_image = image.clone();
-                        let aug = self.augmentations.apply(view_image, &mut rng);
+                        let aug = self.augmentations.apply(image.as_ref(), &mut rng);
                         if view_idx == 0 {
                             self.normalize.apply(&aug, &mut images);
                         }
@@ -1928,8 +2187,7 @@ mod imagenet {
                             .as_ref()
                             .expect("local augmentations required");
                         for _ in 0..self.local_views {
-                            let view_image = image.clone();
-                            let aug = local_aug.apply(view_image, &mut rng);
+                            let aug = local_aug.apply(image.as_ref(), &mut rng);
                             if let Some(buffer) = local_view_images.as_mut() {
                                 self.normalize.apply(&aug, buffer);
                             }
@@ -2137,6 +2395,41 @@ mod imagenet {
                 teacher_cls,
             }
         }
+
+        pub fn repeat_batch(&self, repeats: usize) -> Self {
+            let repeats = repeats.max(1);
+            if repeats == 1 {
+                return self.clone();
+            }
+            Self {
+                images: self.images.clone().repeat_dim(0, repeats),
+                target_images: self
+                    .target_images
+                    .as_ref()
+                    .map(|tensor| tensor.clone().repeat_dim(0, repeats)),
+                view_images: self
+                    .view_images
+                    .as_ref()
+                    .map(|tensor| tensor.clone().repeat_dim(0, repeats)),
+                global_view_images: self
+                    .global_view_images
+                    .as_ref()
+                    .map(|tensor| tensor.clone().repeat_dim(0, repeats)),
+                local_view_images: self
+                    .local_view_images
+                    .as_ref()
+                    .map(|tensor| tensor.clone().repeat_dim(0, repeats)),
+                labels: self.labels.clone().repeat_dim(0, repeats),
+                teacher_patch: self
+                    .teacher_patch
+                    .as_ref()
+                    .map(|tensor| tensor.clone().repeat_dim(0, repeats)),
+                teacher_cls: self
+                    .teacher_cls
+                    .as_ref()
+                    .map(|tensor| tensor.clone().repeat_dim(0, repeats)),
+            }
+        }
     }
 
     pub struct ImageNetDataLoader<B: Backend> {
@@ -2189,15 +2482,18 @@ mod imagenet {
             let prefetch_batches = prefetch_batches.min(steps_per_epoch);
             let prefetch_to_device = prefetch_to_device && prefetch_batches > 0;
             let min_prefetch = if prefetch_to_device { 2 } else { 1 };
-            let prefetch_batches = if prefetch_batches == 0 {
-                0
-            } else {
-                prefetch_batches.max(min_prefetch)
-            };
             let prefetch_workers = if prefetch_batches == 0 {
                 0
             } else {
                 prefetch_workers.max(1)
+            };
+            let prefetch_batches = if prefetch_batches == 0 {
+                0
+            } else {
+                prefetch_batches
+                    .max(min_prefetch)
+                    .max(prefetch_workers)
+                    .min(steps_per_epoch)
             };
 
             Self {
@@ -2366,7 +2662,13 @@ mod imagenet {
                             break;
                         }
                         let item = match data {
-                            Ok(data) => Ok(ImageNetPrefetchItem::Batch(data.into_batch::<B>(&device))),
+                            Ok(data) => {
+                                let _guard =
+                                    crate::device::device_allocation_lock().lock().ok();
+                                Ok(ImageNetPrefetchItem::Batch(
+                                    data.into_batch::<B>(&device),
+                                ))
+                            }
                             Err(err) => Err(err),
                         };
                         if tx.send(item).is_err() {

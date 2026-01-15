@@ -98,6 +98,7 @@ pub(crate) struct VisionDiagnostics {
     pub(crate) artifact_fps: u32,
     pub(crate) normalize_mean: [f32; 3],
     pub(crate) normalize_std: [f32; 3],
+    pub(crate) ffmpeg_path: Option<PathBuf>,
 }
 
 pub(crate) fn train_with_scheduler<B, S>(
@@ -168,13 +169,14 @@ where
     fs::create_dir_all(env.run_dir)?;
 
     let metric_every = env.training.log_frequency.max(1);
+    let loss_every = 1;
     let mut builder = LearnerBuilder::new(env.run_dir)
         .num_epochs(env.epochs)
         .learning_strategy(LearningStrategy::SingleDevice(env.device.clone()))
         .with_file_checkpointer(BinFileRecorder::<FullPrecisionSettings>::new())
         .metric_train_numeric(ScalarMetric::<ValidBackend<B>, LossValue<ValidBackend<B>>>::new_every(
             "Loss",
-            metric_every,
+            loss_every,
         ))
         .metric_valid_numeric(LossMetric::<ValidBackend<B>>::new())
         .metric_train_numeric(LearningRateMetric::new())
@@ -184,15 +186,28 @@ where
 
     info!("vision run name: {}", env.run_name);
 
-    if env.training.memory_cleanup_every > 0 {
+    #[cfg(feature = "integration_test")]
+    if env.training.trace_train_loss {
+        builder = builder.metric_train(crate::train::metrics::LossTraceMetric::<
+            ValidBackend<B>,
+        >::new("loss_trace", env.training.trace_train_loss_every));
+    }
+
+    let cleanup_iters = env.training.memory_cleanup_iters;
+    if env.training.memory_cleanup_every > 0 || cleanup_iters > 0 {
+        let allow_cuda_cleanup = !env.training.disable_cuda_memory_cleanup;
         builder = builder
             .metric_train(MemoryCleanupMetric::<B>::new(
                 env.device,
                 env.training.memory_cleanup_every,
+                cleanup_iters,
+                allow_cuda_cleanup,
             ))
             .metric_valid(MemoryCleanupMetric::<ValidBackend<B>>::new(
                 env.device,
                 env.training.memory_cleanup_every,
+                cleanup_iters,
+                allow_cuda_cleanup,
             ));
     }
 
@@ -287,6 +302,7 @@ where
                 diagnostics.normalize_mean,
                 diagnostics.normalize_std,
                 diagnostics.artifact_overwrite,
+                diagnostics.ffmpeg_path.clone(),
             ));
         }
     }

@@ -6,6 +6,54 @@ use serde::{Deserialize, Serialize};
 use crate::positional::RotaryEmbedding;
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum WgpuBackend {
+    Auto,
+    Vulkan,
+    Dx12,
+    Metal,
+    #[serde(rename = "opengl")]
+    OpenGl,
+}
+
+impl Default for WgpuBackend {
+    fn default() -> Self {
+        Self::Auto
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub enum WgpuMemoryConfig {
+    #[serde(rename = "subslices")]
+    SubSlices,
+    Exclusive,
+}
+
+impl Default for WgpuMemoryConfig {
+    fn default() -> Self {
+        Self::SubSlices
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(default)]
+pub struct WgpuRuntimeConfig {
+    pub backend: WgpuBackend,
+    pub tasks_max: Option<usize>,
+    pub memory: WgpuMemoryConfig,
+}
+
+impl Default for WgpuRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            backend: WgpuBackend::default(),
+            tasks_max: None,
+            memory: WgpuMemoryConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct TrainingHyperparameters {
     pub block_size: usize,
     pub batch_size: usize,

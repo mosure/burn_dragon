@@ -2432,7 +2432,9 @@ dependencies = [
  "image 0.25.9",
  "pollster",
  "rand 0.8.5",
+ "serde",
  "tempfile",
+ "toml",
  "wgpu",
 ]
 

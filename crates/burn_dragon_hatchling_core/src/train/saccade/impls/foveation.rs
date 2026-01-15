@@ -1,6 +1,11 @@
 use crate::train::prelude::*;
 use crate::train::foveation::cubecl as foveation_cubecl;
 use crate::train::foveation::wgsl as foveation_wgsl;
+use burn_autodiff::Autodiff;
+use burn_wgpu::Wgpu;
+use std::any::Any;
+#[cfg(feature = "cuda")]
+use burn_cuda::Cuda;
 
 impl<B: BackendTrait> VisionSaccadeModel<B> {
     pub(crate) fn erfinv_approx(&self, values: Tensor<B, 3>) -> Tensor<B, 3> {
@@ -88,12 +93,17 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
         sigma: Tensor<B, 2>,
         laplacian_images: Option<&SaccadeLaplacianImages<B>>,
     ) -> Tensor<B, 4> {
+        let radius = sigma
+            .clone()
+            .mul_scalar(self.config.fovea_radius_scale)
+            .clamp_min(SACCADE_EPS)
+            .clamp_max(1.0 - SACCADE_EPS);
         self.foveated_patch_image_with_radius(
             levels,
             base_grid,
             mean,
             sigma.clone(),
-            sigma,
+            radius,
             laplacian_images,
         )
     }
@@ -157,7 +167,10 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
         let center_x = mean_x.mul_scalar(width as f32);
         let center_y = mean_y.mul_scalar(height as f32);
         let warp_mode = self.config.fovea_warp_mode;
-        let sampling_mode = if matches!(self.config.fovea_sampling_mode, VisionFoveaSamplingMode::Batched) {
+        let subsamples_match = self.config.fovea_subsamples == SACCADE_FOVEA_SUBSAMPLES;
+        let sampling_mode = if subsamples_match
+            && matches!(self.config.fovea_sampling_mode, VisionFoveaSamplingMode::Batched)
+        {
             if foveation_wgsl::supports_backend::<B>() {
                 VisionFoveaSamplingMode::Wgsl
             } else if matches!(warp_mode, VisionFoveaWarpMode::Warped)
@@ -167,21 +180,48 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
             } else {
                 VisionFoveaSamplingMode::Batched
             }
-        } else {
+        } else if subsamples_match {
             self.config.fovea_sampling_mode
+        } else {
+            match self.config.fovea_sampling_mode {
+                VisionFoveaSamplingMode::Wgsl | VisionFoveaSamplingMode::Cubecl => {
+                    VisionFoveaSamplingMode::Batched
+                }
+                _ => self.config.fovea_sampling_mode,
+            }
         };
-        match sampling_mode {
-            VisionFoveaSamplingMode::Batched => self.foveated_patch_sample_batched(
+        let grid_sample_max_bytes = limit_bytes_from_mb(self.config.grid_sample_max_mb);
+        if B::ad_enabled() {
+            if let Some(patch) = self.try_foveated_patch_custom_backward(
+                sampling_mode,
+                warp_mode,
                 levels,
-                base_grid,
-                center_x,
-                center_y,
-                sigma_px,
-                radius_px,
-                lod_sigma,
+                &base_grid,
+                &center_x,
+                &center_y,
+                &sigma_px,
+                &radius_px,
+                &lod_sigma,
                 laplacian_images,
                 full_patch_h,
-            ),
+            ) {
+                return patch;
+            }
+        }
+        match sampling_mode {
+            VisionFoveaSamplingMode::Batched => {
+                self.foveated_patch_sample_batched(
+                    levels,
+                    base_grid,
+                    center_x,
+                    center_y,
+                    sigma_px,
+                    radius_px,
+                    lod_sigma,
+                    laplacian_images,
+                    full_patch_h,
+                )
+            }
             VisionFoveaSamplingMode::Sequential => self.foveated_patch_sample_sequential(
                 levels,
                 base_grid,
@@ -194,7 +234,19 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
                 full_patch_h,
             ),
             VisionFoveaSamplingMode::Cubecl => {
-                if matches!(warp_mode, VisionFoveaWarpMode::Warped) {
+                if B::ad_enabled() {
+                    self.foveated_patch_sample_batched(
+                        levels,
+                        base_grid,
+                        center_x,
+                        center_y,
+                        sigma_px,
+                        radius_px,
+                        lod_sigma,
+                        laplacian_images,
+                        full_patch_h,
+                    )
+                } else if matches!(warp_mode, VisionFoveaWarpMode::Warped) {
                     if let Some(patch) = foveation_cubecl::try_foveated_patch_cubecl(
                         levels,
                         &base_grid,
@@ -204,6 +256,7 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
                         &radius_px,
                         &lod_sigma,
                         laplacian_images,
+                        grid_sample_max_bytes,
                     ) {
                         patch
                     } else {
@@ -234,20 +287,8 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
                 }
             }
             VisionFoveaSamplingMode::Wgsl => {
-                if let Some(patch) = foveation_wgsl::try_foveated_patch_wgsl(
-                    levels,
-                    &base_grid,
-                    &center_x,
-                    &center_y,
-                    &sigma_px,
-                    &radius_px,
-                    &lod_sigma,
-                    laplacian_images,
-                    warp_mode,
-                ) {
-                    patch
-                } else {
-                    self.foveated_patch_sample_sequential(
+                if B::ad_enabled() {
+                    self.foveated_patch_sample_batched(
                         levels,
                         base_grid,
                         center_x,
@@ -258,6 +299,32 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
                         laplacian_images,
                         full_patch_h,
                     )
+                } else {
+                    if let Some(patch) = foveation_wgsl::try_foveated_patch_wgsl(
+                        levels,
+                        &base_grid,
+                        &center_x,
+                        &center_y,
+                        &sigma_px,
+                        &radius_px,
+                        &lod_sigma,
+                        laplacian_images,
+                        warp_mode,
+                    ) {
+                        patch
+                    } else {
+                        self.foveated_patch_sample_sequential(
+                            levels,
+                            base_grid,
+                            center_x,
+                            center_y,
+                            sigma_px,
+                            radius_px,
+                            lod_sigma,
+                            laplacian_images,
+                            full_patch_h,
+                        )
+                    }
                 }
             }
             VisionFoveaSamplingMode::Subpatch => {
@@ -289,6 +356,110 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
                 )
             }
         }
+    }
+
+    fn try_foveated_patch_custom_backward(
+        &self,
+        sampling_mode: VisionFoveaSamplingMode,
+        warp_mode: VisionFoveaWarpMode,
+        levels: &[SaccadeMipLevel<B>],
+        base_grid: &Tensor<B, 4>,
+        center_x: &Tensor<B, 3>,
+        center_y: &Tensor<B, 3>,
+        sigma_px: &Tensor<B, 3>,
+        radius_px: &Tensor<B, 3>,
+        lod_sigma: &Tensor<B, 3>,
+        laplacian_images: Option<&SaccadeLaplacianImages<B>>,
+        full_patch_h: usize,
+    ) -> Option<Tensor<B, 4>> {
+        if !B::ad_enabled() {
+            return None;
+        }
+        if self.config.fovea_subsamples != SACCADE_FOVEA_SUBSAMPLES {
+            return None;
+        }
+        if let Some(result) = self.try_foveated_patch_custom_backward_for::<Autodiff<Wgpu<f32>>>(
+            sampling_mode,
+            warp_mode,
+            levels,
+            base_grid,
+            center_x,
+            center_y,
+            sigma_px,
+            radius_px,
+            lod_sigma,
+            laplacian_images,
+            full_patch_h,
+        ) {
+            return Some(result);
+        }
+        #[cfg(feature = "cuda")]
+        if let Some(result) = self.try_foveated_patch_custom_backward_for::<Autodiff<Cuda<f32>>>(
+            sampling_mode,
+            warp_mode,
+            levels,
+            base_grid,
+            center_x,
+            center_y,
+            sigma_px,
+            radius_px,
+            lod_sigma,
+            laplacian_images,
+            full_patch_h,
+        ) {
+            return Some(result);
+        }
+        None
+    }
+
+    fn try_foveated_patch_custom_backward_for<AD>(
+        &self,
+        sampling_mode: VisionFoveaSamplingMode,
+        warp_mode: VisionFoveaWarpMode,
+        levels: &[SaccadeMipLevel<B>],
+        base_grid: &Tensor<B, 4>,
+        center_x: &Tensor<B, 3>,
+        center_y: &Tensor<B, 3>,
+        sigma_px: &Tensor<B, 3>,
+        radius_px: &Tensor<B, 3>,
+        lod_sigma: &Tensor<B, 3>,
+        laplacian_images: Option<&SaccadeLaplacianImages<B>>,
+        full_patch_h: usize,
+    ) -> Option<Tensor<B, 4>>
+    where
+        AD: AutodiffBackend,
+    {
+        let model = (self as &dyn Any).downcast_ref::<VisionSaccadeModel<AD>>()?;
+        let levels = downcast_levels::<B, AD>(levels)?;
+        let base_grid = downcast_tensor::<B, AD, 4>(base_grid)?;
+        let center_x = downcast_tensor::<B, AD, 3>(center_x)?;
+        let center_y = downcast_tensor::<B, AD, 3>(center_y)?;
+        let sigma_px = downcast_tensor::<B, AD, 3>(sigma_px)?;
+        let radius_px = downcast_tensor::<B, AD, 3>(radius_px)?;
+        let lod_sigma = downcast_tensor::<B, AD, 3>(lod_sigma)?;
+        let laplacian_images = match laplacian_images {
+            Some(laplacian) => Some(downcast_laplacian::<B, AD>(laplacian)?),
+            None => None,
+        };
+        let patch = try_foveated_patch_custom_backward_autodiff(
+            model,
+            sampling_mode,
+            warp_mode,
+            &levels,
+            &base_grid,
+            &center_x,
+            &center_y,
+            &sigma_px,
+            &radius_px,
+            &lod_sigma,
+            laplacian_images.as_ref(),
+            full_patch_h,
+        )?;
+        let boxed: Box<dyn Any> = Box::new(patch);
+        boxed
+            .downcast::<Tensor<B, 4>>()
+            .ok()
+            .map(|boxed| *boxed)
     }
 
     pub(crate) fn foveated_patch_sample_batched(
@@ -323,10 +494,14 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
         };
         let [batch, channels, height, width] = first.image.shape().dims::<4>();
         let [_, patch_h, patch_w, _] = base_grid.shape().dims::<4>();
+        let grid_sample_max_bytes = limit_bytes_from_mb(self.config.grid_sample_max_mb);
         let full_half = full_patch_h as f32 * 0.5;
         let pixel_du = 1.0 / full_half.max(1.0);
-        let subsamples = SACCADE_FOVEA_SUBSAMPLES * SACCADE_FOVEA_SUBSAMPLES;
-        let jitter = self.fovea_jitter(full_patch_h, &device).batched;
+        let subsamples_axis = self.config.fovea_subsamples.max(1);
+        let subsamples = subsamples_axis * subsamples_axis;
+        let jitter = self
+            .fovea_jitter(full_patch_h, subsamples_axis, &device)
+            .batched;
         let ux_base = base_grid.clone().slice_dim(3, 0..1).squeeze_dim::<3>(3);
         let uy_base = base_grid.clone().slice_dim(3, 1..2).squeeze_dim::<3>(3);
         let sigma_base = sigma_px
@@ -433,8 +608,11 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
         let laplacian_samples = if let Some(laplacian) = laplacian_images {
             let [_, _, coarse_h, coarse_w] = laplacian.coarse.shape().dims::<4>();
             let coarse_grid = make_grid(&fx, &fy, coarse_w, coarse_h);
-            let coarse_sample =
-                grid_sample_2d_bilinear::<B>(expand_4d(laplacian.coarse.clone()), coarse_grid);
+            let coarse_sample = grid_sample_2d_bilinear::<B>(
+                expand_4d(laplacian.coarse.clone()),
+                coarse_grid,
+                grid_sample_max_bytes,
+            );
             let mut residual_samples = Vec::with_capacity(laplacian.residuals.len());
             for residual in laplacian.residuals.iter() {
                 let [_, _, res_h, res_w] = residual.shape().dims::<4>();
@@ -442,6 +620,7 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
                 residual_samples.push(grid_sample_2d_bilinear::<B>(
                     expand_4d(residual.clone()),
                     residual_grid,
+                    grid_sample_max_bytes,
                 ));
             }
             let mut recon_samples = Vec::with_capacity(levels.len());
@@ -481,7 +660,11 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
             } else {
                 let [_, _, level_h, level_w] = level.image.shape().dims::<4>();
                 let level_grid = make_grid(&fx, &fy, level_w, level_h);
-                grid_sample_2d_bilinear::<B>(expand_4d(level.image.clone()), level_grid)
+                grid_sample_2d_bilinear::<B>(
+                    expand_4d(level.image.clone()),
+                    level_grid,
+                    grid_sample_max_bytes,
+                )
             };
             color = color + sample * weight.clone().unsqueeze_dim::<4>(1);
             weight_sum = weight_sum + weight;
@@ -501,5 +684,157 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
         accum.mul_scalar(1.0 / subsamples as f32)
     }
 
+}
+
+fn downcast_tensor<B: BackendTrait, AD: BackendTrait, const D: usize>(
+    tensor: &Tensor<B, D>,
+) -> Option<Tensor<AD, D>> {
+    let any = tensor as &dyn Any;
+    any.downcast_ref::<Tensor<AD, D>>().cloned()
+}
+
+fn downcast_levels<B: BackendTrait, AD: BackendTrait>(
+    levels: &[SaccadeMipLevel<B>],
+) -> Option<Vec<SaccadeMipLevel<AD>>> {
+    let mut out = Vec::with_capacity(levels.len());
+    for level in levels {
+        let tokens = downcast_tensor::<B, AD, 3>(&level.tokens)?;
+        let image = downcast_tensor::<B, AD, 4>(&level.image)?;
+        out.push(SaccadeMipLevel {
+            tokens,
+            grid: level.grid,
+            image,
+        });
+    }
+    Some(out)
+}
+
+fn downcast_laplacian<B: BackendTrait, AD: BackendTrait>(
+    laplacian: &SaccadeLaplacianImages<B>,
+) -> Option<SaccadeLaplacianImages<AD>> {
+    let mut residuals = Vec::with_capacity(laplacian.residuals.len());
+    for residual in &laplacian.residuals {
+        residuals.push(downcast_tensor::<B, AD, 4>(residual)?);
+    }
+    let coarse = downcast_tensor::<B, AD, 4>(&laplacian.coarse)?;
+    Some(SaccadeLaplacianImages { residuals, coarse })
+}
+
+fn try_foveated_patch_custom_backward_autodiff<AD: AutodiffBackend>(
+    model: &VisionSaccadeModel<AD>,
+    sampling_mode: VisionFoveaSamplingMode,
+    warp_mode: VisionFoveaWarpMode,
+    levels: &[SaccadeMipLevel<AD>],
+    base_grid: &Tensor<AD, 4>,
+    center_x: &Tensor<AD, 3>,
+    center_y: &Tensor<AD, 3>,
+    sigma_px: &Tensor<AD, 3>,
+    radius_px: &Tensor<AD, 3>,
+    lod_sigma: &Tensor<AD, 3>,
+    laplacian_images: Option<&SaccadeLaplacianImages<AD>>,
+    full_patch_h: usize,
+) -> Option<Tensor<AD, 4>> {
+    let inner_levels: Vec<SaccadeMipLevel<AD::InnerBackend>> = levels
+        .iter()
+        .map(|level| SaccadeMipLevel {
+            tokens: level.tokens.clone().inner(),
+            grid: level.grid,
+            image: level.image.clone().inner(),
+        })
+        .collect();
+    let inner_base_grid = base_grid.clone().inner();
+    let inner_center_x = center_x.clone().inner();
+    let inner_center_y = center_y.clone().inner();
+    let inner_sigma_px = sigma_px.clone().inner();
+    let inner_radius_px = radius_px.clone().inner();
+    let inner_lod_sigma = lod_sigma.clone().inner();
+    let inner_laplacian = laplacian_images.map(|laplacian| SaccadeLaplacianImages {
+        residuals: laplacian
+            .residuals
+            .iter()
+            .map(|residual| residual.clone().inner())
+            .collect(),
+        coarse: laplacian.coarse.clone().inner(),
+    });
+    let inner_laplacian_ref = inner_laplacian.as_ref();
+    let grid_sample_max_bytes = limit_bytes_from_mb(model.config.grid_sample_max_mb);
+
+    let fused_inner = match sampling_mode {
+        VisionFoveaSamplingMode::Wgsl => foveation_wgsl::try_foveated_patch_wgsl::<
+            AD::InnerBackend,
+        >(
+            &inner_levels,
+            &inner_base_grid,
+            &inner_center_x,
+            &inner_center_y,
+            &inner_sigma_px,
+            &inner_radius_px,
+            &inner_lod_sigma,
+            inner_laplacian_ref,
+            warp_mode,
+        ),
+        VisionFoveaSamplingMode::Cubecl => {
+            if matches!(warp_mode, VisionFoveaWarpMode::Warped) {
+                foveation_cubecl::try_foveated_patch_cubecl::<AD::InnerBackend>(
+                    &inner_levels,
+                    &inner_base_grid,
+                    &inner_center_x,
+                    &inner_center_y,
+                    &inner_sigma_px,
+                    &inner_radius_px,
+                    &inner_lod_sigma,
+                    inner_laplacian_ref,
+                    grid_sample_max_bytes,
+                )
+            } else {
+                None
+            }
+        }
+        VisionFoveaSamplingMode::Batched => foveation_wgsl::try_foveated_patch_wgsl::<
+            AD::InnerBackend,
+        >(
+            &inner_levels,
+            &inner_base_grid,
+            &inner_center_x,
+            &inner_center_y,
+            &inner_sigma_px,
+            &inner_radius_px,
+            &inner_lod_sigma,
+            inner_laplacian_ref,
+            warp_mode,
+        )
+        .or_else(|| {
+            if matches!(warp_mode, VisionFoveaWarpMode::Warped) {
+                foveation_cubecl::try_foveated_patch_cubecl::<AD::InnerBackend>(
+                    &inner_levels,
+                    &inner_base_grid,
+                    &inner_center_x,
+                    &inner_center_y,
+                    &inner_sigma_px,
+                    &inner_radius_px,
+                    &inner_lod_sigma,
+                    inner_laplacian_ref,
+                    grid_sample_max_bytes,
+                )
+            } else {
+                None
+            }
+        }),
+        _ => None,
+    }?;
+
+    let fused = Tensor::<AD, 4>::from_inner(fused_inner);
+    let surrogate = model.foveated_patch_sample_batched(
+        levels,
+        base_grid.clone(),
+        center_x.clone(),
+        center_y.clone(),
+        sigma_px.clone(),
+        radius_px.clone(),
+        lod_sigma.clone(),
+        laplacian_images,
+        full_patch_h,
+    );
+    Some(fused + (surrogate.clone() - surrogate.detach()))
 }
 

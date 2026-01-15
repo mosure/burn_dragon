@@ -23,6 +23,7 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
         };
         let [batch, channels, height, width] = first.image.shape().dims::<4>();
         let [_, patch_h, patch_w, _] = base_grid.shape().dims::<4>();
+        let grid_sample_max_bytes = limit_bytes_from_mb(self.config.grid_sample_max_mb);
         if batch == 0 || channels == 0 || patch_h == 0 || patch_w == 0 {
             return Tensor::<B, 4>::zeros(
                 [batch.max(1), channels.max(1), patch_h.max(1), patch_w.max(1)],
@@ -143,18 +144,25 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
         let mean_y = center_y.clone().div_scalar(height as f32);
         let min_side = width.min(height).max(1) as f32;
         let max_level = levels.len().saturating_sub(1) as f32;
-        let level_map = radius_px
+        let level_f = radius_px
             .clone()
             .div_scalar(min_side)
             .clamp_min(0.0)
             .clamp_max(1.0)
             .mul_scalar(max_level)
-            .add_scalar(0.5)
-            .floor()
             .clamp_min(0.0)
-            .clamp_max(max_level)
-            .repeat_dim(1, patch_h)
-            .repeat_dim(2, patch_w);
+            .clamp_max(max_level);
+        let level0 = level_f.clone().floor();
+        let level1 = level0.clone().add_scalar(1.0).clamp_max(max_level);
+        let t = level_f
+            .clone()
+            .sub(level0.clone())
+            .clamp_min(0.0)
+            .clamp_max(1.0);
+        let level0_map = level0.clone().repeat_dim(1, patch_h).repeat_dim(2, patch_w);
+        let level1_map = level1.clone().repeat_dim(1, patch_h).repeat_dim(2, patch_w);
+        let t_map = t.repeat_dim(1, patch_h).repeat_dim(2, patch_w);
+        let inv_t_map = t_map.clone().mul_scalar(-1.0).add_scalar(1.0);
 
         let make_grid = |fx: &Tensor<B, 3>, fy: &Tensor<B, 3>, level_w: usize, level_h: usize| {
             grid_from_fx_fy::<B>(fx, fy, level_w, level_h, &device)
@@ -165,15 +173,15 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
             let [_, _, coarse_h, coarse_w] = laplacian.coarse.shape().dims::<4>();
             let coarse_grid = make_grid(fx, fy, coarse_w, coarse_h);
             let mut sample =
-                grid_sample_2d_bilinear::<B>(laplacian.coarse.clone(), coarse_grid);
+                grid_sample_2d_bilinear::<B>(laplacian.coarse.clone(), coarse_grid, grid_sample_max_bytes);
             for (idx, residual) in laplacian.residuals.iter().enumerate() {
                 if idx < start_idx {
                     continue;
                 }
                 let [_, _, res_h, res_w] = residual.shape().dims::<4>();
                 let residual_grid = make_grid(fx, fy, res_w, res_h);
-                sample =
-                    sample + grid_sample_2d_bilinear::<B>(residual.clone(), residual_grid);
+                sample = sample
+                    + grid_sample_2d_bilinear::<B>(residual.clone(), residual_grid, grid_sample_max_bytes);
             }
             sample
         };
@@ -185,12 +193,14 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
             let [_, _, level_h, level_w] = level.image.shape().dims::<4>();
             let fx = mean_x.clone().add(dx.clone().div_scalar(level_w as f32));
             let fy = mean_y.clone().add(dy.clone().div_scalar(level_h as f32));
-            let weight = level_map.clone().equal_elem(level_f).float();
+            let weight0 = level0_map.clone().equal_elem(level_f).float();
+            let weight1 = level1_map.clone().equal_elem(level_f).float();
+            let weight = weight0.clone().mul(inv_t_map.clone()) + weight1.clone().mul(t_map.clone());
             let sample = if laplacian_images.is_some() {
                 sample_laplacian(level_idx, &fx, &fy)
             } else {
                 let level_grid = make_grid(&fx, &fy, level_w, level_h);
-                grid_sample_2d_bilinear::<B>(level.image.clone(), level_grid)
+                grid_sample_2d_bilinear::<B>(level.image.clone(), level_grid, grid_sample_max_bytes)
             };
             color = color + sample * weight.clone().unsqueeze_dim::<4>(1);
         }
@@ -229,9 +239,13 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
         };
         let [batch, channels, height, width] = first.image.shape().dims::<4>();
         let [_, patch_h, patch_w, _] = base_grid.shape().dims::<4>();
+        let grid_sample_max_bytes = limit_bytes_from_mb(self.config.grid_sample_max_mb);
         let full_half = full_patch_h as f32 * 0.5;
         let pixel_du = 1.0 / full_half.max(1.0);
-        let jitter_samples = self.fovea_jitter(full_patch_h, &device).sequential;
+        let subsamples_axis = self.config.fovea_subsamples.max(1);
+        let jitter_samples = self
+            .fovea_jitter(full_patch_h, subsamples_axis, &device)
+            .sequential;
         let subsample_count = jitter_samples.len().max(1) as f32;
         let mut accum =
             Tensor::<B, 4>::zeros([batch, channels, patch_h, patch_w], &device);
@@ -305,7 +319,11 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
                     let [_, _, coarse_h, coarse_w] = laplacian.coarse.shape().dims::<4>();
                     let coarse_grid = make_grid(&fx, &fy, coarse_w, coarse_h);
                     let coarse_sample =
-                        grid_sample_2d_bilinear::<B>(laplacian.coarse.clone(), coarse_grid);
+                        grid_sample_2d_bilinear::<B>(
+                            laplacian.coarse.clone(),
+                            coarse_grid,
+                            grid_sample_max_bytes,
+                        );
                     let mut residual_samples = Vec::with_capacity(laplacian.residuals.len());
                     for residual in laplacian.residuals.iter() {
                         let [_, _, res_h, res_w] = residual.shape().dims::<4>();
@@ -313,6 +331,7 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
                         residual_samples.push(grid_sample_2d_bilinear::<B>(
                             residual.clone(),
                             residual_grid,
+                            grid_sample_max_bytes,
                         ));
                     }
                     let mut recon_samples = Vec::with_capacity(levels.len());
@@ -352,7 +371,11 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
                 } else {
                     let [_, _, level_h, level_w] = level.image.shape().dims::<4>();
                     let level_grid = make_grid(&fx, &fy, level_w, level_h);
-                    grid_sample_2d_bilinear::<B>(level.image.clone(), level_grid)
+                    grid_sample_2d_bilinear::<B>(
+                        level.image.clone(),
+                        level_grid,
+                        grid_sample_max_bytes,
+                    )
                 };
                 color = color + sample * weight.clone().unsqueeze_dim::<4>(1);
                 weight_sum = weight_sum + weight;
@@ -523,6 +546,7 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
         }
         let mut tokens_chunks = Vec::with_capacity(levels.len());
         let mut weight_chunks = Vec::with_capacity(weights.len());
+        let mut concat_tokens = 0usize;
         for (tokens, weights_level) in levels.iter().zip(weights.iter()) {
             let [batch_t, in_tokens, dim_t] = tokens.shape().dims::<3>();
             let [batch_w, out_tokens, in_tokens_w] = weights_level.shape().dims::<3>();
@@ -547,6 +571,7 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
             }
             tokens_chunks.push(tokens.clone());
             weight_chunks.push(weights_level.clone());
+            concat_tokens = concat_tokens.saturating_add(in_tokens);
         }
         if tokens_chunks.is_empty() {
             return Tensor::<B, 3>::zeros([batch, traj_tokens, embed_dim.max(1)], &device);
@@ -556,6 +581,27 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
                 weight_chunks.pop().expect("single weight"),
                 tokens_chunks.pop().expect("single tokens"),
             );
+        }
+        let mut use_concat = prefer_concat;
+        if use_concat {
+            let mip_concat_max_bytes = limit_bytes_from_mb(self.config.mip_concat_max_mb);
+            let elem_bytes = std::mem::size_of::<B::FloatElem>() as u64;
+            let matmul_bytes = (batch as u64)
+                .saturating_mul(traj_tokens as u64)
+                .saturating_mul(concat_tokens as u64)
+                .saturating_mul(embed_dim as u64)
+                .saturating_mul(elem_bytes);
+            if matmul_bytes > mip_concat_max_bytes {
+                use_concat = false;
+            }
+        }
+        if !use_concat {
+            let mut context =
+                Tensor::<B, 3>::zeros([batch, traj_tokens, embed_dim.max(1)], &device);
+            for (tokens, weights) in levels.iter().zip(weights.iter()) {
+                context = context + self.weighted_sum_tokens(weights.clone(), tokens.clone());
+            }
+            return context;
         }
         let tokens_cat = Tensor::cat(tokens_chunks, 1);
         let weights_cat = Tensor::cat(weight_chunks, 2);

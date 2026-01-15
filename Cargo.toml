@@ -68,6 +68,8 @@ half = "2"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 pollster = "0.3"
 rand = "0.8"
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.9"
 tempfile = "3"
 wgpu = "26"
 
@@ -118,3 +120,13 @@ path = "bench/train.rs"
 name = "vision_pipeline"
 harness = false
 path = "bench/vision_pipeline.rs"
+
+[[bench]]
+name = "vision_train_step"
+harness = false
+path = "bench/vision_train_step.rs"
+
+[[bench]]
+name = "vision_input_projection"
+harness = false
+path = "bench/vision_input_projection.rs"

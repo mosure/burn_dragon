@@ -278,6 +278,7 @@ mod train_tests {
             local_views: 0,
             cache_decoded: false,
             cache_capacity: 0,
+            cache_preprocessed: false,
         })
         .expect("imagenet dataset");
 
@@ -362,6 +363,7 @@ mod train_tests {
             local_views: 3,
             cache_decoded: false,
             cache_capacity: 0,
+            cache_preprocessed: false,
         })
         .expect("imagenet dataset");
 
@@ -422,6 +424,7 @@ mod train_tests {
                 local_views: 0,
                 cache_decoded: false,
                 cache_capacity: 0,
+            cache_preprocessed: false,
             })
             .expect("imagenet dataset"),
         );
@@ -578,6 +581,7 @@ mod train_tests {
             local_views: 0,
             cache_decoded: false,
             cache_capacity: 0,
+            cache_preprocessed: false,
         })
         .expect("imagenet dataset");
 

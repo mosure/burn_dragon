@@ -1,0 +1,10 @@
+# benchmark controls for the vision pipeline benches
+
+[bench]
+full = false
+include_cuda = false
+
+# [wgpu]
+# backend = "auto"
+# memory = "subslices"
+# tasks_max = 1024

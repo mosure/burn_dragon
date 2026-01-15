@@ -109,6 +109,7 @@ pub(crate) struct VisionOutput<B: BackendTrait> {
     inv_loss: Tensor<B, 1>,
     sigreg_loss: Tensor<B, 1>,
     recon_loss: Tensor<B, 1>,
+    policy_loss: Tensor<B, 1>,
     probe_loss: Tensor<B, 1>,
     probe_acc: Tensor<B, 1>,
     artifacts: Option<VisionArtifactInput<B>>,
@@ -120,6 +121,7 @@ impl<B: BackendTrait> VisionOutput<B> {
         inv_loss: Tensor<B, 1>,
         sigreg_loss: Tensor<B, 1>,
         recon_loss: Tensor<B, 1>,
+        policy_loss: Tensor<B, 1>,
         probe_loss: Tensor<B, 1>,
         probe_acc: Tensor<B, 1>,
         artifacts: Option<VisionArtifactInput<B>>,
@@ -129,6 +131,7 @@ impl<B: BackendTrait> VisionOutput<B> {
             inv_loss,
             sigreg_loss,
             recon_loss,
+            policy_loss,
             probe_loss,
             probe_acc,
             artifacts,
@@ -190,6 +193,17 @@ impl<B: BackendTrait> ReconLossInput<B> {
 }
 
 #[derive(Clone)]
+pub(crate) struct PolicyLossInput<B: BackendTrait> {
+    value: Tensor<B, 1>,
+}
+
+impl<B: BackendTrait> PolicyLossInput<B> {
+    pub(crate) fn new(value: Tensor<B, 1>) -> Self {
+        Self { value }
+    }
+}
+
+#[derive(Clone)]
 pub(crate) struct ProbeLossInput<B: BackendTrait> {
     value: Tensor<B, 1>,
 }
@@ -229,6 +243,12 @@ impl<B: BackendTrait> Adaptor<ReconLossInput<B>> for VisionOutput<B> {
     }
 }
 
+impl<B: BackendTrait> Adaptor<PolicyLossInput<B>> for VisionOutput<B> {
+    fn adapt(&self) -> PolicyLossInput<B> {
+        PolicyLossInput::new(self.policy_loss.clone())
+    }
+}
+
 impl<B: BackendTrait> Adaptor<ProbeLossInput<B>> for VisionOutput<B> {
     fn adapt(&self) -> ProbeLossInput<B> {
         ProbeLossInput::new(self.probe_loss.clone())
@@ -252,6 +272,7 @@ pub(crate) struct VisionTrainItem<B: AutodiffBackend> {
     inv_loss: Tensor<B, 1>,
     sigreg_loss: Tensor<B, 1>,
     recon_loss: Tensor<B, 1>,
+    policy_loss: Tensor<B, 1>,
     probe_loss: Tensor<B, 1>,
     probe_acc: Tensor<B, 1>,
 }
@@ -262,6 +283,7 @@ impl<B: AutodiffBackend> VisionTrainItem<B> {
         inv_loss: Tensor<B, 1>,
         sigreg_loss: Tensor<B, 1>,
         recon_loss: Tensor<B, 1>,
+        policy_loss: Tensor<B, 1>,
         probe_loss: Tensor<B, 1>,
         probe_acc: Tensor<B, 1>,
     ) -> Self {
@@ -270,6 +292,7 @@ impl<B: AutodiffBackend> VisionTrainItem<B> {
             inv_loss: inv_loss.detach(),
             sigreg_loss: sigreg_loss.detach(),
             recon_loss: recon_loss.detach(),
+            policy_loss: policy_loss.detach(),
             probe_loss: probe_loss.detach(),
             probe_acc: probe_acc.detach(),
         }
@@ -285,6 +308,7 @@ impl<B: AutodiffBackend> ItemLazy for VisionTrainItem<B> {
             self.inv_loss.detach().inner(),
             self.sigreg_loss.detach().inner(),
             self.recon_loss.detach().inner(),
+            self.policy_loss.detach().inner(),
             self.probe_loss.detach().inner(),
             self.probe_acc.detach().inner(),
             None,
@@ -309,6 +333,12 @@ impl<B: BackendTrait> ScalarValue<B> for SigRegLossInput<B> {
 }
 
 impl<B: BackendTrait> ScalarValue<B> for ReconLossInput<B> {
+    fn value(&self) -> Tensor<B, 1> {
+        self.value.clone()
+    }
+}
+
+impl<B: BackendTrait> ScalarValue<B> for PolicyLossInput<B> {
     fn value(&self) -> Tensor<B, 1> {
         self.value.clone()
     }

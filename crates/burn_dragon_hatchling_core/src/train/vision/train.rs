@@ -658,8 +658,7 @@ where
             let teacher = teacher.map(|teacher| *teacher);
             let mut model = Some(VisionDistillModel::new(model, loss, teacher, rollout));
             let mut optim = Some(
-                AdamWConfig::new()
-                    .with_weight_decay(optimizer_cfg.weight_decay)
+                adamw_config_from_optimizer(optimizer_cfg)
                     .init::<B, VisionDistillModel<B>>(),
             );
             match scheduler {
@@ -723,8 +722,7 @@ where
                 &device,
             ));
             let mut optim = Some(
-                AdamWConfig::new()
-                    .with_weight_decay(optimizer_cfg.weight_decay)
+                adamw_config_from_optimizer(optimizer_cfg)
                     .init::<B, VisionLejepaModel<B>>(),
             );
             let diagnostics = Some(VisionDiagnostics {
@@ -739,6 +737,7 @@ where
                     .recon
                     .weight
                     > 0.0,
+                policy: false,
                 probe: true,
                 artifact_every: model.as_ref().expect("model").config.artifact_every,
                 artifact_output: model.as_ref().expect("model").config.artifact_output,
@@ -809,8 +808,7 @@ where
                 &device,
             ));
             let mut optim = Some(
-                AdamWConfig::new()
-                    .with_weight_decay(optimizer_cfg.weight_decay)
+                adamw_config_from_optimizer(optimizer_cfg)
                     .init::<B, VisionMaeModel<B>>(),
             );
             let diagnostics = model.as_ref().map(|model_ref| VisionDiagnostics {
@@ -818,6 +816,7 @@ where
                 inv: false,
                 sigreg: false,
                 recon: model_ref.config.loss.recon.weight > 0.0,
+                policy: false,
                 probe: false,
                 artifact_every: model_ref.config.artifact_every,
                 artifact_output: model_ref.config.artifact_output,
@@ -891,8 +890,7 @@ where
                 &device,
             ));
             let mut optim = Some(
-                AdamWConfig::new()
-                    .with_weight_decay(optimizer_cfg.weight_decay)
+                adamw_config_from_optimizer(optimizer_cfg)
                     .init::<B, VisionSaccadeModel<B>>(),
             );
             let diagnostics = model.as_ref().map(|model_ref| VisionDiagnostics {
@@ -900,6 +898,7 @@ where
                 inv: model_ref.config.loss.lejepa.enabled,
                 sigreg: model_ref.config.loss.lejepa.enabled,
                 recon: model_ref.config.loss.recon.weight > 0.0,
+                policy: model_ref.config.policy.gdpo.enabled,
                 probe: false,
                 artifact_every: model_ref.config.artifact_every,
                 artifact_output: model_ref.config.artifact_output,

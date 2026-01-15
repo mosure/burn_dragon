@@ -25,6 +25,8 @@ fn note_cpu_fallback() {
     GDPO_CPU_FALLBACKS.fetch_add(1, Ordering::Relaxed);
 }
 
+const GDPO_LOG_RATIO_CLAMP: f32 = 20.0;
+
 
 pub(crate) fn gdpo_advantage<B: BackendTrait>(
     hard: Tensor<B, 2>,
@@ -63,6 +65,9 @@ pub(crate) fn gdpo_policy_loss<B: BackendTrait>(
     if policy_weight <= 0.0 {
         return Tensor::<B, 1>::zeros([1], &log_prob_new.device());
     }
+    let log_prob_new = nan_to_num(log_prob_new);
+    let log_prob_old = nan_to_num(log_prob_old);
+    let advantage = nan_to_num(advantage);
     let clip = config.policy_clip_range.max(0.0);
     if clip <= 0.0 {
         return log_prob_new
@@ -71,7 +76,12 @@ pub(crate) fn gdpo_policy_loss<B: BackendTrait>(
             .mul_scalar(-policy_weight);
     }
 
-    let ratio = log_prob_new.clone().sub(log_prob_old).exp();
+    let log_ratio = log_prob_new
+        .clone()
+        .sub(log_prob_old)
+        .clamp_min(-GDPO_LOG_RATIO_CLAMP)
+        .clamp_max(GDPO_LOG_RATIO_CLAMP);
+    let ratio = log_ratio.exp();
     let clipped = ratio
         .clone()
         .clamp_min(1.0 - clip)

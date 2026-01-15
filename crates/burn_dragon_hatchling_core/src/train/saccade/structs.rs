@@ -137,18 +137,51 @@ impl<B: BackendTrait> UpsampleWeightsCache<B> {
         }
         let from_tokens = from.num_patches();
         let to_tokens = to.num_patches();
+        if from.height == 0 || from.width == 0 || to.height == 0 || to.width == 0 {
+            let weights = Tensor::<B, 2>::zeros([to_tokens.max(1), from_tokens.max(1)], device);
+            return weights;
+        }
         let mut mapping = vec![0.0f32; to_tokens * from_tokens];
-        for ty in 0..to.height {
-            let src_y = (ty as f32 * from.height as f32 / to.height as f32)
-                .floor()
-                .min((from.height - 1) as f32) as usize;
-            for tx in 0..to.width {
-                let src_x = (tx as f32 * from.width as f32 / to.width as f32)
-                    .floor()
-                    .min((from.width - 1) as f32) as usize;
-                let src_idx = src_y * from.width + src_x;
-                let dst_idx = ty * to.width + tx;
-                mapping[dst_idx * from_tokens + src_idx] = 1.0;
+        let from_h = from.height;
+        let from_w = from.width;
+        let to_h = to.height;
+        let to_w = to.width;
+        for ty in 0..to_h {
+            let (y0, y1, wy0, wy1) = if from_h == 1 {
+                (0usize, 0usize, 1.0f32, 0.0f32)
+            } else {
+                let src_y = (ty as f32 + 0.5) * (from_h as f32 / to_h as f32) - 0.5;
+                let y0f = src_y.floor();
+                let y1f = y0f + 1.0;
+                let wy1 = src_y - y0f;
+                let wy0 = 1.0 - wy1;
+                let y0 = y0f.clamp(0.0, (from_h - 1) as f32) as usize;
+                let y1 = y1f.clamp(0.0, (from_h - 1) as f32) as usize;
+                (y0, y1, wy0, wy1)
+            };
+            for tx in 0..to_w {
+                let (x0, x1, wx0, wx1) = if from_w == 1 {
+                    (0usize, 0usize, 1.0f32, 0.0f32)
+                } else {
+                    let src_x = (tx as f32 + 0.5) * (from_w as f32 / to_w as f32) - 0.5;
+                    let x0f = src_x.floor();
+                    let x1f = x0f + 1.0;
+                    let wx1 = src_x - x0f;
+                    let wx0 = 1.0 - wx1;
+                    let x0 = x0f.clamp(0.0, (from_w - 1) as f32) as usize;
+                    let x1 = x1f.clamp(0.0, (from_w - 1) as f32) as usize;
+                    (x0, x1, wx0, wx1)
+                };
+                let dst_idx = ty * to_w + tx;
+                let row = dst_idx * from_tokens;
+                let idx00 = y0 * from_w + x0;
+                let idx01 = y0 * from_w + x1;
+                let idx10 = y1 * from_w + x0;
+                let idx11 = y1 * from_w + x1;
+                mapping[row + idx00] += wy0 * wx0;
+                mapping[row + idx01] += wy0 * wx1;
+                mapping[row + idx10] += wy1 * wx0;
+                mapping[row + idx11] += wy1 * wx1;
             }
         }
         let weights =
@@ -445,6 +478,7 @@ pub(crate) struct VisionSaccadeModel<B: BackendTrait> {
     pub(crate) fovea_proj: VisionSaccadeProjection<B>,
     pub(crate) pyramid_in_proj: Option<VisionSaccadeProjection<B>>,
     pub(crate) pyramid_out_proj: Option<VisionSaccadeProjection<B>>,
+    pub(crate) pyramid_norm: LayerNorm<B>,
     pub(crate) residual_proj: VisionSaccadeProjection<B>,
     pub(crate) saccade_head: VisionSaccadeHead<B>,
     pub(crate) config: VisionSaccadeConfig,
@@ -467,6 +501,7 @@ pub(crate) struct VisionSaccadeLosses<B: BackendTrait> {
     pub(crate) inv: Tensor<B, 1>,
     pub(crate) sigreg: Tensor<B, 1>,
     pub(crate) recon: Tensor<B, 1>,
+    pub(crate) policy: Tensor<B, 1>,
     pub(crate) artifacts: Option<VisionArtifactInput<B>>,
 }
 

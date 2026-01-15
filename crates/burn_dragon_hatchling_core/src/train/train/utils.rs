@@ -50,6 +50,16 @@ pub(crate) fn prepare_dataset(
     Ok(dataset)
 }
 
+pub(crate) fn adamw_config_from_optimizer(optimizer_cfg: &OptimizerConfig) -> AdamWConfig {
+    let mut config = AdamWConfig::new().with_weight_decay(optimizer_cfg.weight_decay);
+    if let Some(clip) = optimizer_cfg.grad_clip_norm {
+        config = config.with_grad_clipping(Some(GradientClippingConfig::Norm(clip)));
+    } else if let Some(clip) = optimizer_cfg.grad_clip_value {
+        config = config.with_grad_clipping(Some(GradientClippingConfig::Value(clip)));
+    }
+    config
+}
+
 pub(crate) fn log_theoretical_profile(config: &BDHConfig, batch: usize, block: usize, backend: &str) {
     let batch = batch as u64;
     let time = block as u64;

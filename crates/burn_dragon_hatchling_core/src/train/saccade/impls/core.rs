@@ -249,6 +249,7 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
         } else {
             None
         };
+        let pyramid_norm = LayerNormConfig::new(pyramid_dim).init(device);
         let residual_proj = VisionSaccadeProjection::new(embed_dim, pyramid_dim, device);
         let saccade_head = VisionSaccadeHead::new(embed_dim, device);
         Self {
@@ -260,6 +261,7 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
             fovea_proj,
             pyramid_in_proj,
             pyramid_out_proj,
+            pyramid_norm,
             residual_proj,
             saccade_head,
             config,
@@ -299,7 +301,7 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
         if let Some(proj) = &self.pyramid_out_proj {
             proj.forward(context)
         } else {
-            context
+            self.pyramid_norm.forward(context)
         }
     }
 
@@ -681,6 +683,11 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
             randomize_mask,
             capture_artifacts,
         );
+        let sigreg = if gdpo_active && gdpo_group > 1 {
+            sigreg.mul_scalar(1.0 / gdpo_group as f32)
+        } else {
+            sigreg
+        };
         let denom = mask_sum.clone().add_scalar(LEJEPA_EPS);
         let recon = loss_sum / denom;
         let lambda = if self.config.loss.lejepa.enabled {
@@ -713,6 +720,11 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
                 }
             })
         });
+        let policy = if let Some(policy_loss) = &policy_loss {
+            policy_loss.clone()
+        } else {
+            Tensor::<B, 1>::zeros([1], &total.device())
+        };
         if let Some(policy_loss) = policy_loss {
             total = total + policy_loss;
         }
@@ -739,6 +751,7 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
             inv,
             sigreg,
             recon,
+            policy,
             artifacts,
         }
     }
@@ -845,14 +858,7 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
                 }
                 let weights_context =
                     self.mip_gaussian_weights(&ctx.mip_levels, mean.clone(), sigma.clone());
-                let weights_scatter = if matches!(
-                    self.config.pyramid_mode,
-                    VisionPyramidMode::Laplacian
-                ) {
-                    self.mip_spatial_weights(&ctx.mip_levels, mean.clone(), sigma.clone())
-                } else {
-                    weights_context.clone()
-                };
+                let weights_scatter = weights_context.clone();
                 let patch_image = self.foveated_patch_image(
                     &ctx.mip_levels,
                     &ctx.base_grid,

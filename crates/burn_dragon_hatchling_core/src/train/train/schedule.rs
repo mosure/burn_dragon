@@ -90,6 +90,7 @@ pub(crate) struct VisionDiagnostics {
     pub(crate) inv: bool,
     pub(crate) sigreg: bool,
     pub(crate) recon: bool,
+    pub(crate) policy: bool,
     pub(crate) probe: bool,
     pub(crate) artifact_every: usize,
     pub(crate) artifact_output: VisionArtifactOutputMode,
@@ -256,6 +257,22 @@ where
                 )
                 .metric_valid_numeric(
                     ScalarMetric::<ValidBackend<B>, ReconLossInput<ValidBackend<B>>>::new_every(
+                        name.as_str(),
+                        metric_every,
+                    ),
+                );
+        }
+        if diagnostics.policy {
+            let name = format!("{prefix}_policy_loss");
+            builder = builder
+                .metric_train_numeric(
+                    ScalarMetric::<ValidBackend<B>, PolicyLossInput<ValidBackend<B>>>::new_every(
+                        name.as_str(),
+                        metric_every,
+                    ),
+                )
+                .metric_valid_numeric(
+                    ScalarMetric::<ValidBackend<B>, PolicyLossInput<ValidBackend<B>>>::new_every(
                         name.as_str(),
                         metric_every,
                     ),

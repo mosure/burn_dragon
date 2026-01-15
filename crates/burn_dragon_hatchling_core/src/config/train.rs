@@ -101,6 +101,37 @@ pub struct OptimizerConfig {
     pub weight_decay: f32,
     #[serde(default)]
     pub lr_schedule: Option<LearningRateScheduleConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grad_clip_norm: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grad_clip_value: Option<f32>,
+}
+
+impl OptimizerConfig {
+    pub fn validate(&self) -> Result<()> {
+        if self.learning_rate <= 0.0 {
+            return Err(anyhow!("optimizer.learning_rate must be > 0"));
+        }
+        if self.weight_decay < 0.0 {
+            return Err(anyhow!("optimizer.weight_decay must be >= 0"));
+        }
+        if let Some(clip) = self.grad_clip_norm {
+            if clip <= 0.0 {
+                return Err(anyhow!("optimizer.grad_clip_norm must be > 0"));
+            }
+        }
+        if let Some(clip) = self.grad_clip_value {
+            if clip <= 0.0 {
+                return Err(anyhow!("optimizer.grad_clip_value must be > 0"));
+            }
+        }
+        if self.grad_clip_norm.is_some() && self.grad_clip_value.is_some() {
+            return Err(anyhow!(
+                "optimizer.grad_clip_norm and optimizer.grad_clip_value are mutually exclusive"
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -179,12 +210,7 @@ impl TrainingConfig {
                 return Err(anyhow!("training.epochs must be > 0"));
             }
         }
-        if self.optimizer.learning_rate <= 0.0 {
-            return Err(anyhow!("optimizer.learning_rate must be > 0"));
-        }
-        if self.optimizer.weight_decay < 0.0 {
-            return Err(anyhow!("optimizer.weight_decay must be >= 0"));
-        }
+        self.optimizer.validate()?;
         if !(0.0 < self.dataset.train_split_ratio && self.dataset.train_split_ratio <= 1.0) {
             return Err(anyhow!(
                 "dataset.train_split_ratio must be in (0, 1] (got {})",

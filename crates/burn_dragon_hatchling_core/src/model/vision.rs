@@ -993,12 +993,12 @@ impl<B: Backend> VisionDragonHatchling<B> {
 
     fn full_attention(&self, query: Tensor<B, 4>, value: Tensor<B, 4>) -> Tensor<B, 4> {
         let latent = query.shape().dims::<4>()[3] as f32;
+        let scale = latent.sqrt().max(1.0);
         let k = query.clone();
-        let mut scores = query.matmul(k.swap_dims(2, 3));
+        let query_scaled = query.div_scalar(scale);
+        let mut scores = query_scaled.matmul(k.swap_dims(2, 3));
         match self.attention_mode {
             VisionAttentionMode::Softmax => {
-                let scale = latent.sqrt().max(1.0);
-                scores = scores.div_scalar(scale);
                 scores = activation::softmax(scores, 3);
             }
             VisionAttentionMode::RowL1 => {

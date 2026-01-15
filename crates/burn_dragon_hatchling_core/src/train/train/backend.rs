@@ -56,11 +56,7 @@ where
         ));
 
     let mut model = Some(BDH::<B>::new(model_config.clone(), &device));
-    let mut optim = Some(
-        AdamWConfig::new()
-            .with_weight_decay(optimizer_cfg.weight_decay)
-            .init::<B, BDH<B>>(),
-    );
+    let mut optim = Some(adamw_config_from_optimizer(optimizer_cfg).init::<B, BDH<B>>());
     let scheduler_iters = match schedule.source {
         ScheduleSource::Epochs => Some(total_steps),
         ScheduleSource::MaxIters => None,

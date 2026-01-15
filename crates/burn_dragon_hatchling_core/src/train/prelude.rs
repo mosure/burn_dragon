@@ -27,6 +27,7 @@ pub(crate) use burn::module::{AutodiffModule, Content, Module, ModuleDisplay, Mo
 pub(crate) use burn::nn::loss::CrossEntropyLossConfig;
 pub(crate) use burn::nn::{LayerNorm, LayerNormConfig, Linear, LinearConfig};
 pub(crate) use burn::optim::adaptor::OptimizerAdaptor;
+pub(crate) use burn::optim::grad_clipping::GradientClippingConfig;
 pub(crate) use burn::optim::{AdamW, AdamWConfig, GradientsAccumulator, GradientsParams, LearningRate};
 pub(crate) use burn::tensor::Distribution as TensorDistribution;
 pub(crate) use burn::tensor::activation;
@@ -92,6 +93,7 @@ pub(crate) use crate::train::vision::*;
 
 pub(crate) use crate::train::metrics::{
     DeviceMetric, InvLossInput, LanguageModelOutput, LanguageModelTrainItem, LossValue,
-    MemoryCleanupMetric, ProbeAccInput, ProbeLossInput, ReconLossInput, ScalarMetric,
-    SigRegLossInput, VisionArtifactInput, VisionArtifactMetric, VisionOutput, VisionTrainItem,
+    MemoryCleanupMetric, PolicyLossInput, ProbeAccInput, ProbeLossInput, ReconLossInput,
+    ScalarMetric, SigRegLossInput, VisionArtifactInput, VisionArtifactMetric, VisionOutput,
+    VisionTrainItem,
 };

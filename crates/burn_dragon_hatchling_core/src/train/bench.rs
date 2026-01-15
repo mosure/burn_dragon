@@ -407,9 +407,8 @@ impl<B: AutodiffBackend> VisionSaccadeTrainStepBench<B> {
         );
         let rollout_steps = saccade.rollout.max_steps;
         let backprop_steps = saccade.rollout.backprop_steps(rollout_steps);
-        let optimizer = AdamWConfig::new()
-            .with_weight_decay(optimizer_cfg.weight_decay)
-            .init::<B, VisionSaccadeModel<B>>();
+        let optimizer =
+            adamw_config_from_optimizer(optimizer_cfg).init::<B, VisionSaccadeModel<B>>();
         let lr = optimizer_cfg.learning_rate;
         Ok(Self {
             model: Some(saccade),

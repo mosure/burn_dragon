@@ -298,54 +298,5 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
         weights_out
     }
 
-    pub(crate) fn mip_spatial_weights(
-        &self,
-        levels: &[SaccadeMipLevel<B>],
-        mean: Tensor<B, 3>,
-        sigma: Tensor<B, 3>,
-    ) -> Vec<Tensor<B, 3>> {
-        let [batch, traj_tokens, _] = mean.shape().dims::<3>();
-        let device = mean.device();
-        let level_count = levels.len();
-        if level_count == 0 {
-            return Vec::new();
-        }
-
-        let mean_flat = mean.reshape([batch * traj_tokens, 2]);
-        let sigma_scaled = sigma
-            .mul_scalar(self.config.fovea_radius_scale)
-            .clamp_min(SACCADE_EPS);
-        let sigma_flat = sigma_scaled.reshape([batch * traj_tokens, 1]);
-
-        let mut weights_out = Vec::with_capacity(level_count);
-        for level in levels.iter() {
-            let coords = self.level_coords_cached(level.grid, &device);
-            let tokens_len = level.tokens.shape().dims::<3>()[1].max(1);
-            let coords = coords.reshape([1, tokens_len, 2]);
-            let diff = mean_flat.clone().unsqueeze_dim::<3>(1) - coords;
-            let dist2 = diff
-                .powf_scalar(2.0)
-                .sum_dim(2)
-                .reshape([batch * traj_tokens, tokens_len]);
-            let sigma2 = sigma_flat
-                .clone()
-                .powf_scalar(2.0)
-                .add_scalar(SACCADE_EPS)
-                .repeat_dim(1, tokens_len);
-            let spatial = (dist2 / sigma2.mul_scalar(2.0))
-                .mul_scalar(-1.0)
-                .exp();
-            let denom = spatial
-                .clone()
-                .sum_dim(1)
-                .reshape([batch * traj_tokens, 1])
-                .add_scalar(SACCADE_EPS)
-                .repeat_dim(1, tokens_len);
-            let weights = (spatial / denom).reshape([batch, traj_tokens, tokens_len]);
-            weights_out.push(weights);
-        }
-        weights_out
-    }
-
 }
 

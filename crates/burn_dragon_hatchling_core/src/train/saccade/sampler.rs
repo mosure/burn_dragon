@@ -192,6 +192,7 @@ impl<B: AutodiffBackend> TrainStep<ImageNetBatch<B>, VisionTrainItem<B>>
                 zero.clone(),
                 zero.clone(),
                 zero.clone(),
+                zero.clone(),
                 zero,
             ),
         )
@@ -234,6 +235,7 @@ impl<B: BackendTrait> ValidStep<ImageNetBatch<B>, VisionOutput<B>> for VisionDis
             zero.clone(),
             zero.clone(),
             zero.clone(),
+            zero.clone(),
             zero,
             None,
         )
@@ -247,6 +249,7 @@ impl<B: AutodiffBackend> TrainStep<ImageNetBatch<B>, VisionTrainItem<B>> for Vis
         let losses = self.forward_losses(batch, rollout_steps, backprop_steps, true);
         let total_for_backprop = losses.total.clone() + losses.probe_loss.clone();
         let grads = total_for_backprop.backward();
+        let zero = Tensor::<B, 1>::zeros([1], &losses.total.device());
 
         TrainOutput::new(
             self,
@@ -256,6 +259,7 @@ impl<B: AutodiffBackend> TrainStep<ImageNetBatch<B>, VisionTrainItem<B>> for Vis
                 losses.inv,
                 losses.sigreg,
                 losses.recon,
+                zero,
                 losses.probe_loss,
                 losses.probe_acc,
             ),
@@ -276,12 +280,14 @@ impl<B: BackendTrait> ValidStep<ImageNetBatch<B>, VisionOutput<B>> for VisionLej
     fn step(&self, batch: ImageNetBatch<B>) -> VisionOutput<B> {
         let backprop_steps = self.rollout.backprop_steps(self.rollout.max_steps);
         let losses = self.forward_losses(batch, self.rollout.max_steps, backprop_steps, false);
+        let zero = Tensor::<B, 1>::zeros([1], &losses.total.device());
 
         VisionOutput::new(
             losses.total,
             losses.inv,
             losses.sigreg,
             losses.recon,
+            zero,
             losses.probe_loss,
             losses.probe_acc,
             losses.artifacts,
@@ -306,6 +312,7 @@ impl<B: AutodiffBackend> TrainStep<ImageNetBatch<B>, VisionTrainItem<B>> for Vis
                 zero.clone(),
                 losses.recon,
                 zero.clone(),
+                zero.clone(),
                 zero,
             ),
         )
@@ -329,6 +336,7 @@ impl<B: BackendTrait> ValidStep<ImageNetBatch<B>, VisionOutput<B>> for VisionMae
             zero.clone(),
             zero.clone(),
             losses.recon,
+            zero.clone(),
             zero.clone(),
             zero,
             losses.artifacts,
@@ -379,6 +387,7 @@ impl<B: AutodiffBackend> TrainStep<ImageNetBatch<B>, VisionTrainItem<B>> for Vis
                     losses.inv,
                     losses.sigreg,
                     losses.recon,
+                    losses.policy,
                     zero.clone(),
                     zero,
                 ),
@@ -392,6 +401,7 @@ impl<B: AutodiffBackend> TrainStep<ImageNetBatch<B>, VisionTrainItem<B>> for Vis
         let mut inv_sum: Option<Tensor<B, 1>> = None;
         let mut sigreg_sum: Option<Tensor<B, 1>> = None;
         let mut recon_sum: Option<Tensor<B, 1>> = None;
+        let mut policy_sum: Option<Tensor<B, 1>> = None;
         let mut consumed = 0;
 
         while consumed < repeats {
@@ -429,6 +439,10 @@ impl<B: AutodiffBackend> TrainStep<ImageNetBatch<B>, VisionTrainItem<B>> for Vis
                 Some(accum) => accum + losses.recon.clone().mul_scalar(weight),
                 None => losses.recon.clone().mul_scalar(weight),
             });
+            policy_sum = Some(match policy_sum {
+                Some(accum) => accum + losses.policy.clone().mul_scalar(weight),
+                None => losses.policy.clone().mul_scalar(weight),
+            });
             consumed += chunk;
         }
 
@@ -436,11 +450,12 @@ impl<B: AutodiffBackend> TrainStep<ImageNetBatch<B>, VisionTrainItem<B>> for Vis
         let inv = inv_sum.expect("repeat inv").mul_scalar(scale);
         let sigreg = sigreg_sum.expect("repeat sigreg").mul_scalar(scale);
         let recon = recon_sum.expect("repeat recon").mul_scalar(scale);
+        let policy = policy_sum.expect("repeat policy").mul_scalar(scale);
         let grads = grads.grads();
         let zero = Tensor::<B, 1>::zeros([1], &total.device());
         TrainOutput {
             grads,
-            item: VisionTrainItem::new(total, inv, sigreg, recon, zero.clone(), zero),
+            item: VisionTrainItem::new(total, inv, sigreg, recon, policy, zero.clone(), zero),
         }
     }
 }
@@ -462,6 +477,7 @@ impl<B: BackendTrait> ValidStep<ImageNetBatch<B>, VisionOutput<B>> for VisionSac
             losses.inv,
             losses.sigreg,
             losses.recon,
+            losses.policy,
             zero.clone(),
             zero,
             losses.artifacts,

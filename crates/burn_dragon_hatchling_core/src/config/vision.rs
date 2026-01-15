@@ -381,6 +381,7 @@ impl VisionTrainingConfig {
                 return Err(anyhow!("training.epochs must be > 0"));
             }
         }
+        self.optimizer.validate()?;
 
         if self.vision.image_size == 0 {
             return Err(anyhow!("vision.image_size must be > 0"));

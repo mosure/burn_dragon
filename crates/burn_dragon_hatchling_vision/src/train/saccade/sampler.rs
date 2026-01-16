@@ -122,32 +122,6 @@ pub(crate) fn build_sampling_pyramid<B: BackendTrait>(
     levels
 }
 
-impl<B: AutodiffBackend> TrainStep<SequenceBatch<B>, LanguageModelTrainItem<B>> for BDH<B> {
-    fn step(&self, batch: SequenceBatch<B>) -> TrainOutput<LanguageModelTrainItem<B>> {
-        let logits = if fast_train_enabled() {
-            self.forward_fast(batch.inputs)
-        } else {
-            self.forward(batch.inputs)
-        };
-        let loss = language_model_loss::<B>(logits, batch.targets);
-        let grads = loss.backward();
-
-        TrainOutput::new(self, grads, LanguageModelTrainItem::new(loss))
-    }
-}
-
-impl<B: BackendTrait> ValidStep<SequenceBatch<B>, LanguageModelOutput<B>> for BDH<B> {
-    fn step(&self, batch: SequenceBatch<B>) -> LanguageModelOutput<B> {
-        let logits = if fast_train_enabled() {
-            self.forward_fast(batch.inputs)
-        } else {
-            self.forward(batch.inputs)
-        };
-        let loss = language_model_loss::<B>(logits, batch.targets);
-        LanguageModelOutput::new(loss)
-    }
-}
-
 impl<B: AutodiffBackend> TrainStep<ImageNetBatch<B>, VisionTrainItem<B>>
     for VisionDistillModel<B>
 {
@@ -188,6 +162,12 @@ impl<B: AutodiffBackend> TrainStep<ImageNetBatch<B>, VisionTrainItem<B>>
             grads,
             VisionTrainItem::new(
                 loss,
+                zero.clone(),
+                zero.clone(),
+                zero.clone(),
+                zero.clone(),
+                zero.clone(),
+                zero.clone(),
                 zero.clone(),
                 zero.clone(),
                 zero.clone(),
@@ -236,6 +216,12 @@ impl<B: BackendTrait> ValidStep<ImageNetBatch<B>, VisionOutput<B>> for VisionDis
             zero.clone(),
             zero.clone(),
             zero.clone(),
+            zero.clone(),
+            zero.clone(),
+            zero.clone(),
+            zero.clone(),
+            zero.clone(),
+            zero.clone(),
             zero,
             None,
         )
@@ -259,7 +245,13 @@ impl<B: AutodiffBackend> TrainStep<ImageNetBatch<B>, VisionTrainItem<B>> for Vis
                 losses.inv,
                 losses.sigreg,
                 losses.recon,
-                zero,
+                losses.recon_psnr,
+                zero.clone(),
+                zero.clone(),
+                zero.clone(),
+                zero.clone(),
+                zero.clone(),
+                zero.clone(),
                 losses.probe_loss,
                 losses.probe_acc,
             ),
@@ -287,7 +279,13 @@ impl<B: BackendTrait> ValidStep<ImageNetBatch<B>, VisionOutput<B>> for VisionLej
             losses.inv,
             losses.sigreg,
             losses.recon,
-            zero,
+            losses.recon_psnr,
+            zero.clone(),
+            zero.clone(),
+            zero.clone(),
+            zero.clone(),
+            zero.clone(),
+            zero.clone(),
             losses.probe_loss,
             losses.probe_acc,
             losses.artifacts,
@@ -311,6 +309,12 @@ impl<B: AutodiffBackend> TrainStep<ImageNetBatch<B>, VisionTrainItem<B>> for Vis
                 zero.clone(),
                 zero.clone(),
                 losses.recon,
+                losses.recon_psnr,
+                zero.clone(),
+                zero.clone(),
+                zero.clone(),
+                zero.clone(),
+                zero.clone(),
                 zero.clone(),
                 zero.clone(),
                 zero,
@@ -336,6 +340,12 @@ impl<B: BackendTrait> ValidStep<ImageNetBatch<B>, VisionOutput<B>> for VisionMae
             zero.clone(),
             zero.clone(),
             losses.recon,
+            losses.recon_psnr,
+            zero.clone(),
+            zero.clone(),
+            zero.clone(),
+            zero.clone(),
+            zero.clone(),
             zero.clone(),
             zero.clone(),
             zero,
@@ -387,7 +397,13 @@ impl<B: AutodiffBackend> TrainStep<ImageNetBatch<B>, VisionTrainItem<B>> for Vis
                     losses.inv,
                     losses.sigreg,
                     losses.recon,
+                    losses.recon_psnr,
                     losses.policy,
+                    losses.policy_advantage_abs_mean,
+                    losses.policy_advantage_std,
+                    losses.policy_log_prob_mean,
+                    losses.policy_entropy,
+                    losses.policy_action_clamp_rate,
                     zero.clone(),
                     zero,
                 ),
@@ -401,7 +417,13 @@ impl<B: AutodiffBackend> TrainStep<ImageNetBatch<B>, VisionTrainItem<B>> for Vis
         let mut inv_sum: Option<Tensor<B, 1>> = None;
         let mut sigreg_sum: Option<Tensor<B, 1>> = None;
         let mut recon_sum: Option<Tensor<B, 1>> = None;
+        let mut recon_psnr_sum: Option<Tensor<B, 1>> = None;
         let mut policy_sum: Option<Tensor<B, 1>> = None;
+        let mut policy_adv_abs_sum: Option<Tensor<B, 1>> = None;
+        let mut policy_adv_std_sum: Option<Tensor<B, 1>> = None;
+        let mut policy_log_prob_sum: Option<Tensor<B, 1>> = None;
+        let mut policy_entropy_sum: Option<Tensor<B, 1>> = None;
+        let mut policy_action_clamp_sum: Option<Tensor<B, 1>> = None;
         let mut consumed = 0;
 
         while consumed < repeats {
@@ -439,9 +461,33 @@ impl<B: AutodiffBackend> TrainStep<ImageNetBatch<B>, VisionTrainItem<B>> for Vis
                 Some(accum) => accum + losses.recon.clone().mul_scalar(weight),
                 None => losses.recon.clone().mul_scalar(weight),
             });
+            recon_psnr_sum = Some(match recon_psnr_sum {
+                Some(accum) => accum + losses.recon_psnr.clone().mul_scalar(weight),
+                None => losses.recon_psnr.clone().mul_scalar(weight),
+            });
             policy_sum = Some(match policy_sum {
                 Some(accum) => accum + losses.policy.clone().mul_scalar(weight),
                 None => losses.policy.clone().mul_scalar(weight),
+            });
+            policy_adv_abs_sum = Some(match policy_adv_abs_sum {
+                Some(accum) => accum + losses.policy_advantage_abs_mean.clone().mul_scalar(weight),
+                None => losses.policy_advantage_abs_mean.clone().mul_scalar(weight),
+            });
+            policy_adv_std_sum = Some(match policy_adv_std_sum {
+                Some(accum) => accum + losses.policy_advantage_std.clone().mul_scalar(weight),
+                None => losses.policy_advantage_std.clone().mul_scalar(weight),
+            });
+            policy_log_prob_sum = Some(match policy_log_prob_sum {
+                Some(accum) => accum + losses.policy_log_prob_mean.clone().mul_scalar(weight),
+                None => losses.policy_log_prob_mean.clone().mul_scalar(weight),
+            });
+            policy_entropy_sum = Some(match policy_entropy_sum {
+                Some(accum) => accum + losses.policy_entropy.clone().mul_scalar(weight),
+                None => losses.policy_entropy.clone().mul_scalar(weight),
+            });
+            policy_action_clamp_sum = Some(match policy_action_clamp_sum {
+                Some(accum) => accum + losses.policy_action_clamp_rate.clone().mul_scalar(weight),
+                None => losses.policy_action_clamp_rate.clone().mul_scalar(weight),
             });
             consumed += chunk;
         }
@@ -450,12 +496,42 @@ impl<B: AutodiffBackend> TrainStep<ImageNetBatch<B>, VisionTrainItem<B>> for Vis
         let inv = inv_sum.expect("repeat inv").mul_scalar(scale);
         let sigreg = sigreg_sum.expect("repeat sigreg").mul_scalar(scale);
         let recon = recon_sum.expect("repeat recon").mul_scalar(scale);
+        let recon_psnr = recon_psnr_sum.expect("repeat recon psnr").mul_scalar(scale);
         let policy = policy_sum.expect("repeat policy").mul_scalar(scale);
+        let policy_advantage_abs_mean = policy_adv_abs_sum
+            .expect("repeat policy adv abs")
+            .mul_scalar(scale);
+        let policy_advantage_std = policy_adv_std_sum
+            .expect("repeat policy adv std")
+            .mul_scalar(scale);
+        let policy_log_prob_mean = policy_log_prob_sum
+            .expect("repeat policy log prob")
+            .mul_scalar(scale);
+        let policy_entropy = policy_entropy_sum
+            .expect("repeat policy entropy")
+            .mul_scalar(scale);
+        let policy_action_clamp_rate = policy_action_clamp_sum
+            .expect("repeat policy clamp")
+            .mul_scalar(scale);
         let grads = grads.grads();
         let zero = Tensor::<B, 1>::zeros([1], &total.device());
         TrainOutput {
             grads,
-            item: VisionTrainItem::new(total, inv, sigreg, recon, policy, zero.clone(), zero),
+            item: VisionTrainItem::new(
+                total,
+                inv,
+                sigreg,
+                recon,
+                recon_psnr,
+                policy,
+                policy_advantage_abs_mean,
+                policy_advantage_std,
+                policy_log_prob_mean,
+                policy_entropy,
+                policy_action_clamp_rate,
+                zero.clone(),
+                zero,
+            ),
         }
     }
 }
@@ -477,7 +553,13 @@ impl<B: BackendTrait> ValidStep<ImageNetBatch<B>, VisionOutput<B>> for VisionSac
             losses.inv,
             losses.sigreg,
             losses.recon,
+            losses.recon_psnr,
             losses.policy,
+            losses.policy_advantage_abs_mean,
+            losses.policy_advantage_std,
+            losses.policy_log_prob_mean,
+            losses.policy_entropy,
+            losses.policy_action_clamp_rate,
             zero.clone(),
             zero,
             losses.artifacts,

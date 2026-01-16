@@ -1366,6 +1366,7 @@ fn foveated_laplacian_fused_kernel(
 }
 
 #[allow(dead_code)]
+#[allow(clippy::modulo_one)]
 #[cube(launch)]
 fn foveated_accumulate_kernel(
     input: &Tensor<f32>,
@@ -1521,6 +1522,7 @@ fn foveated_accumulate_kernel(
 }
 
 #[allow(dead_code)]
+#[allow(clippy::modulo_one)]
 #[cube(launch)]
 fn foveated_laplacian_weight_kernel(
     weight_sum: &mut Tensor<f32>,
@@ -1646,6 +1648,7 @@ fn foveated_laplacian_weight_kernel(
 }
 
 #[allow(dead_code)]
+#[allow(clippy::modulo_one)]
 #[cube(launch)]
 fn foveated_laplacian_residual_kernel(
     residual: &Tensor<f32>,
@@ -1758,6 +1761,7 @@ fn foveated_laplacian_residual_kernel(
 }
 
 #[allow(dead_code)]
+#[allow(clippy::modulo_one)]
 #[cube(launch)]
 fn foveated_laplacian_coarse_kernel(
     coarse: &Tensor<f32>,

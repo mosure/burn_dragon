@@ -1,7 +1,7 @@
 fn main() {
     #[cfg(feature = "cli")]
     {
-        if let Err(err) = burn_dragon_hatchling::train::run_cli() {
+        if let Err(err) = burn_dragon_hatchling::vision::train::run_cli() {
             eprintln!("error: {err:#}");
             std::process::exit(1);
         }

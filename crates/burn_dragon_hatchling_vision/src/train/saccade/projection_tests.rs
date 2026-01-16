@@ -1,9 +1,10 @@
 use crate::train::prelude::*;
 use burn_ndarray::NdArray;
-use std::sync::Once;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::train::init_wgpu_test_runtime;
 
 #[cfg(not(target_arch = "wasm32"))]
-use burn_wgpu::{graphics, RuntimeOptions, Wgpu};
+use burn_wgpu::Wgpu;
 #[cfg(all(feature = "cuda", not(target_arch = "wasm32")))]
 use burn_cuda::Cuda;
 
@@ -76,19 +77,11 @@ fn input_projection_forward_shapes_across_patch_sizes() {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn init_wgpu(device: &<Wgpu<f32> as BackendTrait>::Device) {
-    static INIT: Once = Once::new();
-    INIT.call_once(|| {
-        burn_wgpu::init_setup::<graphics::AutoGraphicsApi>(device, RuntimeOptions::default());
-    });
-}
-
-#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn input_projection_forward_shapes_wgpu() {
     type Backend = Wgpu<f32>;
     let device = <Backend as BackendTrait>::Device::default();
-    init_wgpu(&device);
+    init_wgpu_test_runtime(&device);
     let patch_sizes = [16usize, 32, 64, 128];
     for patch_size in patch_sizes {
         run_projection_variants::<Backend>(&device, patch_size);

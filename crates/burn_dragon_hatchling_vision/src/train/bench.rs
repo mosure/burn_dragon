@@ -4,7 +4,7 @@ use burn::optim::{GradientsAccumulator, GradientsParams, Optimizer};
 use burn::tensor::Distribution as TensorDistribution;
 use burn::tensor::backend::{AutodiffBackend, Backend as BackendTrait};
 use burn::tensor::{Int, Tensor, TensorData};
-use crate::{GdpoConfig, GdpoHardGate};
+use burn_dragon_hatchling_core::{GdpoConfig, GdpoHardGate};
 
 pub struct VisionSaccadeBench<B: AutodiffBackend> {
     model: VisionSaccadeModel<B>,
@@ -46,6 +46,22 @@ pub struct VisionInputProjectionBench<B: BackendTrait> {
 pub struct VisionSaccadeTrainStepBench<B: AutodiffBackend> {
     model: Option<VisionSaccadeModel<B>>,
     optimizer: OptimizerAdaptor<AdamW, VisionSaccadeModel<B>, B>,
+    lr: LearningRate,
+    rollout_steps: usize,
+    backprop_steps: usize,
+}
+
+pub struct VisionMaeTrainStepBench<B: AutodiffBackend> {
+    model: Option<VisionMaeModel<B>>,
+    optimizer: OptimizerAdaptor<AdamW, VisionMaeModel<B>, B>,
+    lr: LearningRate,
+    rollout_steps: usize,
+    backprop_steps: usize,
+}
+
+pub struct VisionLejepaTrainStepBench<B: AutodiffBackend> {
+    model: Option<VisionLejepaModel<B>>,
+    optimizer: OptimizerAdaptor<AdamW, VisionLejepaModel<B>, B>,
     lr: LearningRate,
     rollout_steps: usize,
     backprop_steps: usize,
@@ -472,6 +488,103 @@ impl<B: AutodiffBackend> VisionSaccadeTrainStepBench<B> {
             .expect("repeat loss")
             .mul_scalar(scale)
             .detach();
+        model = self.optimizer.step(self.lr, model, grads);
+        self.model = Some(model);
+        loss
+    }
+}
+
+impl<B: AutodiffBackend> VisionMaeTrainStepBench<B> {
+    pub fn new(
+        vision: VisionDragonHatchlingConfig,
+        mae: VisionMaeConfig,
+        training: &VisionTrainingHyperparameters,
+        optimizer_cfg: &OptimizerConfig,
+        device: &B::Device,
+    ) -> Result<Self> {
+        let rollout = resolve_vision_rollout(training, vision.steps)?;
+        let embed_dim = vision.embed_dim;
+        let recon_patch_dim = vision.patch_size * vision.patch_size * vision.in_channels;
+        let model = VisionDragonHatchling::<B>::new(vision, device);
+        let mae = VisionMaeModel::new(
+            model,
+            mae,
+            embed_dim,
+            rollout,
+            recon_patch_dim,
+            device,
+        );
+        let rollout_steps = mae.rollout.max_steps;
+        let backprop_steps = mae.rollout.backprop_steps(rollout_steps);
+        let optimizer = adamw_config_from_optimizer(optimizer_cfg).init::<B, VisionMaeModel<B>>();
+        let lr = optimizer_cfg.learning_rate;
+        Ok(Self {
+            model: Some(mae),
+            optimizer,
+            lr,
+            rollout_steps,
+            backprop_steps,
+        })
+    }
+
+    pub fn train_step(&mut self, batch: ImageNetBatch<B>) -> Tensor<B, 1> {
+        let mut model = self.model.take().expect("mae model");
+        let losses = model.forward_losses(
+            batch,
+            self.rollout_steps,
+            self.backprop_steps,
+            true,
+            false,
+        );
+        let grads = GradientsParams::from_grads(losses.total.clone().backward(), &model);
+        let loss = losses.total.detach();
+        model = self.optimizer.step(self.lr, model, grads);
+        self.model = Some(model);
+        loss
+    }
+}
+
+impl<B: AutodiffBackend> VisionLejepaTrainStepBench<B> {
+    pub fn new(
+        vision: VisionDragonHatchlingConfig,
+        lejepa: VisionLejepaConfig,
+        training: &VisionTrainingHyperparameters,
+        optimizer_cfg: &OptimizerConfig,
+        num_classes: usize,
+        device: &B::Device,
+    ) -> Result<Self> {
+        let rollout = resolve_vision_rollout(training, vision.steps)?;
+        let embed_dim = vision.embed_dim;
+        let recon_patch_dim = vision.patch_size * vision.patch_size * vision.in_channels;
+        let model = VisionDragonHatchling::<B>::new(vision, device);
+        let lejepa = VisionLejepaModel::new(
+            model,
+            lejepa,
+            embed_dim,
+            num_classes,
+            rollout,
+            recon_patch_dim,
+            device,
+        );
+        let rollout_steps = lejepa.rollout.max_steps;
+        let backprop_steps = lejepa.rollout.backprop_steps(rollout_steps);
+        let optimizer =
+            adamw_config_from_optimizer(optimizer_cfg).init::<B, VisionLejepaModel<B>>();
+        let lr = optimizer_cfg.learning_rate;
+        Ok(Self {
+            model: Some(lejepa),
+            optimizer,
+            lr,
+            rollout_steps,
+            backprop_steps,
+        })
+    }
+
+    pub fn train_step(&mut self, batch: ImageNetBatch<B>) -> Tensor<B, 1> {
+        let mut model = self.model.take().expect("lejepa model");
+        let losses = model.forward_losses(batch, self.rollout_steps, self.backprop_steps, true);
+        let grads = GradientsParams::from_grads(losses.total.clone().backward(), &model);
+        let loss = losses.total.detach();
         model = self.optimizer.step(self.lr, model, grads);
         self.model = Some(model);
         loss

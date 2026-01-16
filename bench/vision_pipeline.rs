@@ -17,7 +17,7 @@ mod vision_bench {
     };
     use burn_dragon_hatchling_vision::foveation;
     use burn_dragon_hatchling_vision::FOVEATION_SHADER;
-    use burn_dragon_hatchling::train::bench::{VisionSaccadeBench, VisionScatterBench};
+    use burn_dragon_hatchling::vision::train::bench::{VisionSaccadeBench, VisionScatterBench};
     use burn_wgpu::{Wgpu, WgpuDevice};
     use bytemuck::{Pod, Zeroable};
     use half::f16;

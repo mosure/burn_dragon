@@ -70,7 +70,6 @@ viz = [
 
 [dependencies]
 bevy_burn = { version = "0.4", optional = true }
-burn_dragon_hatchling_vision = { path = "../burn_dragon_hatchling_vision" }
 ctrlc = { version = "3.4", optional = true }
 toml = { version = "0.9", optional = true }
 rand = "0.8"

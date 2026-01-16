@@ -1,4 +1,8 @@
+#![recursion_limit = "256"]
+
 pub mod foveation;
+#[cfg(feature = "train")]
+pub mod train;
 pub mod wgsl;
 
 pub use foveation::{

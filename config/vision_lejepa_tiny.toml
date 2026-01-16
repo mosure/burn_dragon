@@ -6,8 +6,10 @@ train_dir = "train"
 val_dir = "val"
 prefetch_batches = 2
 prefetch_workers = 4
+prefetch_to_device = true
 cache_decoded = true
 cache_capacity = 512
+cache_preprocessed = true
 
 [dataset.download]
 type = "imagenette"
@@ -15,19 +17,38 @@ variant = "imagenette2-160"
 
 [training]
 batch_size = 32
-max_iters = 2000
+max_iters = 5000
 log_frequency = 20
+batch_repeats = 1
+# run GPU memory cleanup every N epochs (0 disables)
+memory_cleanup_every = 0
+# run GPU memory cleanup every N iterations (0 disables)
+memory_cleanup_iters = 0
+# disable CUDA allocator cleanup even if memory_cleanup_* is set
+disable_cuda_memory_cleanup = false
+# repeat chunk size for batch_repeats (0 uses auto)
+train_repeat_chunk = 0
+# capture per-iteration loss samples (integration tests only)
+trace_train_loss = false
+trace_train_loss_every = 1
+# optional ffmpeg path for mp4/avi encoding
+# ffmpeg_path = "C:/path/to/ffmpeg"
 rollout_min_steps = 1
 rollout_max_steps = 4
-# backprop through the last N rollout steps (TRM-style refinement)
+# backprop through the last N rollout steps (0 = all steps)
 rollout_backprop_steps = 1
 
 [optimizer]
 learning_rate = 0.0005
 weight_decay = 0.05
+grad_clip_norm = 1.0
 
 [optimizer.lr_schedule]
 type = "constant"
+
+[wgpu]
+backend = "auto"
+memory = "subslices"
 
 [vision]
 image_size = 160
@@ -61,6 +82,8 @@ local_max_scale = 0.3
 artifact_every = 1
 # artifact output: images (png), avi, or mp4
 artifact_output = "mp4"
+# artifact video fps (frames per second)
+artifact_fps = 8
 # max images per artifact batch (caps batch rows)
 artifact_max_images = 4
 # max views per image (caps number of crops shown)

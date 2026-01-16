@@ -2472,7 +2472,6 @@ dependencies = [
  "burn-train",
  "burn-wgpu",
  "burn_dino",
- "burn_dragon_hatchling_vision",
  "clap 4.5.54",
  "console_error_panic_hook",
  "crossbeam-channel",
@@ -2509,6 +2508,36 @@ dependencies = [
 [[package]]
 name = "burn_dragon_hatchling_vision"
 version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "burn",
+ "burn-autodiff",
+ "burn-cubecl",
+ "burn-cuda",
+ "burn-fusion",
+ "burn-ndarray",
+ "burn-train",
+ "burn-wgpu",
+ "burn_dino",
+ "burn_dragon_hatchling_core",
+ "clap 4.5.54",
+ "csv",
+ "ctrlc",
+ "cubecl",
+ "cubecl-runtime",
+ "flate2",
+ "hf-hub",
+ "image 0.25.9",
+ "names",
+ "parquet",
+ "rand 0.8.5",
+ "serde",
+ "serde_json",
+ "tar",
+ "toml",
+ "tracing",
+ "ureq",
+]
 
 [[package]]
 name = "bytemuck"

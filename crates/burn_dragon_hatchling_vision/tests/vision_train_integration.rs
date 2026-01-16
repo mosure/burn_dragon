@@ -11,10 +11,9 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 
 use burn_dragon_hatchling_core::load_vision_training_config;
-use burn_dragon_hatchling_core::train::{
+use burn_dragon_hatchling_vision::train::{
     gdpo_cpu_fallbacks, gdpo_reset_cpu_fallbacks, loss_trace_len, loss_trace_reset,
-    loss_trace_take,
-    train_vision_backend_for_test,
+    loss_trace_take, train_vision_backend_for_test,
 };
 #[cfg(feature = "cuda")]
 use burn_autodiff::Autodiff;

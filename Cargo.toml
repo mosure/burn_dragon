@@ -42,17 +42,21 @@ members = [
 [features]
 default = ["cli", "cuda"]
 
-benchmark = ["burn_dragon_hatchling_core/benchmark"]
-cli = ["burn_dragon_hatchling_core/cli"]
-train = ["burn_dragon_hatchling_core/train"]
-cuda = ["burn_dragon_hatchling_core/cuda"]
-integration_test = ["burn_dragon_hatchling_core/integration_test"]
+benchmark = ["burn_dragon_hatchling_core/benchmark", "burn_dragon_hatchling_vision/benchmark"]
+cli = ["burn_dragon_hatchling_core/cli", "burn_dragon_hatchling_vision/cli"]
+train = ["burn_dragon_hatchling_core/train", "burn_dragon_hatchling_vision/train"]
+cuda = ["burn_dragon_hatchling_core/cuda", "burn_dragon_hatchling_vision/cuda"]
+integration_test = [
+  "burn_dragon_hatchling_core/integration_test",
+  "burn_dragon_hatchling_vision/integration_test",
+]
 web = ["burn_dragon_hatchling_core/web"]
 viz = ["burn_dragon_hatchling_core/viz"]
 
 
 [dependencies]
 burn_dragon_hatchling_core = { path = "crates/burn_dragon_hatchling_core", default-features = false }
+burn_dragon_hatchling_vision = { path = "crates/burn_dragon_hatchling_vision", default-features = false }
 
 
 [dev-dependencies]
@@ -62,7 +66,6 @@ burn-autodiff = { version = "0.19" }
 burn-ndarray = "0.19"
 burn-wgpu = { version = "0.19", default-features = false, features = ["fusion", "std"] }
 burn-cuda = { version = "0.19", default-features = false, features = ["std"] }
-burn_dragon_hatchling_vision = { path = "crates/burn_dragon_hatchling_vision" }
 bytemuck = { version = "1", features = ["derive"] }
 half = "2"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
@@ -125,8 +128,22 @@ path = "bench/vision_pipeline.rs"
 name = "vision_train_step"
 harness = false
 path = "bench/vision_train_step.rs"
+required-features = ["benchmark"]
+
+[[bench]]
+name = "vision_mae_train_step"
+harness = false
+path = "bench/vision_mae_train_step.rs"
+required-features = ["benchmark"]
+
+[[bench]]
+name = "vision_lejepa_train_step"
+harness = false
+path = "bench/vision_lejepa_train_step.rs"
+required-features = ["benchmark"]
 
 [[bench]]
 name = "vision_input_projection"
 harness = false
 path = "bench/vision_input_projection.rs"
+required-features = ["benchmark"]

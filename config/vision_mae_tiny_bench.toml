@@ -1,0 +1,10 @@
+# benchmark overrides for vision_mae_tiny
+
+[mode]
+artifact_every = 0
+
+[bench]
+include_cuda = false
+
+# [dataset]
+# max_records = 256

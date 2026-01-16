@@ -14,7 +14,7 @@ use burn_wgpu::{KernelSource, SourceKernel, SourceTemplate, WgpuRuntime};
 use cubecl::prelude::*;
 use cubecl_runtime::server::Bindings;
 
-use burn_dragon_hatchling_vision::SCATTER_BUFFER_SHADER;
+use crate::SCATTER_BUFFER_SHADER;
 
 const META_LEN: usize = 4;
 const WORKGROUP_SIZE: u32 = 8;

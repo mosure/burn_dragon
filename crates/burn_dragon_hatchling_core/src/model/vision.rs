@@ -983,7 +983,7 @@ impl<B: Backend> VisionDragonHatchling<B> {
             let mlp_out = mlp_flat.reshape([batch, 1, time, self.embed_dim]);
             let mlp_out = self.token_norm.forward(mlp_out);
             current = self.token_norm.forward(current + mlp_out);
-            if step_idx + 1 <= detach_until {
+            if step_idx < detach_until {
                 current = current.detach();
             }
         }

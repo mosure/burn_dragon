@@ -1,6 +1,6 @@
 use crate::train::prelude::*;
 
-pub(crate) fn build_vocab_only(config: &TrainingConfig) -> Result<()> {
+pub fn build_vocab_only(config: &TrainingConfig) -> Result<()> {
     let dataset = prepare_dataset(&config.dataset, &config.training)?;
     let tokenizer = dataset.tokenizer();
     info!(
@@ -11,7 +11,7 @@ pub(crate) fn build_vocab_only(config: &TrainingConfig) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn prepare_dataset(
+pub fn prepare_dataset(
     dataset_cfg: &DatasetConfig,
     training: &TrainingHyperparameters,
 ) -> Result<Arc<Dataset>> {
@@ -50,7 +50,7 @@ pub(crate) fn prepare_dataset(
     Ok(dataset)
 }
 
-pub(crate) fn adamw_config_from_optimizer(optimizer_cfg: &OptimizerConfig) -> AdamWConfig {
+pub fn adamw_config_from_optimizer(optimizer_cfg: &OptimizerConfig) -> AdamWConfig {
     let mut config = AdamWConfig::new().with_weight_decay(optimizer_cfg.weight_decay);
     if let Some(clip) = optimizer_cfg.grad_clip_norm {
         config = config.with_grad_clipping(Some(GradientClippingConfig::Norm(clip)));
@@ -60,7 +60,7 @@ pub(crate) fn adamw_config_from_optimizer(optimizer_cfg: &OptimizerConfig) -> Ad
     config
 }
 
-pub(crate) fn log_theoretical_profile(config: &BDHConfig, batch: usize, block: usize, backend: &str) {
+pub fn log_theoretical_profile(config: &BDHConfig, batch: usize, block: usize, backend: &str) {
     let batch = batch as u64;
     let time = block as u64;
     let embed = config.n_embd as u64;
@@ -86,7 +86,7 @@ pub(crate) fn log_theoretical_profile(config: &BDHConfig, batch: usize, block: u
     );
 }
 
-pub(crate) fn create_run_dir(run_root: &Path) -> Result<(PathBuf, String)> {
+pub fn create_run_dir(run_root: &Path) -> Result<(PathBuf, String)> {
     let mut generator = Generator::default();
 
     for _ in 0..64 {
@@ -107,7 +107,7 @@ pub(crate) fn create_run_dir(run_root: &Path) -> Result<(PathBuf, String)> {
     Ok((run_root.join(&name), name))
 }
 
-pub(crate) fn write_latest_run(run_root: &Path, run_name: &str) -> Result<()> {
+pub fn write_latest_run(run_root: &Path, run_name: &str) -> Result<()> {
     fs::create_dir_all(run_root)
         .with_context(|| format!("failed to create run directory {}", run_root.display()))?;
     let path = run_root.join("latest");
@@ -117,13 +117,13 @@ pub(crate) fn write_latest_run(run_root: &Path, run_name: &str) -> Result<()> {
 }
 
 #[derive(Serialize)]
-pub(crate) struct WebConfigOutput {
+pub struct WebConfigOutput {
     run_name: String,
     block_size: usize,
     overrides: ModelOverrides,
 }
 
-pub(crate) fn write_run_config(config: &TrainingConfig, run_dir: &Path, run_name: &str) -> Result<()> {
+pub fn write_run_config(config: &TrainingConfig, run_dir: &Path, run_name: &str) -> Result<()> {
     fs::create_dir_all(run_dir)
         .with_context(|| format!("failed to create run directory {}", run_dir.display()))?;
 

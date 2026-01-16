@@ -3,7 +3,7 @@ use burn::tensor::Distribution;
 use burn::tensor::TensorData;
 use burn::tensor::backend::Backend as BackendTrait;
 use burn_ndarray::NdArray;
-use crate::{
+use burn_dragon_hatchling_core::{
     FusedKernelConfig, SpatialPositionalEncodingKind, VisionAttentionMode,
     VisionLocationEmbeddingMode,
 };

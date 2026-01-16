@@ -12,23 +12,23 @@ use image::RgbImage;
 
 use crate::config::VisionArtifactOutputMode;
 
-pub(crate) const ARTIFACT_DEFAULT_FPS: u32 = 4;
+pub const ARTIFACT_DEFAULT_FPS: u32 = 4;
 
 #[derive(Clone, Debug)]
-pub(crate) struct ArtifactFrame {
-    pub(crate) width: usize,
-    pub(crate) height: usize,
-    pub(crate) rgb: Vec<u8>,
+pub struct ArtifactFrame {
+    pub width: usize,
+    pub height: usize,
+    pub rgb: Vec<u8>,
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct ArtifactWriteOutcome {
-    pub(crate) saved: usize,
-    pub(crate) mode: VisionArtifactOutputMode,
-    pub(crate) path: PathBuf,
+pub struct ArtifactWriteOutcome {
+    pub saved: usize,
+    pub mode: VisionArtifactOutputMode,
+    pub path: PathBuf,
 }
 
-pub(crate) fn collect_frames(
+pub fn collect_frames(
     data: &[f32],
     batch: usize,
     frames: usize,
@@ -65,7 +65,7 @@ pub(crate) fn collect_frames(
     out
 }
 
-pub(crate) fn write_video(
+pub fn write_video(
     output_dir: &Path,
     output_mode: VisionArtifactOutputMode,
     overwrite: bool,

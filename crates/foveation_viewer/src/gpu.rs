@@ -419,6 +419,7 @@ pub(crate) fn update_gpu_params(
         return;
     }
     let patch = runtime.patch_size.max(1) as f32;
+    let patch_u32 = runtime.patch_size.max(1) as u32;
     let image_size = Vec2::new(source.width as f32, source.height as f32).max(Vec2::ONE);
     let inv_image_size = Vec2::new(1.0 / image_size.x, 1.0 / image_size.y);
     let sample = resolve_foveation_sample(&settings, &noise);
@@ -457,8 +458,8 @@ pub(crate) fn update_gpu_params(
         _pad0: 0,
         _pad1: 0,
     };
-    let groups_x = (runtime.patch_size.max(1) as u32 + WORKGROUP_SIZE - 1) / WORKGROUP_SIZE;
-    let groups_y = (runtime.patch_size.max(1) as u32 + WORKGROUP_SIZE - 1) / WORKGROUP_SIZE;
+    let groups_x = patch_u32.div_ceil(WORKGROUP_SIZE);
+    let groups_y = patch_u32.div_ceil(WORKGROUP_SIZE);
     params.dispatch = UVec2::new(groups_x.max(1), groups_y.max(1));
 }
 
@@ -845,8 +846,8 @@ fn dispatch_foveation_compute(
 }
 
 fn workgroup_dispatch(size: UVec2) -> UVec2 {
-    let groups_x = (size.x + WORKGROUP_SIZE - 1) / WORKGROUP_SIZE;
-    let groups_y = (size.y + WORKGROUP_SIZE - 1) / WORKGROUP_SIZE;
+    let groups_x = size.x.div_ceil(WORKGROUP_SIZE);
+    let groups_y = size.y.div_ceil(WORKGROUP_SIZE);
     UVec2::new(groups_x.max(1), groups_y.max(1))
 }
 
@@ -905,7 +906,7 @@ mod tests {
     };
     use burn::tensor::backend::Backend;
     use burn::tensor::{Tensor, TensorData};
-    use burn_dragon_hatchling_core::train::SaccadeFoveationSampler;
+    use burn_dragon_hatchling_vision::train::SaccadeFoveationSampler;
     use burn_dragon_hatchling_core::{VisionFoveaSamplingMode, VisionSaccadeConfig};
     use burn_wgpu::{self, RuntimeOptions, Wgpu};
     use burn_wgpu::graphics;

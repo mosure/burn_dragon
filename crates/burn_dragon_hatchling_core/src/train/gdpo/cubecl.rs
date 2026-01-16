@@ -15,9 +15,9 @@ use burn_wgpu::WgpuRuntime;
 use cubecl::cuda::CudaRuntime;
 use cubecl::{calculate_cube_count_elemwise, prelude::*};
 
-pub(crate) const MAX_GROUP: u32 = 8;
+pub const MAX_GROUP: u32 = 8;
 
-pub(crate) fn supports_backend<B: BackendTrait>() -> bool
+pub fn supports_backend<B: BackendTrait>() -> bool
 where
     B::FloatTensorPrimitive: 'static,
 {
@@ -52,7 +52,7 @@ where
     }
 }
 
-pub(crate) fn try_percentile_thresholds_cubecl<B: BackendTrait>(
+pub fn try_percentile_thresholds_cubecl<B: BackendTrait>(
     values: &BurnTensor<B, 2>,
     quantile: f32,
 ) -> Option<BurnTensor<B, 2>>
@@ -111,11 +111,12 @@ where
     try_percentile_thresholds_cubecl_direct::<B, WgpuRuntime>(values, quantile)
 }
 
-fn try_percentile_thresholds_cubecl_fusion<B: BackendTrait, BT: BoolElement, R: CubeRuntime>(
+fn try_percentile_thresholds_cubecl_fusion<B, BT, R>(
     values: &BurnTensor<B, 2>,
     quantile: f32,
 ) -> Option<BurnTensor<B, 2>>
 where
+    B: BackendTrait,
     B::FloatTensorPrimitive: 'static,
     BT: BoolElement + 'static,
     R: CubeRuntime + 'static,
@@ -141,11 +142,12 @@ where
     Some(BurnTensor::<B, 2>::from_primitive(TensorPrimitive::Float(out_prim)))
 }
 
-fn try_percentile_thresholds_cubecl_direct<B: BackendTrait, R: CubeRuntime>(
+fn try_percentile_thresholds_cubecl_direct<B, R>(
     values: &BurnTensor<B, 2>,
     quantile: f32,
 ) -> Option<BurnTensor<B, 2>>
 where
+    B: BackendTrait,
     B::FloatTensorPrimitive: 'static,
     R: CubeRuntime + 'static,
 {

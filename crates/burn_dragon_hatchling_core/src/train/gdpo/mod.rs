@@ -28,7 +28,7 @@ fn note_cpu_fallback() {
 const GDPO_LOG_RATIO_CLAMP: f32 = 20.0;
 
 
-pub(crate) fn gdpo_advantage<B: BackendTrait>(
+pub fn gdpo_advantage<B: BackendTrait>(
     hard: Tensor<B, 2>,
     easy: Tensor<B, 2>,
     config: &GdpoConfig,
@@ -44,7 +44,7 @@ pub(crate) fn gdpo_advantage<B: BackendTrait>(
     batch_normalize_advantage(advantage, config.norm_epsilon.max(0.0))
 }
 
-pub(crate) fn gdpo_advantage_autodiff<B: AutodiffBackend>(
+pub fn gdpo_advantage_autodiff<B: AutodiffBackend>(
     hard: Tensor<B, 2>,
     easy: Tensor<B, 2>,
     config: &GdpoConfig,
@@ -55,7 +55,7 @@ pub(crate) fn gdpo_advantage_autodiff<B: AutodiffBackend>(
     Tensor::from_inner(advantage_inner)
 }
 
-pub(crate) fn gdpo_policy_loss<B: BackendTrait>(
+pub fn gdpo_policy_loss<B: BackendTrait>(
     log_prob_new: Tensor<B, 2>,
     log_prob_old: Tensor<B, 2>,
     advantage: Tensor<B, 2>,

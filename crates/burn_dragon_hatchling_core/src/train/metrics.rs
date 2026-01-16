@@ -18,15 +18,15 @@ use burn_train::metric::{Adaptor, ItemLazy, LossInput};
 use cubecl::Runtime;
 
 use crate::train::constants::LEJEPA_EPS;
-use crate::train::artifacts::{collect_frames, write_video};
+use crate::train::artifacts::{ArtifactFrame, collect_frames, write_video};
 use crate::VisionArtifactOutputMode;
 
-pub(crate) struct LanguageModelOutput<B: BackendTrait> {
+pub struct LanguageModelOutput<B: BackendTrait> {
     loss: Tensor<B, 1>,
 }
 
 impl<B: BackendTrait> LanguageModelOutput<B> {
-    pub(crate) fn new(loss: Tensor<B, 1>) -> Self {
+    pub fn new(loss: Tensor<B, 1>) -> Self {
         Self { loss }
     }
 }
@@ -52,22 +52,22 @@ impl<B: BackendTrait> Adaptor<LossValue<B>> for LanguageModelOutput<B> {
 }
 
 #[derive(Clone)]
-pub(crate) struct LossValue<B: BackendTrait> {
+pub struct LossValue<B: BackendTrait> {
     value: Tensor<B, 1>,
 }
 
 impl<B: BackendTrait> LossValue<B> {
-    pub(crate) fn new(value: Tensor<B, 1>) -> Self {
+    pub fn new(value: Tensor<B, 1>) -> Self {
         Self { value }
     }
 }
 
-pub(crate) struct LanguageModelTrainItem<B: AutodiffBackend> {
+pub struct LanguageModelTrainItem<B: AutodiffBackend> {
     loss: Tensor<B, 1>,
 }
 
 impl<B: AutodiffBackend> LanguageModelTrainItem<B> {
-    pub(crate) fn new(loss: Tensor<B, 1>) -> Self {
+    pub fn new(loss: Tensor<B, 1>) -> Self {
         Self { loss: loss.detach() }
     }
 }
@@ -81,17 +81,17 @@ impl<B: AutodiffBackend> ItemLazy for LanguageModelTrainItem<B> {
 }
 
 #[derive(Clone)]
-pub(crate) struct VisionArtifactInput<B: BackendTrait> {
-    pub(crate) views: Option<Tensor<B, 5>>,
-    pub(crate) frames: Option<Tensor<B, 5>>,
-    pub(crate) patch_norms: Option<Tensor<B, 3>>,
-    pub(crate) probe_logits: Option<Tensor<B, 2>>,
-    pub(crate) labels: Option<Tensor<B, 1, Int>>,
-    pub(crate) legend: Option<Vec<String>>,
+pub struct VisionArtifactInput<B: BackendTrait> {
+    pub views: Option<Tensor<B, 5>>,
+    pub frames: Option<Tensor<B, 5>>,
+    pub patch_norms: Option<Tensor<B, 3>>,
+    pub probe_logits: Option<Tensor<B, 2>>,
+    pub labels: Option<Tensor<B, 1, Int>>,
+    pub legend: Option<Vec<String>>,
 }
 
 impl<B: BackendTrait> VisionArtifactInput<B> {
-    pub(crate) fn empty() -> Self {
+    pub fn empty() -> Self {
         Self {
             views: None,
             frames: None,
@@ -104,24 +104,36 @@ impl<B: BackendTrait> VisionArtifactInput<B> {
 }
 
 #[derive(Clone)]
-pub(crate) struct VisionOutput<B: BackendTrait> {
+pub struct VisionOutput<B: BackendTrait> {
     loss: Tensor<B, 1>,
     inv_loss: Tensor<B, 1>,
     sigreg_loss: Tensor<B, 1>,
     recon_loss: Tensor<B, 1>,
+    recon_psnr: Tensor<B, 1>,
     policy_loss: Tensor<B, 1>,
+    policy_advantage_abs_mean: Tensor<B, 1>,
+    policy_advantage_std: Tensor<B, 1>,
+    policy_log_prob_mean: Tensor<B, 1>,
+    policy_entropy: Tensor<B, 1>,
+    policy_action_clamp_rate: Tensor<B, 1>,
     probe_loss: Tensor<B, 1>,
     probe_acc: Tensor<B, 1>,
     artifacts: Option<VisionArtifactInput<B>>,
 }
 
 impl<B: BackendTrait> VisionOutput<B> {
-    pub(crate) fn new(
+    pub fn new(
         loss: Tensor<B, 1>,
         inv_loss: Tensor<B, 1>,
         sigreg_loss: Tensor<B, 1>,
         recon_loss: Tensor<B, 1>,
+        recon_psnr: Tensor<B, 1>,
         policy_loss: Tensor<B, 1>,
+        policy_advantage_abs_mean: Tensor<B, 1>,
+        policy_advantage_std: Tensor<B, 1>,
+        policy_log_prob_mean: Tensor<B, 1>,
+        policy_entropy: Tensor<B, 1>,
+        policy_action_clamp_rate: Tensor<B, 1>,
         probe_loss: Tensor<B, 1>,
         probe_acc: Tensor<B, 1>,
         artifacts: Option<VisionArtifactInput<B>>,
@@ -131,7 +143,13 @@ impl<B: BackendTrait> VisionOutput<B> {
             inv_loss,
             sigreg_loss,
             recon_loss,
+            recon_psnr,
             policy_loss,
+            policy_advantage_abs_mean,
+            policy_advantage_std,
+            policy_log_prob_mean,
+            policy_entropy,
+            policy_action_clamp_rate,
             probe_loss,
             probe_acc,
             artifacts,
@@ -160,67 +178,133 @@ impl<B: BackendTrait> Adaptor<LossValue<B>> for VisionOutput<B> {
 }
 
 #[derive(Clone)]
-pub(crate) struct InvLossInput<B: BackendTrait> {
+pub struct InvLossInput<B: BackendTrait> {
     value: Tensor<B, 1>,
 }
 
 impl<B: BackendTrait> InvLossInput<B> {
-    pub(crate) fn new(value: Tensor<B, 1>) -> Self {
+    pub fn new(value: Tensor<B, 1>) -> Self {
         Self { value }
     }
 }
 
 #[derive(Clone)]
-pub(crate) struct SigRegLossInput<B: BackendTrait> {
+pub struct SigRegLossInput<B: BackendTrait> {
     value: Tensor<B, 1>,
 }
 
 impl<B: BackendTrait> SigRegLossInput<B> {
-    pub(crate) fn new(value: Tensor<B, 1>) -> Self {
+    pub fn new(value: Tensor<B, 1>) -> Self {
         Self { value }
     }
 }
 
 #[derive(Clone)]
-pub(crate) struct ReconLossInput<B: BackendTrait> {
+pub struct ReconLossInput<B: BackendTrait> {
     value: Tensor<B, 1>,
 }
 
 impl<B: BackendTrait> ReconLossInput<B> {
-    pub(crate) fn new(value: Tensor<B, 1>) -> Self {
+    pub fn new(value: Tensor<B, 1>) -> Self {
         Self { value }
     }
 }
 
 #[derive(Clone)]
-pub(crate) struct PolicyLossInput<B: BackendTrait> {
+pub struct ReconPsnrInput<B: BackendTrait> {
+    value: Tensor<B, 1>,
+}
+
+impl<B: BackendTrait> ReconPsnrInput<B> {
+    pub fn new(value: Tensor<B, 1>) -> Self {
+        Self { value }
+    }
+}
+
+#[derive(Clone)]
+pub struct PolicyLossInput<B: BackendTrait> {
     value: Tensor<B, 1>,
 }
 
 impl<B: BackendTrait> PolicyLossInput<B> {
-    pub(crate) fn new(value: Tensor<B, 1>) -> Self {
+    pub fn new(value: Tensor<B, 1>) -> Self {
         Self { value }
     }
 }
 
 #[derive(Clone)]
-pub(crate) struct ProbeLossInput<B: BackendTrait> {
+pub struct AdvantageAbsMeanInput<B: BackendTrait> {
+    value: Tensor<B, 1>,
+}
+
+impl<B: BackendTrait> AdvantageAbsMeanInput<B> {
+    pub fn new(value: Tensor<B, 1>) -> Self {
+        Self { value }
+    }
+}
+
+#[derive(Clone)]
+pub struct AdvantageStdInput<B: BackendTrait> {
+    value: Tensor<B, 1>,
+}
+
+impl<B: BackendTrait> AdvantageStdInput<B> {
+    pub fn new(value: Tensor<B, 1>) -> Self {
+        Self { value }
+    }
+}
+
+#[derive(Clone)]
+pub struct LogProbMeanInput<B: BackendTrait> {
+    value: Tensor<B, 1>,
+}
+
+impl<B: BackendTrait> LogProbMeanInput<B> {
+    pub fn new(value: Tensor<B, 1>) -> Self {
+        Self { value }
+    }
+}
+
+#[derive(Clone)]
+pub struct PolicyEntropyInput<B: BackendTrait> {
+    value: Tensor<B, 1>,
+}
+
+impl<B: BackendTrait> PolicyEntropyInput<B> {
+    pub fn new(value: Tensor<B, 1>) -> Self {
+        Self { value }
+    }
+}
+
+#[derive(Clone)]
+pub struct ActionClampRateInput<B: BackendTrait> {
+    value: Tensor<B, 1>,
+}
+
+impl<B: BackendTrait> ActionClampRateInput<B> {
+    pub fn new(value: Tensor<B, 1>) -> Self {
+        Self { value }
+    }
+}
+
+#[derive(Clone)]
+pub struct ProbeLossInput<B: BackendTrait> {
     value: Tensor<B, 1>,
 }
 
 impl<B: BackendTrait> ProbeLossInput<B> {
-    pub(crate) fn new(value: Tensor<B, 1>) -> Self {
+    pub fn new(value: Tensor<B, 1>) -> Self {
         Self { value }
     }
 }
 
 #[derive(Clone)]
-pub(crate) struct ProbeAccInput<B: BackendTrait> {
+pub struct ProbeAccInput<B: BackendTrait> {
     value: Tensor<B, 1>,
 }
 
 impl<B: BackendTrait> ProbeAccInput<B> {
-    pub(crate) fn new(value: Tensor<B, 1>) -> Self {
+    pub fn new(value: Tensor<B, 1>) -> Self {
         Self { value }
     }
 }
@@ -243,9 +327,45 @@ impl<B: BackendTrait> Adaptor<ReconLossInput<B>> for VisionOutput<B> {
     }
 }
 
+impl<B: BackendTrait> Adaptor<ReconPsnrInput<B>> for VisionOutput<B> {
+    fn adapt(&self) -> ReconPsnrInput<B> {
+        ReconPsnrInput::new(self.recon_psnr.clone())
+    }
+}
+
 impl<B: BackendTrait> Adaptor<PolicyLossInput<B>> for VisionOutput<B> {
     fn adapt(&self) -> PolicyLossInput<B> {
         PolicyLossInput::new(self.policy_loss.clone())
+    }
+}
+
+impl<B: BackendTrait> Adaptor<AdvantageAbsMeanInput<B>> for VisionOutput<B> {
+    fn adapt(&self) -> AdvantageAbsMeanInput<B> {
+        AdvantageAbsMeanInput::new(self.policy_advantage_abs_mean.clone())
+    }
+}
+
+impl<B: BackendTrait> Adaptor<AdvantageStdInput<B>> for VisionOutput<B> {
+    fn adapt(&self) -> AdvantageStdInput<B> {
+        AdvantageStdInput::new(self.policy_advantage_std.clone())
+    }
+}
+
+impl<B: BackendTrait> Adaptor<LogProbMeanInput<B>> for VisionOutput<B> {
+    fn adapt(&self) -> LogProbMeanInput<B> {
+        LogProbMeanInput::new(self.policy_log_prob_mean.clone())
+    }
+}
+
+impl<B: BackendTrait> Adaptor<PolicyEntropyInput<B>> for VisionOutput<B> {
+    fn adapt(&self) -> PolicyEntropyInput<B> {
+        PolicyEntropyInput::new(self.policy_entropy.clone())
+    }
+}
+
+impl<B: BackendTrait> Adaptor<ActionClampRateInput<B>> for VisionOutput<B> {
+    fn adapt(&self) -> ActionClampRateInput<B> {
+        ActionClampRateInput::new(self.policy_action_clamp_rate.clone())
     }
 }
 
@@ -267,23 +387,35 @@ impl<B: BackendTrait> Adaptor<VisionArtifactInput<B>> for VisionOutput<B> {
     }
 }
 
-pub(crate) struct VisionTrainItem<B: AutodiffBackend> {
+pub struct VisionTrainItem<B: AutodiffBackend> {
     loss: Tensor<B, 1>,
     inv_loss: Tensor<B, 1>,
     sigreg_loss: Tensor<B, 1>,
     recon_loss: Tensor<B, 1>,
+    recon_psnr: Tensor<B, 1>,
     policy_loss: Tensor<B, 1>,
+    policy_advantage_abs_mean: Tensor<B, 1>,
+    policy_advantage_std: Tensor<B, 1>,
+    policy_log_prob_mean: Tensor<B, 1>,
+    policy_entropy: Tensor<B, 1>,
+    policy_action_clamp_rate: Tensor<B, 1>,
     probe_loss: Tensor<B, 1>,
     probe_acc: Tensor<B, 1>,
 }
 
 impl<B: AutodiffBackend> VisionTrainItem<B> {
-    pub(crate) fn new(
+    pub fn new(
         loss: Tensor<B, 1>,
         inv_loss: Tensor<B, 1>,
         sigreg_loss: Tensor<B, 1>,
         recon_loss: Tensor<B, 1>,
+        recon_psnr: Tensor<B, 1>,
         policy_loss: Tensor<B, 1>,
+        policy_advantage_abs_mean: Tensor<B, 1>,
+        policy_advantage_std: Tensor<B, 1>,
+        policy_log_prob_mean: Tensor<B, 1>,
+        policy_entropy: Tensor<B, 1>,
+        policy_action_clamp_rate: Tensor<B, 1>,
         probe_loss: Tensor<B, 1>,
         probe_acc: Tensor<B, 1>,
     ) -> Self {
@@ -292,7 +424,13 @@ impl<B: AutodiffBackend> VisionTrainItem<B> {
             inv_loss: inv_loss.detach(),
             sigreg_loss: sigreg_loss.detach(),
             recon_loss: recon_loss.detach(),
+            recon_psnr: recon_psnr.detach(),
             policy_loss: policy_loss.detach(),
+            policy_advantage_abs_mean: policy_advantage_abs_mean.detach(),
+            policy_advantage_std: policy_advantage_std.detach(),
+            policy_log_prob_mean: policy_log_prob_mean.detach(),
+            policy_entropy: policy_entropy.detach(),
+            policy_action_clamp_rate: policy_action_clamp_rate.detach(),
             probe_loss: probe_loss.detach(),
             probe_acc: probe_acc.detach(),
         }
@@ -308,7 +446,13 @@ impl<B: AutodiffBackend> ItemLazy for VisionTrainItem<B> {
             self.inv_loss.detach().inner(),
             self.sigreg_loss.detach().inner(),
             self.recon_loss.detach().inner(),
+            self.recon_psnr.detach().inner(),
             self.policy_loss.detach().inner(),
+            self.policy_advantage_abs_mean.detach().inner(),
+            self.policy_advantage_std.detach().inner(),
+            self.policy_log_prob_mean.detach().inner(),
+            self.policy_entropy.detach().inner(),
+            self.policy_action_clamp_rate.detach().inner(),
             self.probe_loss.detach().inner(),
             self.probe_acc.detach().inner(),
             None,
@@ -316,7 +460,7 @@ impl<B: AutodiffBackend> ItemLazy for VisionTrainItem<B> {
     }
 }
 
-pub(crate) trait ScalarValue<B: BackendTrait> {
+pub trait ScalarValue<B: BackendTrait> {
     fn value(&self) -> Tensor<B, 1>;
 }
 
@@ -338,7 +482,43 @@ impl<B: BackendTrait> ScalarValue<B> for ReconLossInput<B> {
     }
 }
 
+impl<B: BackendTrait> ScalarValue<B> for ReconPsnrInput<B> {
+    fn value(&self) -> Tensor<B, 1> {
+        self.value.clone()
+    }
+}
+
 impl<B: BackendTrait> ScalarValue<B> for PolicyLossInput<B> {
+    fn value(&self) -> Tensor<B, 1> {
+        self.value.clone()
+    }
+}
+
+impl<B: BackendTrait> ScalarValue<B> for AdvantageAbsMeanInput<B> {
+    fn value(&self) -> Tensor<B, 1> {
+        self.value.clone()
+    }
+}
+
+impl<B: BackendTrait> ScalarValue<B> for AdvantageStdInput<B> {
+    fn value(&self) -> Tensor<B, 1> {
+        self.value.clone()
+    }
+}
+
+impl<B: BackendTrait> ScalarValue<B> for LogProbMeanInput<B> {
+    fn value(&self) -> Tensor<B, 1> {
+        self.value.clone()
+    }
+}
+
+impl<B: BackendTrait> ScalarValue<B> for PolicyEntropyInput<B> {
+    fn value(&self) -> Tensor<B, 1> {
+        self.value.clone()
+    }
+}
+
+impl<B: BackendTrait> ScalarValue<B> for ActionClampRateInput<B> {
     fn value(&self) -> Tensor<B, 1> {
         self.value.clone()
     }
@@ -362,7 +542,7 @@ impl<B: BackendTrait> ScalarValue<B> for LossValue<B> {
     }
 }
 
-pub(crate) struct ScalarMetric<B: BackendTrait, I: ScalarValue<B>> {
+pub struct ScalarMetric<B: BackendTrait, I: ScalarValue<B>> {
     name: Arc<String>,
     last: f64,
     every: usize,
@@ -383,7 +563,7 @@ impl<B: BackendTrait, I: ScalarValue<B>> Clone for ScalarMetric<B, I> {
 }
 
 impl<B: BackendTrait, I: ScalarValue<B>> ScalarMetric<B, I> {
-    pub(crate) fn new_every(name: &str, every: usize) -> Self {
+    pub fn new_every(name: &str, every: usize) -> Self {
         Self {
             name: Arc::new(name.to_string()),
             last: 0.0,
@@ -480,7 +660,7 @@ pub fn loss_trace_len() -> usize {
 
 #[cfg(feature = "integration_test")]
 #[derive(Clone)]
-pub(crate) struct LossTraceMetric<B: BackendTrait> {
+pub struct LossTraceMetric<B: BackendTrait> {
     name: Arc<String>,
     every: usize,
     last: f64,
@@ -490,7 +670,7 @@ pub(crate) struct LossTraceMetric<B: BackendTrait> {
 
 #[cfg(feature = "integration_test")]
 impl<B: BackendTrait> LossTraceMetric<B> {
-    pub(crate) fn new(name: &str, every: usize) -> Self {
+    pub fn new(name: &str, every: usize) -> Self {
         let every = every.max(1);
         Self {
             name: Arc::new(name.to_string()),
@@ -548,13 +728,13 @@ impl<B: BackendTrait> burn_train::metric::Metric for LossTraceMetric<B> {
 }
 
 #[derive(Clone)]
-pub(crate) struct DeviceMetric {
+pub struct DeviceMetric {
     name: Arc<String>,
     value: Arc<String>,
 }
 
 impl DeviceMetric {
-    pub(crate) fn new(name: &str, value: &str) -> Self {
+    pub fn new(name: &str, value: &str) -> Self {
         Self {
             name: Arc::new(name.to_string()),
             value: Arc::new(value.to_string()),
@@ -600,19 +780,19 @@ where
     }
 }
 
-fn allow_memory_cleanup<B: BackendTrait>(device: &B::Device, allow_cuda_cleanup: bool) -> bool
+fn allow_memory_cleanup<B: BackendTrait>(_device: &B::Device, _allow_cuda_cleanup: bool) -> bool
 where
     B::Device: 'static,
 {
     #[cfg(feature = "cuda")]
-    if (device as &dyn Any).downcast_ref::<burn_cuda::CudaDevice>().is_some() {
-        return allow_cuda_cleanup;
+    if (_device as &dyn Any).downcast_ref::<burn_cuda::CudaDevice>().is_some() {
+        return _allow_cuda_cleanup;
     }
     true
 }
 
 #[derive(Clone)]
-pub(crate) struct MemoryCleanupMetric<B: BackendTrait> {
+pub struct MemoryCleanupMetric<B: BackendTrait> {
     name: Arc<String>,
     device: B::Device,
     every_epochs: usize,
@@ -622,7 +802,7 @@ pub(crate) struct MemoryCleanupMetric<B: BackendTrait> {
 }
 
 impl<B: BackendTrait> MemoryCleanupMetric<B> {
-    pub(crate) fn new(
+    pub fn new(
         device: &B::Device,
         every_epochs: usize,
         every_iters: usize,
@@ -704,7 +884,7 @@ where
 }
 
 #[derive(Clone)]
-pub(crate) struct VisionArtifactMetric<B: BackendTrait> {
+pub struct VisionArtifactMetric<B: BackendTrait> {
     name: Arc<String>,
     output_dir: PathBuf,
     every: usize,
@@ -721,7 +901,7 @@ pub(crate) struct VisionArtifactMetric<B: BackendTrait> {
 }
 
 impl<B: BackendTrait> VisionArtifactMetric<B> {
-    pub(crate) fn new(
+    pub fn new(
         output_dir: PathBuf,
         every: usize,
         output_mode: VisionArtifactOutputMode,
@@ -772,6 +952,113 @@ impl<B: BackendTrait> VisionArtifactMetric<B> {
         let path = self.output_dir.join("vision_artifacts_key.txt");
         let _ = fs::write(path, contents);
     }
+
+    fn build_lejepa_frame(
+        &self,
+        views_vec: &[f32],
+        patch_vec: &[f32],
+        batch_idx: usize,
+        view_count: usize,
+        channels: usize,
+        height: usize,
+        width: usize,
+        grid_h: usize,
+        grid_w: usize,
+        probe_preds: Option<(&[i64], &[i64])>,
+    ) -> Option<ArtifactFrame> {
+        if channels < 3 || height == 0 || width == 0 || grid_h == 0 || grid_w == 0 {
+            return None;
+        }
+        let heat_patch_h = height / grid_h;
+        let heat_patch_w = width / grid_w;
+        if heat_patch_h == 0 || heat_patch_w == 0 {
+            return None;
+        }
+        let width_total = width * (view_count + 1);
+        let mut canvas = vec![0u8; width_total * height * 3];
+
+        for view_idx in 0..view_count {
+            for y in 0..height {
+                for x in 0..width {
+                    let base = (((batch_idx * view_count + view_idx) * channels + 0) * height + y)
+                        * width
+                        + x;
+                    let r = self.denormalize_channel(views_vec[base], 0);
+                    let g = self.denormalize_channel(views_vec[base + height * width], 1);
+                    let b = self.denormalize_channel(views_vec[base + 2 * height * width], 2);
+                    let out_x = view_idx * width + x;
+                    let offset = (y * width_total + out_x) * 3;
+                    canvas[offset] = r;
+                    canvas[offset + 1] = g;
+                    canvas[offset + 2] = b;
+                }
+            }
+        }
+
+        let patch_offset = batch_idx * grid_h * grid_w;
+        let patch_slice = &patch_vec[patch_offset..patch_offset + grid_h * grid_w];
+        let mut min_val = f32::INFINITY;
+        let mut max_val = f32::NEG_INFINITY;
+        for value in patch_slice {
+            min_val = min_val.min(*value);
+            max_val = max_val.max(*value);
+        }
+        let denom = (max_val - min_val).max(LEJEPA_EPS);
+        for gy in 0..grid_h {
+            for gx in 0..grid_w {
+                let value = (patch_slice[gy * grid_w + gx] - min_val) / denom;
+                let pix = (value.clamp(0.0, 1.0) * 255.0).round() as u8;
+                for y in (gy * heat_patch_h)..((gy + 1) * heat_patch_h) {
+                    for x in (gx * heat_patch_w)..((gx + 1) * heat_patch_w) {
+                        let out_x = view_count * width + x;
+                        let offset = (y * width_total + out_x) * 3;
+                        canvas[offset] = pix;
+                        canvas[offset + 1] = pix;
+                        canvas[offset + 2] = pix;
+                    }
+                }
+            }
+        }
+
+        let is_correct = probe_preds.and_then(|(preds, labels)| {
+            let pred = preds.get(batch_idx)?;
+            let label = labels.get(batch_idx)?;
+            Some(pred == label)
+        });
+        if let Some(is_correct) = is_correct {
+            let (r, g, b) = if is_correct {
+                (0u8, 200u8, 0u8)
+            } else {
+                (200u8, 0u8, 0u8)
+            };
+            for x in 0..width_total {
+                let top = x * 3;
+                canvas[top] = r;
+                canvas[top + 1] = g;
+                canvas[top + 2] = b;
+                let bottom = ((height - 1) * width_total + x) * 3;
+                canvas[bottom] = r;
+                canvas[bottom + 1] = g;
+                canvas[bottom + 2] = b;
+            }
+            for y in 0..height {
+                let left = (y * width_total) * 3;
+                canvas[left] = r;
+                canvas[left + 1] = g;
+                canvas[left + 2] = b;
+                let right = (y * width_total + (width_total - 1)) * 3;
+                canvas[right] = r;
+                canvas[right + 1] = g;
+                canvas[right + 2] = b;
+            }
+        }
+
+        Some(ArtifactFrame {
+            width: width_total,
+            height,
+            rgb: canvas,
+        })
+    }
 }
 
 impl<B: BackendTrait> burn_train::metric::Metric for VisionArtifactMetric<B> {
@@ -812,6 +1099,121 @@ impl<B: BackendTrait> burn_train::metric::Metric for VisionArtifactMetric<B> {
             );
         }
         if self.output_mode != VisionArtifactOutputMode::Images {
+            if item.frames.is_none() {
+                if let (Some(views), Some(patch_norms)) = (&item.views, &item.patch_norms) {
+                    if let Some(legend) = item.legend.as_ref() {
+                        self.write_legend(legend);
+                    }
+                    let [batch, view_count, channels, height, width] = views.shape().dims::<5>();
+                    if batch == 0 || view_count == 0 || channels == 0 || height == 0 || width == 0 {
+                        return burn_train::metric::MetricEntry::new(
+                            Arc::clone(&self.name),
+                            "empty_views".to_string(),
+                            "0".to_string(),
+                        );
+                    }
+                    let [norm_batch, grid_h, grid_w] = patch_norms.shape().dims::<3>();
+                    if norm_batch == 0 || grid_h == 0 || grid_w == 0 {
+                        return burn_train::metric::MetricEntry::new(
+                            Arc::clone(&self.name),
+                            "empty_norms".to_string(),
+                            "0".to_string(),
+                        );
+                    }
+                    let views_vec = match views.to_data().convert::<f32>().into_vec::<f32>() {
+                        Ok(vec) => vec,
+                        Err(_) => {
+                            return burn_train::metric::MetricEntry::new(
+                                Arc::clone(&self.name),
+                                "view_copy_failed".to_string(),
+                                "0".to_string(),
+                            );
+                        }
+                    };
+                    let patch_vec = match patch_norms.to_data().convert::<f32>().into_vec::<f32>() {
+                        Ok(vec) => vec,
+                        Err(_) => {
+                            return burn_train::metric::MetricEntry::new(
+                                Arc::clone(&self.name),
+                                "patch_copy_failed".to_string(),
+                                "0".to_string(),
+                            );
+                        }
+                    };
+                    let probe_preds = if let (Some(logits), Some(labels)) =
+                        (&item.probe_logits, &item.labels)
+                    {
+                        let preds = logits
+                            .clone()
+                            .argmax(1)
+                            .to_data()
+                            .convert::<i64>()
+                            .into_vec::<i64>()
+                            .ok();
+                        let labels = labels
+                            .clone()
+                            .to_data()
+                            .convert::<i64>()
+                            .into_vec::<i64>()
+                            .ok();
+                        preds.zip(labels)
+                    } else {
+                        None
+                    };
+
+                    let mut saved = 0usize;
+                    let mut last_mode = self.output_mode;
+                    let batch_limit = batch.min(self.remaining_images);
+                    for batch_idx in 0..batch_limit {
+                        let probe_slices = probe_preds
+                            .as_ref()
+                            .map(|(preds, labels)| (preds.as_slice(), labels.as_slice()));
+                        let Some(frame) = self.build_lejepa_frame(
+                            &views_vec,
+                            &patch_vec,
+                            batch_idx,
+                            view_count,
+                            channels,
+                            height,
+                            width,
+                            grid_h,
+                            grid_w,
+                            probe_slices,
+                        ) else {
+                            continue;
+                        };
+                        let frames = vec![frame];
+                        let outcome = match write_video(
+                            &self.output_dir,
+                            self.output_mode,
+                            self.overwrite,
+                            metadata.iteration,
+                            batch_idx,
+                            &frames,
+                            self.fps,
+                            self.ffmpeg_path.as_deref(),
+                        ) {
+                            Ok(outcome) => outcome,
+                            Err(_) => {
+                                return burn_train::metric::MetricEntry::new(
+                                    Arc::clone(&self.name),
+                                    "video_write_failed".to_string(),
+                                    "0".to_string(),
+                                );
+                            }
+                        };
+                        saved += outcome.saved;
+                        last_mode = outcome.mode;
+                    }
+                    self.remaining_images = self.remaining_images.saturating_sub(batch_limit);
+                    return burn_train::metric::MetricEntry::new(
+                        Arc::clone(&self.name),
+                        format!("saved={saved} mode={last_mode}"),
+                        saved.to_string(),
+                    );
+                }
+            }
+
             let frames_tensor = item.frames.as_ref().or(item.views.as_ref());
             let Some(frames_tensor) = frames_tensor else {
                 return burn_train::metric::MetricEntry::new(
@@ -999,97 +1401,29 @@ impl<B: BackendTrait> burn_train::metric::Metric for VisionArtifactMetric<B> {
 
         let mut saved = 0usize;
         let mut log_lines = Vec::new();
-        let width_total = width * (view_count + 1);
         let batch_limit = batch.min(self.remaining_images);
+        let probe_slices = probe_preds
+            .as_ref()
+            .map(|(preds, labels)| (preds.as_slice(), labels.as_slice()));
         for batch_idx in 0..batch_limit {
-            let mut canvas = vec![0u8; width_total * height * 3];
-            for view_idx in 0..view_count {
-                for y in 0..height {
-                    for x in 0..width {
-                        let base = (((batch_idx * view_count + view_idx) * channels + 0) * height
-                            + y)
-                            * width
-                            + x;
-                        let r = self.denormalize_channel(views_vec[base], 0);
-                        let g = self.denormalize_channel(
-                            views_vec[base + height * width],
-                            1,
-                        );
-                        let b = self.denormalize_channel(
-                            views_vec[base + 2 * height * width],
-                            2,
-                        );
-                        let out_x = view_idx * width + x;
-                        let offset = (y * width_total + out_x) * 3;
-                        canvas[offset] = r;
-                        canvas[offset + 1] = g;
-                        canvas[offset + 2] = b;
-                    }
-                }
-            }
-
-            let patch_offset = batch_idx * grid_h * grid_w;
-            let patch_slice = &patch_vec[patch_offset..patch_offset + grid_h * grid_w];
-            let mut min_val = f32::INFINITY;
-            let mut max_val = f32::NEG_INFINITY;
-            for value in patch_slice {
-                min_val = min_val.min(*value);
-                max_val = max_val.max(*value);
-            }
-            let denom = (max_val - min_val).max(LEJEPA_EPS);
-            for gy in 0..grid_h {
-                for gx in 0..grid_w {
-                    let value = (patch_slice[gy * grid_w + gx] - min_val) / denom;
-                    let pix = (value.clamp(0.0, 1.0) * 255.0).round() as u8;
-                    for y in (gy * heat_patch_h)..((gy + 1) * heat_patch_h) {
-                        for x in (gx * heat_patch_w)..((gx + 1) * heat_patch_w) {
-                            let out_x = view_count * width + x;
-                            let offset = (y * width_total + out_x) * 3;
-                            canvas[offset] = pix;
-                            canvas[offset + 1] = pix;
-                            canvas[offset + 2] = pix;
-                        }
-                    }
-                }
-            }
-
-            let is_correct = probe_preds.as_ref().and_then(|(preds, labels)| {
-                let pred = preds.get(batch_idx)?;
-                let label = labels.get(batch_idx)?;
-                Some(pred == label)
-            });
-            if let Some(is_correct) = is_correct {
-                let (r, g, b) = if is_correct {
-                    (0u8, 200u8, 0u8)
-                } else {
-                    (200u8, 0u8, 0u8)
-                };
-                for x in 0..width_total {
-                    let top = x * 3;
-                    canvas[top] = r;
-                    canvas[top + 1] = g;
-                    canvas[top + 2] = b;
-                    let bottom = ((height - 1) * width_total + x) * 3;
-                    canvas[bottom] = r;
-                    canvas[bottom + 1] = g;
-                    canvas[bottom + 2] = b;
-                }
-                for y in 0..height {
-                    let left = (y * width_total) * 3;
-                    canvas[left] = r;
-                    canvas[left + 1] = g;
-                    canvas[left + 2] = b;
-                    let right = (y * width_total + (width_total - 1)) * 3;
-                    canvas[right] = r;
-                    canvas[right + 1] = g;
-                    canvas[right + 2] = b;
-                }
-            }
-
+            let Some(frame) = self.build_lejepa_frame(
+                &views_vec,
+                &patch_vec,
+                batch_idx,
+                view_count,
+                channels,
+                height,
+                width,
+                grid_h,
+                grid_w,
+                probe_slices,
+            ) else {
+                continue;
+            };
             if let Some(image) = image::RgbImage::from_vec(
-                width_total as u32,
-                height as u32,
-                canvas,
+                frame.width as u32,
+                frame.height as u32,
+                frame.rgb,
             ) {
                 let filename = if self.overwrite {
                     format!("sample_{:02}.png", batch_idx)

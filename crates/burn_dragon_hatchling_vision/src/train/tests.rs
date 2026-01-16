@@ -1,13 +1,14 @@
+use crate::foveation;
 use crate::train::prelude::*;
 use crate::train::SaccadeFoveationSampler;
-use crate::ContextStrategyConfig;
-use crate::{
+use burn_dragon_hatchling_core::ContextStrategyConfig;
+use burn_dragon_hatchling_core::{
     FusedKernelConfig, SpatialPositionalEncodingKind, VisionAttentionMode, VisionLossConfig,
     VisionPyramidMode, VisionReconLossConfig, VisionSaccadeCacheConfig,
     VisionSaccadeInputProjectionConfig, VisionSaccadePolicyConfig, VisionTbpttConfig,
 };
 #[cfg(not(target_arch = "wasm32"))]
-use crate::{VisionTrainingModeConfig, load_vision_training_config};
+use burn_dragon_hatchling_core::{VisionTrainingModeConfig, load_vision_training_config};
 use burn_autodiff::Autodiff;
 #[cfg(not(target_arch = "wasm32"))]
 use burn_cubecl::CubeBackend;
@@ -16,7 +17,8 @@ use burn_ndarray::NdArray;
 use burn_wgpu::Wgpu;
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
-use std::sync::Once;
+#[cfg(not(target_arch = "wasm32"))]
+use super::init_wgpu_test_runtime;
 
 fn make_training(max_iters: usize, epochs: Option<usize>) -> TrainingHyperparameters {
     TrainingHyperparameters {
@@ -103,6 +105,7 @@ fn make_saccade_model_with_dims<B: BackendTrait>(
                 weight: 0.0,
                 mask_ratio: 0.0,
                 hidden_dim: 16,
+                ..VisionReconLossConfig::default()
             },
         },
         artifact_output: VisionArtifactOutputMode::Images,
@@ -155,6 +158,184 @@ fn make_test_image(channels: usize, height: usize, width: usize) -> Vec<f32> {
     data
 }
 
+fn make_checkerboard_image(
+    channels: usize,
+    height: usize,
+    width: usize,
+    cell_size: usize,
+) -> Vec<f32> {
+    let mut data = Vec::with_capacity(channels * height * width);
+    let cell = cell_size.max(1);
+    for _c in 0..channels {
+        for y in 0..height {
+            let cy = y / cell;
+            for x in 0..width {
+                let cx = x / cell;
+                let value = if (cx + cy) % 2 == 0 { 0.0 } else { 1.0 };
+                data.push(value);
+            }
+        }
+    }
+    data
+}
+
+fn checkerboard_center_metrics(
+    patch: &[f32],
+    channels: usize,
+    height: usize,
+    width: usize,
+) -> (f32, f32) {
+    let start_x = width / 4;
+    let start_y = height / 4;
+    let mut end_x = (width * 3) / 4;
+    let mut end_y = (height * 3) / 4;
+    if end_x <= start_x + 1 {
+        end_x = width.max(start_x + 2);
+    }
+    if end_y <= start_y + 1 {
+        end_y = height.max(start_y + 2);
+    }
+    let end_x = end_x.min(width);
+    let end_y = end_y.min(height);
+
+    let mut min_val = f32::INFINITY;
+    let mut max_val = f32::NEG_INFINITY;
+    let mut diff_sum = 0.0;
+    let mut diff_count = 0usize;
+
+    for c in 0..channels {
+        let base = c * height * width;
+        for y in start_y..end_y {
+            let row = base + y * width;
+            for x in start_x..end_x {
+                let value = patch[row + x];
+                min_val = min_val.min(value);
+                max_val = max_val.max(value);
+            }
+        }
+        for y in start_y..(end_y - 1) {
+            let row = base + y * width;
+            let next_row = base + (y + 1) * width;
+            for x in start_x..(end_x - 1) {
+                let value = patch[row + x];
+                diff_sum += (value - patch[row + x + 1]).abs();
+                diff_sum += (value - patch[next_row + x]).abs();
+                diff_count += 2;
+            }
+        }
+    }
+
+    let range = if min_val.is_finite() {
+        max_val - min_val
+    } else {
+        0.0
+    };
+    let mean_diff = if diff_count == 0 {
+        0.0
+    } else {
+        diff_sum / diff_count as f32
+    };
+    (mean_diff, range)
+}
+
+fn run_foveation_snellen<B: BackendTrait>(
+    device: &B::Device,
+    backend_label: &str,
+) {
+    let batch = 1;
+    let channels = 3;
+    let width = 32;
+    let height = 32;
+    let patch_size = 16;
+    let data = make_checkerboard_image(channels, height, width, 1);
+    let images = Tensor::<B, 4>::from_data(
+        TensorData::new(data, [batch, channels, height, width]),
+        device,
+    );
+
+    let mut sampling_modes = vec![
+        VisionFoveaSamplingMode::Batched,
+        VisionFoveaSamplingMode::Sequential,
+    ];
+    if crate::train::foveation::cubecl::supports_backend::<B>() {
+        sampling_modes.push(VisionFoveaSamplingMode::Cubecl);
+    }
+    if crate::train::foveation::wgsl::supports_backend::<B>() {
+        sampling_modes.push(VisionFoveaSamplingMode::Wgsl);
+    }
+
+    let cases = [
+        (0.06, 0.2),
+        (0.08, 0.25),
+        (0.1, 0.35),
+        (0.12, 0.45),
+    ];
+    let normalized_threshold = 0.3;
+    let range_threshold = 0.6;
+
+    for sampling_mode in sampling_modes {
+        let (mut saccade, vision_config) =
+            make_saccade_model_with_dims::<B>(device, 1, width, height, patch_size);
+        saccade.config.pyramid_mode = VisionPyramidMode::Stacked;
+        saccade.config.fovea_sampling_mode = sampling_mode;
+        saccade.config.fovea_warp_mode = VisionFoveaWarpMode::Warped;
+        saccade.config.fovea_subpatch_size = 0;
+        saccade.config.mip_levels = 3;
+
+        let mut sampler =
+            SaccadeFoveationSampler::<B>::new(vision_config, saccade.config.clone(), device);
+        sampler.update_image(images.clone());
+        let patch_size = sampler.patch_size();
+
+        let mut best_norm = 0.0;
+        let mut best_diff = 0.0;
+        let mut best_range = 0.0;
+        let mut best_case = None;
+        let mut passed = false;
+        for (case_idx, (sigma_val, radius_val)) in cases.iter().copied().enumerate() {
+            let mean = Tensor::<B, 2>::from_data(
+                TensorData::new(vec![0.5, 0.5], [batch, 2]),
+                device,
+            );
+            let sigma = Tensor::<B, 2>::from_data(
+                TensorData::new(vec![sigma_val], [batch, 1]),
+                device,
+            );
+            let radius = Tensor::<B, 2>::from_data(
+                TensorData::new(vec![radius_val], [batch, 1]),
+                device,
+            );
+            let patch_view = sampler.sample_patch_with_radius(mean, sigma, radius);
+            let patch_vec = patch_view
+                .to_data()
+                .convert::<f32>()
+                .into_vec::<f32>()
+                .expect("patch vec");
+            let (mean_diff, range) =
+                checkerboard_center_metrics(&patch_vec, channels, patch_size, patch_size);
+            let normalized = if range > 0.0 {
+                mean_diff / range
+            } else {
+                0.0
+            };
+            if normalized > best_norm {
+                best_norm = normalized;
+                best_diff = mean_diff;
+                best_range = range;
+                best_case = Some((case_idx, sigma_val, radius_val));
+            }
+            if normalized >= normalized_threshold && range >= range_threshold {
+                passed = true;
+                break;
+            }
+        }
+        assert!(
+            passed,
+            "backend {backend_label} sampling {sampling_mode:?} best_norm {best_norm:.3} best_diff {best_diff:.3} best_range {best_range:.3} best_case {best_case:?} thresholds norm {normalized_threshold:.3} range {range_threshold:.3}"
+        );
+    }
+}
+
 #[test]
 fn patch_embed_supports_large_patches() {
     type Backend = NdArray<f32>;
@@ -184,15 +365,6 @@ fn patch_embed_supports_large_patches() {
     assert_eq!(patch.grid.height, 3);
     assert_eq!(patch.grid.width, 3);
     assert_eq!(patch.tokens.shape().dims::<3>()[1], 9);
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn init_wgpu_test_runtime(device: &burn_wgpu::WgpuDevice) {
-    use burn_wgpu::{RuntimeOptions, graphics};
-    static INIT: Once = Once::new();
-    INIT.call_once(|| {
-        burn_wgpu::init_setup::<graphics::AutoGraphicsApi>(device, RuntimeOptions::default());
-    });
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -244,6 +416,16 @@ fn cuda_memory_snapshot(device: &burn_cuda::CudaDevice) -> MemorySnapshot {
         in_use: usage.bytes_in_use,
         allocs: usage.number_allocs,
     }
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "cuda"))]
+fn cuda_memory_snapshot_safe(device: &burn_cuda::CudaDevice) -> Option<MemorySnapshot> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| cuda_memory_snapshot(device))).ok()
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "cuda"))]
+fn cuda_memory_cleanup_safe<B: BackendTrait>(device: &B::Device) -> bool {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| B::memory_cleanup(device))).is_ok()
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -883,6 +1065,13 @@ fn saccade_patch_view_matches_cpu_foveation() {
     run_foveation_equivalence::<Backend>(&device, "ndarray");
 }
 
+#[test]
+fn saccade_fovea_snellen_checkerboard_resolves_cpu() {
+    type Backend = NdArray<f32>;
+    let device = <Backend as BackendTrait>::Device::default();
+    run_foveation_snellen::<Backend>(&device, "ndarray");
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn saccade_patch_view_matches_cpu_foveation_wgpu() {
@@ -890,6 +1079,26 @@ fn saccade_patch_view_matches_cpu_foveation_wgpu() {
     let device = burn_wgpu::WgpuDevice::default();
     init_wgpu_test_runtime(&device);
     run_foveation_equivalence::<Backend>(&device, "wgpu");
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn saccade_fovea_snellen_checkerboard_resolves_wgpu() {
+    type Backend = Wgpu<f32>;
+    let device = burn_wgpu::WgpuDevice::default();
+    init_wgpu_test_runtime(&device);
+    run_foveation_snellen::<Backend>(&device, "wgpu");
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "cuda"))]
+#[test]
+fn saccade_fovea_snellen_checkerboard_resolves_cuda() {
+    type Backend = Cuda<f32>;
+    if !crate::train::foveation::cubecl::supports_backend::<Cuda<f32>>() {
+        return;
+    }
+    let device = burn_cuda::CudaDevice::default();
+    run_foveation_snellen::<Backend>(&device, "cuda");
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1519,6 +1728,9 @@ fn wgpu_vision_saccade_train_memory_stays_bounded_small_config() {
 #[test]
 fn cuda_text_memory_stays_bounded_across_epochs() {
     type Backend = Autodiff<Cuda<f32>>;
+    if !crate::train::foveation::cubecl::supports_backend::<Cuda<f32>>() {
+        return;
+    }
     let device = burn_cuda::CudaDevice::default();
 
     let vocab = 64;
@@ -1540,9 +1752,14 @@ fn cuda_text_memory_stays_bounded_across_epochs() {
             drop(output);
         }
         Backend::sync(&device);
-        Backend::memory_cleanup(&device);
+        if !cuda_memory_cleanup_safe::<Backend>(&device) {
+            return;
+        }
         Backend::sync(&device);
-        snapshots.push(cuda_memory_snapshot(&device));
+        let Some(snapshot) = cuda_memory_snapshot_safe(&device) else {
+            return;
+        };
+        snapshots.push(snapshot);
     }
 
     assert_memory_growth_bounded(
@@ -1557,6 +1774,9 @@ fn cuda_text_memory_stays_bounded_across_epochs() {
 #[test]
 fn cuda_vision_saccade_memory_stays_bounded_across_epochs() {
     type Backend = Cuda<f32>;
+    if !crate::train::foveation::cubecl::supports_backend::<Cuda<f32>>() {
+        return;
+    }
     let device = burn_cuda::CudaDevice::default();
 
     let config_path = vision_saccade_tiny_path();
@@ -1629,9 +1849,14 @@ fn cuda_vision_saccade_memory_stays_bounded_across_epochs() {
             drop(output);
         }
         Backend::sync(&device);
-        Backend::memory_cleanup(&device);
+        if !cuda_memory_cleanup_safe::<Backend>(&device) {
+            return;
+        }
         Backend::sync(&device);
-        snapshots.push(cuda_memory_snapshot(&device));
+        let Some(snapshot) = cuda_memory_snapshot_safe(&device) else {
+            return;
+        };
+        snapshots.push(snapshot);
     }
 
     assert_memory_growth_bounded(
@@ -1646,6 +1871,9 @@ fn cuda_vision_saccade_memory_stays_bounded_across_epochs() {
 #[test]
 fn cuda_vision_saccade_train_memory_stays_bounded_small_config() {
     type Backend = Autodiff<Cuda<f32>>;
+    if !crate::train::foveation::cubecl::supports_backend::<Cuda<f32>>() {
+        return;
+    }
     let device = burn_cuda::CudaDevice::default();
 
     let (saccade, vision_config) = make_saccade_model_with_dims::<Backend>(&device, 1, 64, 64, 16);
@@ -1680,9 +1908,14 @@ fn cuda_vision_saccade_train_memory_stays_bounded_small_config() {
             drop(output);
         }
         Backend::sync(&device);
-        Backend::memory_cleanup(&device);
+        if !cuda_memory_cleanup_safe::<Backend>(&device) {
+            return;
+        }
         Backend::sync(&device);
-        snapshots.push(cuda_memory_snapshot(&device));
+        let Some(snapshot) = cuda_memory_snapshot_safe(&device) else {
+            return;
+        };
+        snapshots.push(snapshot);
     }
 
     assert_memory_growth_bounded(

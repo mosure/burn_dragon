@@ -11,7 +11,7 @@ mod projection_bench {
     use burn_dragon_hatchling::{
         VisionSaccadeInputProjectionConfig, VisionSaccadeInputProjectionCnnConfig,
         VisionSaccadeInputProjectionMicroVitConfig,
-        train::bench::VisionInputProjectionBench,
+        vision::train::bench::VisionInputProjectionBench,
     };
     use burn_ndarray::NdArray;
     use std::hint::black_box;

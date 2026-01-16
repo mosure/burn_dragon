@@ -1,6 +1,6 @@
 use crate::train::prelude::*;
 
-pub(crate) enum ResolvedLrScheduler {
+pub enum ResolvedLrScheduler {
     Constant(LearningRate),
     Cosine(CosineAnnealingLrScheduler),
     Linear(LinearLrScheduler),
@@ -10,13 +10,13 @@ pub(crate) enum ResolvedLrScheduler {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ScheduleSource {
+pub enum ScheduleSource {
     Epochs,
     MaxIters,
 }
 
 impl ScheduleSource {
-    pub(crate) fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             ScheduleSource::Epochs => "epochs",
             ScheduleSource::MaxIters => "max_iters",
@@ -25,53 +25,53 @@ impl ScheduleSource {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct TrainSchedule {
-    pub(crate) steps_per_epoch: usize,
-    pub(crate) total_steps: usize,
-    pub(crate) total_epochs: usize,
-    pub(crate) source: ScheduleSource,
+pub struct TrainSchedule {
+    pub steps_per_epoch: usize,
+    pub total_steps: usize,
+    pub total_epochs: usize,
+    pub source: ScheduleSource,
 }
 
-pub(crate) struct TrainEnvironment<'a, B>
+pub struct TrainEnvironment<'a, B>
 where
     B: AutodiffBackend + Clone + 'static,
     B::Device: Clone,
 {
-    pub(crate) run_dir: &'a Path,
-    pub(crate) run_name: &'a str,
-    pub(crate) backend_name: &'a str,
-    pub(crate) training: &'a TrainingHyperparameters,
-    pub(crate) model_config: &'a BDHConfig,
-    pub(crate) device: &'a B::Device,
-    pub(crate) train_loader: Arc<dyn DataLoader<B, SequenceBatch<B>>>,
-    pub(crate) valid_loader: Arc<dyn DataLoader<ValidBackend<B>, SequenceBatch<ValidBackend<B>>>>,
-    pub(crate) epochs: usize,
+    pub run_dir: &'a Path,
+    pub run_name: &'a str,
+    pub backend_name: &'a str,
+    pub training: &'a TrainingHyperparameters,
+    pub model_config: &'a BDHConfig,
+    pub device: &'a B::Device,
+    pub train_loader: Arc<dyn DataLoader<B, SequenceBatch<B>>>,
+    pub valid_loader: Arc<dyn DataLoader<ValidBackend<B>, SequenceBatch<ValidBackend<B>>>>,
+    pub epochs: usize,
 }
 
-pub(crate) struct VisionTrainEnvironment<'a, B>
+pub struct VisionTrainEnvironment<'a, B>
 where
     B: AutodiffBackend + Clone + 'static,
     B::Device: Clone,
 {
-    pub(crate) run_dir: &'a Path,
-    pub(crate) run_name: &'a str,
-    pub(crate) backend_name: &'a str,
-    pub(crate) training: &'a VisionTrainingHyperparameters,
-    pub(crate) device: &'a B::Device,
-    pub(crate) train_loader: Arc<dyn DataLoader<B, ImageNetBatch<B>>>,
-    pub(crate) valid_loader: Arc<dyn DataLoader<ValidBackend<B>, ImageNetBatch<ValidBackend<B>>>>,
-    pub(crate) epochs: usize,
+    pub run_dir: &'a Path,
+    pub run_name: &'a str,
+    pub backend_name: &'a str,
+    pub training: &'a VisionTrainingHyperparameters,
+    pub device: &'a B::Device,
+    pub train_loader: Arc<dyn DataLoader<B, ImageNetBatch<B>>>,
+    pub valid_loader: Arc<dyn DataLoader<ValidBackend<B>, ImageNetBatch<ValidBackend<B>>>>,
+    pub epochs: usize,
 }
 
 #[derive(Clone, Copy, Debug, Module)]
-pub(crate) struct VisionRollout {
-    pub(crate) min_steps: usize,
-    pub(crate) max_steps: usize,
-    pub(crate) backprop_steps: usize,
+pub struct VisionRollout {
+    pub min_steps: usize,
+    pub max_steps: usize,
+    pub backprop_steps: usize,
 }
 
 impl VisionRollout {
-    pub(crate) fn sample_steps(&self) -> usize {
+    pub fn sample_steps(&self) -> usize {
         if self.min_steps >= self.max_steps {
             self.max_steps
         } else {
@@ -79,30 +79,34 @@ impl VisionRollout {
         }
     }
 
-    pub(crate) fn backprop_steps(&self, steps: usize) -> usize {
-        self.backprop_steps.min(steps).max(1)
+    pub fn backprop_steps(&self, steps: usize) -> usize {
+        if self.backprop_steps == 0 {
+            steps.max(1)
+        } else {
+            self.backprop_steps.min(steps).max(1)
+        }
     }
 }
 
 #[derive(Clone)]
-pub(crate) struct VisionDiagnostics {
-    pub(crate) metric_prefix: String,
-    pub(crate) inv: bool,
-    pub(crate) sigreg: bool,
-    pub(crate) recon: bool,
-    pub(crate) policy: bool,
-    pub(crate) probe: bool,
-    pub(crate) artifact_every: usize,
-    pub(crate) artifact_output: VisionArtifactOutputMode,
-    pub(crate) artifact_overwrite: bool,
-    pub(crate) artifact_max_images: usize,
-    pub(crate) artifact_fps: u32,
-    pub(crate) normalize_mean: [f32; 3],
-    pub(crate) normalize_std: [f32; 3],
-    pub(crate) ffmpeg_path: Option<PathBuf>,
+pub struct VisionDiagnostics {
+    pub metric_prefix: String,
+    pub inv: bool,
+    pub sigreg: bool,
+    pub recon: bool,
+    pub policy: bool,
+    pub probe: bool,
+    pub artifact_every: usize,
+    pub artifact_output: VisionArtifactOutputMode,
+    pub artifact_overwrite: bool,
+    pub artifact_max_images: usize,
+    pub artifact_fps: u32,
+    pub normalize_mean: [f32; 3],
+    pub normalize_std: [f32; 3],
+    pub ffmpeg_path: Option<PathBuf>,
 }
 
-pub(crate) fn train_with_scheduler<B, S>(
+pub fn train_with_scheduler<B, S>(
     env: &TrainEnvironment<'_, B>,
     model: BDH<B>,
     optimizer: OptimizerAdaptor<AdamW, BDH<B>, B>,
@@ -149,7 +153,7 @@ where
     Ok(model)
 }
 
-pub(crate) fn train_vision_with_scheduler<B, S, M>(
+pub fn train_vision_with_scheduler<B, S, M>(
     env: &VisionTrainEnvironment<'_, B>,
     model: M,
     optimizer: OptimizerAdaptor<AdamW, M, B>,
@@ -248,6 +252,7 @@ where
         }
         if diagnostics.recon {
             let name = format!("{prefix}_recon_loss");
+            let psnr = format!("{prefix}_recon_psnr");
             builder = builder
                 .metric_train_numeric(
                     ScalarMetric::<ValidBackend<B>, ReconLossInput<ValidBackend<B>>>::new_every(
@@ -258,6 +263,19 @@ where
                 .metric_valid_numeric(
                     ScalarMetric::<ValidBackend<B>, ReconLossInput<ValidBackend<B>>>::new_every(
                         name.as_str(),
+                        metric_every,
+                    ),
+                );
+            builder = builder
+                .metric_train_numeric(
+                    ScalarMetric::<ValidBackend<B>, ReconPsnrInput<ValidBackend<B>>>::new_every(
+                        psnr.as_str(),
+                        metric_every,
+                    ),
+                )
+                .metric_valid_numeric(
+                    ScalarMetric::<ValidBackend<B>, ReconPsnrInput<ValidBackend<B>>>::new_every(
+                        psnr.as_str(),
                         metric_every,
                     ),
                 );
@@ -274,6 +292,72 @@ where
                 .metric_valid_numeric(
                     ScalarMetric::<ValidBackend<B>, PolicyLossInput<ValidBackend<B>>>::new_every(
                         name.as_str(),
+                        metric_every,
+                    ),
+                );
+            let adv_abs = format!("{prefix}_advantage_abs_mean");
+            let adv_std = format!("{prefix}_advantage_std");
+            let log_prob = format!("{prefix}_log_prob_mean");
+            let entropy = format!("{prefix}_entropy");
+            let clamp_rate = format!("{prefix}_action_clamp_rate");
+            builder = builder
+                .metric_train_numeric(
+                    ScalarMetric::<ValidBackend<B>, AdvantageAbsMeanInput<ValidBackend<B>>>::new_every(
+                        adv_abs.as_str(),
+                        metric_every,
+                    ),
+                )
+                .metric_valid_numeric(
+                    ScalarMetric::<ValidBackend<B>, AdvantageAbsMeanInput<ValidBackend<B>>>::new_every(
+                        adv_abs.as_str(),
+                        metric_every,
+                    ),
+                )
+                .metric_train_numeric(
+                    ScalarMetric::<ValidBackend<B>, AdvantageStdInput<ValidBackend<B>>>::new_every(
+                        adv_std.as_str(),
+                        metric_every,
+                    ),
+                )
+                .metric_valid_numeric(
+                    ScalarMetric::<ValidBackend<B>, AdvantageStdInput<ValidBackend<B>>>::new_every(
+                        adv_std.as_str(),
+                        metric_every,
+                    ),
+                )
+                .metric_train_numeric(
+                    ScalarMetric::<ValidBackend<B>, LogProbMeanInput<ValidBackend<B>>>::new_every(
+                        log_prob.as_str(),
+                        metric_every,
+                    ),
+                )
+                .metric_valid_numeric(
+                    ScalarMetric::<ValidBackend<B>, LogProbMeanInput<ValidBackend<B>>>::new_every(
+                        log_prob.as_str(),
+                        metric_every,
+                    ),
+                )
+                .metric_train_numeric(
+                    ScalarMetric::<ValidBackend<B>, PolicyEntropyInput<ValidBackend<B>>>::new_every(
+                        entropy.as_str(),
+                        metric_every,
+                    ),
+                )
+                .metric_valid_numeric(
+                    ScalarMetric::<ValidBackend<B>, PolicyEntropyInput<ValidBackend<B>>>::new_every(
+                        entropy.as_str(),
+                        metric_every,
+                    ),
+                )
+                .metric_train_numeric(
+                    ScalarMetric::<ValidBackend<B>, ActionClampRateInput<ValidBackend<B>>>::new_every(
+                        clamp_rate.as_str(),
+                        metric_every,
+                    ),
+                )
+                .metric_valid_numeric(
+                    ScalarMetric::<ValidBackend<B>, ActionClampRateInput<ValidBackend<B>>>::new_every(
+                        clamp_rate.as_str(),
                         metric_every,
                     ),
                 );
@@ -334,7 +418,7 @@ where
     Ok(())
 }
 
-pub(crate) fn resolve_lr_scheduler(
+pub fn resolve_lr_scheduler(
     optimizer_cfg: &OptimizerConfig,
     total_steps: usize,
     override_num_iters: Option<usize>,
@@ -421,7 +505,7 @@ pub(crate) fn resolve_lr_scheduler(
     Ok(schedule)
 }
 
-pub(crate) fn resolve_vision_lr_scheduler(
+pub fn resolve_vision_lr_scheduler(
     optimizer_cfg: &OptimizerConfig,
     total_steps: usize,
     override_num_iters: Option<usize>,
@@ -508,7 +592,7 @@ pub(crate) fn resolve_vision_lr_scheduler(
     Ok(schedule)
 }
 
-pub(crate) fn resolve_train_schedule(
+pub fn resolve_train_schedule(
     training: &TrainingHyperparameters,
     steps_per_epoch: usize,
 ) -> Result<TrainSchedule> {
@@ -544,7 +628,7 @@ pub(crate) fn resolve_train_schedule(
     }
 }
 
-pub(crate) fn resolve_vision_train_schedule(
+pub fn resolve_vision_train_schedule(
     training: &VisionTrainingHyperparameters,
     steps_per_epoch: usize,
 ) -> Result<TrainSchedule> {
@@ -580,7 +664,7 @@ pub(crate) fn resolve_vision_train_schedule(
     }
 }
 
-pub(crate) fn resolve_vision_rollout(
+pub fn resolve_vision_rollout(
     training: &VisionTrainingHyperparameters,
     max_steps: usize,
 ) -> Result<VisionRollout> {
@@ -593,11 +677,6 @@ pub(crate) fn resolve_vision_rollout(
             "vision rollout steps must be > 0 (min={min_steps}, max={max_steps_cfg})"
         ));
     }
-    if backprop_steps == 0 {
-        return Err(anyhow!(
-            "vision rollout_backprop_steps must be > 0 (value={backprop_steps})"
-        ));
-    }
     if min_steps > max_steps_cfg {
         return Err(anyhow!(
             "vision rollout_min_steps ({min_steps}) must be <= rollout_max_steps ({max_steps_cfg})"
@@ -608,7 +687,7 @@ pub(crate) fn resolve_vision_rollout(
             "vision rollout_max_steps ({max_steps_cfg}) exceeds vision.steps ({max_steps})"
         ));
     }
-    if backprop_steps > max_steps_cfg {
+    if backprop_steps > 0 && backprop_steps > max_steps_cfg {
         return Err(anyhow!(
             "vision rollout_backprop_steps ({backprop_steps}) must be <= rollout_max_steps ({max_steps_cfg})"
         ));

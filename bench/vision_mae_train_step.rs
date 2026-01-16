@@ -11,7 +11,7 @@ use burn_dragon_hatchling::{
     ImageNetAugmentations, ImageNetBatch, ImageNetDataLoader, ImageNetDataset,
     ImageNetDatasetConfig, ImageNetSplit, VisionNormalize, VisionTrainingConfig,
     VisionTrainingModeConfig, load_vision_training_config,
-    vision::train::bench::VisionSaccadeTrainStepBench, wgpu::init_runtime,
+    vision::train::bench::VisionMaeTrainStepBench, wgpu::init_runtime,
 };
 use burn_wgpu::{CubeBackend, WgpuDevice, WgpuRuntime};
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
@@ -39,8 +39,8 @@ fn load_bench_settings(path: &Path) -> BenchSettings {
 }
 
 fn load_bench_config() -> (VisionTrainingConfig, BenchSettings) {
-    let base_path = PathBuf::from("config").join("vision_saccade_tiny.toml");
-    let bench_path = PathBuf::from("config").join("vision_saccade_tiny_bench.toml");
+    let base_path = PathBuf::from("config").join("vision_mae_tiny.toml");
+    let bench_path = PathBuf::from("config").join("vision_mae_tiny_bench.toml");
     let config =
         load_vision_training_config(&[base_path, bench_path.clone()]).expect("load bench config");
     let bench = load_bench_settings(&bench_path);
@@ -92,7 +92,7 @@ fn build_train_dataset(config: &VisionTrainingConfig) -> Option<Arc<ImageNetData
     match dataset {
         Ok(dataset) => Some(Arc::new(dataset)),
         Err(err) => {
-            eprintln!("vision_saccade_train_step bench skipped: {err}");
+            eprintln!("vision_mae_train_step bench skipped: {err}");
             None
         }
     }
@@ -105,7 +105,7 @@ fn init_wgpu_runtime(device: &WgpuDevice, config: &burn_dragon_hatchling::WgpuRu
     });
 }
 
-fn vision_train_step_bench(c: &mut Criterion) {
+fn vision_mae_train_step_bench(c: &mut Criterion) {
     let (config, bench) = load_bench_config();
     let Some(dataset) = build_train_dataset(&config) else {
         return;
@@ -133,8 +133,8 @@ fn run_backend<B, Init>(
     B::Device: Clone + Send + Sync + 'static,
     Init: Fn(&B::Device),
 {
-    let VisionTrainingModeConfig::Saccade(saccade_cfg) = &config.mode else {
-        eprintln!("vision_saccade_train_step bench skipped: config is not saccade mode");
+    let VisionTrainingModeConfig::Mae(mae_cfg) = &config.mode else {
+        eprintln!("vision_mae_train_step bench skipped: config is not mae mode");
         return;
     };
 
@@ -160,9 +160,9 @@ fn run_backend<B, Init>(
         ));
 
     {
-        let mut warm_bench = VisionSaccadeTrainStepBench::<B>::new(
+        let mut warm_bench = VisionMaeTrainStepBench::<B>::new(
             vision_cfg.clone(),
-            saccade_cfg.clone(),
+            mae_cfg.clone(),
             &training,
             &optimizer_cfg,
             &device,
@@ -174,24 +174,24 @@ fn run_backend<B, Init>(
         }
     }
 
-    let mut group = c.benchmark_group(format!("vision_saccade_train_step/{name}"));
+    let mut group = c.benchmark_group(format!("vision_mae_train_step/{name}"));
     group.warm_up_time(Duration::from_secs(1));
     group.measurement_time(Duration::from_secs(3));
     group.sample_size(10);
     group.bench_with_input(
-        BenchmarkId::from_parameter("vision_saccade_tiny"),
+        BenchmarkId::from_parameter("vision_mae_tiny"),
         &vision_cfg,
         |b, _| {
             let loader = Arc::clone(&loader);
             let vision_cfg = vision_cfg.clone();
-            let saccade_cfg = saccade_cfg.clone();
+            let mae_cfg = mae_cfg.clone();
             let training = training.clone();
             let optimizer_cfg = optimizer_cfg.clone();
             b.iter_custom(|iters| {
                 let mut total = Duration::ZERO;
-                let mut bench = VisionSaccadeTrainStepBench::<B>::new(
+                let mut bench = VisionMaeTrainStepBench::<B>::new(
                     vision_cfg.clone(),
-                    saccade_cfg.clone(),
+                    mae_cfg.clone(),
                     &training,
                     &optimizer_cfg,
                     &device,
@@ -217,5 +217,5 @@ fn run_backend<B, Init>(
     group.finish();
 }
 
-criterion_group!(benches, vision_train_step_bench);
+criterion_group!(benches, vision_mae_train_step_bench);
 criterion_main!(benches);

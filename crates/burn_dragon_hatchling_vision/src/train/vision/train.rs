@@ -429,6 +429,9 @@ where
             if mae.loss.recon.weight < 0.0 {
                 return Err(anyhow!("mae.loss.recon.weight must be >= 0"));
             }
+            if mae.pyramid_levels == 0 {
+                return Err(anyhow!("mae.pyramid_levels must be > 0"));
+            }
             let train_dataset = Arc::new(ImageNetDataset::new(ImageNetDatasetConfig {
                 root: train_root,
                 split: ImageNetSplit::Train,

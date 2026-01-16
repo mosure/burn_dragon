@@ -121,6 +121,12 @@ pub(crate) fn sample_patch_mask<B: BackendTrait>(
     Tensor::<B, 2>::from_data(TensorData::new(data, [batch, tokens]), device)
 }
 
+pub(crate) fn recon_psnr<B: BackendTrait>(mse: Tensor<B, 1>) -> Tensor<B, 1> {
+    let denom = mse.add_scalar(LEJEPA_EPS);
+    let scale = -10.0 / std::f32::consts::LN_10;
+    denom.log().mul_scalar(scale)
+}
+
 pub(crate) fn lejepa_invariance_loss<B: BackendTrait>(proj: Tensor<B, 3>) -> Tensor<B, 1> {
     let device = proj.device();
     let [views, batch, dim] = proj.shape().dims::<3>();

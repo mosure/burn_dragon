@@ -3,7 +3,7 @@ use std::f32::consts::PI;
 use burn::tensor::backend::Backend as BackendTrait;
 use burn::tensor::{Distribution as TensorDistribution, Tensor, TensorData};
 
-use crate::{VisionLocationEmbeddingMode, VisionNullGlimpseMode};
+use burn_dragon_hatchling_core::{VisionLocationEmbeddingMode, VisionNullGlimpseMode};
 
 use crate::train::constants::{SACCADE_EPS, SACCADE_SIGMA_MAX, SACCADE_SIGMA_MIN};
 use super::structs::VisionSaccadeModel;
@@ -12,6 +12,7 @@ pub(crate) struct SaccadePolicySample<B: BackendTrait> {
     pub(crate) mean: Tensor<B, 3>,
     pub(crate) sigma: Tensor<B, 3>,
     pub(crate) log_prob: Tensor<B, 2>,
+    pub(crate) clamp_rate: Tensor<B, 1>,
 }
 
 impl<B: BackendTrait> VisionSaccadeModel<B> {
@@ -43,7 +44,13 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
             let log_prob = Tensor::<B, 2>::zeros([batch, traj_tokens], &device);
             let mean = params.clone().slice_dim(2, 0..2);
             let sigma = params.slice_dim(2, 2..3);
-            return SaccadePolicySample { mean, sigma, log_prob };
+            let clamp_rate = Tensor::<B, 1>::zeros([batch], &device);
+            return SaccadePolicySample {
+                mean,
+                sigma,
+                log_prob,
+                clamp_rate,
+            };
         }
 
         let noise = Tensor::<B, 3>::random(
@@ -62,16 +69,41 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
             .sum_dim(2)
             .reshape([batch, traj_tokens]);
 
-        let mean = sample
+        let mean_raw = sample.clone().slice_dim(2, 0..2);
+        let sigma_raw = sample.clone().slice_dim(2, 2..3);
+        let mean_low = mean_raw.clone().lower_equal_elem(SACCADE_EPS).float();
+        let mean_high = mean_raw
             .clone()
-            .slice_dim(2, 0..2)
+            .greater_equal_elem(1.0 - SACCADE_EPS)
+            .float();
+        let sigma_low = sigma_raw
+            .clone()
+            .lower_equal_elem(SACCADE_SIGMA_MIN)
+            .float();
+        let sigma_high = sigma_raw
+            .clone()
+            .greater_equal_elem(SACCADE_SIGMA_MAX)
+            .float();
+        let mean_clamped = (mean_low + mean_high).clamp_max(1.0);
+        let sigma_clamped = (sigma_low + sigma_high).clamp_max(1.0);
+        let clamp_count = mean_clamped.sum_dim(2) + sigma_clamped.sum_dim(2);
+        let clamp_rate = clamp_count
+            .div_scalar(3.0)
+            .mean_dim(1)
+            .reshape([batch]);
+
+        let mean = mean_raw
             .clamp_min(SACCADE_EPS)
             .clamp_max(1.0 - SACCADE_EPS);
-        let sigma = sample
-            .slice_dim(2, 2..3)
+        let sigma = sigma_raw
             .clamp_min(SACCADE_SIGMA_MIN)
             .clamp_max(SACCADE_SIGMA_MAX);
-        SaccadePolicySample { mean, sigma, log_prob }
+        SaccadePolicySample {
+            mean,
+            sigma,
+            log_prob,
+            clamp_rate,
+        }
     }
 
     pub(crate) fn null_patch_tokens(
@@ -132,7 +164,7 @@ fn fixed_location_embedding<B: BackendTrait>(
     mean: Tensor<B, 3>,
     sigma: Tensor<B, 3>,
     embed_dim: usize,
-    config: &crate::VisionLocationEmbeddingConfig,
+    config: &burn_dragon_hatchling_core::VisionLocationEmbeddingConfig,
 ) -> Tensor<B, 3> {
     let device = mean.device();
     let [batch, traj_tokens, _] = mean.shape().dims::<3>();
@@ -204,7 +236,7 @@ fn rotary_location_embedding<B: BackendTrait>(
     mean: Tensor<B, 3>,
     sigma: Tensor<B, 3>,
     embed_dim: usize,
-    config: &crate::VisionLocationEmbeddingConfig,
+    config: &burn_dragon_hatchling_core::VisionLocationEmbeddingConfig,
     use_polar: bool,
 ) -> Tensor<B, 3> {
     let device = mean.device();

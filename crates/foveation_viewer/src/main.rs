@@ -26,7 +26,7 @@ use burn::tensor::backend::Backend;
 use burn::tensor::{Tensor, TensorData};
 use burn_wgpu::Wgpu;
 use burn_dragon_hatchling_vision::foveation;
-use burn_dragon_hatchling_core::train::SaccadeFoveationSampler;
+use burn_dragon_hatchling_vision::train::SaccadeFoveationSampler;
 use burn_dragon_hatchling_core::{
     SpatialPositionalEncodingKind, VisionAttentionMode, VisionDragonHatchlingConfig,
     VisionFoveaSamplingMode, VisionFoveaWarpMode, VisionPyramidMode, VisionSaccadeConfig,
@@ -48,6 +48,7 @@ const OVERLAY_RING_THICKNESS: f32 = 3.0;
 const OVERLAY_RING_OUTER: [u8; 4] = [255, 80, 40, 220];
 const OVERLAY_RING_INNER: [u8; 4] = [60, 200, 255, 220];
 const FOVEA_PARAM_EPS: f32 = 1e-3;
+#[cfg(test)]
 const FOVEA_AA_THRESHOLD: f32 = 1.25;
 // Avoid oversized GPU buffers when feeding full-resolution images to the burn backend.
 const BURN_MAX_BUFFER_BYTES: u64 = 2 * 1024 * 1024 * 1024;
@@ -365,19 +366,10 @@ impl PanZoomTextures {
     }
 }
 
-#[derive(Resource, Debug)]
+#[derive(Resource, Default, Debug)]
 struct PanZoomStates {
     input: PanZoomState,
     patch: PanZoomState,
-}
-
-impl Default for PanZoomStates {
-    fn default() -> Self {
-        Self {
-            input: PanZoomState::default(),
-            patch: PanZoomState::default(),
-        }
-    }
 }
 
 #[derive(Resource, Default, Debug)]
@@ -710,6 +702,7 @@ fn attach_burn_handle(
     state.attached = true;
 }
 
+#[allow(clippy::too_many_arguments)]
 fn update_patch_texture(
     settings: Res<FoveationSettings>,
     source: Res<SourceImage>,
@@ -859,13 +852,18 @@ fn update_burn_patch(
     if needs_rebuild {
         let mut vision = make_minimal_vision_config(burn_width, burn_height, patch);
         vision.patch_size = patch;
-        let mut saccade = VisionSaccadeConfig::default();
-        saccade.mip_levels = key.depth;
-        saccade.pyramid_mode = map_pyramid_mode(settings.mode);
-        saccade.fovea_warp_mode = map_warp_mode(settings.warp_mode);
-        if settings.backend == FoveationBackendMode::Cubecl {
-            saccade.fovea_sampling_mode = VisionFoveaSamplingMode::Cubecl;
-        }
+        let fovea_sampling_mode = if settings.backend == FoveationBackendMode::Cubecl {
+            VisionFoveaSamplingMode::Cubecl
+        } else {
+            VisionFoveaSamplingMode::Batched
+        };
+        let saccade = VisionSaccadeConfig {
+            mip_levels: key.depth,
+            pyramid_mode: map_pyramid_mode(settings.mode),
+            fovea_warp_mode: map_warp_mode(settings.warp_mode),
+            fovea_sampling_mode,
+            ..Default::default()
+        };
         let mut sampler = SaccadeFoveationSampler::<BurnBackend>::new(vision, saccade, &device);
         let input =
             tensor_from_source_resized::<BurnBackend>(&source, burn_width, burn_height, &device);
@@ -1020,7 +1018,7 @@ fn pan_zoom_input(
         Ok(window) => window,
         Err(_) => return,
     };
-    let window_scale_factor = window.scale_factor() as f32;
+    let window_scale_factor = window.scale_factor();
 
     let mut touch_points: Vec<(u64, Vec2)> = touches
         .iter()
@@ -1209,11 +1207,12 @@ fn pan_zoom_input(
         scroll += delta;
     }
 
-    if scroll.abs() > f32::EPSILON && cursor_local.is_some() {
+    if scroll.abs() > f32::EPSILON
+        && let Some(pivot) = cursor_local
+    {
         let zoom_factor = 1.1_f32.powf(scroll);
         let next_scale = (state.scale * zoom_factor).clamp(state.min_scale, state.max_scale);
         if (next_scale - state.scale).abs() > f32::EPSILON {
-            let pivot = cursor_local.expect("cursor in viewport");
             let image_pos = (pivot - state.offset) / state.scale;
             state.scale = next_scale;
             state.offset = pivot - image_pos * state.scale;
@@ -1229,13 +1228,11 @@ fn pan_zoom_input(
         state.dragging = true;
     }
 
-    if state.dragging {
-        if let Some(last) = state.last_cursor {
-            let delta = cursor - last;
-            state.offset += delta;
-            let texture = textures.size(kind);
-            state.offset = clamp_offset(state.offset, viewport_size, texture, state.scale);
-        }
+    if state.dragging && let Some(last) = state.last_cursor {
+        let delta = cursor - last;
+        state.offset += delta;
+        let texture = textures.size(kind);
+        state.offset = clamp_offset(state.offset, viewport_size, texture, state.scale);
     }
 
     state.last_cursor = Some(cursor);
@@ -1280,12 +1277,9 @@ fn cursor_local_from_viewport(
     node: &ComputedNode,
     transform: &UiGlobalTransform,
 ) -> Option<Vec2> {
-    let Some(local) = transform
+    let local = transform
         .try_inverse()
-        .map(|affine| affine.transform_point2(cursor))
-    else {
-        return None;
-    };
+        .map(|affine| affine.transform_point2(cursor))?;
     let size = node.size();
     Some(local + size * 0.5)
 }
@@ -1973,7 +1967,6 @@ pub(crate) fn sample_laplacian_foveated(
     color
 }
 
-#[cfg(test)]
 fn patched_levels_from_radius(radius_norm: f32, max_level: usize) -> (usize, usize, f32) {
     if max_level == 0 {
         return (0, 0, 0.0);
@@ -2481,23 +2474,24 @@ pub(crate) fn make_minimal_vision_config(
 ) -> VisionDragonHatchlingConfig {
     let image_size = width.max(height).max(patch_size.max(1));
     let grid = (image_size / patch_size.max(1)).max(1);
-    let mut config = VisionDragonHatchlingConfig::default();
-    config.image_size = image_size;
-    config.patch_size = patch_size.max(1);
-    config.in_channels = 3;
-    config.embed_dim = 32;
-    config.steps = 1;
-    config.n_head = 1;
-    config.mlp_internal_dim_multiplier = 1;
-    config.dropout = 0.0;
-    config.projection_dim = 32;
-    config.projection_hidden_dim = 32;
-    config.use_cls_token = false;
-    config.pos_encoding = SpatialPositionalEncodingKind::None;
-    config.pos_max_height = grid;
-    config.pos_max_width = grid;
-    config.attention_mode = VisionAttentionMode::RowL1;
-    config
+    VisionDragonHatchlingConfig {
+        image_size,
+        patch_size: patch_size.max(1),
+        in_channels: 3,
+        embed_dim: 32,
+        steps: 1,
+        n_head: 1,
+        mlp_internal_dim_multiplier: 1,
+        dropout: 0.0,
+        projection_dim: 32,
+        projection_hidden_dim: 32,
+        use_cls_token: false,
+        pos_encoding: SpatialPositionalEncodingKind::None,
+        pos_max_height: grid,
+        pos_max_width: grid,
+        attention_mode: VisionAttentionMode::RowL1,
+        ..Default::default()
+    }
 }
 
 fn tensor_from_source<B: Backend>(source: &SourceImage, device: &B::Device) -> Tensor<B, 4> {
@@ -2745,12 +2739,11 @@ fn patch_to_rgba<B: Backend>(patch: Tensor<B, 4>) -> Tensor<B, 3> {
         patch
     };
     let patch = patch.swap_dims(1, 2).swap_dims(2, 3);
-    let patch = if channels == 0 || height == 0 || width == 0 {
+    if channels == 0 || height == 0 || width == 0 {
         Tensor::<B, 3>::zeros([height.max(1), width.max(1), 4], &device)
     } else {
         let patch = patch.squeeze_dim::<3>(0).clamp_min(0.0).clamp_max(1.0);
         let alpha = Tensor::<B, 3>::ones([height, width, 1], &device);
         Tensor::cat(vec![patch, alpha], 2)
-    };
-    patch
+    }
 }

@@ -72,14 +72,14 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
                 .into_vec::<f32>()
                 .expect("foveation radius");
             let mode = match self.config.pyramid_mode {
-                VisionPyramidMode::Stacked => burn_dragon_hatchling_vision::foveation::PyramidMode::Stacked,
-                VisionPyramidMode::Laplacian => burn_dragon_hatchling_vision::foveation::PyramidMode::Laplacian,
+                VisionPyramidMode::Stacked => crate::foveation::PyramidMode::Stacked,
+                VisionPyramidMode::Laplacian => crate::foveation::PyramidMode::Laplacian,
             };
             let depth = levels.len().max(1);
             let channel_stride = patch_h * patch_w;
             let mut out = vec![0.0f32; batch * channels * channel_stride];
             for b in 0..batch {
-                let Some(image) = burn_dragon_hatchling_vision::foveation::image_from_nchw(
+                let Some(image) = crate::foveation::image_from_nchw(
                     &data,
                     b,
                     channels,
@@ -89,20 +89,20 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
                     continue;
                 };
                 let cache =
-                    burn_dragon_hatchling_vision::foveation::build_pyramid_cache(image, depth, mode);
+                    crate::foveation::build_pyramid_cache(image, depth, mode);
                 let mean = [
                     *mean_x_vals.get(b).unwrap_or(&0.5),
                     *mean_y_vals.get(b).unwrap_or(&0.5),
                 ];
                 let sigma = *sigma_vals.get(b).unwrap_or(&0.1);
                 let radius = *radius_vals.get(b).unwrap_or(&sigma);
-                let patch = burn_dragon_hatchling_vision::foveation::render_foveated_patch_with_radius(
+                let patch = crate::foveation::render_foveated_patch_with_radius(
                     &cache,
                     mean,
                     sigma,
                     radius,
                     full_patch_h,
-                    burn_dragon_hatchling_vision::foveation::FoveaWarpMode::Patched,
+                    crate::foveation::FoveaWarpMode::Patched,
                 );
                 for y in 0..patch_h {
                     for x in 0..patch_w {

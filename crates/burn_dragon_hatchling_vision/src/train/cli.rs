@@ -1,7 +1,7 @@
 #[cfg(feature = "cli")]
 use crate::train::prelude::*;
 #[cfg(feature = "cli")]
-use crate::train::train::train_backend;
+use burn_dragon_hatchling_core::train::train::train_backend;
 #[cfg(feature = "cli")]
 use crate::train::vision::train_vision_backend;
 

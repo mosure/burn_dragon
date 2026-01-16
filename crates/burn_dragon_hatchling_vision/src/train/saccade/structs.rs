@@ -501,7 +501,13 @@ pub(crate) struct VisionSaccadeLosses<B: BackendTrait> {
     pub(crate) inv: Tensor<B, 1>,
     pub(crate) sigreg: Tensor<B, 1>,
     pub(crate) recon: Tensor<B, 1>,
+    pub(crate) recon_psnr: Tensor<B, 1>,
     pub(crate) policy: Tensor<B, 1>,
+    pub(crate) policy_advantage_abs_mean: Tensor<B, 1>,
+    pub(crate) policy_advantage_std: Tensor<B, 1>,
+    pub(crate) policy_log_prob_mean: Tensor<B, 1>,
+    pub(crate) policy_entropy: Tensor<B, 1>,
+    pub(crate) policy_action_clamp_rate: Tensor<B, 1>,
     pub(crate) artifacts: Option<VisionArtifactInput<B>>,
 }
 
@@ -510,6 +516,9 @@ pub(crate) struct GdpoPolicyInputs<B: BackendTrait> {
     pub(crate) recon_per_sample: Tensor<B, 1>,
     pub(crate) log_prob_sum: Tensor<B, 2>,
     pub(crate) log_prob_sum_old: Tensor<B, 2>,
+    pub(crate) log_prob_mean: Tensor<B, 1>,
+    pub(crate) entropy: Tensor<B, 1>,
+    pub(crate) action_clamp_rate: Tensor<B, 1>,
     pub(crate) gdpo_group: usize,
 }
 

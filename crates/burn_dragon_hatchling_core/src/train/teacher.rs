@@ -1,6 +1,6 @@
 use crate::train::prelude::*;
 
-pub(crate) fn teacher_variant_dim(variant: VisionTeacherVariant) -> usize {
+pub fn teacher_variant_dim(variant: VisionTeacherVariant) -> usize {
     match variant {
         VisionTeacherVariant::Vits => 384,
         VisionTeacherVariant::Vitb => 768,
@@ -9,7 +9,7 @@ pub(crate) fn teacher_variant_dim(variant: VisionTeacherVariant) -> usize {
     }
 }
 
-pub(crate) fn build_dino_config(
+pub fn build_dino_config(
     variant: VisionTeacherVariant,
     image_size: usize,
     patch_size: usize,

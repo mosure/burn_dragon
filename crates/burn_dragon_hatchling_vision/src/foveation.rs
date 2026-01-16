@@ -772,8 +772,8 @@ mod tests {
         let mean = [0.5, 0.5];
         let sigma = 0.2;
         let patch_size = 4;
-        let values = [0.1, 0.4, 0.7];
-        let cases = [0.0, 0.25, 0.5, 0.75, 1.0];
+        let values: [f32; 3] = [0.1, 0.4, 0.7];
+        let cases: [f32; 5] = [0.0, 0.25, 0.5, 0.75, 1.0];
         for radius in cases {
             let radius_norm = radius.clamp(FOVEA_PARAM_EPS, 1.0);
             let (level0, level1, t) =

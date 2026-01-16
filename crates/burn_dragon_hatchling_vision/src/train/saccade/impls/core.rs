@@ -68,6 +68,9 @@ struct SaccadeRolloutState<B: BackendTrait> {
     log_prob_sum: Option<Tensor<B, 2>>,
     log_prob_sum_old: Option<Tensor<B, 2>>,
     hard_reward: Option<Tensor<B, 1>>,
+    policy_steps: usize,
+    clamp_rate_sum: Option<Tensor<B, 1>>,
+    clamp_rate_count: usize,
     tbptt_policy_inputs: Vec<GdpoPolicyInputs<B>>,
     tbptt_step_idx: usize,
     tbptt_chunks: usize,
@@ -90,6 +93,10 @@ impl<B: BackendTrait> SaccadeRolloutState<B> {
         rollout_steps: usize,
     ) -> Self {
         let artifacts = SaccadeArtifactState::new(rollout_steps, capture_traj, capture_artifacts);
+        let clamp_rate_sum = log_prob_sum.as_ref().map(|log_prob_sum| {
+            let [batch, _] = log_prob_sum.shape().dims::<2>();
+            Tensor::<B, 1>::zeros([batch], &log_prob_sum.device())
+        });
         Self {
             trajs,
             state_levels,
@@ -97,6 +104,9 @@ impl<B: BackendTrait> SaccadeRolloutState<B> {
             log_prob_sum,
             log_prob_sum_old,
             hard_reward,
+            policy_steps: 0,
+            clamp_rate_sum,
+            clamp_rate_count: 0,
             tbptt_policy_inputs: Vec::new(),
             tbptt_step_idx: 0,
             tbptt_chunks: 0,
@@ -118,10 +128,17 @@ impl<B: BackendTrait> SaccadeRolloutState<B> {
         if gdpo_enabled {
             self.log_prob_sum = Some(Tensor::<B, 2>::zeros([batch, 1], device));
             self.log_prob_sum_old = Some(Tensor::<B, 2>::zeros([batch, 1], device));
+            self.clamp_rate_sum = Some(Tensor::<B, 1>::zeros([batch], device));
+        } else {
+            self.log_prob_sum = None;
+            self.log_prob_sum_old = None;
+            self.clamp_rate_sum = None;
         }
         if info_reward_enabled {
             self.hard_reward = Some(Tensor::<B, 1>::zeros([batch], device));
         }
+        self.policy_steps = 0;
+        self.clamp_rate_count = 0;
     }
 }
 
@@ -596,12 +613,12 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
 
     pub(crate) fn build_gdpo_policy_loss<F>(
         &self,
-        gdpo: &crate::GdpoConfig,
+        gdpo: &burn_dragon_hatchling_core::GdpoConfig,
         inputs: GdpoPolicyInputs<B>,
         advantage_fn: F,
     ) -> Option<Tensor<B, 1>>
     where
-        F: FnOnce(Tensor<B, 2>, Tensor<B, 2>, &crate::GdpoConfig) -> Tensor<B, 2>,
+        F: FnOnce(Tensor<B, 2>, Tensor<B, 2>, &burn_dragon_hatchling_core::GdpoConfig) -> Tensor<B, 2>,
     {
         let gdpo_group = inputs.gdpo_group;
         let batch = inputs.hard_reward.shape().dims::<1>()[0];
@@ -627,6 +644,39 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
             advantage,
             gdpo,
         ))
+    }
+
+    fn policy_log_prob_stats(
+        &self,
+        log_prob_sum: &Tensor<B, 2>,
+        policy_steps: usize,
+        num_eyes: usize,
+        traj_len: usize,
+    ) -> (Tensor<B, 1>, Tensor<B, 1>) {
+        let device = log_prob_sum.device();
+        let [batch, _] = log_prob_sum.shape().dims::<2>();
+        if batch == 0 {
+            let zero = Tensor::<B, 1>::zeros([batch.max(1)], &device);
+            return (zero.clone(), zero);
+        }
+        let denom = (policy_steps.max(1) * num_eyes.max(1) * traj_len.max(1)) as f32;
+        let log_prob_mean = log_prob_sum.clone().div_scalar(denom).reshape([batch]);
+        let entropy = log_prob_mean.clone().mul_scalar(-1.0);
+        (log_prob_mean, entropy)
+    }
+
+    fn policy_action_clamp_rate(
+        &self,
+        clamp_rate_sum: Option<Tensor<B, 1>>,
+        clamp_rate_count: usize,
+        batch: usize,
+        device: &B::Device,
+    ) -> Tensor<B, 1> {
+        if let Some(clamp_rate_sum) = clamp_rate_sum {
+            clamp_rate_sum.div_scalar(clamp_rate_count.max(1) as f32)
+        } else {
+            Tensor::<B, 1>::zeros([batch.max(1)], device)
+        }
     }
 
     pub(crate) fn forward_losses(
@@ -690,6 +740,7 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
         };
         let denom = mask_sum.clone().add_scalar(LEJEPA_EPS);
         let recon = loss_sum / denom;
+        let recon_psnr = recon_psnr(recon.clone());
         let lambda = if self.config.loss.lejepa.enabled {
             self.config.loss.lejepa.lambda.clamp(0.0, 1.0)
         } else {
@@ -700,34 +751,124 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
         if recon_weight > 0.0 {
             total = total + recon.clone().mul_scalar(recon_weight);
         }
-        let policy_loss = gdpo_inputs.and_then(|inputs| {
-            let mut sum: Option<Tensor<B, 1>> = None;
-            let mut count = 0usize;
+        let zero = Tensor::<B, 1>::zeros([1], &total.device());
+        let mut policy_loss_sum: Option<Tensor<B, 1>> = None;
+        let mut policy_loss_count = 0usize;
+        let mut adv_abs_sum: Option<Tensor<B, 1>> = None;
+        let mut adv_std_sum: Option<Tensor<B, 1>> = None;
+        let mut adv_count = 0usize;
+        let mut log_prob_sum: Option<Tensor<B, 1>> = None;
+        let mut entropy_sum: Option<Tensor<B, 1>> = None;
+        let mut clamp_sum: Option<Tensor<B, 1>> = None;
+        let mut stat_count = 0usize;
+
+        if let Some(inputs) = gdpo_inputs {
             for input in inputs {
+                stat_count += 1;
+                log_prob_sum = Some(match log_prob_sum {
+                    Some(accum) => accum + input.log_prob_mean.clone(),
+                    None => input.log_prob_mean.clone(),
+                });
+                entropy_sum = Some(match entropy_sum {
+                    Some(accum) => accum + input.entropy.clone(),
+                    None => input.entropy.clone(),
+                });
+                clamp_sum = Some(match clamp_sum {
+                    Some(accum) => accum + input.action_clamp_rate.clone(),
+                    None => input.action_clamp_rate.clone(),
+                });
+
+                let batch = input.hard_reward.shape().dims::<1>()[0];
+                let gdpo_group = input.gdpo_group;
+                if gdpo_group > 0 && batch > 0 && batch % gdpo_group == 0 {
+                    let scene_batch = batch / gdpo_group;
+                    let hard = input
+                        .hard_reward
+                        .clone()
+                        .detach()
+                        .reshape([scene_batch, gdpo_group]);
+                    let easy = input
+                        .recon_per_sample
+                        .clone()
+                        .mul_scalar(-1.0)
+                        .detach()
+                        .reshape([scene_batch, gdpo_group]);
+                    let advantage = gdpo::gdpo_advantage(hard, easy, gdpo);
+                    let adv_abs = advantage.clone().abs().mean();
+                    let adv_mean = advantage.clone().mean();
+                    let adv_mean_sq = adv_mean.clone().powf_scalar(2.0);
+                    let adv_sq_mean = advantage.clone().powf_scalar(2.0).mean();
+                    let adv_std = adv_sq_mean
+                        .sub(adv_mean_sq)
+                        .clamp_min(0.0)
+                        .sqrt();
+                    adv_abs_sum = Some(match adv_abs_sum {
+                        Some(accum) => accum + adv_abs,
+                        None => adv_abs,
+                    });
+                    adv_std_sum = Some(match adv_std_sum {
+                        Some(accum) => accum + adv_std,
+                        None => adv_std,
+                    });
+                    adv_count += 1;
+                }
+
                 if let Some(loss) = policy_loss_fn(input) {
-                    count += 1;
-                    sum = Some(match sum {
+                    policy_loss_count += 1;
+                    policy_loss_sum = Some(match policy_loss_sum {
                         Some(accum) => accum + loss,
                         None => loss,
                     });
                 }
             }
-            sum.map(|loss| {
-                if count > 1 {
-                    loss.mul_scalar(1.0 / count as f32)
-                } else {
-                    loss
-                }
-            })
+        }
+
+        let policy_loss = policy_loss_sum.map(|loss| {
+            if policy_loss_count > 1 {
+                loss.mul_scalar(1.0 / policy_loss_count as f32)
+            } else {
+                loss
+            }
         });
-        let policy = if let Some(policy_loss) = &policy_loss {
-            policy_loss.clone()
-        } else {
-            Tensor::<B, 1>::zeros([1], &total.device())
-        };
+        let policy = policy_loss.clone().unwrap_or_else(|| zero.clone());
         if let Some(policy_loss) = policy_loss {
             total = total + policy_loss;
         }
+        let policy_advantage_abs_mean = if adv_count > 0 {
+            adv_abs_sum
+                .unwrap_or_else(|| zero.clone())
+                .mul_scalar(1.0 / adv_count as f32)
+        } else {
+            zero.clone()
+        };
+        let policy_advantage_std = if adv_count > 0 {
+            adv_std_sum
+                .unwrap_or_else(|| zero.clone())
+                .mul_scalar(1.0 / adv_count as f32)
+        } else {
+            zero.clone()
+        };
+        let policy_log_prob_mean = if stat_count > 0 {
+            log_prob_sum
+                .unwrap_or_else(|| zero.clone())
+                .mul_scalar(1.0 / stat_count as f32)
+        } else {
+            zero.clone()
+        };
+        let policy_entropy = if stat_count > 0 {
+            entropy_sum
+                .unwrap_or_else(|| zero.clone())
+                .mul_scalar(1.0 / stat_count as f32)
+        } else {
+            zero.clone()
+        };
+        let policy_action_clamp_rate = if stat_count > 0 {
+            clamp_sum
+                .unwrap_or_else(|| zero.clone())
+                .mul_scalar(1.0 / stat_count as f32)
+        } else {
+            zero.clone()
+        };
 
         let artifacts = artifacts.and_then(|(views, residual, frames, legend)| {
             build_lejepa_artifacts(
@@ -751,7 +892,13 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
             inv,
             sigreg,
             recon,
+            recon_psnr,
             policy,
+            policy_advantage_abs_mean,
+            policy_advantage_std,
+            policy_log_prob_mean,
+            policy_entropy,
+            policy_action_clamp_rate,
             artifacts,
         }
     }
@@ -832,6 +979,10 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
                     if let Some(log_prob_sum_old) = state.log_prob_sum_old.as_mut() {
                         *log_prob_sum_old = log_prob_sum_old.clone() + log_prob_eye.detach();
                     }
+                    if let Some(clamp_rate_sum) = state.clamp_rate_sum.as_mut() {
+                        *clamp_rate_sum = clamp_rate_sum.clone() + sample.clamp_rate.clone();
+                    }
+                    state.clamp_rate_count += 1;
                     (sample.mean, sample.sigma)
                 } else {
                     (mean_raw.clone(), sigma_raw.clone())
@@ -945,6 +1096,9 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
                     }
                 }
                 scratch.next_trajs.push(next_traj);
+            }
+            if ctx.gdpo_enabled {
+                state.policy_steps += 1;
             }
             let state_real: Vec<Tensor<B, 3>> = state
                 .state_levels
@@ -1119,11 +1273,26 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
                         let log_prob_sum_old = state.log_prob_sum_old.take().unwrap_or_else(|| {
                             Tensor::<B, 2>::zeros([ctx.batch, 1], &ctx.device)
                         });
+                        let (log_prob_mean, entropy) = self.policy_log_prob_stats(
+                            &log_prob_sum,
+                            state.policy_steps,
+                            ctx.num_eyes,
+                            ctx.traj_len,
+                        );
+                        let action_clamp_rate = self.policy_action_clamp_rate(
+                            state.clamp_rate_sum.take(),
+                            state.clamp_rate_count,
+                            ctx.batch,
+                            &ctx.device,
+                        );
                         state.tbptt_policy_inputs.push(GdpoPolicyInputs {
                             hard_reward,
                             recon_per_sample,
                             log_prob_sum,
                             log_prob_sum_old,
+                            log_prob_mean,
+                            entropy,
+                            action_clamp_rate,
                             gdpo_group: ctx.gdpo_group,
                         });
                     }
@@ -1221,11 +1390,26 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
                 let log_prob_sum_old = state.log_prob_sum_old.take().unwrap_or_else(|| {
                     Tensor::<B, 2>::zeros([ctx.batch, 1], &ctx.device)
                 });
+                let (log_prob_mean, entropy) = self.policy_log_prob_stats(
+                    &log_prob_sum,
+                    state.policy_steps,
+                    ctx.num_eyes,
+                    ctx.traj_len,
+                );
+                let action_clamp_rate = self.policy_action_clamp_rate(
+                    state.clamp_rate_sum.take(),
+                    state.clamp_rate_count,
+                    ctx.batch,
+                    &ctx.device,
+                );
                 Some(vec![GdpoPolicyInputs {
                     hard_reward,
                     recon_per_sample,
                     log_prob_sum,
                     log_prob_sum_old,
+                    log_prob_mean,
+                    entropy,
+                    action_clamp_rate,
                     gdpo_group: ctx.gdpo_group,
                 }])
             } else {

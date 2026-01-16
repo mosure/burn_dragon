@@ -10,6 +10,7 @@ out/
 .DS_Store
 
 screenshots/
+scripts/
 headless_output/
 www/assets/
 www/out/

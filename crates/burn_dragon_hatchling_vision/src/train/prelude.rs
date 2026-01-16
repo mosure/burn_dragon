@@ -62,10 +62,10 @@ pub(crate) use burn_cuda::Cuda;
 pub(crate) use burn::record::{BinFileRecorder, FullPrecisionSettings};
 
 #[cfg(feature = "cli")]
-pub(crate) use crate::wgpu::init_runtime;
+pub(crate) use burn_dragon_hatchling_core::wgpu::init_runtime;
 #[cfg(feature = "cli")]
-pub(crate) use crate::{load_training_config, load_vision_training_config};
-pub(crate) use crate::{
+pub(crate) use burn_dragon_hatchling_core::{load_training_config, load_vision_training_config};
+pub(crate) use burn_dragon_hatchling_core::{
     BDH, BDHConfig, Dataset, DatasetConfig, DatasetSplit, DinoFeatureStore, GdpoHardGate,
     ImageNetAugmentations, ImageNetBatch, ImageNetDataLoader, ImageNetDataset, ImageNetDatasetConfig,
     ImageNetSplit, ImagenetteVariant, LearningRateScheduleConfig, ModelOverrides, OptimizerConfig,
@@ -86,10 +86,12 @@ pub(crate) use burn_dino::model::dino::{DinoVisionTransformer, DinoVisionTransfo
 pub(crate) use serde::Serialize;
 
 pub(crate) use crate::train::constants::*;
-pub(crate) use crate::train::teacher::*;
-pub(crate) use crate::train::train::*;
+pub(crate) use crate::train::saccade::*;
+pub(crate) use crate::train::vision::*;
+pub(crate) use burn_dragon_hatchling_core::train::teacher::*;
+pub(crate) use burn_dragon_hatchling_core::train::train::*;
 
-pub(crate) use crate::train::metrics::{
+pub(crate) use burn_dragon_hatchling_core::train::metrics::{
     ActionClampRateInput, AdvantageAbsMeanInput, AdvantageStdInput, DeviceMetric, InvLossInput,
     LanguageModelOutput, LanguageModelTrainItem, LogProbMeanInput, LossValue, MemoryCleanupMetric,
     PolicyEntropyInput, PolicyLossInput, ProbeAccInput, ProbeLossInput, ReconLossInput,

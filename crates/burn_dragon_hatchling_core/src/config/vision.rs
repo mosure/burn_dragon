@@ -637,8 +637,7 @@ impl Default for VisionMaeLossConfig {
         Self {
             recon: VisionReconLossConfig {
                 weight: 1.0,
-                mask_ratio: 0.75,
-                hidden_dim: 256,
+                ..VisionReconLossConfig::default()
             },
         }
     }
@@ -752,6 +751,8 @@ impl ModuleDisplay for VisionLejepaConfig {}
 #[serde(default)]
 pub struct VisionMaeConfig {
     pub loss: VisionMaeLossConfig,
+    #[serde(default = "default_mae_pyramid_levels")]
+    pub pyramid_levels: usize,
     pub artifact_output: VisionArtifactOutputMode,
     pub artifact_fps: u32,
     pub artifact_every: usize,
@@ -764,6 +765,7 @@ impl Default for VisionMaeConfig {
     fn default() -> Self {
         Self {
             loss: VisionMaeLossConfig::default(),
+            pyramid_levels: default_mae_pyramid_levels(),
             artifact_output: VisionArtifactOutputMode::Images,
             artifact_fps: 4,
             artifact_every: 0,
@@ -814,6 +816,7 @@ impl ModuleDisplayDefault for VisionMaeConfig {
     fn content(&self, content: Content) -> Option<Content> {
         content
             .add("loss", &self.loss)
+            .add("pyramid_levels", &self.pyramid_levels)
             .add("artifact_output", &self.artifact_output)
             .add("artifact_fps", &self.artifact_fps)
             .add("artifact_every", &self.artifact_every)
@@ -1196,6 +1199,10 @@ fn default_recon_max_elems() -> usize {
     50_000_000
 }
 
+fn default_mae_pyramid_levels() -> usize {
+    1
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
 pub struct VisionDatasetConfig {
@@ -1455,11 +1462,6 @@ fn validate_vision_rollout(
             "vision rollout steps must be > 0 (min={min_steps}, max={max_steps_cfg})"
         ));
     }
-    if backprop_steps == 0 {
-        return Err(anyhow!(
-            "vision rollout_backprop_steps must be > 0 (value={backprop_steps})"
-        ));
-    }
     if min_steps > max_steps_cfg {
         return Err(anyhow!(
             "vision rollout_min_steps ({min_steps}) must be <= rollout_max_steps ({max_steps_cfg})"
@@ -1470,7 +1472,7 @@ fn validate_vision_rollout(
             "vision rollout_max_steps ({max_steps_cfg}) exceeds vision.steps ({max_steps})"
         ));
     }
-    if backprop_steps > max_steps_cfg {
+    if backprop_steps > 0 && backprop_steps > max_steps_cfg {
         return Err(anyhow!(
             "vision rollout_backprop_steps ({backprop_steps}) must be <= rollout_max_steps ({max_steps_cfg})"
         ));
@@ -1538,6 +1540,9 @@ fn validate_vision_mode(mode: &VisionTrainingModeConfig, vision: &VisionModelCon
         }
         VisionTrainingModeConfig::Mae(mae) => {
             validate_recon_loss("mode.loss.recon", &mae.loss.recon)?;
+            if mae.pyramid_levels == 0 {
+                return Err(anyhow!("mode.pyramid_levels must be > 0"));
+            }
         }
         VisionTrainingModeConfig::Saccade(saccade) => {
             if saccade.num_eyes == 0 {
@@ -1985,6 +1990,7 @@ mod tests {
 
             [mode]
             type = "mae"
+            pyramid_levels = 2
             artifact_output = "images"
             artifact_fps = 5
             artifact_every = 3
@@ -2004,6 +2010,7 @@ mod tests {
                 assert!((mae.loss.recon.mask_ratio - 0.8).abs() < f32::EPSILON);
                 assert!((mae.loss.recon.weight - 1.2).abs() < f32::EPSILON);
                 assert_eq!(mae.loss.recon.hidden_dim, 192);
+                assert_eq!(mae.pyramid_levels, 2);
                 assert_eq!(mae.artifact_output, VisionArtifactOutputMode::Images);
                 assert_eq!(mae.artifact_fps, 5);
                 assert_eq!(mae.artifact_every, 3);

@@ -1,6 +1,6 @@
 use crate::train::prelude::*;
 
-pub(crate) fn train_backend<B, Init>(
+pub fn train_backend<B, Init>(
     config: &TrainingConfig,
     dataset: Arc<Dataset>,
     backend_name: &str,

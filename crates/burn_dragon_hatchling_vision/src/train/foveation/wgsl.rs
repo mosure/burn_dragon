@@ -14,10 +14,10 @@ use burn_wgpu::{KernelSource, SourceKernel, SourceTemplate, WgpuRuntime};
 use cubecl::prelude::*;
 use cubecl_runtime::server::Bindings;
 
-use burn_dragon_hatchling_vision::FOVEATION_BUFFER_SHADER;
+use crate::FOVEATION_BUFFER_SHADER;
 
 use crate::train::saccade::{SaccadeLaplacianImages, SaccadeMipLevel};
-use crate::config::VisionFoveaWarpMode;
+use burn_dragon_hatchling_core::config::VisionFoveaWarpMode;
 
 const MAX_LEVELS: usize = 8;
 const META_HEADER_LEN: usize = 10;

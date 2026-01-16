@@ -34,6 +34,7 @@ trace_train_loss_every = 1
 # ffmpeg_path = "C:/path/to/ffmpeg"
 rollout_min_steps = 16
 rollout_max_steps = 16
+# backprop through the last N rollout steps (0 = all steps)
 rollout_backprop_steps = 16
 batch_repeats = 1
 
@@ -117,6 +118,7 @@ artifact_max_images = 16
 artifact_max_views = 4
 # overwrite validation artifacts instead of keeping history
 artifact_overwrite = true
+
 # input projection module: linear | cnn | radial_micro_vit
 [mode.input_projection]
 type = "linear"
@@ -136,6 +138,7 @@ type = "linear"
 # truncated BPTT chunk size (0 disables)
 [mode.tbptt]
 step_count = 0
+
 # policy training and side-channel controls (GDPO + location embedding)
 [mode.policy]
 # keep policy gradients separate from recon sampling if enabled
@@ -166,7 +169,7 @@ null_noise_std = 0.05
 [mode.policy.gdpo]
 # GDPO advantage conditioning for saccade policy
 enabled = true
-group_size = 4
+group_size = 8
 hard_weight = 1.0
 easy_weight = 1.0
 policy_weight = 1.0
@@ -184,7 +187,7 @@ max_entries = 64
 
 [mode.loss.lejepa]
 # enable LeJEPA invariance + sigreg losses
-enabled = true
+enabled = false
 lambda = 0.02
 sigreg_knots = 17
 sigreg_t_max = 3.0

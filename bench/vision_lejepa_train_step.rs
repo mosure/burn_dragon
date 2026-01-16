@@ -11,7 +11,7 @@ use burn_dragon_hatchling::{
     ImageNetAugmentations, ImageNetBatch, ImageNetDataLoader, ImageNetDataset,
     ImageNetDatasetConfig, ImageNetSplit, VisionNormalize, VisionTrainingConfig,
     VisionTrainingModeConfig, load_vision_training_config,
-    vision::train::bench::VisionSaccadeTrainStepBench, wgpu::init_runtime,
+    vision::train::bench::VisionLejepaTrainStepBench, wgpu::init_runtime,
 };
 use burn_wgpu::{CubeBackend, WgpuDevice, WgpuRuntime};
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
@@ -39,8 +39,8 @@ fn load_bench_settings(path: &Path) -> BenchSettings {
 }
 
 fn load_bench_config() -> (VisionTrainingConfig, BenchSettings) {
-    let base_path = PathBuf::from("config").join("vision_saccade_tiny.toml");
-    let bench_path = PathBuf::from("config").join("vision_saccade_tiny_bench.toml");
+    let base_path = PathBuf::from("config").join("vision_lejepa_tiny.toml");
+    let bench_path = PathBuf::from("config").join("vision_lejepa_tiny_bench.toml");
     let config =
         load_vision_training_config(&[base_path, bench_path.clone()]).expect("load bench config");
     let bench = load_bench_settings(&bench_path);
@@ -48,6 +48,10 @@ fn load_bench_config() -> (VisionTrainingConfig, BenchSettings) {
 }
 
 fn build_train_dataset(config: &VisionTrainingConfig) -> Option<Arc<ImageNetDataset>> {
+    let VisionTrainingModeConfig::Lejepa(lejepa) = &config.mode else {
+        eprintln!("vision_lejepa_train_step bench skipped: config is not lejepa mode");
+        return None;
+    };
     let normalize =
         VisionNormalize::new(config.augment.normalize_mean, config.augment.normalize_std);
     let train_aug = ImageNetAugmentations::new(
@@ -71,6 +75,42 @@ fn build_train_dataset(config: &VisionTrainingConfig) -> Option<Arc<ImageNetData
         config.augment.solarize_prob,
         config.augment.solarize_threshold,
     );
+    let multi_crop = lejepa.global_views > 0 || lejepa.local_views > 0;
+    let global_views = if multi_crop {
+        lejepa.global_views.max(1)
+    } else {
+        lejepa.views.max(1)
+    };
+    let local_views = if multi_crop { lejepa.local_views } else { 0 };
+    let local_train_aug = if local_views > 0 {
+        if lejepa.local_image_size == 0 {
+            eprintln!("vision_lejepa_train_step bench skipped: local_image_size is 0");
+            return None;
+        }
+        Some(ImageNetAugmentations::new(
+            ImageNetSplit::Train,
+            lejepa.local_image_size,
+            lejepa.local_image_size,
+            lejepa.local_min_scale,
+            lejepa.local_max_scale,
+            config.augment.min_aspect_ratio,
+            config.augment.max_aspect_ratio,
+            config.augment.flip_prob,
+            config.augment.color_jitter_prob,
+            config.augment.brightness,
+            config.augment.contrast,
+            config.augment.saturation,
+            config.augment.hue,
+            config.augment.grayscale_prob,
+            config.augment.blur_prob,
+            config.augment.blur_sigma_min,
+            config.augment.blur_sigma_max,
+            config.augment.solarize_prob,
+            config.augment.solarize_threshold,
+        ))
+    } else {
+        None
+    };
     let train_root = config
         .dataset
         .imagenet_root
@@ -80,11 +120,11 @@ fn build_train_dataset(config: &VisionTrainingConfig) -> Option<Arc<ImageNetData
         split: ImageNetSplit::Train,
         max_records: config.dataset.max_records,
         augmentations: train_aug,
-        local_augmentations: None,
+        local_augmentations: local_train_aug,
         normalize,
         teacher: None,
-        views: 1,
-        local_views: 0,
+        views: global_views,
+        local_views,
         cache_decoded: config.dataset.cache_decoded,
         cache_capacity: config.dataset.cache_capacity,
         cache_preprocessed: config.dataset.cache_preprocessed,
@@ -92,7 +132,7 @@ fn build_train_dataset(config: &VisionTrainingConfig) -> Option<Arc<ImageNetData
     match dataset {
         Ok(dataset) => Some(Arc::new(dataset)),
         Err(err) => {
-            eprintln!("vision_saccade_train_step bench skipped: {err}");
+            eprintln!("vision_lejepa_train_step bench skipped: {err}");
             None
         }
     }
@@ -105,7 +145,7 @@ fn init_wgpu_runtime(device: &WgpuDevice, config: &burn_dragon_hatchling::WgpuRu
     });
 }
 
-fn vision_train_step_bench(c: &mut Criterion) {
+fn vision_lejepa_train_step_bench(c: &mut Criterion) {
     let (config, bench) = load_bench_config();
     let Some(dataset) = build_train_dataset(&config) else {
         return;
@@ -133,8 +173,8 @@ fn run_backend<B, Init>(
     B::Device: Clone + Send + Sync + 'static,
     Init: Fn(&B::Device),
 {
-    let VisionTrainingModeConfig::Saccade(saccade_cfg) = &config.mode else {
-        eprintln!("vision_saccade_train_step bench skipped: config is not saccade mode");
+    let VisionTrainingModeConfig::Lejepa(lejepa_cfg) = &config.mode else {
+        eprintln!("vision_lejepa_train_step bench skipped: config is not lejepa mode");
         return;
     };
 
@@ -145,6 +185,7 @@ fn run_backend<B, Init>(
     let training = config.training.clone();
     let optimizer_cfg = config.optimizer.clone();
     let vision_cfg = config.vision.build();
+    let num_classes = dataset.num_classes();
 
     let steps_per_epoch = dataset.steps_per_epoch(training.batch_size);
     let loader: Arc<dyn burn::data::dataloader::DataLoader<B, ImageNetBatch<B>>> =
@@ -160,11 +201,12 @@ fn run_backend<B, Init>(
         ));
 
     {
-        let mut warm_bench = VisionSaccadeTrainStepBench::<B>::new(
+        let mut warm_bench = VisionLejepaTrainStepBench::<B>::new(
             vision_cfg.clone(),
-            saccade_cfg.clone(),
+            lejepa_cfg.clone(),
             &training,
             &optimizer_cfg,
+            num_classes,
             &device,
         )
         .expect("warm bench");
@@ -174,26 +216,27 @@ fn run_backend<B, Init>(
         }
     }
 
-    let mut group = c.benchmark_group(format!("vision_saccade_train_step/{name}"));
+    let mut group = c.benchmark_group(format!("vision_lejepa_train_step/{name}"));
     group.warm_up_time(Duration::from_secs(1));
     group.measurement_time(Duration::from_secs(3));
     group.sample_size(10);
     group.bench_with_input(
-        BenchmarkId::from_parameter("vision_saccade_tiny"),
+        BenchmarkId::from_parameter("vision_lejepa_tiny"),
         &vision_cfg,
         |b, _| {
             let loader = Arc::clone(&loader);
             let vision_cfg = vision_cfg.clone();
-            let saccade_cfg = saccade_cfg.clone();
+            let lejepa_cfg = lejepa_cfg.clone();
             let training = training.clone();
             let optimizer_cfg = optimizer_cfg.clone();
             b.iter_custom(|iters| {
                 let mut total = Duration::ZERO;
-                let mut bench = VisionSaccadeTrainStepBench::<B>::new(
+                let mut bench = VisionLejepaTrainStepBench::<B>::new(
                     vision_cfg.clone(),
-                    saccade_cfg.clone(),
+                    lejepa_cfg.clone(),
                     &training,
                     &optimizer_cfg,
+                    num_classes,
                     &device,
                 )
                 .expect("bench init");
@@ -217,5 +260,5 @@ fn run_backend<B, Init>(
     group.finish();
 }
 
-criterion_group!(benches, vision_train_step_bench);
+criterion_group!(benches, vision_lejepa_train_step_bench);
 criterion_main!(benches);

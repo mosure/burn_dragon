@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+
 use std::any::{Any, TypeId};
 
 use burn::tensor::{Tensor as BurnTensor, TensorPrimitive};

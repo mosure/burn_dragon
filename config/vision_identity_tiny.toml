@@ -1,0 +1,100 @@
+# Identity MAE training config (single image, full reconstruction).
+
+[dataset]
+imagenet_root = "data/imagenette2-160"
+train_dir = "train"
+val_dir = "val"
+max_records = 1
+prefetch_batches = 1
+prefetch_workers = 2
+prefetch_to_device = true
+cache_decoded = true
+cache_capacity = 8
+cache_preprocessed = true
+
+[dataset.download]
+type = "imagenette"
+variant = "imagenette2-160"
+
+[training]
+batch_size = 1
+max_iters = 200
+log_frequency = 10
+batch_repeats = 1
+memory_cleanup_every = 0
+memory_cleanup_iters = 0
+disable_cuda_memory_cleanup = false
+train_repeat_chunk = 0
+trace_train_loss = true
+trace_train_loss_every = 1
+rollout_min_steps = 4
+rollout_max_steps = 4
+rollout_backprop_steps = 4
+
+[optimizer]
+learning_rate = 0.01
+weight_decay = 0.0
+grad_clip_norm = 1.0
+
+[optimizer.lr_schedule]
+type = "constant"
+
+[wgpu]
+backend = "auto"
+memory = "subslices"
+
+[vision]
+image_size = 64
+patch_size = 8
+in_channels = 3
+embed_dim = 64
+steps = 4
+n_head = 4
+mlp_internal_dim_multiplier = 2
+dropout = 0.0
+projection_dim = 64
+projection_hidden_dim = 128
+use_cls_token = true
+pos_encoding = "learned2d"
+attention_mode = "row_l1"
+fused_kernels = false
+relu_threshold = 0.0
+
+[mode]
+type = "mae"
+pyramid_levels = 1
+artifact_every = 1
+artifact_output = "images"
+artifact_fps = 8
+artifact_max_images = 1
+artifact_max_views = 3
+artifact_overwrite = true
+
+[mode.loss.recon]
+mask_ratio = 0.0
+weight = 1.0
+hidden_dim = 128
+# compute reconstruction loss on all patches (not only masked ones)
+loss_on_all_patches = true
+
+[augment]
+image_size = 64
+resize_short = 64
+min_scale = 1.0
+max_scale = 1.0
+min_aspect_ratio = 1.0
+max_aspect_ratio = 1.0
+flip_prob = 0.0
+color_jitter_prob = 0.0
+brightness = 0.0
+contrast = 0.0
+saturation = 0.0
+hue = 0.0
+grayscale_prob = 0.0
+blur_prob = 0.0
+blur_sigma_min = 0.1
+blur_sigma_max = 0.1
+solarize_prob = 0.0
+solarize_threshold = 128
+normalize_mean = [0.0, 0.0, 0.0]
+normalize_std = [1.0, 1.0, 1.0]

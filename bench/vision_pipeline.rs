@@ -1,7 +1,9 @@
 #![recursion_limit = "256"]
 
+#[cfg(all(feature = "train", feature = "benchmark"))]
 use std::time::{Duration, Instant};
 
+#[cfg(all(feature = "train", feature = "benchmark"))]
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
 #[cfg(all(feature = "train", feature = "benchmark"))]

@@ -50,30 +50,38 @@ impl<B: BackendTrait> VisionProbe<B> {
 pub(crate) struct VisionReconstructionHead<B: BackendTrait> {
     pub(crate) norm: LayerNorm<B>,
     pub(crate) hidden: Option<Linear<B>>,
+    pub(crate) hidden2: Option<Linear<B>>,
     pub(crate) out: Linear<B>,
 }
 
 impl<B: BackendTrait> VisionReconstructionHead<B> {
     pub(crate) fn new(embed_dim: usize, hidden_dim: usize, patch_dim: usize, device: &B::Device) -> Self {
         let norm = LayerNormConfig::new(embed_dim).init(device);
-        let hidden = if hidden_dim > 0 {
-            Some(LinearConfig::new(embed_dim, hidden_dim).init(device))
+        let (hidden, hidden2, out_dim) = if hidden_dim > 0 {
+            let hidden = Some(LinearConfig::new(embed_dim, hidden_dim).init(device));
+            let hidden2 = Some(LinearConfig::new(hidden_dim, hidden_dim).init(device));
+            (hidden, hidden2, hidden_dim.max(1))
         } else {
-            None
-        };
-        let out_dim = if hidden.is_some() {
-            hidden_dim.max(1)
-        } else {
-            embed_dim.max(1)
+            (None, None, embed_dim.max(1))
         };
         let out = LinearConfig::new(out_dim, patch_dim.max(1)).init(device);
-        Self { norm, hidden, out }
+        Self {
+            norm,
+            hidden,
+            hidden2,
+            out,
+        }
     }
 
     pub(crate) fn forward<const D: usize>(&self, tokens: Tensor<B, D>) -> Tensor<B, D> {
         let tokens = self.norm.forward(tokens);
         let tokens = if let Some(hidden) = &self.hidden {
             activation::gelu(hidden.forward(tokens))
+        } else {
+            tokens
+        };
+        let tokens = if let Some(hidden2) = &self.hidden2 {
+            activation::gelu(hidden2.forward(tokens))
         } else {
             tokens
         };
@@ -961,7 +969,13 @@ impl<B: BackendTrait> VisionLejepaModel<B> {
 
         let target_patches = patchify(stacked, patch_size);
         let mask_ratio = self.config.loss.recon.mask_ratio;
+        let loss_on_all_patches = self.config.loss.recon.loss_on_all_patches;
         let mask = sample_patch_mask(&device, total, tokens, mask_ratio, randomize_mask);
+        let loss_mask = if loss_on_all_patches {
+            Tensor::<B, 2>::ones([total, tokens], &device)
+        } else {
+            mask.clone()
+        };
         let mask_expanded = mask.clone().unsqueeze_dim::<3>(2);
         let keep = mask_expanded.clone().mul_scalar(-1.0).add_scalar(1.0);
         let mut masked_tokens = patch.tokens.clone().mul(keep.clone());
@@ -993,22 +1007,27 @@ impl<B: BackendTrait> VisionLejepaModel<B> {
         let diff = pred_patches.clone() - target_patches.clone();
         let loss_sum = diff
             .powf_scalar(2.0)
-            .mul(mask_expanded.clone())
+            .mul(loss_mask.clone().unsqueeze_dim::<3>(2))
             .sum();
-        let mask_sum = mask.clone().sum().mul_scalar(patch_dim as f32);
+        let mask_sum = loss_mask.clone().sum().mul_scalar(patch_dim as f32);
 
         let artifacts = if capture_artifacts && batch > 0 {
             let pred_first = pred_patches.slice_dim(0, 0..batch);
             let target_first = target_patches.slice_dim(0, 0..batch);
             let mask_first = mask.slice_dim(0, 0..batch);
+            let loss_mask_first = loss_mask.slice_dim(0, 0..batch);
             let mask_expanded = mask_first.clone().unsqueeze_dim::<3>(2);
+            let loss_mask_expanded = loss_mask_first.clone().unsqueeze_dim::<3>(2);
             let keep = mask_expanded.clone().mul_scalar(-1.0).add_scalar(1.0);
             let masked_patches = target_first.clone().mul(keep.clone());
-            let recon_patches =
-                pred_first.clone().mul(mask_expanded.clone()) + target_first.clone().mul(keep);
+            let recon_patches = if loss_on_all_patches {
+                pred_first.clone()
+            } else {
+                pred_first.clone().mul(mask_expanded.clone()) + target_first.clone().mul(keep)
+            };
             let masked_view = unpatchify(masked_patches, patch_size, height, width, channels);
             let recon_view = unpatchify(recon_patches, patch_size, height, width, channels);
-            let residual = (pred_first - target_first).mul(mask_expanded);
+            let residual = (pred_first - target_first).mul(loss_mask_expanded);
             Some((vec![views[0].clone(), masked_view, recon_view], residual))
         } else {
             None
@@ -1177,6 +1196,7 @@ impl<B: BackendTrait> VisionMaeModel<B> {
         let mut loss_sum: Option<Tensor<B, 1>> = None;
         let mut mask_sum: Option<Tensor<B, 1>> = None;
         let mut artifacts: Option<(Vec<Tensor<B, 4>>, Tensor<B, 3>)> = None;
+        let loss_on_all_patches = self.config.loss.recon.loss_on_all_patches;
 
         for (level_idx, level_images) in pyramid.into_iter().enumerate() {
             let [batch, channels, height, width] = level_images.shape().dims::<4>();
@@ -1191,6 +1211,11 @@ impl<B: BackendTrait> VisionMaeModel<B> {
             let target_patches = patchify(level_images.clone(), patch_size);
             let mask_ratio = self.config.loss.recon.mask_ratio;
             let mask = sample_patch_mask(&device, batch, tokens, mask_ratio, randomize_mask);
+            let loss_mask = if loss_on_all_patches {
+                Tensor::<B, 2>::ones([batch, tokens], &device)
+            } else {
+                mask.clone()
+            };
 
             let mask_expanded = mask.clone().unsqueeze_dim::<3>(2);
             let keep = mask_expanded.clone().mul_scalar(-1.0).add_scalar(1.0);
@@ -1218,9 +1243,9 @@ impl<B: BackendTrait> VisionMaeModel<B> {
             let diff = pred_patches.clone() - target_patches.clone();
             let loss_sum_level = diff
                 .powf_scalar(2.0)
-                .mul(mask_expanded.clone())
+                .mul(loss_mask.clone().unsqueeze_dim::<3>(2))
                 .sum();
-            let mask_sum_level = mask.clone().sum().mul_scalar(patch_dim as f32);
+            let mask_sum_level = loss_mask.clone().sum().mul_scalar(patch_dim as f32);
             loss_sum = Some(match loss_sum {
                 Some(accum) => accum + loss_sum_level,
                 None => loss_sum_level,
@@ -1234,14 +1259,19 @@ impl<B: BackendTrait> VisionMaeModel<B> {
                 let pred_first = pred_patches.slice_dim(0, 0..batch);
                 let target_first = target_patches.slice_dim(0, 0..batch);
                 let mask_first = mask.slice_dim(0, 0..batch);
+                let loss_mask_first = loss_mask.slice_dim(0, 0..batch);
                 let mask_expanded = mask_first.clone().unsqueeze_dim::<3>(2);
+                let loss_mask_expanded = loss_mask_first.clone().unsqueeze_dim::<3>(2);
                 let keep = mask_expanded.clone().mul_scalar(-1.0).add_scalar(1.0);
                 let masked_patches = target_first.clone().mul(keep.clone());
-                let recon_patches =
-                    pred_first.clone().mul(mask_expanded.clone()) + target_first.clone().mul(keep);
+                let recon_patches = if loss_on_all_patches {
+                    pred_first.clone()
+                } else {
+                    pred_first.clone().mul(mask_expanded.clone()) + target_first.clone().mul(keep)
+                };
                 let masked_view = unpatchify(masked_patches, patch_size, height, width, channels);
                 let recon_view = unpatchify(recon_patches, patch_size, height, width, channels);
-                let residual = (pred_first - target_first).mul(mask_expanded);
+                let residual = (pred_first - target_first).mul(loss_mask_expanded);
                 artifacts = Some((vec![level_images.clone(), masked_view, recon_view], residual));
             }
         }

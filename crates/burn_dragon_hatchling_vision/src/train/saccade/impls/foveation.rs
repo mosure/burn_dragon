@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+
 use crate::train::prelude::*;
 use crate::train::foveation::cubecl as foveation_cubecl;
 use crate::train::foveation::wgsl as foveation_wgsl;

@@ -122,6 +122,7 @@ pub struct VisionOutput<B: BackendTrait> {
 }
 
 impl<B: BackendTrait> VisionOutput<B> {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         loss: Tensor<B, 1>,
         inv_loss: Tensor<B, 1>,
@@ -404,6 +405,7 @@ pub struct VisionTrainItem<B: AutodiffBackend> {
 }
 
 impl<B: AutodiffBackend> VisionTrainItem<B> {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         loss: Tensor<B, 1>,
         inv_loss: Tensor<B, 1>,
@@ -901,6 +903,7 @@ pub struct VisionArtifactMetric<B: BackendTrait> {
 }
 
 impl<B: BackendTrait> VisionArtifactMetric<B> {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         output_dir: PathBuf,
         every: usize,
@@ -953,6 +956,7 @@ impl<B: BackendTrait> VisionArtifactMetric<B> {
         let _ = fs::write(path, contents);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn build_lejepa_frame(
         &self,
         views_vec: &[f32],

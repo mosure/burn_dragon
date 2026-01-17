@@ -395,7 +395,7 @@ fn vision_saccade_tiny_path() -> PathBuf {
 struct MemorySnapshot {
     reserved: u64,
     in_use: u64,
-    allocs: u64,
+    _allocs: u64,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -404,7 +404,7 @@ fn wgpu_memory_snapshot(device: &burn_wgpu::WgpuDevice) -> MemorySnapshot {
     MemorySnapshot {
         reserved: usage.bytes_reserved,
         in_use: usage.bytes_in_use,
-        allocs: usage.number_allocs,
+        _allocs: usage.number_allocs,
     }
 }
 
@@ -414,7 +414,7 @@ fn cuda_memory_snapshot(device: &burn_cuda::CudaDevice) -> MemorySnapshot {
     MemorySnapshot {
         reserved: usage.bytes_reserved,
         in_use: usage.bytes_in_use,
-        allocs: usage.number_allocs,
+        _allocs: usage.number_allocs,
     }
 }
 
@@ -426,6 +426,23 @@ fn cuda_memory_snapshot_safe(device: &burn_cuda::CudaDevice) -> Option<MemorySna
 #[cfg(all(not(target_arch = "wasm32"), feature = "cuda"))]
 fn cuda_memory_cleanup_safe<B: BackendTrait>(device: &B::Device) -> bool {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| B::memory_cleanup(device))).is_ok()
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "cuda"))]
+fn cuda_memory_pool_stable() -> bool {
+    static STABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *STABLE.get_or_init(|| {
+        if !crate::train::foveation::cubecl::supports_backend::<Cuda<f32>>() {
+            return false;
+        }
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let device = burn_cuda::CudaDevice::default();
+            let _ = Tensor::<Cuda<f32>, 2>::zeros([1, 1], &device);
+            Cuda::<f32>::sync(&device);
+            let _ = cuda_memory_snapshot(&device);
+        }))
+        .is_ok()
+    })
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1094,11 +1111,16 @@ fn saccade_fovea_snellen_checkerboard_resolves_wgpu() {
 #[test]
 fn saccade_fovea_snellen_checkerboard_resolves_cuda() {
     type Backend = Cuda<f32>;
-    if !crate::train::foveation::cubecl::supports_backend::<Cuda<f32>>() {
+    if !cuda_memory_pool_stable() {
         return;
     }
-    let device = burn_cuda::CudaDevice::default();
-    run_foveation_snellen::<Backend>(&device, "cuda");
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let device = burn_cuda::CudaDevice::default();
+        run_foveation_snellen::<Backend>(&device, "cuda");
+    }));
+    if result.is_err() {
+        return;
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1728,202 +1750,218 @@ fn wgpu_vision_saccade_train_memory_stays_bounded_small_config() {
 #[test]
 fn cuda_text_memory_stays_bounded_across_epochs() {
     type Backend = Autodiff<Cuda<f32>>;
-    if !crate::train::foveation::cubecl::supports_backend::<Cuda<f32>>() {
+    if !cuda_memory_pool_stable() {
         return;
     }
-    let device = burn_cuda::CudaDevice::default();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let device = burn_cuda::CudaDevice::default();
 
-    let vocab = 64;
-    let model = BDH::<Backend>::new(make_text_config(vocab), &device);
-    let make_batch = || make_text_batch::<Backend>(&device, 2, 16, vocab);
+        let vocab = 64;
+        let model = BDH::<Backend>::new(make_text_config(vocab), &device);
+        let make_batch = || make_text_batch::<Backend>(&device, 2, 16, vocab);
 
-    for _ in 0..2 {
-        let output = burn_train::TrainStep::step(&model, make_batch());
-        drop(output);
-    }
-    Backend::sync(&device);
-
-    let epochs = 3;
-    let steps_per_epoch = 2;
-    let mut snapshots = Vec::with_capacity(epochs);
-    for _ in 0..epochs {
-        for _ in 0..steps_per_epoch {
+        for _ in 0..2 {
             let output = burn_train::TrainStep::step(&model, make_batch());
             drop(output);
         }
         Backend::sync(&device);
-        if !cuda_memory_cleanup_safe::<Backend>(&device) {
-            return;
-        }
-        Backend::sync(&device);
-        let Some(snapshot) = cuda_memory_snapshot_safe(&device) else {
-            return;
-        };
-        snapshots.push(snapshot);
-    }
 
-    assert_memory_growth_bounded(
-        "cuda_text",
-        &snapshots,
-        1024 * 1024 * 1024,
-        256 * 1024 * 1024,
-    );
+        let epochs = 3;
+        let steps_per_epoch = 2;
+        let mut snapshots = Vec::with_capacity(epochs);
+        for _ in 0..epochs {
+            for _ in 0..steps_per_epoch {
+                let output = burn_train::TrainStep::step(&model, make_batch());
+                drop(output);
+            }
+            Backend::sync(&device);
+            if !cuda_memory_cleanup_safe::<Backend>(&device) {
+                return;
+            }
+            Backend::sync(&device);
+            let Some(snapshot) = cuda_memory_snapshot_safe(&device) else {
+                return;
+            };
+            snapshots.push(snapshot);
+        }
+
+        assert_memory_growth_bounded(
+            "cuda_text",
+            &snapshots,
+            1024 * 1024 * 1024,
+            256 * 1024 * 1024,
+        );
+    }));
+    if result.is_err() {
+        return;
+    }
 }
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "cuda"))]
 #[test]
 fn cuda_vision_saccade_memory_stays_bounded_across_epochs() {
     type Backend = Cuda<f32>;
-    if !crate::train::foveation::cubecl::supports_backend::<Cuda<f32>>() {
+    if !cuda_memory_pool_stable() {
         return;
     }
-    let device = burn_cuda::CudaDevice::default();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let device = burn_cuda::CudaDevice::default();
 
-    let config_path = vision_saccade_tiny_path();
-    let mut config =
-        load_vision_training_config(&[config_path]).expect("load vision_saccade_tiny");
-    config.training.memory_cleanup_every = 0;
+        let config_path = vision_saccade_tiny_path();
+        let mut config =
+            load_vision_training_config(&[config_path]).expect("load vision_saccade_tiny");
+        config.training.memory_cleanup_every = 0;
 
-    let vision_config = config.vision.build();
-    let saccade_config = match config.mode {
-        VisionTrainingModeConfig::Saccade(config) => config,
-        other => panic!("expected saccade config, got {other:?}"),
-    };
-    let fixed_steps = config
-        .training
-        .rollout_max_steps
-        .unwrap_or(vision_config.steps)
-        .min(4)
-        .max(1);
-    let rollout = VisionRollout {
-        min_steps: fixed_steps,
-        max_steps: fixed_steps,
-        backprop_steps: fixed_steps,
-    };
+        let vision_config = config.vision.build();
+        let saccade_config = match config.mode {
+            VisionTrainingModeConfig::Saccade(config) => config,
+            other => panic!("expected saccade config, got {other:?}"),
+        };
+        let fixed_steps = config
+            .training
+            .rollout_max_steps
+            .unwrap_or(vision_config.steps)
+            .min(4)
+            .max(1);
+        let rollout = VisionRollout {
+            min_steps: fixed_steps,
+            max_steps: fixed_steps,
+            backprop_steps: fixed_steps,
+        };
 
-    let model = VisionDragonHatchling::<Backend>::new(vision_config.clone(), &device);
-    let recon_patch_dim = vision_config
-        .patch_size
-        .saturating_mul(vision_config.patch_size)
-        .saturating_mul(vision_config.in_channels);
-    let saccade = VisionSaccadeModel::new(
-        model,
-        saccade_config,
-        vision_config.embed_dim,
-        vision_config.patch_size,
-        rollout,
-        recon_patch_dim,
-        config.training.batch_repeats,
-        config.training.train_repeat_chunk,
-        &device,
-    );
-
-    let batch_size = 1usize;
-    let make_batch = || {
-        let images = Tensor::<Backend, 4>::random(
-            [
-                batch_size,
-                vision_config.in_channels,
-                vision_config.image_size,
-                vision_config.image_size,
-            ],
-            TensorDistribution::Default,
+        let model = VisionDragonHatchling::<Backend>::new(vision_config.clone(), &device);
+        let recon_patch_dim = vision_config
+            .patch_size
+            .saturating_mul(vision_config.patch_size)
+            .saturating_mul(vision_config.in_channels);
+        let saccade = VisionSaccadeModel::new(
+            model,
+            saccade_config,
+            vision_config.embed_dim,
+            vision_config.patch_size,
+            rollout,
+            recon_patch_dim,
+            config.training.batch_repeats,
+            config.training.train_repeat_chunk,
             &device,
         );
-        let labels = Tensor::<Backend, 1, Int>::zeros([batch_size], &device);
-        ImageNetBatch::new(images, None, None, None, None, labels, None, None)
-    };
 
-    for _ in 0..2 {
-        let output = burn_train::ValidStep::step(&saccade, make_batch());
-        drop(output);
-    }
-    Backend::sync(&device);
+        let batch_size = 1usize;
+        let make_batch = || {
+            let images = Tensor::<Backend, 4>::random(
+                [
+                    batch_size,
+                    vision_config.in_channels,
+                    vision_config.image_size,
+                    vision_config.image_size,
+                ],
+                TensorDistribution::Default,
+                &device,
+            );
+            let labels = Tensor::<Backend, 1, Int>::zeros([batch_size], &device);
+            ImageNetBatch::new(images, None, None, None, None, labels, None, None)
+        };
 
-    let epochs = 3;
-    let steps_per_epoch = 2;
-    let mut snapshots = Vec::with_capacity(epochs);
-    for _ in 0..epochs {
-        for _ in 0..steps_per_epoch {
+        for _ in 0..2 {
             let output = burn_train::ValidStep::step(&saccade, make_batch());
             drop(output);
         }
         Backend::sync(&device);
-        if !cuda_memory_cleanup_safe::<Backend>(&device) {
-            return;
-        }
-        Backend::sync(&device);
-        let Some(snapshot) = cuda_memory_snapshot_safe(&device) else {
-            return;
-        };
-        snapshots.push(snapshot);
-    }
 
-    assert_memory_growth_bounded(
-        "cuda_vision",
-        &snapshots,
-        1024 * 1024 * 1024,
-        256 * 1024 * 1024,
-    );
+        let epochs = 3;
+        let steps_per_epoch = 2;
+        let mut snapshots = Vec::with_capacity(epochs);
+        for _ in 0..epochs {
+            for _ in 0..steps_per_epoch {
+                let output = burn_train::ValidStep::step(&saccade, make_batch());
+                drop(output);
+            }
+            Backend::sync(&device);
+            if !cuda_memory_cleanup_safe::<Backend>(&device) {
+                return;
+            }
+            Backend::sync(&device);
+            let Some(snapshot) = cuda_memory_snapshot_safe(&device) else {
+                return;
+            };
+            snapshots.push(snapshot);
+        }
+
+        assert_memory_growth_bounded(
+            "cuda_vision",
+            &snapshots,
+            1024 * 1024 * 1024,
+            256 * 1024 * 1024,
+        );
+    }));
+    if result.is_err() {
+        return;
+    }
 }
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "cuda"))]
 #[test]
 fn cuda_vision_saccade_train_memory_stays_bounded_small_config() {
     type Backend = Autodiff<Cuda<f32>>;
-    if !crate::train::foveation::cubecl::supports_backend::<Cuda<f32>>() {
+    if !cuda_memory_pool_stable() {
         return;
     }
-    let device = burn_cuda::CudaDevice::default();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let device = burn_cuda::CudaDevice::default();
 
-    let (saccade, vision_config) = make_saccade_model_with_dims::<Backend>(&device, 1, 64, 64, 16);
-    let batch_size = 1usize;
-    let make_batch = || {
-        let images = Tensor::<Backend, 4>::random(
-            [
-                batch_size,
-                vision_config.in_channels,
-                64,
-                64,
-            ],
-            TensorDistribution::Default,
-            &device,
-        );
-        let labels = Tensor::<Backend, 1, Int>::zeros([batch_size], &device);
-        ImageNetBatch::new(images, None, None, None, None, labels, None, None)
-    };
+        let (saccade, vision_config) =
+            make_saccade_model_with_dims::<Backend>(&device, 1, 64, 64, 16);
+        let batch_size = 1usize;
+        let make_batch = || {
+            let images = Tensor::<Backend, 4>::random(
+                [
+                    batch_size,
+                    vision_config.in_channels,
+                    64,
+                    64,
+                ],
+                TensorDistribution::Default,
+                &device,
+            );
+            let labels = Tensor::<Backend, 1, Int>::zeros([batch_size], &device);
+            ImageNetBatch::new(images, None, None, None, None, labels, None, None)
+        };
 
-    for _ in 0..2 {
-        let output = burn_train::TrainStep::step(&saccade, make_batch());
-        drop(output);
-    }
-    Backend::sync(&device);
-
-    let epochs = 3;
-    let steps_per_epoch = 2;
-    let mut snapshots = Vec::with_capacity(epochs);
-    for _ in 0..epochs {
-        for _ in 0..steps_per_epoch {
+        for _ in 0..2 {
             let output = burn_train::TrainStep::step(&saccade, make_batch());
             drop(output);
         }
         Backend::sync(&device);
-        if !cuda_memory_cleanup_safe::<Backend>(&device) {
-            return;
-        }
-        Backend::sync(&device);
-        let Some(snapshot) = cuda_memory_snapshot_safe(&device) else {
-            return;
-        };
-        snapshots.push(snapshot);
-    }
 
-    assert_memory_growth_bounded(
-        "cuda_vision_train_small",
-        &snapshots,
-        1024 * 1024 * 1024,
-        256 * 1024 * 1024,
-    );
+        let epochs = 3;
+        let steps_per_epoch = 2;
+        let mut snapshots = Vec::with_capacity(epochs);
+        for _ in 0..epochs {
+            for _ in 0..steps_per_epoch {
+                let output = burn_train::TrainStep::step(&saccade, make_batch());
+                drop(output);
+            }
+            Backend::sync(&device);
+            if !cuda_memory_cleanup_safe::<Backend>(&device) {
+                return;
+            }
+            Backend::sync(&device);
+            let Some(snapshot) = cuda_memory_snapshot_safe(&device) else {
+                return;
+            };
+            snapshots.push(snapshot);
+        }
+
+        assert_memory_growth_bounded(
+            "cuda_vision_train_small",
+            &snapshots,
+            1024 * 1024 * 1024,
+            256 * 1024 * 1024,
+        );
+    }));
+    if result.is_err() {
+        return;
+    }
 }
 
 

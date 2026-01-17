@@ -382,6 +382,31 @@ where
             } else {
                 None
             };
+            let local_val_aug = if local_views > 0 {
+                Some(ImageNetAugmentations::new(
+                    ImageNetSplit::Val,
+                    lejepa.local_image_size,
+                    lejepa.local_image_size,
+                    lejepa.local_min_scale,
+                    lejepa.local_max_scale,
+                    config.augment.min_aspect_ratio,
+                    config.augment.max_aspect_ratio,
+                    config.augment.flip_prob,
+                    config.augment.color_jitter_prob,
+                    config.augment.brightness,
+                    config.augment.contrast,
+                    config.augment.saturation,
+                    config.augment.hue,
+                    config.augment.grayscale_prob,
+                    config.augment.blur_prob,
+                    config.augment.blur_sigma_min,
+                    config.augment.blur_sigma_max,
+                    config.augment.solarize_prob,
+                    config.augment.solarize_threshold,
+                ))
+            } else {
+                None
+            };
             let train_dataset = Arc::new(ImageNetDataset::new(ImageNetDatasetConfig {
                 root: train_root,
                 split: ImageNetSplit::Train,
@@ -394,21 +419,21 @@ where
                 local_views,
                 cache_decoded: config.dataset.cache_decoded,
                 cache_capacity: config.dataset.cache_capacity,
-                        cache_preprocessed: config.dataset.cache_preprocessed,
+                cache_preprocessed: config.dataset.cache_preprocessed,
             })?);
             let val_dataset = Arc::new(ImageNetDataset::new(ImageNetDatasetConfig {
                 root: val_root,
                 split: ImageNetSplit::Val,
                 max_records: config.dataset.max_records,
-                augmentations: train_aug.clone(),
-                local_augmentations: local_train_aug.clone(),
+                augmentations: val_aug.clone(),
+                local_augmentations: local_val_aug.clone(),
                 normalize,
                 teacher: None,
                 views: global_views,
                 local_views,
                 cache_decoded: config.dataset.cache_decoded,
                 cache_capacity: config.dataset.cache_capacity,
-                        cache_preprocessed: config.dataset.cache_preprocessed,
+                cache_preprocessed: config.dataset.cache_preprocessed,
             })?);
 
             (
@@ -444,13 +469,13 @@ where
                 local_views: 0,
                 cache_decoded: config.dataset.cache_decoded,
                 cache_capacity: config.dataset.cache_capacity,
-                        cache_preprocessed: config.dataset.cache_preprocessed,
+                cache_preprocessed: config.dataset.cache_preprocessed,
             })?);
             let val_dataset = Arc::new(ImageNetDataset::new(ImageNetDatasetConfig {
                 root: val_root,
                 split: ImageNetSplit::Val,
                 max_records: config.dataset.max_records,
-                augmentations: train_aug.clone(),
+                augmentations: val_aug.clone(),
                 local_augmentations: None,
                 normalize,
                 teacher: None,
@@ -458,7 +483,7 @@ where
                 local_views: 0,
                 cache_decoded: config.dataset.cache_decoded,
                 cache_capacity: config.dataset.cache_capacity,
-                        cache_preprocessed: config.dataset.cache_preprocessed,
+                cache_preprocessed: config.dataset.cache_preprocessed,
             })?);
 
             (
@@ -564,13 +589,13 @@ where
                 local_views: 0,
                 cache_decoded: config.dataset.cache_decoded,
                 cache_capacity: config.dataset.cache_capacity,
-                        cache_preprocessed: config.dataset.cache_preprocessed,
+                cache_preprocessed: config.dataset.cache_preprocessed,
             })?);
             let val_dataset = Arc::new(ImageNetDataset::new(ImageNetDatasetConfig {
                 root: val_root,
                 split: ImageNetSplit::Val,
                 max_records: config.dataset.max_records,
-                augmentations: train_aug.clone(),
+                augmentations: val_aug.clone(),
                 local_augmentations: None,
                 normalize,
                 teacher: None,
@@ -578,7 +603,7 @@ where
                 local_views: 0,
                 cache_decoded: config.dataset.cache_decoded,
                 cache_capacity: config.dataset.cache_capacity,
-                        cache_preprocessed: config.dataset.cache_preprocessed,
+                cache_preprocessed: config.dataset.cache_preprocessed,
             })?);
 
             (

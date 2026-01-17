@@ -574,6 +574,9 @@ impl ModuleDisplay for VisionLejepaLossConfig {}
 pub struct VisionReconLossConfig {
     pub weight: f32,
     pub mask_ratio: f32,
+    /// When true, compute reconstruction loss on all patches (not only masked ones).
+    #[serde(alias = "full_loss")]
+    pub loss_on_all_patches: bool,
     pub hidden_dim: usize,
 }
 
@@ -582,6 +585,7 @@ impl Default for VisionReconLossConfig {
         Self {
             weight: 0.0,
             mask_ratio: 0.75,
+            loss_on_all_patches: false,
             hidden_dim: 256,
         }
     }
@@ -592,6 +596,7 @@ impl ModuleDisplayDefault for VisionReconLossConfig {
         content
             .add("weight", &self.weight)
             .add("mask_ratio", &self.mask_ratio)
+            .add("loss_on_all_patches", &self.loss_on_all_patches)
             .add("hidden_dim", &self.hidden_dim)
             .optional()
     }

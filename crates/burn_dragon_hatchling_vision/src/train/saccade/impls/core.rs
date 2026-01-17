@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+
 use crate::train::prelude::*;
 use crate::train::gdpo;
 

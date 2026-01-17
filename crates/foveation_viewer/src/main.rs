@@ -27,6 +27,8 @@ use burn::tensor::{Tensor, TensorData};
 use burn_wgpu::Wgpu;
 use burn_dragon_hatchling_vision::foveation;
 use burn_dragon_hatchling_vision::train::SaccadeFoveationSampler;
+#[cfg(test)]
+use burn_dragon_hatchling_core::constants::FOVEA_AA_THRESHOLD;
 use burn_dragon_hatchling_core::{
     SpatialPositionalEncodingKind, VisionAttentionMode, VisionDragonHatchlingConfig,
     VisionFoveaSamplingMode, VisionFoveaWarpMode, VisionPyramidMode, VisionSaccadeConfig,
@@ -48,8 +50,6 @@ const OVERLAY_RING_THICKNESS: f32 = 3.0;
 const OVERLAY_RING_OUTER: [u8; 4] = [255, 80, 40, 220];
 const OVERLAY_RING_INNER: [u8; 4] = [60, 200, 255, 220];
 const FOVEA_PARAM_EPS: f32 = 1e-3;
-#[cfg(test)]
-const FOVEA_AA_THRESHOLD: f32 = 1.25;
 // Avoid oversized GPU buffers when feeding full-resolution images to the burn backend.
 const BURN_MAX_BUFFER_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const BURN_MAX_IMAGE_SIDE: usize = 1024;
@@ -1343,6 +1343,7 @@ fn reset_drag_state(state: &mut PanZoomState) {
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn render_patch(
     source: &SourceImage,
     cache: &PyramidCache,
@@ -1858,6 +1859,7 @@ struct FoveaWarp {
 const LOD_WINDOW: i32 = 3;
 
 #[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn sample_gaussian_foveated(
     levels: &[ImageLevel],
     dx: f32,
@@ -1913,6 +1915,7 @@ pub(crate) fn sample_gaussian_foveated(
 }
 
 #[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn sample_laplacian_foveated(
     residuals: &[ImageLevel],
     coarse: Option<&ImageLevel>,
@@ -2078,8 +2081,11 @@ pub(crate) fn build_laplacian_pyramid(gaussian: &[ImageLevel]) -> (Vec<ImageLeve
         let next = &gaussian[idx + 1];
         let up = resample(next, current.width, current.height);
         let mut data = vec![0.0; current.width * current.height * 3];
-        for i in 0..data.len() {
-            data[i] = current.data[i] - up.data[i];
+        for (out, (current_val, up_val)) in data
+            .iter_mut()
+            .zip(current.data.iter().zip(up.data.iter()))
+        {
+            *out = current_val - up_val;
         }
         residuals.push(ImageLevel {
             width: current.width,
@@ -2100,12 +2106,10 @@ fn downsample(level: &ImageLevel) -> ImageLevel {
     for y in 0..new_h {
         for x in 0..new_w {
             let mut accum = [0.0; 3];
-            for ky in 0..5 {
-                let wy = weights[ky];
+            for (ky, &wy) in weights.iter().enumerate() {
                 let sy = (y * 2).saturating_add(ky).saturating_sub(2);
                 let sy = sy.min(level.height - 1);
-                for kx in 0..5 {
-                    let wx = weights[kx];
+                for (kx, &wx) in weights.iter().enumerate() {
                     let sx = (x * 2).saturating_add(kx).saturating_sub(2);
                     let sx = sx.min(level.width - 1);
                     let weight = wx * wy;

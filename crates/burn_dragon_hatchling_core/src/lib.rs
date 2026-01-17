@@ -1,6 +1,7 @@
 #![recursion_limit = "256"]
 
 pub mod config;
+pub mod constants;
 pub(crate) mod device;
 #[cfg(feature = "train")]
 pub mod dataset;

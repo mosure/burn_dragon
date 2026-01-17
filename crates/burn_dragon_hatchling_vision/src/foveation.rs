@@ -1,9 +1,10 @@
+use burn_dragon_hatchling_core::constants::FOVEA_AA_THRESHOLD;
+
 const FOVEA_PARAM_EPS: f32 = 1e-3;
 const SIGMA_MIN: f32 = 0.03;
 const SIGMA_MAX: f32 = 0.5;
 const LOD_LOG2_MIN: f32 = -2.0;
 const LOD_LOG2_MAX: f32 = 1.0;
-const FOVEA_AA_THRESHOLD: f32 = 1.25;
 const LN_2: f32 = std::f32::consts::LN_2;
 const SQRT2: f32 = std::f32::consts::SQRT_2;
 const PI: f32 = std::f32::consts::PI;
@@ -694,11 +695,8 @@ mod tests {
 
     fn constant_image(width: usize, height: usize, value: f32) -> CpuImageLevel {
         let mut data = vec![0.0; width * height * 3];
-        for idx in 0..(width * height) {
-            let base = idx * 3;
-            data[base] = value;
-            data[base + 1] = value;
-            data[base + 2] = value;
+        for pixel in data.chunks_exact_mut(3) {
+            pixel.fill(value);
         }
         CpuImageLevel {
             width,
@@ -716,8 +714,11 @@ mod tests {
         for residual in laplacian.iter().rev() {
             let up = resample(&recon, residual.width, residual.height);
             let mut data = vec![0.0; residual.width * residual.height * 3];
-            for i in 0..data.len() {
-                data[i] = residual.data[i] + up.data[i];
+            for (out, (residual_val, up_val)) in data
+                .iter_mut()
+                .zip(residual.data.iter().zip(up.data.iter()))
+            {
+                *out = residual_val + up_val;
             }
             recon = CpuImageLevel {
                 width: residual.width,
@@ -745,11 +746,8 @@ mod tests {
     fn patched_blends_between_levels() {
         fn constant_level(width: usize, height: usize, value: f32) -> CpuImageLevel {
             let mut data = vec![0.0; width * height * 3];
-            for idx in 0..(width * height) {
-                let base = idx * 3;
-                data[base] = value;
-                data[base + 1] = value;
-                data[base + 2] = value;
+            for pixel in data.chunks_exact_mut(3) {
+                pixel.fill(value);
             }
             CpuImageLevel {
                 width,

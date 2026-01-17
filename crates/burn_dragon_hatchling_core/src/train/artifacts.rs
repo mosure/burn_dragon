@@ -28,6 +28,7 @@ pub struct ArtifactWriteOutcome {
     pub path: PathBuf,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn collect_frames(
     data: &[f32],
     batch: usize,
@@ -65,6 +66,7 @@ pub fn collect_frames(
     out
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn write_video(
     output_dir: &Path,
     output_mode: VisionArtifactOutputMode,

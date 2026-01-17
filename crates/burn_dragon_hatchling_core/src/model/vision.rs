@@ -2373,12 +2373,13 @@ mod imagenet {
         pub teacher_cls: Option<Tensor<B, 2>>,
     }
 
-    impl<B: Backend> ImageNetBatch<B> {
-        pub fn new(
-            images: Tensor<B, 4>,
-            target_images: Option<Tensor<B, 4>>,
-            view_images: Option<Tensor<B, 5>>,
-            global_view_images: Option<Tensor<B, 5>>,
+impl<B: Backend> ImageNetBatch<B> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        images: Tensor<B, 4>,
+        target_images: Option<Tensor<B, 4>>,
+        view_images: Option<Tensor<B, 5>>,
+        global_view_images: Option<Tensor<B, 5>>,
             local_view_images: Option<Tensor<B, 5>>,
             labels: Tensor<B, 1, Int>,
             teacher_patch: Option<Tensor<B, 3>>,
@@ -2460,12 +2461,13 @@ mod imagenet {
         }
     }
 
-    impl<B: Backend> ImageNetDataLoader<B> {
-        pub fn new(
-            dataset: Arc<ImageNetDataset>,
-            batch_size: usize,
-            device: &B::Device,
-            steps_per_epoch: usize,
+impl<B: Backend> ImageNetDataLoader<B> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        dataset: Arc<ImageNetDataset>,
+        batch_size: usize,
+        device: &B::Device,
+        steps_per_epoch: usize,
             total_steps: Option<usize>,
             prefetch_batches: usize,
             prefetch_workers: usize,

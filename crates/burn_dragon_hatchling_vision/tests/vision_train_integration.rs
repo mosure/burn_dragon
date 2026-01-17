@@ -1,25 +1,36 @@
 #![cfg(feature = "integration_test")]
 
+#[cfg(feature = "cuda")]
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+#[cfg(feature = "cuda")]
+use std::path::Path;
+#[cfg(feature = "cuda")]
 use std::process::Command;
+#[cfg(feature = "cuda")]
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(feature = "cuda")]
 use std::sync::Arc;
+#[cfg(feature = "cuda")]
 use std::thread;
+#[cfg(feature = "cuda")]
 use std::time::{Duration, Instant};
 
+#[cfg(feature = "cuda")]
 use serde::Deserialize;
 
 use burn_dragon_hatchling_core::load_vision_training_config;
 use burn_dragon_hatchling_vision::train::{
-    gdpo_cpu_fallbacks, gdpo_reset_cpu_fallbacks, loss_trace_len, loss_trace_reset,
-    loss_trace_take, train_vision_backend_for_test,
+    gdpo_reset_cpu_fallbacks, loss_trace_reset, loss_trace_take, train_vision_backend_for_test,
 };
 #[cfg(feature = "cuda")]
+use burn_dragon_hatchling_vision::train::{gdpo_cpu_fallbacks, loss_trace_len};
 use burn_autodiff::Autodiff;
 #[cfg(feature = "cuda")]
 use burn_cuda::Cuda;
+use burn_ndarray::NdArray;
 
+#[cfg(feature = "cuda")]
 fn vision_saccade_tiny_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
@@ -28,6 +39,7 @@ fn vision_saccade_tiny_path() -> PathBuf {
         .join("vision_saccade_tiny.toml")
 }
 
+#[cfg(feature = "cuda")]
 fn vision_saccade_tiny_integration_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
@@ -36,6 +48,23 @@ fn vision_saccade_tiny_integration_path() -> PathBuf {
         .join("vision_saccade_tiny_integration.toml")
 }
 
+fn vision_identity_tiny_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("config")
+        .join("vision_identity_tiny.toml")
+}
+
+fn vision_identity_tiny_integration_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("config")
+        .join("vision_identity_tiny_integration.toml")
+}
+
+#[cfg(feature = "cuda")]
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 struct IntegrationSettings {
@@ -49,6 +78,7 @@ struct IntegrationSettings {
     max_mem_growth_mb: f32,
 }
 
+#[cfg(feature = "cuda")]
 impl Default for IntegrationSettings {
     fn default() -> Self {
         Self {
@@ -64,22 +94,59 @@ impl Default for IntegrationSettings {
     }
 }
 
+#[cfg(feature = "cuda")]
 #[derive(Debug, Default, Deserialize)]
 struct TestSettings {
     #[serde(default)]
     test: TestSection,
 }
 
+#[cfg(feature = "cuda")]
 #[derive(Debug, Default, Deserialize)]
 struct TestSection {
     #[serde(default)]
     integration: IntegrationSettings,
 }
 
+#[cfg(feature = "cuda")]
 fn load_integration_settings(path: &Path) -> IntegrationSettings {
     let contents = fs::read_to_string(path).expect("read integration config");
     let settings: TestSettings = toml::from_str(&contents).expect("parse integration config");
     settings.test.integration
+}
+
+#[test]
+fn cpu_vision_identity_tiny_training_loss_decreases() {
+    let config_path = vision_identity_tiny_path();
+    let integration_path = vision_identity_tiny_integration_path();
+    let config = load_vision_training_config(&[config_path, integration_path])
+        .expect("load vision_identity_tiny");
+
+    gdpo_reset_cpu_fallbacks();
+    loss_trace_reset();
+
+    let result =
+        train_vision_backend_for_test::<Autodiff<NdArray<f32>>, _>(&config, "cpu", |_| {});
+    if let Err(err) = result {
+        panic!("training failed: {err}");
+    }
+
+    let losses = loss_trace_take();
+    assert!(
+        !losses.is_empty(),
+        "no training loss samples captured; enable training.trace_train_loss in the integration config"
+    );
+    let first = losses.first().copied().unwrap_or(f32::INFINITY);
+    let min_loss = losses
+        .iter()
+        .copied()
+        .fold(f32::INFINITY, |acc, value| acc.min(value));
+    assert!(first.is_finite(), "initial loss not finite: {first}");
+    assert!(min_loss.is_finite(), "min loss not finite: {min_loss}");
+    assert!(
+        min_loss < first,
+        "expected loss to decrease at least once (initial={first}, min={min_loss})"
+    );
 }
 
 #[cfg(feature = "cuda")]

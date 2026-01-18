@@ -124,10 +124,12 @@ where
         .num_epochs(env.epochs)
         .learning_strategy(LearningStrategy::SingleDevice(env.device.clone()))
         .with_file_checkpointer(BinFileRecorder::<FullPrecisionSettings>::new())
-        .metric_train_numeric(ScalarMetric::<ValidBackend<B>, LossValue<ValidBackend<B>>>::new_every(
-            "Loss",
-            metric_every,
-        ))
+        .metric_train_numeric(
+            ScalarMetric::<ValidBackend<B>, LossValue<ValidBackend<B>>>::new_every(
+                "Loss",
+                metric_every,
+            ),
+        )
         .metric_valid_numeric(LossMetric::<ValidBackend<B>>::new())
         .metric_train_numeric(LearningRateMetric::new())
         .metric_train(DeviceMetric::new("device", env.backend_name))
@@ -138,10 +140,8 @@ where
 
     let learner = builder.build(model, optimizer, scheduler);
 
-    let TrainingResult { model, .. } = learner.fit(
-        Arc::clone(&env.train_loader),
-        Arc::clone(&env.valid_loader),
-    );
+    let TrainingResult { model, .. } =
+        learner.fit(Arc::clone(&env.train_loader), Arc::clone(&env.valid_loader));
 
     log_theoretical_profile(
         env.model_config,
@@ -175,14 +175,25 @@ where
 
     let metric_every = env.training.log_frequency.max(1);
     let loss_every = 1;
+    let enable_checkpoints = should_enable_vision_checkpoints(env.training, env.backend_name);
+    if env.training.enable_checkpoints && !enable_checkpoints {
+        tracing::warn!(
+            "vision checkpoints disabled for backend {} on this platform to avoid stack overflow",
+            env.backend_name
+        );
+    }
     let mut builder = LearnerBuilder::new(env.run_dir)
         .num_epochs(env.epochs)
-        .learning_strategy(LearningStrategy::SingleDevice(env.device.clone()))
-        .with_file_checkpointer(BinFileRecorder::<FullPrecisionSettings>::new())
-        .metric_train_numeric(ScalarMetric::<ValidBackend<B>, LossValue<ValidBackend<B>>>::new_every(
-            "Loss",
-            loss_every,
-        ))
+        .learning_strategy(LearningStrategy::SingleDevice(env.device.clone()));
+    if enable_checkpoints {
+        builder = builder.with_file_checkpointer(BinFileRecorder::<FullPrecisionSettings>::new());
+    }
+    builder = builder
+        .metric_train_numeric(
+            ScalarMetric::<ValidBackend<B>, LossValue<ValidBackend<B>>>::new_every(
+                "Loss", loss_every,
+            ),
+        )
         .metric_valid_numeric(LossMetric::<ValidBackend<B>>::new())
         .metric_train_numeric(LearningRateMetric::new())
         .metric_train(DeviceMetric::new("device", env.backend_name))
@@ -193,9 +204,12 @@ where
 
     #[cfg(feature = "integration_test")]
     if env.training.trace_train_loss {
-        builder = builder.metric_train(crate::train::metrics::LossTraceMetric::<
-            ValidBackend<B>,
-        >::new("loss_trace", env.training.trace_train_loss_every));
+        builder = builder.metric_train(
+            crate::train::metrics::LossTraceMetric::<ValidBackend<B>>::new(
+                "loss_trace",
+                env.training.trace_train_loss_every,
+            ),
+        );
     }
 
     let cleanup_iters = env.training.memory_cleanup_iters;
@@ -237,159 +251,127 @@ where
         if diagnostics.sigreg {
             let name = format!("{prefix}_sigreg_loss");
             builder = builder
-                .metric_train_numeric(
-                    ScalarMetric::<ValidBackend<B>, SigRegLossInput<ValidBackend<B>>>::new_every(
-                        name.as_str(),
-                        metric_every,
-                    ),
-                )
-                .metric_valid_numeric(
-                    ScalarMetric::<ValidBackend<B>, SigRegLossInput<ValidBackend<B>>>::new_every(
-                        name.as_str(),
-                        metric_every,
-                    ),
-                );
+                .metric_train_numeric(ScalarMetric::<
+                    ValidBackend<B>,
+                    SigRegLossInput<ValidBackend<B>>,
+                >::new_every(name.as_str(), metric_every))
+                .metric_valid_numeric(ScalarMetric::<
+                    ValidBackend<B>,
+                    SigRegLossInput<ValidBackend<B>>,
+                >::new_every(name.as_str(), metric_every));
         }
         if diagnostics.recon {
             let name = format!("{prefix}_recon_loss");
             let psnr = format!("{prefix}_recon_psnr");
             builder = builder
-                .metric_train_numeric(
-                    ScalarMetric::<ValidBackend<B>, ReconLossInput<ValidBackend<B>>>::new_every(
-                        name.as_str(),
-                        metric_every,
-                    ),
-                )
-                .metric_valid_numeric(
-                    ScalarMetric::<ValidBackend<B>, ReconLossInput<ValidBackend<B>>>::new_every(
-                        name.as_str(),
-                        metric_every,
-                    ),
-                );
+                .metric_train_numeric(ScalarMetric::<
+                    ValidBackend<B>,
+                    ReconLossInput<ValidBackend<B>>,
+                >::new_every(name.as_str(), metric_every))
+                .metric_valid_numeric(ScalarMetric::<
+                    ValidBackend<B>,
+                    ReconLossInput<ValidBackend<B>>,
+                >::new_every(name.as_str(), metric_every));
             builder = builder
-                .metric_train_numeric(
-                    ScalarMetric::<ValidBackend<B>, ReconPsnrInput<ValidBackend<B>>>::new_every(
-                        psnr.as_str(),
-                        metric_every,
-                    ),
-                )
-                .metric_valid_numeric(
-                    ScalarMetric::<ValidBackend<B>, ReconPsnrInput<ValidBackend<B>>>::new_every(
-                        psnr.as_str(),
-                        metric_every,
-                    ),
-                );
+                .metric_train_numeric(ScalarMetric::<
+                    ValidBackend<B>,
+                    ReconPsnrInput<ValidBackend<B>>,
+                >::new_every(psnr.as_str(), metric_every))
+                .metric_valid_numeric(ScalarMetric::<
+                    ValidBackend<B>,
+                    ReconPsnrInput<ValidBackend<B>>,
+                >::new_every(psnr.as_str(), metric_every));
         }
         if diagnostics.policy {
             let name = format!("{prefix}_policy_loss");
             builder = builder
-                .metric_train_numeric(
-                    ScalarMetric::<ValidBackend<B>, PolicyLossInput<ValidBackend<B>>>::new_every(
-                        name.as_str(),
-                        metric_every,
-                    ),
-                )
-                .metric_valid_numeric(
-                    ScalarMetric::<ValidBackend<B>, PolicyLossInput<ValidBackend<B>>>::new_every(
-                        name.as_str(),
-                        metric_every,
-                    ),
-                );
+                .metric_train_numeric(ScalarMetric::<
+                    ValidBackend<B>,
+                    PolicyLossInput<ValidBackend<B>>,
+                >::new_every(name.as_str(), metric_every))
+                .metric_valid_numeric(ScalarMetric::<
+                    ValidBackend<B>,
+                    PolicyLossInput<ValidBackend<B>>,
+                >::new_every(name.as_str(), metric_every));
             let adv_abs = format!("{prefix}_advantage_abs_mean");
             let adv_std = format!("{prefix}_advantage_std");
             let log_prob = format!("{prefix}_log_prob_mean");
             let entropy = format!("{prefix}_entropy");
             let clamp_rate = format!("{prefix}_action_clamp_rate");
             builder = builder
-                .metric_train_numeric(
-                    ScalarMetric::<ValidBackend<B>, AdvantageAbsMeanInput<ValidBackend<B>>>::new_every(
-                        adv_abs.as_str(),
-                        metric_every,
-                    ),
-                )
-                .metric_valid_numeric(
-                    ScalarMetric::<ValidBackend<B>, AdvantageAbsMeanInput<ValidBackend<B>>>::new_every(
-                        adv_abs.as_str(),
-                        metric_every,
-                    ),
-                )
-                .metric_train_numeric(
-                    ScalarMetric::<ValidBackend<B>, AdvantageStdInput<ValidBackend<B>>>::new_every(
-                        adv_std.as_str(),
-                        metric_every,
-                    ),
-                )
-                .metric_valid_numeric(
-                    ScalarMetric::<ValidBackend<B>, AdvantageStdInput<ValidBackend<B>>>::new_every(
-                        adv_std.as_str(),
-                        metric_every,
-                    ),
-                )
-                .metric_train_numeric(
-                    ScalarMetric::<ValidBackend<B>, LogProbMeanInput<ValidBackend<B>>>::new_every(
-                        log_prob.as_str(),
-                        metric_every,
-                    ),
-                )
-                .metric_valid_numeric(
-                    ScalarMetric::<ValidBackend<B>, LogProbMeanInput<ValidBackend<B>>>::new_every(
-                        log_prob.as_str(),
-                        metric_every,
-                    ),
-                )
-                .metric_train_numeric(
-                    ScalarMetric::<ValidBackend<B>, PolicyEntropyInput<ValidBackend<B>>>::new_every(
-                        entropy.as_str(),
-                        metric_every,
-                    ),
-                )
-                .metric_valid_numeric(
-                    ScalarMetric::<ValidBackend<B>, PolicyEntropyInput<ValidBackend<B>>>::new_every(
-                        entropy.as_str(),
-                        metric_every,
-                    ),
-                )
-                .metric_train_numeric(
-                    ScalarMetric::<ValidBackend<B>, ActionClampRateInput<ValidBackend<B>>>::new_every(
-                        clamp_rate.as_str(),
-                        metric_every,
-                    ),
-                )
-                .metric_valid_numeric(
-                    ScalarMetric::<ValidBackend<B>, ActionClampRateInput<ValidBackend<B>>>::new_every(
-                        clamp_rate.as_str(),
-                        metric_every,
-                    ),
-                );
+                .metric_train_numeric(ScalarMetric::<
+                    ValidBackend<B>,
+                    AdvantageAbsMeanInput<ValidBackend<B>>,
+                >::new_every(adv_abs.as_str(), metric_every))
+                .metric_valid_numeric(ScalarMetric::<
+                    ValidBackend<B>,
+                    AdvantageAbsMeanInput<ValidBackend<B>>,
+                >::new_every(adv_abs.as_str(), metric_every))
+                .metric_train_numeric(ScalarMetric::<
+                    ValidBackend<B>,
+                    AdvantageStdInput<ValidBackend<B>>,
+                >::new_every(adv_std.as_str(), metric_every))
+                .metric_valid_numeric(ScalarMetric::<
+                    ValidBackend<B>,
+                    AdvantageStdInput<ValidBackend<B>>,
+                >::new_every(adv_std.as_str(), metric_every))
+                .metric_train_numeric(ScalarMetric::<
+                    ValidBackend<B>,
+                    LogProbMeanInput<ValidBackend<B>>,
+                >::new_every(log_prob.as_str(), metric_every))
+                .metric_valid_numeric(ScalarMetric::<
+                    ValidBackend<B>,
+                    LogProbMeanInput<ValidBackend<B>>,
+                >::new_every(log_prob.as_str(), metric_every))
+                .metric_train_numeric(ScalarMetric::<
+                    ValidBackend<B>,
+                    PolicyEntropyInput<ValidBackend<B>>,
+                >::new_every(entropy.as_str(), metric_every))
+                .metric_valid_numeric(ScalarMetric::<
+                    ValidBackend<B>,
+                    PolicyEntropyInput<ValidBackend<B>>,
+                >::new_every(entropy.as_str(), metric_every))
+                .metric_train_numeric(ScalarMetric::<
+                    ValidBackend<B>,
+                    ActionClampRateInput<ValidBackend<B>>,
+                >::new_every(
+                    clamp_rate.as_str(), metric_every
+                ))
+                .metric_valid_numeric(ScalarMetric::<
+                    ValidBackend<B>,
+                    ActionClampRateInput<ValidBackend<B>>,
+                >::new_every(
+                    clamp_rate.as_str(), metric_every
+                ));
         }
         if diagnostics.probe {
             let probe_loss = format!("{prefix}_probe_loss");
             let probe_acc = format!("{prefix}_probe_acc");
             builder = builder
-                .metric_train_numeric(
-                    ScalarMetric::<ValidBackend<B>, ProbeLossInput<ValidBackend<B>>>::new_every(
-                        probe_loss.as_str(),
-                        metric_every,
-                    ),
-                )
-                .metric_valid_numeric(
-                    ScalarMetric::<ValidBackend<B>, ProbeLossInput<ValidBackend<B>>>::new_every(
-                        probe_loss.as_str(),
-                        metric_every,
-                    ),
-                )
-                .metric_train_numeric(
-                    ScalarMetric::<ValidBackend<B>, ProbeAccInput<ValidBackend<B>>>::new_every(
-                        probe_acc.as_str(),
-                        metric_every,
-                    ),
-                )
-                .metric_valid_numeric(
-                    ScalarMetric::<ValidBackend<B>, ProbeAccInput<ValidBackend<B>>>::new_every(
-                        probe_acc.as_str(),
-                        metric_every,
-                    ),
-                );
+                .metric_train_numeric(ScalarMetric::<
+                    ValidBackend<B>,
+                    ProbeLossInput<ValidBackend<B>>,
+                >::new_every(
+                    probe_loss.as_str(), metric_every
+                ))
+                .metric_valid_numeric(ScalarMetric::<
+                    ValidBackend<B>,
+                    ProbeLossInput<ValidBackend<B>>,
+                >::new_every(
+                    probe_loss.as_str(), metric_every
+                ))
+                .metric_train_numeric(ScalarMetric::<
+                    ValidBackend<B>,
+                    ProbeAccInput<ValidBackend<B>>,
+                >::new_every(
+                    probe_acc.as_str(), metric_every
+                ))
+                .metric_valid_numeric(ScalarMetric::<
+                    ValidBackend<B>,
+                    ProbeAccInput<ValidBackend<B>>,
+                >::new_every(
+                    probe_acc.as_str(), metric_every
+                ));
         }
 
         if diagnostics.artifact_every > 0 {
@@ -410,12 +392,49 @@ where
 
     let learner = builder.build(model, optimizer, scheduler);
 
-    let _result = learner.fit(
-        Arc::clone(&env.train_loader),
-        Arc::clone(&env.valid_loader),
-    );
+    let _result = learner.fit(Arc::clone(&env.train_loader), Arc::clone(&env.valid_loader));
 
     Ok(())
+}
+
+fn should_enable_vision_checkpoints(
+    training: &VisionTrainingHyperparameters,
+    backend_name: &str,
+) -> bool {
+    if !training.enable_checkpoints {
+        return false;
+    }
+    if cfg!(windows) {
+        let backend = backend_name.to_ascii_lowercase();
+        if backend.contains("wgpu") {
+            return false;
+        }
+    }
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vision_checkpoints_disabled_when_flag_off() {
+        let mut training = VisionTrainingHyperparameters::default();
+        training.enable_checkpoints = false;
+        assert!(!should_enable_vision_checkpoints(&training, "wgpu"));
+        assert!(!should_enable_vision_checkpoints(&training, "ndarray"));
+    }
+
+    #[test]
+    fn vision_checkpoints_guard_wgpu_on_windows() {
+        let training = VisionTrainingHyperparameters::default();
+        let enabled = should_enable_vision_checkpoints(&training, "wgpu");
+        if cfg!(windows) {
+            assert!(!enabled);
+        } else {
+            assert!(enabled);
+        }
+    }
 }
 
 pub fn resolve_lr_scheduler(
@@ -698,5 +717,3 @@ pub fn resolve_vision_rollout(
         backprop_steps,
     })
 }
-
-

@@ -87,10 +87,7 @@ where
         config.augment.solarize_threshold,
     );
 
-    let train_root = config
-        .dataset
-        .imagenet_root
-        .join(&config.dataset.train_dir);
+    let train_root = config.dataset.imagenet_root.join(&config.dataset.train_dir);
     let val_root = config.dataset.imagenet_root.join(&config.dataset.val_dir);
 
     enum VisionMode<B: BackendTrait> {
@@ -142,6 +139,8 @@ where
                         teacher: None,
                         views: 1,
                         local_views: 0,
+                        min_view_overlap: 0.0,
+                        view_overlap_attempts: 1,
                         cache_decoded: config.dataset.cache_decoded,
                         cache_capacity: config.dataset.cache_capacity,
                         cache_preprocessed: config.dataset.cache_preprocessed,
@@ -167,6 +166,8 @@ where
                         teacher: None,
                         views: 1,
                         local_views: 0,
+                        min_view_overlap: 0.0,
+                        view_overlap_attempts: 1,
                         cache_decoded: config.dataset.cache_decoded,
                         cache_capacity: config.dataset.cache_capacity,
                         cache_preprocessed: config.dataset.cache_preprocessed,
@@ -184,12 +185,8 @@ where
                     (train_dataset, val_dataset, None)
                 }
                 VisionTeacherConfig::Model(teacher) => {
-                    let image_size = teacher
-                        .image_size
-                        .unwrap_or(vision_config.image_size);
-                    let patch_size = teacher
-                        .patch_size
-                        .unwrap_or(vision_config.patch_size);
+                    let image_size = teacher.image_size.unwrap_or(vision_config.image_size);
+                    let patch_size = teacher.patch_size.unwrap_or(vision_config.patch_size);
                     if patch_size == 0 {
                         return Err(anyhow!("teacher.patch_size must be > 0"));
                     }
@@ -267,6 +264,8 @@ where
                         teacher: None,
                         views: 1,
                         local_views: 0,
+                        min_view_overlap: 0.0,
+                        view_overlap_attempts: 1,
                         cache_decoded: config.dataset.cache_decoded,
                         cache_capacity: config.dataset.cache_capacity,
                         cache_preprocessed: config.dataset.cache_preprocessed,
@@ -281,6 +280,8 @@ where
                         teacher: None,
                         views: 1,
                         local_views: 0,
+                        min_view_overlap: 0.0,
+                        view_overlap_attempts: 1,
                         cache_decoded: config.dataset.cache_decoded,
                         cache_capacity: config.dataset.cache_capacity,
                         cache_preprocessed: config.dataset.cache_preprocessed,
@@ -316,7 +317,10 @@ where
                 if lejepa.local_image_size == 0 {
                     return Err(anyhow!("lejepa.local_image_size must be > 0"));
                 }
-                if !lejepa.local_image_size.is_multiple_of(vision_config.patch_size) {
+                if !lejepa
+                    .local_image_size
+                    .is_multiple_of(vision_config.patch_size)
+                {
                     return Err(anyhow!(
                         "lejepa.local_image_size ({}) must be divisible by patch_size ({})",
                         lejepa.local_image_size,
@@ -417,6 +421,8 @@ where
                 teacher: None,
                 views: global_views,
                 local_views,
+                min_view_overlap: 0.0,
+                view_overlap_attempts: 1,
                 cache_decoded: config.dataset.cache_decoded,
                 cache_capacity: config.dataset.cache_capacity,
                 cache_preprocessed: config.dataset.cache_preprocessed,
@@ -431,6 +437,8 @@ where
                 teacher: None,
                 views: global_views,
                 local_views,
+                min_view_overlap: 0.0,
+                view_overlap_attempts: 1,
                 cache_decoded: config.dataset.cache_decoded,
                 cache_capacity: config.dataset.cache_capacity,
                 cache_preprocessed: config.dataset.cache_preprocessed,
@@ -457,6 +465,21 @@ where
             if mae.pyramid_levels == 0 {
                 return Err(anyhow!("mae.pyramid_levels must be > 0"));
             }
+            let views = if mae.cross_view.enabled {
+                config.vision.num_eyes.max(1)
+            } else {
+                1
+            };
+            let min_view_overlap = if mae.cross_view.enabled {
+                mae.cross_view.min_overlap.max(0.0)
+            } else {
+                0.0
+            };
+            let view_overlap_attempts = if mae.cross_view.enabled {
+                mae.cross_view.max_attempts.max(1)
+            } else {
+                1
+            };
             let train_dataset = Arc::new(ImageNetDataset::new(ImageNetDatasetConfig {
                 root: train_root,
                 split: ImageNetSplit::Train,
@@ -465,8 +488,10 @@ where
                 local_augmentations: None,
                 normalize,
                 teacher: None,
-                views: 1,
+                views,
                 local_views: 0,
+                min_view_overlap,
+                view_overlap_attempts,
                 cache_decoded: config.dataset.cache_decoded,
                 cache_capacity: config.dataset.cache_capacity,
                 cache_preprocessed: config.dataset.cache_preprocessed,
@@ -479,8 +504,10 @@ where
                 local_augmentations: None,
                 normalize,
                 teacher: None,
-                views: 1,
+                views,
                 local_views: 0,
+                min_view_overlap,
+                view_overlap_attempts,
                 cache_decoded: config.dataset.cache_decoded,
                 cache_capacity: config.dataset.cache_capacity,
                 cache_preprocessed: config.dataset.cache_preprocessed,
@@ -495,6 +522,10 @@ where
             )
         }
         VisionTrainingModeConfig::Saccade(saccade) => {
+            let mut saccade = saccade.clone();
+            if saccade.num_eyes == 0 {
+                saccade.num_eyes = config.vision.num_eyes.max(1);
+            }
             if saccade.mip_levels == 0 {
                 return Err(anyhow!("saccade.mip_levels must be > 0"));
             }
@@ -545,19 +576,13 @@ where
                     ));
                 }
                 if saccade.policy.gdpo.hard_weight < 0.0 {
-                    return Err(anyhow!(
-                        "saccade.policy.gdpo.hard_weight must be >= 0"
-                    ));
+                    return Err(anyhow!("saccade.policy.gdpo.hard_weight must be >= 0"));
                 }
                 if saccade.policy.gdpo.easy_weight < 0.0 {
-                    return Err(anyhow!(
-                        "saccade.policy.gdpo.easy_weight must be >= 0"
-                    ));
+                    return Err(anyhow!("saccade.policy.gdpo.easy_weight must be >= 0"));
                 }
                 if saccade.policy.gdpo.policy_weight < 0.0 {
-                    return Err(anyhow!(
-                        "saccade.policy.gdpo.policy_weight must be >= 0"
-                    ));
+                    return Err(anyhow!("saccade.policy.gdpo.policy_weight must be >= 0"));
                 }
                 if saccade.policy.gdpo.policy_clip_range < 0.0 {
                     return Err(anyhow!(
@@ -577,6 +602,21 @@ where
                     }
                 }
             }
+            let views = if saccade.cross_view.enabled {
+                saccade.num_eyes.max(1)
+            } else {
+                1
+            };
+            let min_view_overlap = if saccade.cross_view.enabled {
+                saccade.cross_view.min_overlap.max(0.0)
+            } else {
+                0.0
+            };
+            let view_overlap_attempts = if saccade.cross_view.enabled {
+                saccade.cross_view.max_attempts.max(1)
+            } else {
+                1
+            };
             let train_dataset = Arc::new(ImageNetDataset::new(ImageNetDatasetConfig {
                 root: train_root,
                 split: ImageNetSplit::Train,
@@ -585,8 +625,10 @@ where
                 local_augmentations: None,
                 normalize,
                 teacher: None,
-                views: 1,
+                views,
                 local_views: 0,
+                min_view_overlap,
+                view_overlap_attempts,
                 cache_decoded: config.dataset.cache_decoded,
                 cache_capacity: config.dataset.cache_capacity,
                 cache_preprocessed: config.dataset.cache_preprocessed,
@@ -599,8 +641,10 @@ where
                 local_augmentations: None,
                 normalize,
                 teacher: None,
-                views: 1,
+                views,
                 local_views: 0,
+                min_view_overlap,
+                view_overlap_attempts,
                 cache_decoded: config.dataset.cache_decoded,
                 cache_capacity: config.dataset.cache_capacity,
                 cache_preprocessed: config.dataset.cache_preprocessed,
@@ -685,10 +729,8 @@ where
             let model = VisionDragonHatchling::<B>::new(vision_config.clone(), &device);
             let teacher = teacher.map(|teacher| *teacher);
             let mut model = Some(VisionDistillModel::new(model, loss, teacher, rollout));
-            let mut optim = Some(
-                adamw_config_from_optimizer(optimizer_cfg)
-                    .init::<B, VisionDistillModel<B>>(),
-            );
+            let mut optim =
+                Some(adamw_config_from_optimizer(optimizer_cfg).init::<B, VisionDistillModel<B>>());
             match scheduler {
                 ResolvedLrScheduler::Constant(lr) => train_vision_with_scheduler(
                     &context,
@@ -749,22 +791,13 @@ where
                 recon_patch_dim,
                 &device,
             ));
-            let mut optim = Some(
-                adamw_config_from_optimizer(optimizer_cfg)
-                    .init::<B, VisionLejepaModel<B>>(),
-            );
+            let mut optim =
+                Some(adamw_config_from_optimizer(optimizer_cfg).init::<B, VisionLejepaModel<B>>());
             let diagnostics = Some(VisionDiagnostics {
                 metric_prefix: "lejepa".to_string(),
                 inv: model.as_ref().expect("model").config.loss.lejepa.enabled,
                 sigreg: model.as_ref().expect("model").config.loss.lejepa.enabled,
-                recon: model
-                    .as_ref()
-                    .expect("model")
-                    .config
-                    .loss
-                    .recon
-                    .weight
-                    > 0.0,
+                recon: model.as_ref().expect("model").config.loss.recon.weight > 0.0,
                 policy: false,
                 probe: true,
                 artifact_every: model.as_ref().expect("model").config.artifact_every,
@@ -830,15 +863,14 @@ where
             let mut model = Some(VisionMaeModel::new(
                 model,
                 mae,
+                vision_config.num_eyes,
                 vision_config.embed_dim,
                 rollout,
                 recon_patch_dim,
                 &device,
             ));
-            let mut optim = Some(
-                adamw_config_from_optimizer(optimizer_cfg)
-                    .init::<B, VisionMaeModel<B>>(),
-            );
+            let mut optim =
+                Some(adamw_config_from_optimizer(optimizer_cfg).init::<B, VisionMaeModel<B>>());
             let diagnostics = model.as_ref().map(|model_ref| VisionDiagnostics {
                 metric_prefix: "mae".to_string(),
                 inv: false,
@@ -917,10 +949,8 @@ where
                 training.train_repeat_chunk,
                 &device,
             ));
-            let mut optim = Some(
-                adamw_config_from_optimizer(optimizer_cfg)
-                    .init::<B, VisionSaccadeModel<B>>(),
-            );
+            let mut optim =
+                Some(adamw_config_from_optimizer(optimizer_cfg).init::<B, VisionSaccadeModel<B>>());
             let diagnostics = model.as_ref().map(|model_ref| VisionDiagnostics {
                 metric_prefix: "saccade".to_string(),
                 inv: model_ref.config.loss.lejepa.enabled,
@@ -1002,5 +1032,3 @@ where
 {
     train_vision_backend::<B, Init>(config, backend_name, init_backend)
 }
-
-

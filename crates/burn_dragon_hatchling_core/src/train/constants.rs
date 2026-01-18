@@ -27,4 +27,3 @@ pub fn fast_train_enabled() -> bool {
 }
 
 pub type ValidBackend<B> = <B as AutodiffBackend>::InnerBackend;
-

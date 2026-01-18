@@ -350,12 +350,8 @@ impl<B: Backend> BDH<B> {
                 activation::relu(x_latent)
             };
 
-            let attn = self.recurrent_attention(
-                x_sparse.clone(),
-                current.clone(),
-                layer_state,
-                start_pos,
-            );
+            let attn =
+                self.recurrent_attention(x_sparse.clone(), current.clone(), layer_state, start_pos);
             let attn = self.layer_norm(attn);
 
             let y_sparse = if fused {

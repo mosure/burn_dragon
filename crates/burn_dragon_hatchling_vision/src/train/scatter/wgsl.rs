@@ -1,13 +1,13 @@
 use std::any::{Any, TypeId};
 
-use burn::tensor::{DType, Shape, TensorData, TensorPrimitive};
-use burn::tensor::backend::Backend as BackendTrait;
 use burn::tensor::Tensor as BurnTensor;
-use burn_cubecl::{BoolElement, CubeBackend, CubeRuntime};
+use burn::tensor::backend::Backend as BackendTrait;
+use burn::tensor::{DType, Shape, TensorData, TensorPrimitive};
 use burn_cubecl::fusion::FusionCubeRuntime;
 use burn_cubecl::kernel::into_contiguous;
 use burn_cubecl::ops::numeric::empty_device;
 use burn_cubecl::tensor::CubeTensor;
+use burn_cubecl::{BoolElement, CubeBackend, CubeRuntime};
 use burn_fusion::FusionTensor;
 use burn_fusion::stream::StreamId;
 use burn_wgpu::{KernelSource, SourceKernel, SourceTemplate, WgpuRuntime};
@@ -23,13 +23,10 @@ pub(crate) fn supports_backend<B: BackendTrait>() -> bool
 where
     B::FloatTensorPrimitive: 'static,
 {
-    matches_type::<
-        B::FloatTensorPrimitive,
-        FusionTensor<FusionCubeRuntime<WgpuRuntime, u32>>,
-    >() || matches_type::<
-        B::FloatTensorPrimitive,
-        FusionTensor<FusionCubeRuntime<WgpuRuntime, u8>>,
-    >() || matches_type::<B::FloatTensorPrimitive, CubeTensor<WgpuRuntime>>()
+    matches_type::<B::FloatTensorPrimitive, FusionTensor<FusionCubeRuntime<WgpuRuntime, u32>>>()
+        || matches_type::<B::FloatTensorPrimitive, FusionTensor<FusionCubeRuntime<WgpuRuntime, u8>>>(
+        )
+        || matches_type::<B::FloatTensorPrimitive, CubeTensor<WgpuRuntime>>()
 }
 
 pub(crate) fn try_weighted_sum_tokens_wgsl<B: BackendTrait>(
@@ -68,7 +65,8 @@ where
     B::FloatTensorPrimitive: 'static,
     BT: BoolElement + 'static,
 {
-    if !matches_type::<B::FloatTensorPrimitive, FusionTensor<FusionCubeRuntime<WgpuRuntime, BT>>>() {
+    if !matches_type::<B::FloatTensorPrimitive, FusionTensor<FusionCubeRuntime<WgpuRuntime, BT>>>()
+    {
         return None;
     }
     let device = weights.device();
@@ -85,13 +83,13 @@ where
     let prim_tokens = tokens.clone().into_primitive().tensor();
     let fusion_tokens: FusionTensor<FusionCubeRuntime<WgpuRuntime, BT>> =
         try_cast_primitive::<B, _>(prim_tokens)?;
-    let tokens = fusion_client.resolve_tensor_float::<CubeBackend<WgpuRuntime, f32, i32, BT>>(fusion_tokens);
+    let tokens =
+        fusion_client.resolve_tensor_float::<CubeBackend<WgpuRuntime, f32, i32, BT>>(fusion_tokens);
     if tokens.dtype != DType::F32 {
         return None;
     }
 
-    let meta =
-        build_meta::<B>(weights.shape.dims::<3>(), tokens.shape.dims::<3>(), device);
+    let meta = build_meta::<B>(weights.shape.dims::<3>(), tokens.shape.dims::<3>(), device);
     let meta = resolve_fusion_tensor::<B, BT>(&meta)?;
     let output = weighted_sum_tokens_wgsl_runtime::<WgpuRuntime>(weights, tokens, meta);
     let shape = output.shape.clone();
@@ -99,7 +97,9 @@ where
     let handle = output.into();
     let fusion_out = fusion_client.register_tensor(handle, shape, StreamId::current(), dtype);
     let out_prim = try_cast_backend::<B, _>(fusion_out)?;
-    Some(BurnTensor::<B, 3>::from_primitive(TensorPrimitive::Float(out_prim)))
+    Some(BurnTensor::<B, 3>::from_primitive(TensorPrimitive::Float(
+        out_prim,
+    )))
 }
 
 fn try_weighted_sum_tokens_wgsl_direct<B: BackendTrait>(
@@ -124,12 +124,13 @@ where
         return None;
     }
 
-    let meta =
-        build_meta::<B>(weights.shape.dims::<3>(), tokens.shape.dims::<3>(), device);
+    let meta = build_meta::<B>(weights.shape.dims::<3>(), tokens.shape.dims::<3>(), device);
     let meta = resolve_direct_tensor::<B>(&meta)?;
     let output = weighted_sum_tokens_wgsl_runtime::<WgpuRuntime>(weights, tokens, meta);
     let out_prim = try_cast_backend::<B, _>(output)?;
-    Some(BurnTensor::<B, 3>::from_primitive(TensorPrimitive::Float(out_prim)))
+    Some(BurnTensor::<B, 3>::from_primitive(TensorPrimitive::Float(
+        out_prim,
+    )))
 }
 
 fn build_meta<B: BackendTrait>(
@@ -159,13 +160,17 @@ fn weighted_sum_tokens_wgsl_runtime<R: CubeRuntime>(
     let dim = tokens.shape.dims::<3>()[2];
     let client = weights.client.clone();
     let device = weights.device.clone();
-    let output = empty_device::<R, f32>(client.clone(), device, Shape::new([batch, out_tokens, dim]));
+    let output =
+        empty_device::<R, f32>(client.clone(), device, Shape::new([batch, out_tokens, dim]));
 
     let workgroups_x = div_ceil_u32(out_tokens as u32, WORKGROUP_SIZE);
     let workgroups_y = div_ceil_u32(dim as u32, WORKGROUP_SIZE);
     let count = CubeCount::Static(workgroups_x, workgroups_y, batch as u32);
 
-    let kernel = SourceKernel::new(ScatterBufferKernel, CubeDim::new(WORKGROUP_SIZE, WORKGROUP_SIZE, 1));
+    let kernel = SourceKernel::new(
+        ScatterBufferKernel,
+        CubeDim::new(WORKGROUP_SIZE, WORKGROUP_SIZE, 1),
+    );
     let bindings = Bindings::new().with_buffers(vec![
         weights.handle.clone().binding(),
         tokens.handle.clone().binding(),
@@ -232,9 +237,7 @@ fn matches_type<A: 'static, B: 'static>() -> bool {
     TypeId::of::<A>() == TypeId::of::<B>()
 }
 
-fn try_cast_primitive<B: BackendTrait, T: 'static>(
-    value: B::FloatTensorPrimitive,
-) -> Option<T>
+fn try_cast_primitive<B: BackendTrait, T: 'static>(value: B::FloatTensorPrimitive) -> Option<T>
 where
     B::FloatTensorPrimitive: 'static,
 {

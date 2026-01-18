@@ -13,6 +13,7 @@ use burn_dragon_hatchling::{
     VisionTrainingModeConfig, load_vision_training_config,
     vision::train::bench::VisionSaccadeTrainStepBench, wgpu::init_runtime,
 };
+use burn_ndarray::NdArray;
 use burn_wgpu::{CubeBackend, WgpuDevice, WgpuRuntime};
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use serde::Deserialize;
@@ -71,10 +72,7 @@ fn build_train_dataset(config: &VisionTrainingConfig) -> Option<Arc<ImageNetData
         config.augment.solarize_prob,
         config.augment.solarize_threshold,
     );
-    let train_root = config
-        .dataset
-        .imagenet_root
-        .join(&config.dataset.train_dir);
+    let train_root = config.dataset.imagenet_root.join(&config.dataset.train_dir);
     let dataset = ImageNetDataset::new(ImageNetDatasetConfig {
         root: train_root,
         split: ImageNetSplit::Train,
@@ -85,6 +83,8 @@ fn build_train_dataset(config: &VisionTrainingConfig) -> Option<Arc<ImageNetData
         teacher: None,
         views: 1,
         local_views: 0,
+        min_view_overlap: 0.0,
+        view_overlap_attempts: 1,
         cache_decoded: config.dataset.cache_decoded,
         cache_capacity: config.dataset.cache_capacity,
         cache_preprocessed: config.dataset.cache_preprocessed,
@@ -111,10 +111,24 @@ fn vision_train_step_bench(c: &mut Criterion) {
         return;
     };
 
+    type CpuBackend = NdArray<f32>;
+    run_backend::<Autodiff<CpuBackend>, _>(c, "cpu", &config, Arc::clone(&dataset), |_| {});
+
     type WgpuBackend = CubeBackend<WgpuRuntime, f32, i32, u32>;
-    run_backend::<Autodiff<WgpuBackend>, _>(c, "wgpu", &config, Arc::clone(&dataset), |device| {
-        init_wgpu_runtime(device, &config.wgpu);
-    });
+    let wgpu_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run_backend::<Autodiff<WgpuBackend>, _>(
+            c,
+            "wgpu",
+            &config,
+            Arc::clone(&dataset),
+            |device| {
+                init_wgpu_runtime(device, &config.wgpu);
+            },
+        );
+    }));
+    if wgpu_result.is_err() {
+        eprintln!("vision_saccade_train_step bench skipped: wgpu backend panicked");
+    }
 
     #[cfg(feature = "cuda")]
     if bench.include_cuda {
@@ -175,8 +189,8 @@ fn run_backend<B, Init>(
     }
 
     let mut group = c.benchmark_group(format!("vision_saccade_train_step/{name}"));
-    group.warm_up_time(Duration::from_secs(1));
-    group.measurement_time(Duration::from_secs(3));
+    group.warm_up_time(Duration::from_millis(500));
+    group.measurement_time(Duration::from_secs(1));
     group.sample_size(10);
     group.bench_with_input(
         BenchmarkId::from_parameter("vision_saccade_tiny"),

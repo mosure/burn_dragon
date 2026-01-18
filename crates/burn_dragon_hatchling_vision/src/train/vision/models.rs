@@ -1,6 +1,6 @@
 use crate::train::prelude::*;
-use burn::nn::conv::{Conv2d, Conv2dConfig};
 use burn::nn::PaddingConfig2d;
+use burn::nn::conv::{Conv2d, Conv2dConfig};
 
 #[derive(Module, Debug)]
 pub(crate) struct VisionDistillModel<B: BackendTrait> {
@@ -48,15 +48,25 @@ impl<B: BackendTrait> VisionProbe<B> {
 
 #[derive(Module, Debug)]
 pub(crate) struct VisionReconstructionHead<B: BackendTrait> {
-    pub(crate) norm: LayerNorm<B>,
+    pub(crate) norm: Option<LayerNorm<B>>,
     pub(crate) hidden: Option<Linear<B>>,
     pub(crate) hidden2: Option<Linear<B>>,
     pub(crate) out: Linear<B>,
 }
 
 impl<B: BackendTrait> VisionReconstructionHead<B> {
-    pub(crate) fn new(embed_dim: usize, hidden_dim: usize, patch_dim: usize, device: &B::Device) -> Self {
-        let norm = LayerNormConfig::new(embed_dim).init(device);
+    pub(crate) fn new(
+        embed_dim: usize,
+        hidden_dim: usize,
+        patch_dim: usize,
+        use_norm: bool,
+        device: &B::Device,
+    ) -> Self {
+        let norm = if use_norm {
+            Some(LayerNormConfig::new(embed_dim).init(device))
+        } else {
+            None
+        };
         let (hidden, hidden2, out_dim) = if hidden_dim > 0 {
             let hidden = Some(LinearConfig::new(embed_dim, hidden_dim).init(device));
             let hidden2 = Some(LinearConfig::new(hidden_dim, hidden_dim).init(device));
@@ -74,7 +84,10 @@ impl<B: BackendTrait> VisionReconstructionHead<B> {
     }
 
     pub(crate) fn forward<const D: usize>(&self, tokens: Tensor<B, D>) -> Tensor<B, D> {
-        let tokens = self.norm.forward(tokens);
+        let tokens = match &self.norm {
+            Some(norm) => norm.forward(tokens),
+            None => tokens,
+        };
         let tokens = if let Some(hidden) = &self.hidden {
             activation::gelu(hidden.forward(tokens))
         } else {
@@ -146,7 +159,8 @@ impl<B: BackendTrait> VisionSaccadeInputProjection<B> {
         match config {
             VisionSaccadeInputProjectionConfig::Linear => {
                 let linear = VisionSaccadeProjection::new(embed_dim, embed_dim, device);
-                let param_count = linear_params(embed_dim, embed_dim) + layer_norm_params(embed_dim);
+                let param_count =
+                    linear_params(embed_dim, embed_dim) + layer_norm_params(embed_dim);
                 Self {
                     linear: Some(linear),
                     cnn: None,
@@ -235,18 +249,14 @@ impl<B: BackendTrait> VisionInputProjectionCnn<B> {
         let mut block_list = Vec::with_capacity(blocks);
         for _ in 0..blocks {
             block_list.push(VisionInputProjectionCnnBlock::new(
-                channels,
-                kernel,
-                expansion,
-                device,
+                channels, kernel, expansion, device,
             ));
         }
         let mut param_count = layer_norm_params(embed_dim)
             + linear_params(embed_dim, channels)
             + linear_params(channels, embed_dim);
-        param_count = param_count.saturating_add(
-            cnn_block_params(channels, kernel, expansion).saturating_mul(blocks),
-        );
+        param_count = param_count
+            .saturating_add(cnn_block_params(channels, kernel, expansion).saturating_mul(blocks));
         Self {
             norm,
             in_proj,
@@ -295,16 +305,10 @@ impl<B: BackendTrait> VisionInputProjectionCnnBlock<B> {
             .with_padding(PaddingConfig2d::Same)
             .with_groups(channels.max(1))
             .init(device);
-        let pointwise_in = Conv2dConfig::new(
-            [channels, channels.saturating_mul(expansion)],
-            [1, 1],
-        )
-        .init(device);
-        let pointwise_out = Conv2dConfig::new(
-            [channels.saturating_mul(expansion), channels],
-            [1, 1],
-        )
-        .init(device);
+        let pointwise_in =
+            Conv2dConfig::new([channels, channels.saturating_mul(expansion)], [1, 1]).init(device);
+        let pointwise_out =
+            Conv2dConfig::new([channels.saturating_mul(expansion), channels], [1, 1]).init(device);
         Self {
             depthwise,
             pointwise_in,
@@ -355,10 +359,7 @@ impl<B: BackendTrait> VisionInputProjectionMicroVit<B> {
         let mut blocks = Vec::with_capacity(layers);
         for _ in 0..layers {
             blocks.push(VisionInputProjectionMicroVitBlock::new(
-                embed_dim,
-                heads,
-                mlp_ratio,
-                device,
+                embed_dim, heads, mlp_ratio, device,
             ));
         }
         Self {
@@ -378,7 +379,10 @@ impl<B: BackendTrait> VisionInputProjectionMicroVit<B> {
         }
         let (grid_h, grid_w) = token_grid(token_count);
         let device = tokens.device();
-        let mut x = tokens + self.radial.forward(batch, token_count, grid_h, grid_w, &device);
+        let mut x = tokens
+            + self
+                .radial
+                .forward(batch, token_count, grid_h, grid_w, &device);
         for block in &self.blocks {
             x = block.forward(x);
         }
@@ -704,6 +708,7 @@ impl<B: BackendTrait> VisionLejepaModel<B> {
                     embed_dim,
                     config.loss.recon.hidden_dim,
                     recon_patch_dim,
+                    config.loss.recon.recon_head_norm,
                     device,
                 ))
             }
@@ -777,20 +782,18 @@ impl<B: BackendTrait> VisionLejepaModel<B> {
                         .reshape([batch, dim]),
                 );
                 if heatmap_source.is_none() {
-                    heatmap_source =
-                        Some(output.patch_tokens.clone().slice_dim(0, 0..batch));
+                    heatmap_source = Some(output.patch_tokens.clone().slice_dim(0, 0..batch));
                 }
             }
 
             if recon_enabled {
-                let (loss_sum, mask_sum, artifacts) =
-                    self.recon_group_loss(
-                        &collected.global,
-                        steps,
-                        backprop_steps,
-                        true,
-                        randomize_mask,
-                    );
+                let (loss_sum, mask_sum, artifacts) = self.recon_group_loss(
+                    &collected.global,
+                    steps,
+                    backprop_steps,
+                    true,
+                    randomize_mask,
+                );
                 recon_loss_sum = recon_loss_sum + loss_sum;
                 recon_mask_sum = recon_mask_sum + mask_sum;
                 if let Some((views, residual)) = artifacts {
@@ -805,8 +808,7 @@ impl<B: BackendTrait> VisionLejepaModel<B> {
             let output = self.forward_view_group(&collected.local, steps, backprop_steps);
             if heatmap_source.is_none() {
                 let [_, batch, _] = output.embed.shape().dims::<3>();
-                heatmap_source =
-                    Some(output.patch_tokens.clone().slice_dim(0, 0..batch));
+                heatmap_source = Some(output.patch_tokens.clone().slice_dim(0, 0..batch));
             }
             if recon_enabled {
                 let (loss_sum, mask_sum, _) = self.recon_group_loss(
@@ -875,15 +877,11 @@ impl<B: BackendTrait> VisionLejepaModel<B> {
             .detach();
         let labels_flat = labels.clone().repeat_dim(0, view_count);
         let probe_logits = self.probe.forward(embed_flat);
-        let probe_loss = self.probe_loss.forward(probe_logits.clone(), labels_flat.clone());
-        let probe_pred = probe_logits
-            .clone()
-            .argmax(1)
-            .reshape([view_count * batch]);
-        let probe_acc = probe_pred
-            .equal(labels_flat)
-            .float()
-            .mean();
+        let probe_loss = self
+            .probe_loss
+            .forward(probe_logits.clone(), labels_flat.clone());
+        let probe_pred = probe_logits.clone().argmax(1).reshape([view_count * batch]);
+        let probe_acc = probe_pred.equal(labels_flat).float().mean();
 
         let probe_primary = probe_primary.map(|embed| self.probe.forward(embed.detach()));
         let artifact_views = artifact_views.unwrap_or_else(|| collected.artifact_views());
@@ -941,10 +939,7 @@ impl<B: BackendTrait> VisionLejepaModel<B> {
         let recon = match &self.recon {
             Some(recon) => recon,
             None => {
-                let device = views
-                    .get(0)
-                    .map(|view| view.device())
-                    .unwrap_or_default();
+                let device = views.get(0).map(|view| view.device()).unwrap_or_default();
                 let zero = Tensor::<B, 1>::zeros([1], &device);
                 return (zero.clone(), zero, None);
             }
@@ -1046,15 +1041,18 @@ impl<B: BackendTrait> VisionLejepaModel<B> {
         let [batch, _, _, _] = views[0].shape().dims::<4>();
         let stacked = stack_views(views);
         let patch = self.model.patch_embed(stacked);
-        let embed_out = self
-            .model
-            .forward_tokens_embed_steps_rollout(patch.tokens, steps, backprop_steps);
+        let embed_out =
+            self.model
+                .forward_tokens_embed_steps_rollout(patch.tokens, steps, backprop_steps);
         let cls_embed = embed_out.cls_token;
         let patch_tokens = embed_out.patch_tokens;
         let [total, embed_dim] = cls_embed.shape().dims::<2>();
         debug_assert_eq!(total, view_count * batch, "lejepa embed mismatch");
         let tokens = Tensor::cat(
-            vec![cls_embed.clone().unsqueeze_dim::<3>(1), patch_tokens.clone()],
+            vec![
+                cls_embed.clone().unsqueeze_dim::<3>(1),
+                patch_tokens.clone(),
+            ],
             1,
         );
         let proj_tokens = self.model.project_tokens(tokens);
@@ -1076,7 +1074,11 @@ pub(crate) struct VisionMaeModel<B: BackendTrait> {
     pub(crate) model: VisionDragonHatchling<B>,
     pub(crate) recon: VisionReconstructionHead<B>,
     pub(crate) mask_token: Param<Tensor<B, 2>>,
+    pub(crate) visible_token: Param<Tensor<B, 2>>,
+    pub(crate) view_embed: Option<Linear<B>>,
     pub(crate) config: VisionMaeConfig,
+    #[module(ignore)]
+    pub(crate) num_eyes: usize,
     #[module(ignore)]
     pub(crate) rollout: VisionRollout,
 }
@@ -1092,6 +1094,7 @@ impl<B: BackendTrait> VisionMaeModel<B> {
     pub(crate) fn new(
         model: VisionDragonHatchling<B>,
         config: VisionMaeConfig,
+        num_eyes: usize,
         embed_dim: usize,
         rollout: VisionRollout,
         recon_patch_dim: usize,
@@ -1101,6 +1104,7 @@ impl<B: BackendTrait> VisionMaeModel<B> {
             embed_dim,
             config.loss.recon.hidden_dim,
             recon_patch_dim,
+            config.loss.recon.recon_head_norm,
             device,
         );
         let token = Tensor::<B, 2>::random(
@@ -1109,11 +1113,24 @@ impl<B: BackendTrait> VisionMaeModel<B> {
             device,
         );
         let mask_token = Param::from_tensor(token);
+        let visible_token = Param::from_tensor(Tensor::<B, 2>::random(
+            [1, embed_dim.max(1)],
+            TensorDistribution::Normal(0.0, 0.02),
+            device,
+        ));
+        let view_embed = if num_eyes.max(1) > 1 {
+            Some(LinearConfig::new(4, embed_dim.max(1)).init(device))
+        } else {
+            None
+        };
         Self {
             model,
             recon,
             mask_token,
+            visible_token,
+            view_embed,
             config,
+            num_eyes: num_eyes.max(1),
             rollout,
         }
     }
@@ -1126,15 +1143,72 @@ impl<B: BackendTrait> VisionMaeModel<B> {
         randomize_mask: bool,
         capture_artifacts: bool,
     ) -> VisionMaeLosses<B> {
-        let ImageNetBatch { images, labels, .. } = batch;
-        let (loss_sum, mask_sum, artifacts) =
-            self.recon_loss(images, steps, backprop_steps, randomize_mask, capture_artifacts);
+        let ImageNetBatch {
+            images,
+            target_images,
+            view_images,
+            view_crops,
+            labels,
+            ..
+        } = batch;
+        let (loss_sum, mask_sum, visible_loss_sum, visible_mask_sum, artifacts) =
+            if self.config.cross_view.enabled {
+            let num_eyes = self.num_eyes.max(1);
+            let views = if let Some(view_images) = view_images {
+                view_images
+            } else if let Some(target_images) = target_images {
+                let primary = images.clone().unsqueeze_dim::<5>(1);
+                let target = target_images.unsqueeze_dim::<5>(1);
+                Tensor::cat(vec![primary, target], 1)
+            } else {
+                let primary = images.clone().unsqueeze_dim::<5>(1);
+                primary.repeat_dim(1, num_eyes.max(1))
+            };
+            let views = if num_eyes > 0 {
+                views.slice_dim(1, 0..num_eyes)
+            } else {
+                views
+            };
+            let view_crops = view_crops.map(|crops| {
+                if num_eyes > 0 {
+                    crops.slice_dim(1, 0..num_eyes)
+                } else {
+                    crops
+                }
+            });
+            self.recon_loss_cross_view(
+                views,
+                view_crops,
+                steps,
+                backprop_steps,
+                randomize_mask,
+                capture_artifacts,
+            )
+        } else {
+            let (loss_sum, mask_sum, artifacts) = self.recon_loss(
+                images,
+                steps,
+                backprop_steps,
+                randomize_mask,
+                capture_artifacts,
+            )
+            ;
+            let zero = Tensor::<B, 1>::zeros([1], &loss_sum.device());
+            (loss_sum, mask_sum, zero.clone(), zero, artifacts)
+        };
         let denom = mask_sum.clone().add_scalar(LEJEPA_EPS);
         let recon = loss_sum / denom;
         let recon_psnr = recon_psnr(recon.clone());
+        let visible = if self.config.cross_view.visible_weight > 0.0 {
+            let denom = visible_mask_sum.clone().add_scalar(LEJEPA_EPS);
+            visible_loss_sum / denom
+        } else {
+            Tensor::<B, 1>::zeros([1], &recon.device())
+        };
         let total = recon
             .clone()
-            .mul_scalar(self.config.loss.recon.weight.max(0.0));
+            .mul_scalar(self.config.loss.recon.weight.max(0.0))
+            + visible.mul_scalar(self.config.cross_view.visible_weight.max(0.0));
 
         let artifacts = artifacts.and_then(|(views, residual)| {
             build_lejepa_artifacts(
@@ -1220,19 +1294,25 @@ impl<B: BackendTrait> VisionMaeModel<B> {
             let mask_expanded = mask.clone().unsqueeze_dim::<3>(2);
             let keep = mask_expanded.clone().mul_scalar(-1.0).add_scalar(1.0);
             let mut masked_tokens = patch.tokens.clone().mul(keep.clone());
-            let token = self
+            let visible_token = self
+                .visible_token
+                .val()
+                .reshape([1, 1, embed_dim])
+                .repeat_dim(0, batch)
+                .repeat_dim(1, tokens);
+            let mask_token = self
                 .mask_token
                 .val()
                 .reshape([1, 1, embed_dim])
                 .repeat_dim(0, batch)
                 .repeat_dim(1, tokens);
-            masked_tokens = masked_tokens + token.mul(mask_expanded.clone());
+            masked_tokens = masked_tokens
+                + visible_token.mul(keep.clone())
+                + mask_token.mul(mask_expanded.clone());
             let masked_tokens = self.model.add_patch_position(masked_tokens, patch.grid);
-            let embed_out = self.model.forward_tokens_embed_steps_rollout(
-                masked_tokens,
-                steps,
-                backprop_steps,
-            );
+            let embed_out =
+                self.model
+                    .forward_tokens_embed_steps_rollout(masked_tokens, steps, backprop_steps);
 
             let pred_patches = self.recon.forward(embed_out.patch_tokens);
             let [total, tokens, patch_dim] = pred_patches.shape().dims::<3>();
@@ -1272,7 +1352,10 @@ impl<B: BackendTrait> VisionMaeModel<B> {
                 let masked_view = unpatchify(masked_patches, patch_size, height, width, channels);
                 let recon_view = unpatchify(recon_patches, patch_size, height, width, channels);
                 let residual = (pred_first - target_first).mul(loss_mask_expanded);
-                artifacts = Some((vec![level_images.clone(), masked_view, recon_view], residual));
+                artifacts = Some((
+                    vec![level_images.clone(), masked_view, recon_view],
+                    residual,
+                ));
             }
         }
 
@@ -1281,6 +1364,235 @@ impl<B: BackendTrait> VisionMaeModel<B> {
         let mask_sum = mask_sum.unwrap_or_else(|| zero);
         (loss_sum, mask_sum, artifacts)
     }
+
+    pub(crate) fn recon_loss_cross_view(
+        &self,
+        views: Tensor<B, 5>,
+        view_crops: Option<Tensor<B, 3>>,
+        steps: usize,
+        backprop_steps: usize,
+        randomize_mask: bool,
+        capture_artifacts: bool,
+    ) -> (
+        Tensor<B, 1>,
+        Tensor<B, 1>,
+        Tensor<B, 1>,
+        Tensor<B, 1>,
+        Option<(Vec<Tensor<B, 4>>, Tensor<B, 3>)>,
+    ) {
+        let device = views.device();
+        let patch_size = self.model.patch_size().max(1);
+        let pyramid_levels = self.config.pyramid_levels.max(1);
+        let mut pyramid = Vec::with_capacity(pyramid_levels);
+        let mut current = views;
+        pyramid.push(current.clone());
+        for _ in 1..pyramid_levels {
+            let [batch, eyes, channels, height, width] = current.shape().dims::<5>();
+            let flat = current.reshape([batch * eyes, channels, height, width]);
+            let Some(next) = downsample_image(flat) else {
+                break;
+            };
+            let [_, _, next_h, next_w] = next.shape().dims::<4>();
+            let next = next.reshape([batch, eyes, channels, next_h, next_w]);
+            pyramid.push(next.clone());
+            current = next;
+        }
+        pyramid.reverse();
+
+        let level_count = pyramid.len();
+        let mut loss_sum: Option<Tensor<B, 1>> = None;
+        let mut mask_sum: Option<Tensor<B, 1>> = None;
+        let mut visible_loss_sum: Option<Tensor<B, 1>> = None;
+        let mut visible_mask_sum: Option<Tensor<B, 1>> = None;
+        let mut artifacts: Option<(Vec<Tensor<B, 4>>, Tensor<B, 3>)> = None;
+        let loss_on_all_patches = self.config.loss.recon.loss_on_all_patches;
+        let masked_eye = self.config.cross_view.masked_eye;
+        let visible_weight = self.config.cross_view.visible_weight;
+
+        for (level_idx, level_views) in pyramid.into_iter().enumerate() {
+            let [batch, eyes, channels, height, width] = level_views.shape().dims::<5>();
+            if batch == 0 || eyes == 0 {
+                continue;
+            }
+            let flat = level_views
+                .clone()
+                .reshape([batch * eyes, channels, height, width]);
+            let patch = self.model.patch_embed_raw(flat);
+            let [_, tokens, embed_dim] = patch.tokens.shape().dims::<3>();
+            let grid_h = patch.grid.height;
+            let grid_w = patch.grid.width;
+            if grid_h == 0 || grid_w == 0 || grid_h * grid_w != tokens {
+                continue;
+            }
+
+            let target_images = level_views
+                .clone()
+                .slice_dim(1, masked_eye..masked_eye + 1)
+                .reshape([batch, channels, height, width]);
+            let target_patches = patchify(target_images.clone(), patch_size);
+
+            let mask_ratio = self.config.loss.recon.mask_ratio;
+            let mask = sample_patch_mask(&device, batch, tokens, mask_ratio, randomize_mask);
+            let loss_mask = if loss_on_all_patches {
+                Tensor::<B, 2>::ones([batch, tokens], &device)
+            } else {
+                mask.clone()
+            };
+
+            let mask_expanded = mask.clone().unsqueeze_dim::<3>(2);
+            let keep = mask_expanded.clone().mul_scalar(-1.0).add_scalar(1.0);
+
+            let view_tokens = patch.tokens.reshape([batch, eyes, tokens, embed_dim]);
+            let target_tokens = view_tokens
+                .clone()
+                .slice_dim(1, masked_eye..masked_eye + 1)
+                .reshape([batch, tokens, embed_dim]);
+            let visible_token = self
+                .visible_token
+                .val()
+                .reshape([1, 1, embed_dim])
+                .repeat_dim(0, batch)
+                .repeat_dim(1, tokens);
+            let mask_token = self
+                .mask_token
+                .val()
+                .reshape([1, 1, embed_dim])
+                .repeat_dim(0, batch)
+                .repeat_dim(1, tokens);
+            let mut masked_target = target_tokens.clone().mul(keep.clone());
+            masked_target = masked_target
+                + visible_token.mul(keep.clone())
+                + mask_token.mul(mask_expanded.clone());
+
+            let mut eye_tokens = Vec::with_capacity(eyes);
+            for eye_idx in 0..eyes {
+                if eye_idx == masked_eye {
+                    eye_tokens.push(masked_target.clone().reshape([batch, 1, tokens, embed_dim]));
+                } else {
+                    eye_tokens.push(view_tokens.clone().slice_dim(1, eye_idx..eye_idx + 1));
+                }
+            }
+            let mut eye_tokens = Tensor::cat(eye_tokens, 1);
+            eye_tokens = self.model.add_patch_position_multi(eye_tokens, patch.grid);
+            if let (Some(view_crops), Some(view_embed)) = (&view_crops, self.view_embed.as_ref()) {
+                let [batch, eyes, _] = view_crops.shape().dims::<3>();
+                if batch > 0 && eyes > 0 {
+                    let flat = view_crops.clone().reshape([batch * eyes, 4]);
+                    let embed = view_embed
+                        .forward(flat)
+                        .reshape([batch, eyes, 1, embed_dim])
+                        .repeat_dim(2, tokens);
+                    eye_tokens = eye_tokens + embed;
+                }
+            }
+            let embed_out = self.model.forward_tokens_embed_steps_rollout_multi(
+                eye_tokens,
+                steps,
+                backprop_steps,
+            );
+            let patch_tokens = embed_out.patch_tokens.clone();
+            let mut pred_tokens = patch_tokens
+                .clone()
+                .slice_dim(1, masked_eye..masked_eye + 1)
+                .reshape([batch, tokens, embed_dim]);
+            if eyes > 1 && self.config.cross_view.fuse_alpha > 0.0 {
+                let alpha = self.config.cross_view.fuse_alpha.clamp(0.0, 1.0);
+                let sum = patch_tokens
+                    .clone()
+                    .sum_dim(1)
+                    .reshape([batch, tokens, embed_dim]);
+                let other_count = (eyes - 1).max(1) as f32;
+                let other_mean = (sum - pred_tokens.clone()).div_scalar(other_count);
+                pred_tokens =
+                    pred_tokens.mul_scalar(1.0 - alpha) + other_mean.mul_scalar(alpha);
+            }
+
+            let pred_patches = self.recon.forward(pred_tokens);
+            let [total, tokens, patch_dim] = pred_patches.shape().dims::<3>();
+            if total == 0 || tokens == 0 || patch_dim == 0 {
+                continue;
+            }
+
+            let diff = pred_patches.clone() - target_patches.clone();
+            let loss_sum_level = diff
+                .powf_scalar(2.0)
+                .mul(loss_mask.clone().unsqueeze_dim::<3>(2))
+                .sum();
+            let mask_sum_level = loss_mask.clone().sum().mul_scalar(patch_dim as f32);
+            loss_sum = Some(match loss_sum {
+                Some(accum) => accum + loss_sum_level,
+                None => loss_sum_level,
+            });
+            mask_sum = Some(match mask_sum {
+                Some(accum) => accum + mask_sum_level,
+                None => mask_sum_level,
+            });
+
+            if visible_weight > 0.0 && eyes > 1 {
+                let mut visible_tokens = Vec::with_capacity(eyes.saturating_sub(1));
+                let mut visible_targets = Vec::with_capacity(eyes.saturating_sub(1));
+                for eye_idx in 0..eyes {
+                    if eye_idx == masked_eye {
+                        continue;
+                    }
+                    let tokens = patch_tokens
+                        .clone()
+                        .slice_dim(1, eye_idx..eye_idx + 1)
+                        .reshape([batch, tokens, embed_dim]);
+                    let view_images = level_views
+                        .clone()
+                        .slice_dim(1, eye_idx..eye_idx + 1)
+                        .reshape([batch, channels, height, width]);
+                    let target = patchify(view_images, patch_size);
+                    visible_tokens.push(tokens);
+                    visible_targets.push(target);
+                }
+                if !visible_tokens.is_empty() {
+                    let pred_visible = self.recon.forward(Tensor::cat(visible_tokens, 0));
+                    let target_visible = Tensor::cat(visible_targets, 0);
+                    let diff = pred_visible.clone() - target_visible;
+                    let loss_sum_level = diff.powf_scalar(2.0).sum();
+                    let [vis_batch, vis_tokens, vis_dim] = pred_visible.shape().dims::<3>();
+                    let mask_sum_level = Tensor::<B, 1>::ones([1], &device)
+                        .mul_scalar((vis_batch * vis_tokens * vis_dim) as f32);
+                    visible_loss_sum = Some(match visible_loss_sum {
+                        Some(accum) => accum + loss_sum_level,
+                        None => loss_sum_level,
+                    });
+                    visible_mask_sum = Some(match visible_mask_sum {
+                        Some(accum) => accum + mask_sum_level,
+                        None => mask_sum_level,
+                    });
+                }
+            }
+
+            if capture_artifacts && level_idx + 1 == level_count && batch > 0 {
+                let pred_first = pred_patches.slice_dim(0, 0..batch);
+                let target_first = target_patches.slice_dim(0, 0..batch);
+                let mask_first = mask.slice_dim(0, 0..batch);
+                let loss_mask_first = loss_mask.slice_dim(0, 0..batch);
+                let mask_expanded = mask_first.clone().unsqueeze_dim::<3>(2);
+                let loss_mask_expanded = loss_mask_first.clone().unsqueeze_dim::<3>(2);
+                let keep = mask_expanded.clone().mul_scalar(-1.0).add_scalar(1.0);
+                let masked_patches = target_first.clone().mul(keep.clone());
+                let recon_patches = if loss_on_all_patches {
+                    pred_first.clone()
+                } else {
+                    pred_first.clone().mul(mask_expanded.clone()) + target_first.clone().mul(keep)
+                };
+                let masked_view = unpatchify(masked_patches, patch_size, height, width, channels);
+                let recon_view = unpatchify(recon_patches, patch_size, height, width, channels);
+                let residual = (pred_first - target_first).mul(loss_mask_expanded);
+                let input_view = target_images.clone();
+                artifacts = Some((vec![input_view, masked_view, recon_view], residual));
+            }
+        }
+
+        let zero = Tensor::<B, 1>::zeros([1], &device);
+        let loss_sum = loss_sum.unwrap_or_else(|| zero.clone());
+        let mask_sum = mask_sum.unwrap_or_else(|| zero.clone());
+        let visible_loss_sum = visible_loss_sum.unwrap_or_else(|| zero.clone());
+        let visible_mask_sum = visible_mask_sum.unwrap_or_else(|| zero);
+        (loss_sum, mask_sum, visible_loss_sum, visible_mask_sum, artifacts)
+    }
 }
-
-

@@ -1,13 +1,13 @@
 use std::any::{Any, TypeId};
 
-use burn::tensor::{DType, Shape, TensorPrimitive};
-use burn::tensor::backend::Backend as BackendTrait;
 use burn::tensor::Tensor as BurnTensor;
-use burn_cubecl::{BoolElement, CubeBackend, CubeRuntime};
+use burn::tensor::backend::Backend as BackendTrait;
+use burn::tensor::{DType, Shape, TensorPrimitive};
 use burn_cubecl::fusion::FusionCubeRuntime;
 use burn_cubecl::kernel::into_contiguous;
 use burn_cubecl::ops::numeric::empty_device;
 use burn_cubecl::tensor::CubeTensor;
+use burn_cubecl::{BoolElement, CubeBackend, CubeRuntime};
 use burn_fusion::FusionTensor;
 use burn_fusion::stream::StreamId;
 use burn_wgpu::WgpuRuntime;
@@ -93,7 +93,8 @@ where
     }
     #[cfg(feature = "cuda")]
     {
-        if let Some(result) = try_weighted_sum_tokens_cubecl_direct::<B, CudaRuntime>(weights, tokens)
+        if let Some(result) =
+            try_weighted_sum_tokens_cubecl_direct::<B, CudaRuntime>(weights, tokens)
         {
             return Some(result);
         }
@@ -117,7 +118,8 @@ where
     let fusion_weights: FusionTensor<FusionCubeRuntime<R, BT>> =
         try_cast_primitive::<B, _>(prim_weights)?;
     let fusion_client = fusion_weights.client.clone();
-    let weights = fusion_client.resolve_tensor_float::<CubeBackend<R, f32, i32, BT>>(fusion_weights);
+    let weights =
+        fusion_client.resolve_tensor_float::<CubeBackend<R, f32, i32, BT>>(fusion_weights);
     if weights.dtype != DType::F32 {
         return None;
     }
@@ -136,7 +138,9 @@ where
     let handle = output.into();
     let fusion_out = fusion_client.register_tensor(handle, shape, StreamId::current(), dtype);
     let out_prim = try_cast_backend::<B, _>(fusion_out)?;
-    Some(BurnTensor::<B, 3>::from_primitive(TensorPrimitive::Float(out_prim)))
+    Some(BurnTensor::<B, 3>::from_primitive(TensorPrimitive::Float(
+        out_prim,
+    )))
 }
 
 fn try_weighted_sum_tokens_cubecl_direct<B: BackendTrait, R: CubeRuntime>(
@@ -163,7 +167,9 @@ where
 
     let output = weighted_sum_tokens_cubecl_runtime::<R>(weights, tokens);
     let out_prim = try_cast_backend::<B, _>(output)?;
-    Some(BurnTensor::<B, 3>::from_primitive(TensorPrimitive::Float(out_prim)))
+    Some(BurnTensor::<B, 3>::from_primitive(TensorPrimitive::Float(
+        out_prim,
+    )))
 }
 
 fn weighted_sum_tokens_cubecl_runtime<R: CubeRuntime>(
@@ -177,7 +183,8 @@ fn weighted_sum_tokens_cubecl_runtime<R: CubeRuntime>(
 
     let client = weights.client.clone();
     let device = weights.device.clone();
-    let output = empty_device::<R, f32>(client.clone(), device, Shape::new([batch, out_tokens, dim]));
+    let output =
+        empty_device::<R, f32>(client.clone(), device, Shape::new([batch, out_tokens, dim]));
     let out_elems = output.shape.num_elements();
     let cube_dim = CubeDim::new(256, 1, 1);
     let cube_count = calculate_cube_count_elemwise(out_elems, cube_dim);
@@ -194,11 +201,7 @@ fn weighted_sum_tokens_cubecl_runtime<R: CubeRuntime>(
 }
 
 #[cube(launch)]
-fn weighted_sum_kernel(
-    weights: &Tensor<f32>,
-    tokens: &Tensor<f32>,
-    output: &mut Tensor<f32>,
-) {
+fn weighted_sum_kernel(weights: &Tensor<f32>, tokens: &Tensor<f32>, output: &mut Tensor<f32>) {
     if ABSOLUTE_POS >= output.len() {
         terminate!();
     }
@@ -233,9 +236,7 @@ fn matches_type<A: 'static, B: 'static>() -> bool {
     TypeId::of::<A>() == TypeId::of::<B>()
 }
 
-fn try_cast_primitive<B: BackendTrait, T: 'static>(
-    value: B::FloatTensorPrimitive,
-) -> Option<T>
+fn try_cast_primitive<B: BackendTrait, T: 'static>(value: B::FloatTensorPrimitive) -> Option<T>
 where
     B::FloatTensorPrimitive: 'static,
 {

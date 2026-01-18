@@ -474,6 +474,7 @@ pub(crate) struct VisionSaccadeModel<B: BackendTrait> {
     pub(crate) trajectory_token: Param<Tensor<B, 2>>,
     // Per-eye identity bias to keep multi-eye rollouts disentangled.
     pub(crate) eye_token: Param<Tensor<B, 2>>,
+    pub(crate) view_embed: Option<Linear<B>>,
     pub(crate) input_proj: VisionSaccadeInputProjection<B>,
     pub(crate) fovea_proj: VisionSaccadeProjection<B>,
     pub(crate) pyramid_in_proj: Option<VisionSaccadeProjection<B>>,
@@ -522,15 +523,15 @@ pub(crate) struct GdpoPolicyInputs<B: BackendTrait> {
     pub(crate) gdpo_group: usize,
 }
 
+#[derive(Clone)]
 pub(crate) struct SaccadeMipLevel<B: BackendTrait> {
     pub(crate) tokens: Tensor<B, 3>,
     pub(crate) grid: PatchGrid,
     pub(crate) image: Tensor<B, 4>,
 }
 
+#[derive(Clone)]
 pub(crate) struct SaccadeLaplacianImages<B: BackendTrait> {
     pub(crate) residuals: Vec<Tensor<B, 4>>,
     pub(crate) coarse: Tensor<B, 4>,
 }
-
-

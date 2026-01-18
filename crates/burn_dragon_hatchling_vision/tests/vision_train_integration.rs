@@ -2,15 +2,15 @@
 
 #[cfg(feature = "cuda")]
 use std::fs;
-use std::path::PathBuf;
 #[cfg(feature = "cuda")]
 use std::path::Path;
+use std::path::PathBuf;
 #[cfg(feature = "cuda")]
 use std::process::Command;
 #[cfg(feature = "cuda")]
-use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(feature = "cuda")]
 use std::sync::Arc;
+#[cfg(feature = "cuda")]
+use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(feature = "cuda")]
 use std::thread;
 #[cfg(feature = "cuda")]
@@ -19,15 +19,15 @@ use std::time::{Duration, Instant};
 #[cfg(feature = "cuda")]
 use serde::Deserialize;
 
-use burn_dragon_hatchling_core::load_vision_training_config;
-use burn_dragon_hatchling_vision::train::{
-    gdpo_reset_cpu_fallbacks, loss_trace_reset, loss_trace_take, train_vision_backend_for_test,
-};
-#[cfg(feature = "cuda")]
-use burn_dragon_hatchling_vision::train::{gdpo_cpu_fallbacks, loss_trace_len};
 use burn_autodiff::Autodiff;
 #[cfg(feature = "cuda")]
 use burn_cuda::Cuda;
+use burn_dragon_hatchling_core::load_vision_training_config;
+#[cfg(feature = "cuda")]
+use burn_dragon_hatchling_vision::train::{gdpo_cpu_fallbacks, loss_trace_len};
+use burn_dragon_hatchling_vision::train::{
+    gdpo_reset_cpu_fallbacks, loss_trace_reset, loss_trace_take, train_vision_backend_for_test,
+};
 use burn_ndarray::NdArray;
 
 #[cfg(feature = "cuda")]
@@ -125,8 +125,7 @@ fn cpu_vision_identity_tiny_training_loss_decreases() {
     gdpo_reset_cpu_fallbacks();
     loss_trace_reset();
 
-    let result =
-        train_vision_backend_for_test::<Autodiff<NdArray<f32>>, _>(&config, "cpu", |_| {});
+    let result = train_vision_backend_for_test::<Autodiff<NdArray<f32>>, _>(&config, "cpu", |_| {});
     if let Err(err) = result {
         panic!("training failed: {err}");
     }
@@ -193,11 +192,8 @@ fn cuda_vision_saccade_tiny_training_gpu_utilization() {
     let done = Arc::new(AtomicBool::new(false));
     let done_clone = Arc::clone(&done);
     let handle = thread::spawn(move || {
-        let result = train_vision_backend_for_test::<Autodiff<Cuda<f32>>, _>(
-            &config,
-            "cuda",
-            |_| {},
-        );
+        let result =
+            train_vision_backend_for_test::<Autodiff<Cuda<f32>>, _>(&config, "cuda", |_| {});
         done_clone.store(true, Ordering::Relaxed);
         result
     });
@@ -297,9 +293,7 @@ fn cuda_vision_saccade_tiny_training_gpu_utilization() {
         |(min_val, max_val), &value| (min_val.min(value), max_val.max(value)),
     );
     let mem_growth = (max_mem - min_mem).max(0.0);
-    eprintln!(
-        "GPU memory growth={mem_growth:.1} MiB (min={min_mem:.1}, max={max_mem:.1})"
-    );
+    eprintln!("GPU memory growth={mem_growth:.1} MiB (min={min_mem:.1}, max={max_mem:.1})");
     let max_growth = settings.max_mem_growth_mb;
     assert!(
         mem_growth <= max_growth,

@@ -22,16 +22,14 @@ pub(crate) fn vision_split_has_images(root: &Path) -> Result<bool> {
     if !root.is_dir() {
         return Ok(false);
     }
-    for entry in fs::read_dir(root)
-        .with_context(|| format!("failed to read {}", root.display()))?
-    {
+    for entry in fs::read_dir(root).with_context(|| format!("failed to read {}", root.display()))? {
         let entry = entry?;
         let path = entry.path();
         if !path.is_dir() {
             continue;
         }
-        for file in fs::read_dir(&path)
-            .with_context(|| format!("failed to read {}", path.display()))?
+        for file in
+            fs::read_dir(&path).with_context(|| format!("failed to read {}", path.display()))?
         {
             let file = file?;
             let path = file.path();
@@ -46,15 +44,15 @@ pub(crate) fn vision_split_has_images(root: &Path) -> Result<bool> {
 
 pub(crate) fn is_image_file(path: &Path) -> bool {
     match path.extension().and_then(|ext| ext.to_str()) {
-        Some(ext) => matches!(
-            ext.to_ascii_lowercase().as_str(),
-            "jpg" | "jpeg" | "png"
-        ),
+        Some(ext) => matches!(ext.to_ascii_lowercase().as_str(), "jpg" | "jpeg" | "png"),
         None => false,
     }
 }
 
-pub(crate) fn download_imagenette(config: &VisionDatasetConfig, variant: ImagenetteVariant) -> Result<()> {
+pub(crate) fn download_imagenette(
+    config: &VisionDatasetConfig,
+    variant: ImagenetteVariant,
+) -> Result<()> {
     if config.train_dir != "train" || config.val_dir != "val" {
         return Err(anyhow!(
             "imagenette download expects train_dir='train' and val_dir='val'"
@@ -174,12 +172,17 @@ pub(crate) fn download_file(url: &str, dest: &Path) -> Result<()> {
         .map_err(|err| anyhow!("failed to download {url}: {err}"))?;
     let mut reader = response.into_reader();
     let tmp_path = dest.with_extension("tmp");
-    let mut file =
-        fs::File::create(&tmp_path).with_context(|| format!("failed to create {}", tmp_path.display()))?;
+    let mut file = fs::File::create(&tmp_path)
+        .with_context(|| format!("failed to create {}", tmp_path.display()))?;
     io::copy(&mut reader, &mut file)
         .with_context(|| format!("failed to write {}", tmp_path.display()))?;
-    fs::rename(&tmp_path, dest)
-        .with_context(|| format!("failed to rename {} to {}", tmp_path.display(), dest.display()))?;
+    fs::rename(&tmp_path, dest).with_context(|| {
+        format!(
+            "failed to rename {} to {}",
+            tmp_path.display(),
+            dest.display()
+        )
+    })?;
     Ok(())
 }
 
@@ -203,5 +206,3 @@ pub(crate) fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
     }
     Ok(())
 }
-
-

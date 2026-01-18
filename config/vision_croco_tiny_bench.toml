@@ -1,4 +1,4 @@
-# benchmark overrides for vision_mae_tiny
+# benchmark overrides for vision_croco_tiny
 
 [mode]
 artifact_every = 0

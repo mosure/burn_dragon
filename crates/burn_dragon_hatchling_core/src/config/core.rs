@@ -137,12 +137,8 @@ impl Default for GdpoConfig {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum GdpoHardGate {
     Off,
-    Fixed {
-        threshold: f32,
-    },
-    Percentile {
-        quantile: f32,
-    },
+    Fixed { threshold: f32 },
+    Percentile { quantile: f32 },
 }
 
 impl Default for GdpoHardGate {

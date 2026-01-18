@@ -1,8 +1,9 @@
 use burn::tensor::backend::Backend as BackendTrait;
 use burn::tensor::{Distribution, Tensor};
 use burn_dragon_hatchling::{
-    FusedKernelConfig, PatchEmbed, PatchGrid, SpatialPositionalEncodingKind,
-    VisionAttentionMode, VisionDragonHatchling, VisionDragonHatchlingConfig, pool_patch_tokens,
+    FusedKernelConfig, ManifoldHyperConnectionsConfig, PatchEmbed, PatchGrid,
+    SpatialPositionalEncodingKind, VisionAttentionMode, VisionDragonHatchling,
+    VisionDragonHatchlingConfig, VisionLatentActivation, VisionPatchEmbedMode, pool_patch_tokens,
 };
 use burn_ndarray::NdArray;
 
@@ -14,6 +15,7 @@ fn patch_embed_and_model_shapes() {
     let config = VisionDragonHatchlingConfig {
         image_size: 32,
         patch_size: 8,
+        patch_embed_mode: VisionPatchEmbedMode::default(),
         in_channels: 3,
         embed_dim: 16,
         steps: 2,
@@ -23,11 +25,17 @@ fn patch_embed_and_model_shapes() {
         projection_dim: 8,
         projection_hidden_dim: 16,
         use_cls_token: true,
+        cls_sync_alpha: 0.0,
+        num_eyes: 1,
+        cross_eye_steps: 0,
+        token_state_norm: true,
+        latent_activation: VisionLatentActivation::default(),
         pos_encoding: SpatialPositionalEncodingKind::Learned2d,
         pos_max_height: 4,
         pos_max_width: 4,
         attention_mode: VisionAttentionMode::RowL1,
         fused_kernels: FusedKernelConfig::default(),
+        mhc: ManifoldHyperConnectionsConfig::default(),
     };
 
     let images = Tensor::<Backend, 4>::random([2, 3, 32, 32], Distribution::Default, &device);
@@ -51,6 +59,7 @@ fn patch_embed_raw_matches_add_position() {
     let config = VisionDragonHatchlingConfig {
         image_size: 32,
         patch_size: 8,
+        patch_embed_mode: VisionPatchEmbedMode::default(),
         in_channels: 3,
         embed_dim: 16,
         steps: 2,
@@ -60,11 +69,17 @@ fn patch_embed_raw_matches_add_position() {
         projection_dim: 8,
         projection_hidden_dim: 16,
         use_cls_token: true,
+        cls_sync_alpha: 0.0,
+        num_eyes: 1,
+        cross_eye_steps: 0,
+        token_state_norm: true,
+        latent_activation: VisionLatentActivation::default(),
         pos_encoding: SpatialPositionalEncodingKind::Learned2d,
         pos_max_height: 4,
         pos_max_width: 4,
         attention_mode: VisionAttentionMode::RowL1,
         fused_kernels: FusedKernelConfig::default(),
+        mhc: ManifoldHyperConnectionsConfig::default(),
     };
 
     let images = Tensor::<Backend, 4>::random([2, 3, 32, 32], Distribution::Default, &device);
@@ -89,6 +104,7 @@ fn vision_forward_steps_shapes() {
     let config = VisionDragonHatchlingConfig {
         image_size: 32,
         patch_size: 8,
+        patch_embed_mode: VisionPatchEmbedMode::default(),
         in_channels: 3,
         embed_dim: 16,
         steps: 3,
@@ -98,11 +114,17 @@ fn vision_forward_steps_shapes() {
         projection_dim: 8,
         projection_hidden_dim: 16,
         use_cls_token: true,
+        cls_sync_alpha: 0.0,
+        num_eyes: 1,
+        cross_eye_steps: 0,
+        token_state_norm: true,
+        latent_activation: VisionLatentActivation::default(),
         pos_encoding: SpatialPositionalEncodingKind::Learned2d,
         pos_max_height: 4,
         pos_max_width: 4,
         attention_mode: VisionAttentionMode::RowL1,
         fused_kernels: FusedKernelConfig::default(),
+        mhc: ManifoldHyperConnectionsConfig::default(),
     };
 
     let images = Tensor::<Backend, 4>::random([2, 3, 32, 32], Distribution::Default, &device);
@@ -131,7 +153,10 @@ fn pool_patch_tokens_downsamples() {
     let device = <Backend as BackendTrait>::Device::default();
 
     let tokens = Tensor::<Backend, 3>::random([1, 4, 8], Distribution::Default, &device);
-    let grid = PatchGrid { height: 2, width: 2 };
+    let grid = PatchGrid {
+        height: 2,
+        width: 2,
+    };
     let (pooled, pooled_grid) = pool_patch_tokens(tokens, grid);
     assert_eq!(pooled.shape().dims(), [1, 1, 8]);
     assert_eq!(pooled_grid.height, 1);
@@ -145,8 +170,7 @@ mod train_tests {
     use burn_autodiff::Autodiff;
     use burn_dragon_hatchling::{
         CifarDataset, CifarSplit, CifarType, DinoFeatureStore, ImageNetAugmentations,
-        ImageNetDataLoader,
-        ImageNetDataset, ImageNetDatasetConfig, ImageNetSplit, VisionNormalize,
+        ImageNetDataLoader, ImageNetDataset, ImageNetDatasetConfig, ImageNetSplit, VisionNormalize,
         VisionTrainingModeConfig, load_vision_training_config,
     };
     use image::RgbImage;
@@ -202,18 +226,19 @@ mod train_tests {
         let feature_dim = 3;
         let patch_tokens = 2;
         let cls_values = vec![0.1, 0.2, 0.3, 1.1, 1.2, 1.3];
-        let patch_values = vec![
-            0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5,
-        ];
+        let patch_values = vec![0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5];
         write_f32_file(&cls_path, &cls_values);
         write_f32_file(&patch_path, &patch_values);
 
-        let store = DinoFeatureStore::new(&cls_path, &patch_path, feature_dim, patch_tokens, Some(2))
-            .expect("feature store");
+        let store =
+            DinoFeatureStore::new(&cls_path, &patch_path, feature_dim, patch_tokens, Some(2))
+                .expect("feature store");
 
         type Backend = NdArray<f32>;
         let device = <Backend as BackendTrait>::Device::default();
-        let (cls, patch) = store.load_batch::<Backend>(&[1], &device).expect("load batch");
+        let (cls, patch) = store
+            .load_batch::<Backend>(&[1], &device)
+            .expect("load batch");
 
         assert_eq!(cls.shape().dims(), [1, 3]);
         assert_eq!(patch.shape().dims(), [1, 2, 3]);
@@ -276,6 +301,8 @@ mod train_tests {
             teacher: None,
             views: 1,
             local_views: 0,
+            min_view_overlap: 0.0,
+            view_overlap_attempts: 1,
             cache_decoded: false,
             cache_capacity: 0,
             cache_preprocessed: false,
@@ -361,6 +388,8 @@ mod train_tests {
             teacher: None,
             views: 2,
             local_views: 3,
+            min_view_overlap: 0.0,
+            view_overlap_attempts: 1,
             cache_decoded: false,
             cache_capacity: 0,
             cache_preprocessed: false,
@@ -370,9 +399,7 @@ mod train_tests {
         type Backend = NdArray<f32>;
         let device = <Backend as BackendTrait>::Device::default();
         let batch = dataset.sample_batch::<Backend>(2, &device);
-        let global_views = batch
-            .global_view_images
-            .expect("global view images");
+        let global_views = batch.global_view_images.expect("global view images");
         let local_views = batch.local_view_images.expect("local view images");
         assert_eq!(global_views.shape().dims(), [2, 2, 3, 8, 8]);
         assert_eq!(local_views.shape().dims(), [2, 3, 3, 4, 4]);
@@ -422,25 +449,18 @@ mod train_tests {
                 teacher: None,
                 views: 1,
                 local_views: 0,
+                min_view_overlap: 0.0,
+                view_overlap_attempts: 1,
                 cache_decoded: false,
                 cache_capacity: 0,
-            cache_preprocessed: false,
+                cache_preprocessed: false,
             })
             .expect("imagenet dataset"),
         );
 
         type Backend = NdArray<f32>;
         let device = <Backend as BackendTrait>::Device::default();
-        let loader = ImageNetDataLoader::<Backend>::new(
-            dataset,
-            2,
-            &device,
-            2,
-            None,
-            2,
-            1,
-            true,
-        );
+        let loader = ImageNetDataLoader::<Backend>::new(dataset, 2, &device, 2, None, 2, 1, true);
         let mut iter = loader.iter();
         let batch = iter.next().expect("batch");
         assert_eq!(batch.images.shape().dims(), [2, 3, 8, 8]);
@@ -544,10 +564,8 @@ mod train_tests {
             other => panic!("expected lejepa mode, got {other:?}"),
         };
 
-        let normalize = VisionNormalize::new(
-            config.augment.normalize_mean,
-            config.augment.normalize_std,
-        );
+        let normalize =
+            VisionNormalize::new(config.augment.normalize_mean, config.augment.normalize_std);
         let train_aug = ImageNetAugmentations::new(
             ImageNetSplit::Train,
             config.augment.image_size,
@@ -579,6 +597,8 @@ mod train_tests {
             teacher: None,
             views: 2,
             local_views: 0,
+            min_view_overlap: 0.0,
+            view_overlap_attempts: 1,
             cache_decoded: false,
             cache_capacity: 0,
             cache_preprocessed: false,

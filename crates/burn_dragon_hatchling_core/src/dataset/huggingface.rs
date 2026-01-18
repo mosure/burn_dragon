@@ -370,12 +370,15 @@ fn collect_csv_records(
 
     let mut index_map = HashMap::new();
     for field in &cfg.text_fields {
-        let idx = headers.iter().position(|header| header == field).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("missing field `{}` in csv file {}", field, path.display()),
-            )
-        })?;
+        let idx = headers
+            .iter()
+            .position(|header| header == field)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("missing field `{}` in csv file {}", field, path.display()),
+                )
+            })?;
         index_map.insert(field.as_str(), idx);
     }
 

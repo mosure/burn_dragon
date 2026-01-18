@@ -113,11 +113,7 @@ impl<B: Backend> VizEncoder<B> {
         token_index % stride == 0
     }
 
-    pub fn step(
-        &mut self,
-        layers: &[Option<LayerVizState<B>>],
-        token_index: usize,
-    ) -> VizFrame<B> {
+    pub fn step(&mut self, layers: &[Option<LayerVizState<B>>], token_index: usize) -> VizFrame<B> {
         let device = self.zero_units.device();
         let history = self.config.history.max(1);
         let cursor = token_index % history;
@@ -127,28 +123,27 @@ impl<B: Backend> VizEncoder<B> {
 
         for layer_idx in 0..layer_count {
             let source_idx = layer_start + layer_idx;
-            let offset = layer_idx
-                .saturating_mul(self.latent_total.saturating_add(self.layer_gap));
+            let offset = layer_idx.saturating_mul(self.latent_total.saturating_add(self.layer_gap));
             if let Some(gap) = &self.zero_gap {
                 if layer_idx > 0 {
                     let gap_start = offset.saturating_sub(self.layer_gap);
                     let gap_end = offset;
-                    self.units_x = self.units_x.clone().slice_assign(
-                        [gap_start..gap_end, cursor..cursor + 1, 0..4],
-                        gap.clone(),
-                    );
-                    self.units_y = self.units_y.clone().slice_assign(
-                        [gap_start..gap_end, cursor..cursor + 1, 0..4],
-                        gap.clone(),
-                    );
-                    self.units_xy = self.units_xy.clone().slice_assign(
-                        [gap_start..gap_end, cursor..cursor + 1, 0..4],
-                        gap.clone(),
-                    );
-                    self.units_rho = self.units_rho.clone().slice_assign(
-                        [gap_start..gap_end, cursor..cursor + 1, 0..4],
-                        gap.clone(),
-                    );
+                    self.units_x = self
+                        .units_x
+                        .clone()
+                        .slice_assign([gap_start..gap_end, cursor..cursor + 1, 0..4], gap.clone());
+                    self.units_y = self
+                        .units_y
+                        .clone()
+                        .slice_assign([gap_start..gap_end, cursor..cursor + 1, 0..4], gap.clone());
+                    self.units_xy = self
+                        .units_xy
+                        .clone()
+                        .slice_assign([gap_start..gap_end, cursor..cursor + 1, 0..4], gap.clone());
+                    self.units_rho = self
+                        .units_rho
+                        .clone()
+                        .slice_assign([gap_start..gap_end, cursor..cursor + 1, 0..4], gap.clone());
                 }
             }
 
@@ -203,22 +198,22 @@ impl<B: Backend> VizEncoder<B> {
             );
 
             let range = offset..offset + self.latent_total;
-            self.units_x = self.units_x.clone().slice_assign(
-                [range.clone(), cursor..cursor + 1, 0..4],
-                units_x_col,
-            );
-            self.units_y = self.units_y.clone().slice_assign(
-                [range.clone(), cursor..cursor + 1, 0..4],
-                units_y_col,
-            );
-            self.units_xy = self.units_xy.clone().slice_assign(
-                [range.clone(), cursor..cursor + 1, 0..4],
-                units_xy_col,
-            );
-            self.units_rho = self.units_rho.clone().slice_assign(
-                [range, cursor..cursor + 1, 0..4],
-                units_rho_col,
-            );
+            self.units_x = self
+                .units_x
+                .clone()
+                .slice_assign([range.clone(), cursor..cursor + 1, 0..4], units_x_col);
+            self.units_y = self
+                .units_y
+                .clone()
+                .slice_assign([range.clone(), cursor..cursor + 1, 0..4], units_y_col);
+            self.units_xy = self
+                .units_xy
+                .clone()
+                .slice_assign([range.clone(), cursor..cursor + 1, 0..4], units_xy_col);
+            self.units_rho = self
+                .units_rho
+                .clone()
+                .slice_assign([range, cursor..cursor + 1, 0..4], units_rho_col);
         }
 
         VizFrame {
@@ -244,7 +239,9 @@ impl<B: Backend> VizEncoder<B> {
         let values = values.clamp_min(0.0).reshape([self.latent_total, 1]);
         let scaled = values.clone().mul_scalar(gain);
         let mag = scaled.clone().div(scaled.add_scalar(SOFT_CLIP));
-        let mask = values.clone().div(values.clone().add_scalar(ACTIVE_EPS * 4.0));
+        let mask = values
+            .clone()
+            .div(values.clone().add_scalar(ACTIVE_EPS * 4.0));
         let intensity = (mag * mask).powf_scalar(INTENSITY_GAMMA);
         let intensity = intensity.reshape([self.latent_total, 1, 1]);
         let ramp = color_low.clone() + (color_high.clone() - color_low.clone()) * intensity.clone();
@@ -260,12 +257,7 @@ impl<B: Backend> VizEncoder<B> {
 
 fn color_tensor<B: Backend>(rgba: [f32; 4], device: &B::Device) -> Tensor<B, 3> {
     let [r, g, b, a] = rgba;
-    let rgba = [
-        srgb_to_linear(r),
-        srgb_to_linear(g),
-        srgb_to_linear(b),
-        a,
-    ];
+    let rgba = [srgb_to_linear(r), srgb_to_linear(g), srgb_to_linear(b), a];
     Tensor::<B, 3>::from_data(TensorData::new(rgba.to_vec(), [1, 1, 4]), device)
 }
 
@@ -291,8 +283,11 @@ fn build_separator<B: Backend>(
             mask[idx] = 1.0;
         }
     }
-    let mask = Tensor::<B, 1>::from_data(TensorData::new(mask, [latent_total]), device)
-        .reshape([latent_total, 1, 1]);
+    let mask = Tensor::<B, 1>::from_data(TensorData::new(mask, [latent_total]), device).reshape([
+        latent_total,
+        1,
+        1,
+    ]);
     let color = color_tensor::<B>(COLOR_SEPARATOR, device);
     Some(mask * color)
 }

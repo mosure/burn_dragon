@@ -27,7 +27,6 @@ fn note_cpu_fallback() {
 
 const GDPO_LOG_RATIO_CLAMP: f32 = 20.0;
 
-
 pub fn gdpo_advantage<B: BackendTrait>(
     hard: Tensor<B, 2>,
     easy: Tensor<B, 2>,
@@ -82,10 +81,7 @@ pub fn gdpo_policy_loss<B: BackendTrait>(
         .clamp_min(-GDPO_LOG_RATIO_CLAMP)
         .clamp_max(GDPO_LOG_RATIO_CLAMP);
     let ratio = log_ratio.exp();
-    let clipped = ratio
-        .clone()
-        .clamp_min(1.0 - clip)
-        .clamp_max(1.0 + clip);
+    let clipped = ratio.clone().clamp_min(1.0 - clip).clamp_max(1.0 + clip);
     let surrogate = ratio.mul(advantage.clone());
     let surrogate_clipped = clipped.mul(advantage);
     let use_clipped = surrogate_clipped.clone().lower_equal(surrogate.clone());
@@ -113,10 +109,7 @@ fn gate_easy_rewards<B: BackendTrait>(
     }
 }
 
-fn percentile_thresholds<B: BackendTrait>(
-    values: Tensor<B, 2>,
-    quantile: f32,
-) -> Tensor<B, 2> {
+fn percentile_thresholds<B: BackendTrait>(values: Tensor<B, 2>, quantile: f32) -> Tensor<B, 2> {
     let quantile = if quantile.is_nan() {
         0.0
     } else {
@@ -182,7 +175,11 @@ fn group_normalize_rewards<B: BackendTrait>(
 
     let mean = rewards.clone().mean_dim(1).repeat_dim(1, group);
     let centered = rewards.clone() - mean;
-    let var = centered.clone().powf_scalar(2.0).mean_dim(1).repeat_dim(1, group);
+    let var = centered
+        .clone()
+        .powf_scalar(2.0)
+        .mean_dim(1)
+        .repeat_dim(1, group);
     let std = var.add_scalar(epsilon.max(1e-12)).sqrt();
     let normalized = centered / std;
 
@@ -264,8 +261,8 @@ fn nan_to_num_data(values: &mut [f32]) {
 #[cfg(test)]
 mod tests {
     use crate::train::gdpo::*;
-    use burn::tensor::backend::Backend as BackendTrait;
     use burn::tensor::Tensor;
+    use burn::tensor::backend::Backend as BackendTrait;
     use burn_ndarray::NdArray;
 
     #[test]
@@ -331,7 +328,10 @@ mod tests {
         type Backend = NdArray<f32>;
         let device = <Backend as BackendTrait>::Device::default();
         let hard = Tensor::<Backend, 2>::from_data(
-            TensorData::new(vec![f32::NAN, 1.0, f32::INFINITY, f32::NEG_INFINITY], [1, 4]),
+            TensorData::new(
+                vec![f32::NAN, 1.0, f32::INFINITY, f32::NEG_INFINITY],
+                [1, 4],
+            ),
             &device,
         );
         let thresholds = percentile_thresholds(hard, 0.5)
@@ -347,10 +347,8 @@ mod tests {
     fn gdpo_policy_loss_clips_ratio() {
         type Backend = NdArray<f32>;
         let device = <Backend as BackendTrait>::Device::default();
-        let log_prob_new = Tensor::<Backend, 2>::from_data(
-            TensorData::new(vec![0.3], [1, 1]),
-            &device,
-        );
+        let log_prob_new =
+            Tensor::<Backend, 2>::from_data(TensorData::new(vec![0.3], [1, 1]), &device);
         let log_prob_old = Tensor::<Backend, 2>::zeros([1, 1], &device);
         let advantage = Tensor::<Backend, 2>::ones([1, 1], &device);
         let config = GdpoConfig {

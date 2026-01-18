@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
-use burn::tensor::{Int, Tensor, TensorData};
 use burn::tensor::backend::Backend;
+use burn::tensor::{Int, Tensor, TensorData};
 use burn_autodiff::Autodiff;
 use burn_ndarray::NdArray;
 

@@ -8,8 +8,8 @@ use bevy::render::render_resource::{
     BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutEntry, BindingResource, BindingType,
     BufferBindingType, CachedComputePipelineId, ComputePipelineDescriptor, FilterMode,
     PipelineCache, Sampler, SamplerBindingType, SamplerDescriptor, ShaderStages, ShaderType,
-    StorageTextureAccess, TextureDimension, TextureFormat, TextureSampleType,
-    TextureUsages, TextureViewDimension, UniformBuffer,
+    StorageTextureAccess, TextureDimension, TextureFormat, TextureSampleType, TextureUsages,
+    TextureViewDimension, UniformBuffer,
 };
 use bevy::render::renderer::{RenderDevice, RenderQueue};
 use bevy::render::texture::GpuImage;
@@ -20,14 +20,14 @@ use half::f16;
 use wgpu::Extent3d;
 
 use crate::{
-    radius_norm_from_sample, radius_px_from_norm, resolve_foveation_sample,
-    sigma_norm_from_settings, sigma_px_from_norm, FoveaWarpMode, FoveationBackendMode,
-    FoveationNoiseSample, FoveationRuntime, FoveationSettings, PyramidMode, SourceImage,
+    FoveaWarpMode, FoveationBackendMode, FoveationNoiseSample, FoveationRuntime, FoveationSettings,
+    PyramidMode, SourceImage, radius_norm_from_sample, radius_px_from_norm,
+    resolve_foveation_sample, sigma_norm_from_settings, sigma_px_from_norm,
 };
-use burn_dragon_hatchling_vision::foveation;
-use burn_dragon_hatchling_vision::{FOVEATION_SHADER, PYRAMID_SHADER};
 #[cfg(test)]
 use crate::{ImageLevel, PyramidCache};
+use burn_dragon_hatchling_vision::foveation;
+use burn_dragon_hatchling_vision::{FOVEATION_SHADER, PYRAMID_SHADER};
 
 const WORKGROUP_SIZE: u32 = 8;
 const SHADER_SOURCE: &str = FOVEATION_SHADER;
@@ -199,7 +199,10 @@ impl Plugin for FoveationGpuPlugin {
                         .in_set(RenderSystems::Render)
                         .before(dispatch_foveation_compute),
                 )
-                .add_systems(Render, dispatch_foveation_compute.in_set(RenderSystems::Render));
+                .add_systems(
+                    Render,
+                    dispatch_foveation_compute.in_set(RenderSystems::Render),
+                );
         }
     }
 }
@@ -266,8 +269,8 @@ fn init_foveation_pipeline(
             count: None,
         },
     ];
-    let bind_group_layout = render_device
-        .create_bind_group_layout("foveation_bind_group_layout", &layout_entries);
+    let bind_group_layout =
+        render_device.create_bind_group_layout("foveation_bind_group_layout", &layout_entries);
 
     let sampler = render_device.create_sampler(&SamplerDescriptor {
         mag_filter: FilterMode::Linear,
@@ -616,8 +619,7 @@ fn dispatch_pyramid_compute(
     else {
         return;
     };
-    let Some(residual_pipeline) =
-        pipeline_cache.get_compute_pipeline(pipeline.residual_pipeline)
+    let Some(residual_pipeline) = pipeline_cache.get_compute_pipeline(pipeline.residual_pipeline)
     else {
         return;
     };
@@ -738,9 +740,7 @@ fn dispatch_pyramid_compute(
             view_formats: &[],
         });
         scratch_textures.push(scratch);
-        let scratch_ref = scratch_textures
-            .last()
-            .expect("scratch texture available");
+        let scratch_ref = scratch_textures.last().expect("scratch texture available");
 
         let mut copy_encoder =
             render_device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -779,7 +779,12 @@ fn dispatch_pyramid_compute(
             render_device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("foveation_pyramid_downsample"),
             });
-        dispatch_pass(&mut compute_encoder, downsample_pipeline, &bind_group, dispatch);
+        dispatch_pass(
+            &mut compute_encoder,
+            downsample_pipeline,
+            &bind_group,
+            dispatch,
+        );
         render_queue.submit([compute_encoder.finish()]);
     }
 
@@ -806,7 +811,12 @@ fn dispatch_pyramid_compute(
             render_device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("foveation_pyramid_residual"),
             });
-        dispatch_pass(&mut compute_encoder, residual_pipeline, &bind_group, dispatch);
+        dispatch_pass(
+            &mut compute_encoder,
+            residual_pipeline,
+            &bind_group,
+            dispatch,
+        );
         render_queue.submit([compute_encoder.finish()]);
     }
     state.last_version = config.version;
@@ -906,16 +916,16 @@ mod tests {
     };
     use burn::tensor::backend::Backend;
     use burn::tensor::{Tensor, TensorData};
-    use burn_dragon_hatchling_vision::train::SaccadeFoveationSampler;
     use burn_dragon_hatchling_core::{VisionFoveaSamplingMode, VisionSaccadeConfig};
-    use burn_wgpu::{self, RuntimeOptions, Wgpu};
+    use burn_dragon_hatchling_vision::train::SaccadeFoveationSampler;
     use burn_wgpu::graphics;
+    use burn_wgpu::{self, RuntimeOptions, Wgpu};
     use image::RgbImage;
     use std::collections::HashSet;
     use std::fs;
     use std::path::{Path, PathBuf};
-    use std::sync::mpsc;
     use std::sync::Once;
+    use std::sync::mpsc;
     use wgpu::util::DeviceExt;
 
     type BurnBackend = Wgpu<f32>;
@@ -939,7 +949,11 @@ mod tests {
                 data.push(value);
             }
         }
-        SourceImage { width, height, data }
+        SourceImage {
+            width,
+            height,
+            data,
+        }
     }
 
     fn make_gradient(width: usize, height: usize) -> SourceImage {
@@ -953,7 +967,11 @@ mod tests {
                 data.push(0.5);
             }
         }
-        SourceImage { width, height, data }
+        SourceImage {
+            width,
+            height,
+            data,
+        }
     }
 
     fn make_radial(width: usize, height: usize) -> SourceImage {
@@ -973,7 +991,11 @@ mod tests {
                 data.push(wave);
             }
         }
-        SourceImage { width, height, data }
+        SourceImage {
+            width,
+            height,
+            data,
+        }
     }
 
     fn settings_for_mode(mode: PyramidMode) -> FoveationSettings {
@@ -1014,6 +1036,7 @@ mod tests {
         let mut vision = make_minimal_vision_config(source.width, source.height, patch);
         vision.patch_size = patch;
         let mut saccade = VisionSaccadeConfig::default();
+        saccade.num_eyes = vision.num_eyes;
         saccade.mip_levels = settings.pyramid_depth.max(1);
         saccade.pyramid_mode = map_pyramid_mode(settings.mode);
         saccade.fovea_warp_mode = map_warp_mode(settings.warp_mode);
@@ -1035,10 +1058,8 @@ mod tests {
             TensorData::new(vec![sample.mean_x, sample.mean_y], [1, 2]),
             &device,
         );
-        let sigma = Tensor::<BurnBackend, 2>::from_data(
-            TensorData::new(vec![sigma_norm], [1, 1]),
-            &device,
-        );
+        let sigma =
+            Tensor::<BurnBackend, 2>::from_data(TensorData::new(vec![sigma_norm], [1, 1]), &device);
         let radius = Tensor::<BurnBackend, 2>::from_data(
             TensorData::new(vec![radius_norm], [1, 1]),
             &device,
@@ -1435,14 +1456,13 @@ mod tests {
         map_result.ok()?;
         let data = slice.get_mapped_range().to_vec();
         output_buffer.unmap();
-        let trimmed = trim_padded_rows_bytes(
-            &data,
-            output_size,
-            output_size,
-            8,
-            aligned_bytes_per_row,
-        );
-        Some(decode_f16_rgb(&trimmed, output_size as usize, output_size as usize))
+        let trimmed =
+            trim_padded_rows_bytes(&data, output_size, output_size, 8, aligned_bytes_per_row);
+        Some(decode_f16_rgb(
+            &trimmed,
+            output_size as usize,
+            output_size as usize,
+        ))
     }
 
     fn make_cache(source: &SourceImage, depth: usize) -> PyramidCache {
@@ -1464,10 +1484,7 @@ mod tests {
     }
 
     fn quantize_levels(levels: Vec<ImageLevel>) -> Vec<ImageLevel> {
-        levels
-            .into_iter()
-            .map(quantize_level)
-            .collect()
+        levels.into_iter().map(quantize_level).collect()
     }
 
     fn quantize_level(mut level: ImageLevel) -> ImageLevel {
@@ -1530,9 +1547,8 @@ mod tests {
             let next = &gaussian[idx + 1];
             let up = resample_gpu(next, current.width, current.height);
             let mut data = vec![0.0; current.width * current.height * 3];
-            for (out, (current_val, up_val)) in data
-                .iter_mut()
-                .zip(current.data.iter().zip(up.data.iter()))
+            for (out, (current_val, up_val)) in
+                data.iter_mut().zip(current.data.iter().zip(up.data.iter()))
             {
                 *out = current_val - up_val;
             }
@@ -1558,7 +1574,11 @@ mod tests {
                 data[idx + 2] = sample[2];
             }
         }
-        ImageLevel { width, height, data }
+        ImageLevel {
+            width,
+            height,
+            data,
+        }
     }
 
     fn sample_bilinear_gpu(level: &ImageLevel, fx: f32, fy: f32) -> [f32; 3] {
@@ -1638,8 +1658,7 @@ mod tests {
         let center_value = patch[center_idx];
         let corner_value = patch[corner_idx];
 
-        let src_center = source.data
-            [(source.height / 2 * source.width + source.width / 2) * 3];
+        let src_center = source.data[(source.height / 2 * source.width + source.width / 2) * 3];
         let src_corner = source.data[0];
 
         let center_error = (center_value - src_center).abs();
@@ -2211,14 +2230,15 @@ mod tests {
             bind_group_layouts: &[&bind_group_layout],
             push_constant_ranges: &[],
         });
-        let downsample_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("pyramid_downsample_pipeline"),
-            layout: Some(&pipeline_layout),
-            module: &shader,
-            entry_point: Some("downsample"),
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-            cache: None,
-        });
+        let downsample_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("pyramid_downsample_pipeline"),
+                layout: Some(&pipeline_layout),
+                module: &shader,
+                entry_point: Some("downsample"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                cache: None,
+            });
         let residual_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("pyramid_residual_pipeline"),
             layout: Some(&pipeline_layout),
@@ -2288,9 +2308,7 @@ mod tests {
                 view_formats: &[],
             });
             scratch_textures.push(scratch);
-            let scratch_ref = scratch_textures
-                .last()
-                .expect("scratch texture available");
+            let scratch_ref = scratch_textures.last().expect("scratch texture available");
             let mut copy_encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("pyramid_copy_level"),
             });
@@ -2385,15 +2403,16 @@ mod tests {
             queue.submit([compute_encoder.finish()]);
         }
 
-        let gaussian_levels =
-            read_pyramid_levels(&device, &queue, &gaussian_texture, &sizes)?;
-        let residual_levels =
-            read_pyramid_levels(&device, &queue, &residual_texture, &sizes)?;
+        let gaussian_levels = read_pyramid_levels(&device, &queue, &gaussian_texture, &sizes)?;
+        let residual_levels = read_pyramid_levels(&device, &queue, &residual_texture, &sizes)?;
 
         Some((gaussian_levels, residual_levels))
     }
 
-    fn uniform_for_settings(settings: &FoveationSettings, source: &SourceImage) -> FoveationUniform {
+    fn uniform_for_settings(
+        settings: &FoveationSettings,
+        source: &SourceImage,
+    ) -> FoveationUniform {
         let image_size = Vec2::new(source.width as f32, source.height as f32).max(Vec2::ONE);
         let inv_image_size = Vec2::new(1.0 / image_size.x, 1.0 / image_size.y);
         let center = Vec2::new(
@@ -2469,7 +2488,13 @@ mod tests {
             let padded = if aligned_bytes_per_row == bytes_per_row {
                 bytes
             } else {
-                pad_rows(&bytes, level.width as u32, level.height as u32, 8, aligned_bytes_per_row)
+                pad_rows(
+                    &bytes,
+                    level.width as u32,
+                    level.height as u32,
+                    8,
+                    aligned_bytes_per_row,
+                )
             };
             queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
@@ -2507,7 +2532,10 @@ mod tests {
         );
         for (idx, (exp, act)) in expected.iter().zip(actual.iter()).enumerate() {
             assert_eq!(exp.width, act.width, "{label} level {idx} width mismatch");
-            assert_eq!(exp.height, act.height, "{label} level {idx} height mismatch");
+            assert_eq!(
+                exp.height, act.height,
+                "{label} level {idx} height mismatch"
+            );
             let max_diff = max_abs_diff_float(&exp.data, &act.data);
             assert!(
                 max_diff <= tol,

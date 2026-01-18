@@ -17,6 +17,7 @@ variant = "imagenette2-160"
 
 [training]
 batch_size = 8
+epochs = 2
 max_iters = 200
 log_frequency = 20
 batch_repeats = 1
@@ -33,10 +34,10 @@ trace_train_loss = false
 trace_train_loss_every = 1
 # optional ffmpeg path for mp4/avi encoding
 # ffmpeg_path = "C:/path/to/ffmpeg"
-rollout_min_steps = 1
-rollout_max_steps = 4
+rollout_min_steps = 8
+rollout_max_steps = 8
 # backprop through the last N rollout steps (0 = all steps)
-rollout_backprop_steps = 1
+rollout_backprop_steps = 8
 
 [optimizer]
 learning_rate = 0.0005
@@ -53,24 +54,27 @@ memory = "subslices"
 [vision]
 image_size = 160
 patch_size = 16
+patch_embed_mode = "conv"
 in_channels = 3
-embed_dim = 128
-steps = 4
-n_head = 4
-mlp_internal_dim_multiplier = 4
-dropout = 0.1
-projection_dim = 128
-projection_hidden_dim = 256
-use_cls_token = true
+embed_dim = 384
+steps = 8
+n_head = 6
+mlp_internal_dim_multiplier = 6
+dropout = 0.0
+projection_dim = 384
+projection_hidden_dim = 768
+use_cls_token = false
+token_state_norm = true
+latent_activation = "gelu"
 pos_encoding = "learned2d"
-attention_mode = "row_l1"
+attention_mode = "softmax"
 fused_kernels = false
 relu_threshold = 0.0
 
 [mode]
 type = "mae"
 # number of pyramid levels (coarse-to-fine) used for reconstruction
-pyramid_levels = 3
+pyramid_levels = 1
 # write artifact images every N validation iterations (0 disables)
 artifact_every = 1
 # artifact output: images (png), avi, or mp4
@@ -78,7 +82,7 @@ artifact_output = "images"
 # artifact video fps (frames per second)
 artifact_fps = 8
 # max images per artifact batch (caps batch rows)
-artifact_max_images = 4
+artifact_max_images = 8
 # max panels per image (input/masked/recon)
 artifact_max_views = 3
 # overwrite validation artifacts instead of keeping history
@@ -86,28 +90,30 @@ artifact_overwrite = true
 
 [mode.loss.recon]
 # fraction of patches to mask for reconstruction
-mask_ratio = 0.75
+mask_ratio = 0.5
 weight = 1.0
-hidden_dim = 256
+hidden_dim = 768
+recon_head_norm = true
+loss_on_all_patches = false
 
 [augment]
 image_size = 160
 resize_short = 160
-min_scale = 0.08
+min_scale = 0.2
 max_scale = 1.0
 min_aspect_ratio = 0.75
 max_aspect_ratio = 1.3333334
 flip_prob = 0.5
-color_jitter_prob = 0.8
-brightness = 0.4
-contrast = 0.4
-saturation = 0.2
-hue = 0.1
-grayscale_prob = 0.2
-blur_prob = 0.5
+color_jitter_prob = 0.0
+brightness = 0.0
+contrast = 0.0
+saturation = 0.0
+hue = 0.0
+grayscale_prob = 0.0
+blur_prob = 0.0
 blur_sigma_min = 0.1
 blur_sigma_max = 2.0
-solarize_prob = 0.2
+solarize_prob = 0.0
 solarize_threshold = 128
 normalize_mean = [0.485, 0.456, 0.406]
 normalize_std = [0.229, 0.224, 0.225]

@@ -1,5 +1,5 @@
-use burn::tensor::backend::Backend;
 use burn::tensor::Tensor;
+use burn::tensor::backend::Backend;
 
 pub const LAYER_GAP: usize = 20;
 pub const VIZ_MAX_RES: usize = 8192;

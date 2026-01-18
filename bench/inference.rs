@@ -46,9 +46,14 @@ const FLOAT_BYTES: u64 = std::mem::size_of::<f32>() as u64;
 
 fn inference_bench(c: &mut Criterion) {
     let wgpu_config = WgpuRuntimeConfig::default();
-    run_inference_backend::<Wgpu<f32>, _, _>(c, "wgpu", |device| {
-        init_runtime(device, &wgpu_config);
-    }, skip_reason_wgpu);
+    run_inference_backend::<Wgpu<f32>, _, _>(
+        c,
+        "wgpu",
+        |device| {
+            init_runtime(device, &wgpu_config);
+        },
+        skip_reason_wgpu,
+    );
 
     #[cfg(feature = "cuda")]
     run_inference_backend::<Cuda<f32>, _, _>(c, "cuda", |_| {}, |_, _| None);

@@ -2,9 +2,32 @@
 
 [mode]
 artifact_every = 0
+mip_levels = 2
+grid_sample_max_mb = 256
+mip_concat_max_mb = 256
+pyramid_feature_dim = 64
+recon_max_elems = 2000000
 
 [bench]
 include_cuda = false
+
+# keep bench workloads below GPU buffer limits
+[training]
+batch_size = 1
+rollout_min_steps = 2
+rollout_max_steps = 2
+rollout_backprop_steps = 2
+
+[vision]
+image_size = 64
+patch_size = 16
+embed_dim = 64
+steps = 2
+n_head = 2
+mlp_internal_dim_multiplier = 2
+projection_dim = 64
+projection_hidden_dim = 128
+fused_kernels = false
 
 # [dataset]
 # max_records = 256

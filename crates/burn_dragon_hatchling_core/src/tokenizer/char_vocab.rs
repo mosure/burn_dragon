@@ -140,8 +140,7 @@ impl CharVocab {
     }
 
     pub fn from_json_bytes(data: &[u8]) -> Result<Self> {
-        let text =
-            std::str::from_utf8(data).context("vocabulary data was not valid utf-8")?;
+        let text = std::str::from_utf8(data).context("vocabulary data was not valid utf-8")?;
         Self::from_json_str(text)
     }
 

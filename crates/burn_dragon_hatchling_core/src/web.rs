@@ -3,19 +3,19 @@ use std::sync::Arc;
 use anyhow::{Context, Result, anyhow};
 use burn::module::Module;
 use burn::record::{BinBytesRecorder, FullPrecisionSettings, HalfPrecisionSettings, Recorder};
-use burn::tensor::backend::Backend;
 use burn::tensor::Tensor;
+use burn::tensor::backend::Backend;
 use burn_wgpu::{RuntimeOptions, graphics};
+#[cfg(feature = "viz")]
+use js_sys::Promise;
 use serde::Deserialize;
-use wasm_bindgen::prelude::*;
 #[cfg(feature = "viz")]
 use wasm_bindgen::JsCast;
 #[cfg(feature = "viz")]
-use wasm_bindgen_futures::JsFuture;
-#[cfg(feature = "viz")]
-use js_sys::Promise;
-#[cfg(feature = "viz")]
 use wasm_bindgen::closure::Closure;
+use wasm_bindgen::prelude::*;
+#[cfg(feature = "viz")]
+use wasm_bindgen_futures::JsFuture;
 
 use crate::generation::{
     ContextStrategy, prefill_state, resolve_context_strategy, sample_next_token_async,
@@ -99,10 +99,8 @@ pub async fn load_model(
         console_error_panic_hook::set_once();
 
         let config = match config_json {
-            Some(json) if !json.trim().is_empty() => {
-                serde_json::from_str::<WebModelConfig>(&json)
-                    .context("failed to parse web model config json")?
-            }
+            Some(json) if !json.trim().is_empty() => serde_json::from_str::<WebModelConfig>(&json)
+                .context("failed to parse web model config json")?,
             _ => WebModelConfig::default(),
         };
 
@@ -171,19 +169,19 @@ pub async fn load_model(
         };
 
         let bytes = model_bytes.as_slice();
-        let record: <BDH<WebBackend> as Module<WebBackend>>::Record =
-            match BinBytesRecorder::<FullPrecisionSettings, &[u8]>::default()
+        let record: <BDH<WebBackend> as Module<WebBackend>>::Record = match BinBytesRecorder::<
+            FullPrecisionSettings,
+            &[u8],
+        >::default()
+        .load(bytes, &device)
+        {
+            Ok(record) => record,
+            Err(full_err) => BinBytesRecorder::<HalfPrecisionSettings, &[u8]>::default()
                 .load(bytes, &device)
-            {
-                Ok(record) => record,
-                Err(full_err) => BinBytesRecorder::<HalfPrecisionSettings, &[u8]>::default()
-                    .load(bytes, &device)
-                    .map_err(|half_err| {
-                        anyhow!(
-                            "failed to load model weights as f32 ({full_err}) or f16 ({half_err})"
-                        )
-                    })?,
-            };
+                .map_err(|half_err| {
+                    anyhow!("failed to load model weights as f32 ({full_err}) or f16 ({half_err})")
+                })?,
+        };
         let model = BDH::<WebBackend>::new(model_config, &device).load_record(record);
 
         #[cfg(not(feature = "viz"))]

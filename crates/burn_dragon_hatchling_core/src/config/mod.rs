@@ -15,18 +15,18 @@ pub use train::{
 };
 #[cfg(feature = "train")]
 pub use vision::{
-    ImagenetteVariant, VisionAugmentationConfig, VisionDatasetConfig, VisionDatasetDownloadConfig,
-    VisionArtifactOutputMode, VisionDistillConfig, VisionFoveaSamplingMode, VisionFoveaScatterMode,
-    VisionFoveaWarpMode, VisionLejepaConfig, VisionLejepaLossConfig,
+    ImagenetteVariant, VisionArtifactOutputMode, VisionAugmentationConfig, VisionDatasetConfig,
+    VisionDatasetDownloadConfig, VisionDistillConfig, VisionFoveaSamplingMode,
+    VisionFoveaScatterMode, VisionFoveaWarpMode, VisionLejepaConfig, VisionLejepaLossConfig,
     VisionLocationEmbeddingConfig, VisionLocationEmbeddingMode, VisionLossConfig, VisionMaeConfig,
-    VisionMaeLossConfig, VisionModelConfig, VisionNullGlimpseMode,
-    VisionPyramidMode, VisionReconLossConfig,
-    VisionSaccadeCacheConfig, VisionSaccadeConfig,
-    VisionSaccadeInputProjectionConfig, VisionSaccadeInputProjectionCnnConfig,
-    VisionSaccadeInputProjectionMicroVitConfig, VisionTbpttConfig,
-    VisionSaccadeInfoRewardConfig, VisionSaccadePolicyConfig, VisionTeacherConfig,
-    VisionTeacherFeatureConfig, VisionTeacherModelConfig, VisionTeacherVariant, VisionTrainingConfig,
-    VisionTrainingHyperparameters, VisionTrainingModeConfig, load_vision_training_config,
+    VisionMaeCrossViewConfig, VisionMaeLossConfig, VisionModelConfig, VisionNullGlimpseMode,
+    VisionPyramidMode, VisionReconLossConfig, VisionSaccadeCacheConfig,
+    VisionSaccadeCrossViewConfig, VisionSaccadeConfig, VisionSaccadeInfoRewardConfig,
+    VisionSaccadeInputProjectionCnnConfig, VisionSaccadeInputProjectionConfig,
+    VisionSaccadeInputProjectionMicroVitConfig, VisionSaccadePolicyConfig, VisionTbpttConfig,
+    VisionTeacherConfig, VisionTeacherFeatureConfig, VisionTeacherModelConfig,
+    VisionTeacherVariant, VisionTrainingConfig, VisionTrainingHyperparameters,
+    VisionTrainingModeConfig, load_vision_training_config,
 };
 
 #[cfg(all(test, feature = "train"))]

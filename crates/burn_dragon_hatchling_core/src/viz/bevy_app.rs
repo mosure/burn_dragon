@@ -1,15 +1,12 @@
-use std::sync::Mutex;
-#[cfg(not(target_arch = "wasm32"))]
-use std::sync::{
-    Arc,
-    atomic::AtomicBool,
-};
-#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
-use std::sync::atomic::Ordering;
 #[cfg(target_arch = "wasm32")]
 use std::cell::RefCell;
 #[cfg(target_arch = "wasm32")]
 use std::rc::Rc;
+use std::sync::Mutex;
+#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
+use std::sync::atomic::Ordering;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::{Arc, atomic::AtomicBool};
 
 use bevy::asset::RenderAssetUsages;
 use bevy::ecs::hierarchy::ChildSpawnerCommands;
@@ -18,28 +15,24 @@ use bevy::input::ButtonInput;
 use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use bevy::input::touch::Touches;
 use bevy::prelude::*;
+use bevy::render::RenderPlugin;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages};
 use bevy::render::settings::{RenderCreation, WgpuFeatures, WgpuSettings};
-use bevy::render::RenderPlugin;
 use bevy::ui::IsDefaultUiCamera;
-use bevy::ui::{ComputedNode, UiGlobalTransform};
-use bevy::window::{PrimaryWindow, Window};
 #[cfg(target_arch = "wasm32")]
 use bevy::ui::UiScale;
+use bevy::ui::{ComputedNode, UiGlobalTransform};
 #[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
 use bevy::window::WindowCloseRequested;
-use bevy_burn::{
-    BevyBurnBridgePlugin, BevyBurnHandle, BindingDirection, BurnDevice, TransferKind,
-};
-use burn::tensor::backend::Backend;
+use bevy::window::{PrimaryWindow, Window};
+use bevy_burn::{BevyBurnBridgePlugin, BevyBurnHandle, BindingDirection, BurnDevice, TransferKind};
 use burn::tensor::Tensor;
+use burn::tensor::backend::Backend;
 use burn_wgpu::WgpuDevice;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_futures::spawn_local;
 
-use super::frame::{
-    VizConfig, VizFrame, clamp_history, clamp_layers, units_height,
-};
+use super::frame::{VizConfig, VizFrame, clamp_history, clamp_layers, units_height};
 use super::transport::VizReceiver;
 
 #[derive(Clone, Copy, Debug)]
@@ -190,10 +183,7 @@ where
     app.add_plugins(bridge);
 
     let history = clamp_history(config.history);
-    let latent_total = dims
-        .heads
-        .saturating_mul(dims.latent_per_head)
-        .max(1);
+    let latent_total = dims.heads.saturating_mul(dims.latent_per_head).max(1);
     let layers_visible = clamp_layers(dims.layers, latent_total);
     let units_height = units_height(layers_visible, latent_total);
     app.insert_resource(VizLayout {
@@ -201,7 +191,9 @@ where
         units_height,
     });
     #[cfg(feature = "cli")]
-    app.insert_resource(StopSignal { flag: stop_flag.clone() });
+    app.insert_resource(StopSignal {
+        flag: stop_flag.clone(),
+    });
     #[cfg(not(feature = "cli"))]
     let _ = stop_flag;
     app.insert_resource(PanZoomState::default());
@@ -287,10 +279,7 @@ where
     app.add_plugins(BevyBurnBridgePlugin::<B>::default());
 
     let history = clamp_history(config.history);
-    let latent_total = dims
-        .heads
-        .saturating_mul(dims.latent_per_head)
-        .max(1);
+    let latent_total = dims.heads.saturating_mul(dims.latent_per_head).max(1);
     let layers_visible = clamp_layers(dims.layers, latent_total);
     let units_height = units_height(layers_visible, latent_total);
     app.insert_resource(VizLayout {
@@ -354,10 +343,7 @@ fn style_canvas() {
 }
 
 #[cfg(target_arch = "wasm32")]
-fn update_ui_scale(
-    mut ui_scale: ResMut<UiScale>,
-    windows: Query<&Window, With<PrimaryWindow>>,
-) {
+fn update_ui_scale(mut ui_scale: ResMut<UiScale>, windows: Query<&Window, With<PrimaryWindow>>) {
     let window: &Window = match windows.single() {
         Ok(window) => window,
         Err(_) => return,
@@ -625,9 +611,8 @@ fn build_image<B: Backend>(
         TextureFormat::Rgba32Float,
         RenderAssetUsages::RENDER_WORLD,
     );
-    img.texture_descriptor.usage |= TextureUsages::COPY_DST
-        | TextureUsages::TEXTURE_BINDING
-        | TextureUsages::STORAGE_BINDING;
+    img.texture_descriptor.usage |=
+        TextureUsages::COPY_DST | TextureUsages::TEXTURE_BINDING | TextureUsages::STORAGE_BINDING;
     img.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
         mag_filter: ImageFilterMode::Nearest,
         min_filter: ImageFilterMode::Nearest,
@@ -808,8 +793,7 @@ fn pan_zoom_input(
             if let Some(last) = state.touch_last_center {
                 let delta = position - last;
                 state.offset += delta;
-                state.offset =
-                    clamp_offset(state.offset, viewport_size, texture.size, state.scale);
+                state.offset = clamp_offset(state.offset, viewport_size, texture.size, state.scale);
             }
             state.touch_last_center = Some(position);
             state.touch_last_distance = None;
@@ -871,7 +855,9 @@ fn pan_zoom_input(
     }
     let cursor_local = active.map(|active| active.cursor_local);
     let cursor_in_viewport = cursor_local.is_some();
-    let viewport_size = active.map(|active| active.size).unwrap_or(state.viewport_size);
+    let viewport_size = active
+        .map(|active| active.size)
+        .unwrap_or(state.viewport_size);
 
     let mut scroll = 0.0f32;
     for event in scroll_events.read() {
@@ -1002,11 +988,11 @@ fn default_offset_bottom(viewport: Vec2, scaled: Vec2) -> Vec2 {
 
 #[cfg(all(test, feature = "viz", feature = "cli"))]
 mod tests {
+    use super::super::frame::{LAYER_GAP, VizFrame};
     use super::*;
     use bevy::asset::Assets;
     use burn::tensor::Tensor;
     use burn_ndarray::{NdArray, NdArrayDevice};
-    use super::super::frame::{LAYER_GAP, VizFrame};
 
     type Backend = NdArray<f32>;
 
@@ -1070,7 +1056,9 @@ mod tests {
 
         app.update();
 
-        let mut query = app.world_mut().query::<(&PanelKind, &BevyBurnHandle<Backend>)>();
+        let mut query = app
+            .world_mut()
+            .query::<(&PanelKind, &BevyBurnHandle<Backend>)>();
         let mut count = 0;
         for (kind, handle) in query.iter(app.world()) {
             count += 1;

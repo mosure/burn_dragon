@@ -8,7 +8,7 @@ use toml::Value;
 use crate::tokenizer::TokenizerConfig;
 
 use super::{
-    GenerationConfig, GdpoHardGate, ModelOverrides, TrainingHyperparameters, WgpuRuntimeConfig,
+    GdpoHardGate, GenerationConfig, ModelOverrides, TrainingHyperparameters, WgpuRuntimeConfig,
 };
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -299,7 +299,9 @@ impl TrainingConfig {
         }
         if let Some(multiplier) = self.model.mlp_internal_dim_multiplier {
             if multiplier == 0 {
-                return Err(anyhow!("model.mlp_internal_dim_multiplier must be > 0 when set"));
+                return Err(anyhow!(
+                    "model.mlp_internal_dim_multiplier must be > 0 when set"
+                ));
             }
         }
         if let Some(dropout) = self.model.dropout {
@@ -328,7 +330,9 @@ impl TrainingConfig {
             }
 
             match schedule {
-                LearningRateScheduleConfig::Cosine { min_lr, num_iters, .. } => {
+                LearningRateScheduleConfig::Cosine {
+                    min_lr, num_iters, ..
+                } => {
                     if matches!(min_lr.as_ref(), Some(value) if *value < 0.0) {
                         return Err(anyhow!("optimizer.lr_schedule.min_lr must be >= 0"));
                     }
@@ -336,7 +340,11 @@ impl TrainingConfig {
                         return Err(anyhow!("optimizer.lr_schedule.num_iters must be > 0"));
                     }
                 }
-                LearningRateScheduleConfig::Linear { final_lr, num_iters, .. } => {
+                LearningRateScheduleConfig::Linear {
+                    final_lr,
+                    num_iters,
+                    ..
+                } => {
                     if *final_lr < 0.0 {
                         return Err(anyhow!("optimizer.lr_schedule.final_lr must be >= 0"));
                     }
@@ -349,7 +357,9 @@ impl TrainingConfig {
                         return Err(anyhow!("optimizer.lr_schedule.gamma must be > 0"));
                     }
                 }
-                LearningRateScheduleConfig::Step { gamma, step_size, .. } => {
+                LearningRateScheduleConfig::Step {
+                    gamma, step_size, ..
+                } => {
                     if *gamma <= 0.0 {
                         return Err(anyhow!("optimizer.lr_schedule.gamma must be > 0"));
                     }
@@ -357,7 +367,11 @@ impl TrainingConfig {
                         return Err(anyhow!("optimizer.lr_schedule.step_size must be > 0"));
                     }
                 }
-                LearningRateScheduleConfig::Noam { warmup_steps, model_size, .. } => {
+                LearningRateScheduleConfig::Noam {
+                    warmup_steps,
+                    model_size,
+                    ..
+                } => {
                     if matches!(warmup_steps, Some(0)) {
                         return Err(anyhow!("optimizer.lr_schedule.warmup_steps must be > 0"));
                     }
@@ -452,8 +466,8 @@ fn default_step_gamma() -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::ContextStrategyConfig;
+    use super::*;
     use tempfile::tempdir;
 
     fn write_config(dir: &Path, name: &str, contents: &str) -> PathBuf {
@@ -577,7 +591,10 @@ mod tests {
         assert_eq!(config.model.dropout, Some(0.1));
         assert_eq!(config.model.fused_kernels, Some(true));
         assert_eq!(config.model.block_size, Some(256));
-        assert_eq!(config.model.rotary_embedding, Some(crate::positional::RotaryEmbedding::Alibi));
+        assert_eq!(
+            config.model.rotary_embedding,
+            Some(crate::positional::RotaryEmbedding::Alibi)
+        );
     }
 
     #[test]

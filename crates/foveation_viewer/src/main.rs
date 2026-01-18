@@ -8,9 +8,9 @@ use bevy::ecs::hierarchy::ChildSpawnerCommands;
 use bevy::image::{ImageSampler, ImageSamplerDescriptor};
 use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use bevy::prelude::*;
-use bevy::render::settings::{RenderCreation, WgpuFeatures, WgpuSettings};
-use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages};
 use bevy::render::RenderPlugin;
+use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages};
+use bevy::render::settings::{RenderCreation, WgpuFeatures, WgpuSettings};
 use bevy::text::{TextColor, TextFont};
 use bevy::ui::{
     BackgroundColor, ComputedNode, Display, FlexDirection, Node, Overflow, PositionType,
@@ -24,22 +24,23 @@ use bevy_inspector_egui::prelude::*;
 use bevy_inspector_egui::quick::ResourceInspectorPlugin;
 use burn::tensor::backend::Backend;
 use burn::tensor::{Tensor, TensorData};
-use burn_wgpu::Wgpu;
-use burn_dragon_hatchling_vision::foveation;
-use burn_dragon_hatchling_vision::train::SaccadeFoveationSampler;
 #[cfg(test)]
 use burn_dragon_hatchling_core::constants::FOVEA_AA_THRESHOLD;
 use burn_dragon_hatchling_core::{
-    SpatialPositionalEncodingKind, VisionAttentionMode, VisionDragonHatchlingConfig,
-    VisionFoveaSamplingMode, VisionFoveaWarpMode, VisionPyramidMode, VisionSaccadeConfig,
+    ManifoldHyperConnectionsConfig, SpatialPositionalEncodingKind, VisionAttentionMode,
+    VisionDragonHatchlingConfig, VisionFoveaSamplingMode, VisionFoveaWarpMode, VisionPyramidMode,
+    VisionSaccadeConfig,
 };
+use burn_dragon_hatchling_vision::foveation;
+use burn_dragon_hatchling_vision::train::SaccadeFoveationSampler;
+use burn_wgpu::Wgpu;
 use half::f16;
 use image::ImageReader;
 use noise::{NoiseFn, OpenSimplex};
 
 use gpu::{
-    update_gpu_params, update_gpu_pyramid_textures, FoveationGpuImages, FoveationGpuPlugin,
-    FoveationInputImage,
+    FoveationGpuImages, FoveationGpuPlugin, FoveationInputImage, update_gpu_params,
+    update_gpu_pyramid_textures,
 };
 
 const UI_PADDING: f32 = 12.0;
@@ -78,20 +79,23 @@ fn main() {
         .insert_non_send_resource(BurnFoveationState::default())
         .insert_resource(FoveationBackendState::default())
         .insert_resource(BurnHandleState::default())
-        .add_plugins(DefaultPlugins.set(WindowPlugin {
-            primary_window: Some(Window {
-                title: "Foveation Viewer".to_string(),
-                ..Default::default()
-            }),
-            ..Default::default()
-        })
-        .set(RenderPlugin {
-            render_creation: RenderCreation::Automatic(WgpuSettings {
-                features: WgpuFeatures::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES,
-                ..Default::default()
-            }),
-            ..Default::default()
-        }))
+        .add_plugins(
+            DefaultPlugins
+                .set(WindowPlugin {
+                    primary_window: Some(Window {
+                        title: "Foveation Viewer".to_string(),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                })
+                .set(RenderPlugin {
+                    render_creation: RenderCreation::Automatic(WgpuSettings {
+                        features: WgpuFeatures::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+        )
         .add_plugins(FoveationGpuPlugin)
         .add_plugins(BevyBurnBridgePlugin::<BurnBackend>::default())
         .add_plugins(EguiPlugin::default())
@@ -423,11 +427,7 @@ fn setup(
     source: Res<SourceImage>,
     settings: Res<FoveationSettings>,
 ) {
-    commands.spawn((
-        Camera2d,
-        Transform::default(),
-        GlobalTransform::default(),
-    ));
+    commands.spawn((Camera2d, Transform::default(), GlobalTransform::default()));
 
     let left_handle = create_bevy_image(&source, &mut images);
     let input_handle = create_gpu_input_image(&source, &mut images);
@@ -505,7 +505,9 @@ fn setup(
             ));
         });
 
-    commands.insert_resource(ActiveFoveationView { patch: patch_entity });
+    commands.insert_resource(ActiveFoveationView {
+        patch: patch_entity,
+    });
 
     if let Some(entity) = input_entity {
         commands.entity(entity).with_children(|parent| {
@@ -629,18 +631,18 @@ fn spawn_panel(
                     image_entity = Some(
                         viewport
                             .spawn((
-                        Node {
-                            position_type: PositionType::Absolute,
-                            left: Val::Px(0.0),
-                            top: Val::Px(0.0),
-                            width: Val::Px(image_size.x),
-                            height: Val::Px(image_size.y),
-                            ..Default::default()
-                        },
-                        ImageNode::new(handle).with_mode(NodeImageMode::Stretch),
-                        PanZoomImage,
-                        kind,
-                    ))
+                                Node {
+                                    position_type: PositionType::Absolute,
+                                    left: Val::Px(0.0),
+                                    top: Val::Px(0.0),
+                                    width: Val::Px(image_size.x),
+                                    height: Val::Px(image_size.y),
+                                    ..Default::default()
+                                },
+                                ImageNode::new(handle).with_mode(NodeImageMode::Stretch),
+                                PanZoomImage,
+                                kind,
+                            ))
                             .id(),
                     );
                 });
@@ -692,13 +694,15 @@ fn attach_burn_handle(
         .max(1)
         .min(source.width.min(source.height));
     let tensor = Tensor::<BurnBackend, 3>::zeros([patch, patch, 4], &device);
-    commands.entity(entity).insert(BevyBurnHandle::<BurnBackend> {
-        bevy_image: output.burn.clone(),
-        tensor,
-        upload: false,
-        direction: BindingDirection::BurnToBevy,
-        xfer: TransferKind::Gpu,
-    });
+    commands
+        .entity(entity)
+        .insert(BevyBurnHandle::<BurnBackend> {
+            bevy_image: output.burn.clone(),
+            tensor,
+            upload: false,
+            direction: BindingDirection::BurnToBevy,
+            xfer: TransferKind::Gpu,
+        });
     state.attached = true;
 }
 
@@ -730,9 +734,7 @@ fn update_patch_texture(
     output_handles.burn = create_burn_image(patch, &mut images);
     gpu_images.output = output_handles.cpu.clone();
     let patch_handle = match settings.backend {
-        FoveationBackendMode::Burn | FoveationBackendMode::Cubecl => {
-            output_handles.burn.clone()
-        }
+        FoveationBackendMode::Burn | FoveationBackendMode::Cubecl => output_handles.burn.clone(),
         _ => output_handles.cpu.clone(),
     };
     for (kind, mut image) in &mut panels {
@@ -834,10 +836,7 @@ fn update_burn_patch(
         return;
     };
     let (burn_width, burn_height) = burn_target_dims(&source, &settings);
-    let patch = runtime
-        .patch_size
-        .max(1)
-        .min(burn_width.min(burn_height));
+    let patch = runtime.patch_size.max(1).min(burn_width.min(burn_height));
     let key = BurnFoveationKey {
         width: burn_width,
         height: burn_height,
@@ -884,14 +883,10 @@ fn update_burn_patch(
         TensorData::new(vec![sample.mean_x, sample.mean_y], [1, 2]),
         &device,
     );
-    let sigma = Tensor::<BurnBackend, 2>::from_data(
-        TensorData::new(vec![sigma_norm], [1, 1]),
-        &device,
-    );
-    let radius = Tensor::<BurnBackend, 2>::from_data(
-        TensorData::new(vec![radius_norm], [1, 1]),
-        &device,
-    );
+    let sigma =
+        Tensor::<BurnBackend, 2>::from_data(TensorData::new(vec![sigma_norm], [1, 1]), &device);
+    let radius =
+        Tensor::<BurnBackend, 2>::from_data(TensorData::new(vec![radius_norm], [1, 1]), &device);
     let patch = sampler.sample_patch_with_radius(mean, sigma, radius);
     let rgba = patch_to_rgba::<BurnBackend>(patch);
     for mut handle in &mut handles {
@@ -1009,7 +1004,10 @@ fn pan_zoom_input(
     mut states: ResMut<PanZoomStates>,
     textures: Res<PanZoomTextures>,
     windows: Query<&Window, With<PrimaryWindow>>,
-    viewports: Query<(Entity, &PanelKind, &ComputedNode, &UiGlobalTransform), With<PanZoomViewport>>,
+    viewports: Query<
+        (Entity, &PanelKind, &ComputedNode, &UiGlobalTransform),
+        With<PanZoomViewport>,
+    >,
     buttons: Res<ButtonInput<MouseButton>>,
     mut scroll_events: MessageReader<MouseWheel>,
     touches: Res<Touches>,
@@ -1180,7 +1178,12 @@ fn pan_zoom_input(
 
     let active = active_viewport(cursor, &viewports);
     let (active_kind, cursor_local, viewport_size, inverse_scale) = if let Some(active) = active {
-        (Some(active.kind), Some(active.cursor_local), active.size, active.inverse_scale_factor)
+        (
+            Some(active.kind),
+            Some(active.cursor_local),
+            active.size,
+            active.inverse_scale_factor,
+        )
     } else {
         (None, None, Vec2::ZERO, 1.0)
     };
@@ -1228,7 +1231,9 @@ fn pan_zoom_input(
         state.dragging = true;
     }
 
-    if state.dragging && let Some(last) = state.last_cursor {
+    if state.dragging
+        && let Some(last) = state.last_cursor
+    {
         let delta = cursor - last;
         state.offset += delta;
         let texture = textures.size(kind);
@@ -1286,7 +1291,10 @@ fn cursor_local_from_viewport(
 
 fn active_viewport(
     cursor: Vec2,
-    viewports: &Query<(Entity, &PanelKind, &ComputedNode, &UiGlobalTransform), With<PanZoomViewport>>,
+    viewports: &Query<
+        (Entity, &PanelKind, &ComputedNode, &UiGlobalTransform),
+        With<PanZoomViewport>,
+    >,
 ) -> Option<ActiveViewport> {
     for (entity, kind, node, transform) in viewports.iter() {
         if node.contains_point(*transform, cursor) {
@@ -1460,11 +1468,7 @@ pub(crate) fn render_patch(
             let uy_base = base_dy / half;
             let warp_x_base = foveated_warp(ux_base, sigma, radius);
             let warp_y_base = foveated_warp(uy_base, sigma, radius);
-            let local_scale_base = warp_x_base
-                .deriv
-                .abs()
-                .max(warp_y_base.deriv.abs())
-                * pixel_du;
+            let local_scale_base = warp_x_base.deriv.abs().max(warp_y_base.deriv.abs()) * pixel_du;
             let mut color = [0.0; 3];
             let mut count = 0.0;
             if local_scale_base <= FOVEA_AA_THRESHOLD {
@@ -1514,11 +1518,7 @@ pub(crate) fn render_patch(
                         let warp_y = foveated_warp(uy, sigma, radius);
                         let offset_x = warp_x.offset;
                         let offset_y = warp_y.offset;
-                        let local_scale = warp_x
-                            .deriv
-                            .abs()
-                            .max(warp_y.deriv.abs())
-                            * pixel_du;
+                        let local_scale = warp_x.deriv.abs().max(warp_y.deriv.abs()) * pixel_du;
                         let img_x = center_x + offset_x;
                         let img_y = center_y + offset_y;
                         let fx = img_x / source.width as f32;
@@ -1688,11 +1688,7 @@ pub(crate) fn render_patch_f32(
             let uy_base = base_dy / half;
             let warp_x_base = foveated_warp(ux_base, sigma, radius);
             let warp_y_base = foveated_warp(uy_base, sigma, radius);
-            let local_scale_base = warp_x_base
-                .deriv
-                .abs()
-                .max(warp_y_base.deriv.abs())
-                * pixel_du;
+            let local_scale_base = warp_x_base.deriv.abs().max(warp_y_base.deriv.abs()) * pixel_du;
             let mut color = [0.0; 3];
             let mut count = 0.0;
             if local_scale_base <= FOVEA_AA_THRESHOLD {
@@ -1742,11 +1738,7 @@ pub(crate) fn render_patch_f32(
                         let warp_y = foveated_warp(uy, sigma, radius);
                         let offset_x = warp_x.offset;
                         let offset_y = warp_y.offset;
-                        let local_scale = warp_x
-                            .deriv
-                            .abs()
-                            .max(warp_y.deriv.abs())
-                            * pixel_du;
+                        let local_scale = warp_x.deriv.abs().max(warp_y.deriv.abs()) * pixel_du;
                         let img_x = center_x + offset_x;
                         let img_y = center_y + offset_y;
                         let fx = img_x / source.width as f32;
@@ -2081,9 +2073,8 @@ pub(crate) fn build_laplacian_pyramid(gaussian: &[ImageLevel]) -> (Vec<ImageLeve
         let next = &gaussian[idx + 1];
         let up = resample(next, current.width, current.height);
         let mut data = vec![0.0; current.width * current.height * 3];
-        for (out, (current_val, up_val)) in data
-            .iter_mut()
-            .zip(current.data.iter().zip(up.data.iter()))
+        for (out, (current_val, up_val)) in
+            data.iter_mut().zip(current.data.iter().zip(up.data.iter()))
         {
             *out = current_val - up_val;
         }
@@ -2146,7 +2137,11 @@ fn resample(level: &ImageLevel, width: usize, height: usize) -> ImageLevel {
             data[idx + 2] = sample[2];
         }
     }
-    ImageLevel { width, height, data }
+    ImageLevel {
+        width,
+        height,
+        data,
+    }
 }
 
 #[cfg(test)]
@@ -2196,11 +2191,7 @@ fn sample_bilinear(level: &ImageLevel, fx: f32, fy: f32) -> [f32; 3] {
 #[cfg(test)]
 fn get_pixel(level: &ImageLevel, x: usize, y: usize) -> [f32; 3] {
     let idx = (y * level.width + x) * 3;
-    [
-        level.data[idx],
-        level.data[idx + 1],
-        level.data[idx + 2],
-    ]
+    [level.data[idx], level.data[idx + 1], level.data[idx + 2]]
 }
 
 fn load_image(path: &PathBuf) -> anyhow::Result<SourceImage> {
@@ -2250,9 +2241,8 @@ fn create_gpu_input_image(source: &SourceImage, images: &mut Assets<Image>) -> H
         TextureFormat::Rgba16Float,
         RenderAssetUsages::default(),
     );
-    image.texture_descriptor.usage |= TextureUsages::COPY_DST
-        | TextureUsages::COPY_SRC
-        | TextureUsages::TEXTURE_BINDING;
+    image.texture_descriptor.usage |=
+        TextureUsages::COPY_DST | TextureUsages::COPY_SRC | TextureUsages::TEXTURE_BINDING;
     image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor::linear());
     images.add(image)
 }
@@ -2378,9 +2368,8 @@ fn create_blank_image(size: usize, images: &mut Assets<Image>) -> Handle<Image> 
         TextureFormat::Rgba8Unorm,
         RenderAssetUsages::default(),
     );
-    image.texture_descriptor.usage |= TextureUsages::COPY_DST
-        | TextureUsages::TEXTURE_BINDING
-        | TextureUsages::STORAGE_BINDING;
+    image.texture_descriptor.usage |=
+        TextureUsages::COPY_DST | TextureUsages::TEXTURE_BINDING | TextureUsages::STORAGE_BINDING;
     image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor::linear());
     images.add(image)
 }
@@ -2399,9 +2388,8 @@ fn create_burn_image(size: usize, images: &mut Assets<Image>) -> Handle<Image> {
         TextureFormat::Rgba32Float,
         RenderAssetUsages::RENDER_WORLD,
     );
-    image.texture_descriptor.usage |= TextureUsages::COPY_DST
-        | TextureUsages::TEXTURE_BINDING
-        | TextureUsages::STORAGE_BINDING;
+    image.texture_descriptor.usage |=
+        TextureUsages::COPY_DST | TextureUsages::TEXTURE_BINDING | TextureUsages::STORAGE_BINDING;
     image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor::linear());
     images.add(image)
 }
@@ -2621,8 +2609,7 @@ fn estimate_pyramid_bytes(
         for window in levels.windows(2) {
             let (w_out, h_out) = window[0];
             let (w_in, h_in) = window[1];
-            let bytes =
-                grid_sample_max_buffer_bytes(batch, channels, h_in, w_in, h_out, w_out);
+            let bytes = grid_sample_max_buffer_bytes(batch, channels, h_in, w_in, h_out, w_out);
             max_grid_sample = max_grid_sample.max(bytes);
         }
         max_tensor = max_tensor.max(max_grid_sample);
@@ -2723,11 +2710,7 @@ fn tensor_from_source_resized<B: Backend>(
 
 fn source_pixel(source: &SourceImage, x: usize, y: usize) -> [f32; 3] {
     let idx = (y * source.width + x) * 3;
-    [
-        source.data[idx],
-        source.data[idx + 1],
-        source.data[idx + 2],
-    ]
+    [source.data[idx], source.data[idx + 1], source.data[idx + 2]]
 }
 
 fn lerp_f32(a: f32, b: f32, t: f32) -> f32 {

@@ -60,7 +60,9 @@ pub fn channel<B: Backend>() -> (VizSender<B>, VizReceiver<B>) {
     {
         let slot = Arc::new(Mutex::new(None));
         (
-            VizSender { inner: slot.clone() },
+            VizSender {
+                inner: slot.clone(),
+            },
             VizReceiver { inner: slot },
         )
     }
@@ -69,7 +71,9 @@ pub fn channel<B: Backend>() -> (VizSender<B>, VizReceiver<B>) {
     {
         let slot = Rc::new(RefCell::new(None));
         (
-            VizSender { inner: slot.clone() },
+            VizSender {
+                inner: slot.clone(),
+            },
             VizReceiver { inner: slot },
         )
     }

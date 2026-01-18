@@ -124,10 +124,7 @@ pub fn vision_distillation_loss<B: Backend>(
         let student = l2_normalize(student_cls.clone());
         let teacher = l2_normalize(teacher_cls.clone().detach());
         let cosine = student.mul(teacher).sum_dim(1);
-        let loss = cosine
-            .mul_scalar(-1.0)
-            .add_scalar(1.0)
-            .mean();
+        let loss = cosine.mul_scalar(-1.0).add_scalar(1.0).mean();
         total = total + loss.mul_scalar(config.cls_cosine_weight);
     }
 
@@ -194,10 +191,14 @@ mod tests {
     fn vision_distillation_loss_is_finite() {
         type Backend = NdArray<f32>;
         let device = <Backend as BackendTrait>::Device::default();
-        let student_patch = Tensor::<Backend, 3>::random([2, 4, 8], burn::tensor::Distribution::Default, &device);
-        let teacher_patch = Tensor::<Backend, 3>::random([2, 4, 8], burn::tensor::Distribution::Default, &device);
-        let student_cls = Tensor::<Backend, 2>::random([2, 8], burn::tensor::Distribution::Default, &device);
-        let teacher_cls = Tensor::<Backend, 2>::random([2, 8], burn::tensor::Distribution::Default, &device);
+        let student_patch =
+            Tensor::<Backend, 3>::random([2, 4, 8], burn::tensor::Distribution::Default, &device);
+        let teacher_patch =
+            Tensor::<Backend, 3>::random([2, 4, 8], burn::tensor::Distribution::Default, &device);
+        let student_cls =
+            Tensor::<Backend, 2>::random([2, 8], burn::tensor::Distribution::Default, &device);
+        let teacher_cls =
+            Tensor::<Backend, 2>::random([2, 8], burn::tensor::Distribution::Default, &device);
 
         let config = VisionDistillationLossConfig::default();
         let loss = vision_distillation_loss(

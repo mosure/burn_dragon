@@ -1,24 +1,27 @@
-# tiny saccade training config
+# Tiny CroCo-style MAE training config (Imagenette auto-download).
 
 [dataset]
 imagenet_root = "data/imagenette2-160"
 train_dir = "train"
 val_dir = "val"
-prefetch_batches = 4
-prefetch_workers = 8
+max_records = 64
+prefetch_batches = 2
+prefetch_workers = 4
 prefetch_to_device = true
 cache_decoded = true
-cache_capacity = 16384
-cache_preprocessed = true
+cache_capacity = 512
+cache_preprocessed = false
 
 [dataset.download]
 type = "imagenette"
 variant = "imagenette2-160"
 
 [training]
-batch_size = 64
-max_iters = 2000
+batch_size = 8
+epochs = 100
+max_iters = 800
 log_frequency = 20
+batch_repeats = 1
 # run GPU memory cleanup every N epochs (0 disables)
 memory_cleanup_every = 0
 # run GPU memory cleanup every N iterations (0 disables)
@@ -32,15 +35,14 @@ trace_train_loss = false
 trace_train_loss_every = 1
 # optional ffmpeg path for mp4/avi encoding
 # ffmpeg_path = "C:/path/to/ffmpeg"
-rollout_min_steps = 16
-rollout_max_steps = 16
+rollout_min_steps = 4
+rollout_max_steps = 64
 # backprop through the last N rollout steps (0 = all steps)
-rollout_backprop_steps = 16
-batch_repeats = 1
+rollout_backprop_steps = 0
 
 [optimizer]
-learning_rate = 0.0005
-weight_decay = 0.05
+learning_rate = 0.002
+weight_decay = 0.01
 grad_clip_norm = 1.0
 
 [optimizer.lr_schedule]
@@ -49,25 +51,36 @@ type = "constant"
 [wgpu]
 backend = "auto"
 memory = "subslices"
-# tasks_max = 1024
 
 [vision]
 image_size = 160
-patch_size = 32
+patch_size = 16
+patch_embed_mode = "conv"
 in_channels = 3
-embed_dim = 256
-steps = 256  # TODO: support infinite streaming
-n_head = 8
-mlp_internal_dim_multiplier = 4
-dropout = 0.1
-projection_dim = 256
-projection_hidden_dim = 512
+embed_dim = 384
+steps = 64
+n_head = 6
+mlp_internal_dim_multiplier = 6
+dropout = 0.0
+projection_dim = 384
+projection_hidden_dim = 768
 use_cls_token = true
-num_eyes = 1
+cls_sync_alpha = 0.9
+num_eyes = 2
+cross_eye_steps = 4
+token_state_norm = true
+latent_activation = "gelu"
 pos_encoding = "learned2d"
-attention_mode = "row_l1"
-fused_kernels = true
+attention_mode = "softmax"
+fused_kernels = false
 relu_threshold = 0.0
+
+[vision.mhc]
+enabled = true
+mhc_iters = 10
+mhc_tau = 0.05
+add_branch_out_to_residual = true
+dropout = 0.0
 
 [mode]
 type = "saccade"
@@ -76,7 +89,7 @@ traj_tokens = 1
 # blend factor for recurrent trajectory updates (1.0 = full overwrite)
 traj_update_alpha = 0.7
 # number of MIP levels (2x downsample per level) used for Gaussian sampling
-mip_levels = 4
+mip_levels = 3
 # how pyramid scales are represented: stacked (raw) or laplacian (residual)
 pyramid_mode = "laplacian"
 # fovea sampling strategy: batched, sequential, subpatch, cubecl, or wgsl
@@ -100,39 +113,33 @@ recon_batch_chunk = 0
 # max elements for recon chunking
 recon_max_elems = 50000000
 # feature pyramid embedding dim (unset uses model embed_dim)
-pyramid_feature_dim = 256
+pyramid_feature_dim = 384
 # inner recurrent steps per rollout step
-inner_steps = 1
+inner_steps = 2
 # pre-rollout steps always run without grad to keep memory stable
 low_mem_pre_rollout = true
 # write artifact images every N validation iterations (0 disables)
 artifact_every = 1
 # artifact output: images (png), avi, or mp4
-artifact_output = "mp4"
+artifact_output = "images"
 # artifact video fps (frames per second)
 artifact_fps = 8
 # max images per validation epoch to write artifacts for
-artifact_max_images = 16
-# max panels per image (input + per-eye patches + recon + overlays)
-artifact_max_views = 4
+artifact_max_images = 8
+# max panels per image (input + per-eye views + patches + recon)
+artifact_max_views = 8
 # overwrite validation artifacts instead of keeping history
 artifact_overwrite = true
+
+[mode.cross_view]
+enabled = true
+min_overlap = 0.3
+max_attempts = 10
+masked_eye = 1
 
 # input projection module: linear | cnn | radial_micro_vit
 [mode.input_projection]
 type = "linear"
-# cnn params
-# channels = 256
-# blocks = 2
-# kernel = 5
-# expansion = 2
-
-# radial micro-ViT params
-# layers = 2
-# heads = 4
-# mlp_ratio = 2
-# radial_hidden_dim = 128
-# radial_scale = 1.0
 
 # truncated BPTT chunk size (0 disables)
 [mode.tbptt]
@@ -168,7 +175,7 @@ null_noise_std = 0.05
 [mode.policy.gdpo]
 # GDPO advantage conditioning for saccade policy
 enabled = true
-group_size = 8
+group_size = 4
 hard_weight = 1.0
 easy_weight = 1.0
 policy_weight = 1.0
@@ -190,23 +197,24 @@ enabled = false
 lambda = 0.02
 sigreg_knots = 17
 sigreg_t_max = 3.0
-sigreg_proj_dim = 256
+sigreg_proj_dim = 384
 
 [mode.loss.recon]
-# reconstruction loss weight (trains RGB decoder)
+# fraction of patches to mask for reconstruction
+mask_ratio = 0.75
 weight = 1.0
-# saccade ignores MAE-style masking (full-image reconstruction)
-mask_ratio = 0.0
-hidden_dim = 256
+hidden_dim = 768
+recon_head_norm = true
+loss_on_all_patches = false
 
 [augment]
 image_size = 160
 resize_short = 160
-min_scale = 1.0
+min_scale = 0.2
 max_scale = 1.0
-min_aspect_ratio = 1.0
-max_aspect_ratio = 1.0
-flip_prob = 0.0
+min_aspect_ratio = 0.75
+max_aspect_ratio = 1.3333334
+flip_prob = 0.5
 color_jitter_prob = 0.0
 brightness = 0.0
 contrast = 0.0
@@ -214,8 +222,8 @@ saturation = 0.0
 hue = 0.0
 grayscale_prob = 0.0
 blur_prob = 0.0
-blur_sigma_min = 0.0
-blur_sigma_max = 0.0
+blur_sigma_min = 0.1
+blur_sigma_max = 2.0
 solarize_prob = 0.0
 solarize_threshold = 128
 normalize_mean = [0.485, 0.456, 0.406]

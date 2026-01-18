@@ -180,16 +180,20 @@ pub(crate) fn lejepa_sigreg_loss_params<B: BackendTrait>(
     for i in 0..knots {
         let value = i as f32 * dt;
         let window = (-0.5 * value * value).exp();
-        let weight = if i == 0 || i + 1 == knots { dt } else { 2.0 * dt };
+        let weight = if i == 0 || i + 1 == knots {
+            dt
+        } else {
+            2.0 * dt
+        };
         t.push(value);
         phi.push(window);
         weights.push(weight * window);
     }
 
-    let t = Tensor::<B, 1>::from_data(TensorData::new(t, [knots]), &device)
-        .reshape([1, 1, 1, knots]);
-    let phi = Tensor::<B, 1>::from_data(TensorData::new(phi, [knots]), &device)
-        .reshape([1, 1, knots]);
+    let t =
+        Tensor::<B, 1>::from_data(TensorData::new(t, [knots]), &device).reshape([1, 1, 1, knots]);
+    let phi =
+        Tensor::<B, 1>::from_data(TensorData::new(phi, [knots]), &device).reshape([1, 1, knots]);
     let weights = Tensor::<B, 1>::from_data(TensorData::new(weights, [knots]), &device)
         .reshape([1, 1, knots]);
 
@@ -209,10 +213,7 @@ pub(crate) fn lejepa_sigreg_loss_params<B: BackendTrait>(
         .cos()
         .mean_dim(1)
         .reshape([views, sketch_dim, knots]);
-    let sin = x_t
-        .sin()
-        .mean_dim(1)
-        .reshape([views, sketch_dim, knots]);
+    let sin = x_t.sin().mean_dim(1).reshape([views, sketch_dim, knots]);
     let phi = phi.repeat_dim(0, views).repeat_dim(1, sketch_dim);
     let weights = weights.repeat_dim(0, views).repeat_dim(1, sketch_dim);
     let err = (cos - phi).powf_scalar(2.0) + sin.powf_scalar(2.0);
@@ -220,15 +221,15 @@ pub(crate) fn lejepa_sigreg_loss_params<B: BackendTrait>(
     statistic.mean()
 }
 
-pub(crate) fn normalize_artifact_legend(legend: Option<Vec<String>>, view_count: usize) -> Option<Vec<String>> {
+pub(crate) fn normalize_artifact_legend(
+    legend: Option<Vec<String>>,
+    view_count: usize,
+) -> Option<Vec<String>> {
     if view_count == 0 {
         return None;
     }
-    let mut legend = legend.unwrap_or_else(|| {
-        (0..view_count)
-            .map(|idx| format!("view_{idx}"))
-            .collect()
-    });
+    let mut legend =
+        legend.unwrap_or_else(|| (0..view_count).map(|idx| format!("view_{idx}")).collect());
     if legend.len() < view_count {
         for idx in legend.len()..view_count {
             legend.push(format!("view_{idx}"));
@@ -316,5 +317,3 @@ pub(crate) fn select_trajectory_indices(total: usize, max: usize) -> Vec<usize> 
     indices.dedup();
     indices
 }
-
-

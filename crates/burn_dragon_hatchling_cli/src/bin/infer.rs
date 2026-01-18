@@ -55,9 +55,8 @@ fn run() -> Result<()> {
     if args.config.is_empty() {
         let backend_name = backend_name(args.backend);
         if let Some(config_path) = resolve_run_config_path(args.checkpoint.as_ref(), backend_name) {
-            let contents = fs::read_to_string(&config_path).with_context(|| {
-                format!("failed to read run config {}", config_path.display())
-            })?;
+            let contents = fs::read_to_string(&config_path)
+                .with_context(|| format!("failed to read run config {}", config_path.display()))?;
             let run_config: RunConfigJson = serde_json::from_str(&contents)
                 .with_context(|| format!("failed to parse {}", config_path.display()))?;
             apply_run_config(&mut config, &run_config);
@@ -75,12 +74,9 @@ fn run() -> Result<()> {
         BackendArg::Wgpu => {
             #[cfg(feature = "viz")]
             if use_viz {
-                return infer_backend_with_viz::<Wgpu<f32>, _>(
-                    &config,
-                    &args,
-                    "wgpu",
-                    |device| init_runtime(device, &config.wgpu),
-                );
+                return infer_backend_with_viz::<Wgpu<f32>, _>(&config, &args, "wgpu", |device| {
+                    init_runtime(device, &config.wgpu)
+                });
             }
             infer_backend::<Wgpu<f32>, _>(&config, &args, "wgpu", |device| {
                 init_runtime(device, &config.wgpu)
@@ -120,14 +116,7 @@ where
     let device = B::Device::default();
     #[cfg(feature = "viz")]
     {
-        infer_backend_on_device::<B, Init>(
-            config,
-            args,
-            backend_name,
-            device,
-            init_backend,
-            None,
-        )
+        infer_backend_on_device::<B, Init>(config, args, backend_name, device, init_backend, None)
     }
     #[cfg(not(feature = "viz"))]
     {
@@ -408,7 +397,6 @@ where
     Ok(result)
 }
 
-
 fn apply_generation_overrides(generation: &mut GenerationConfig, args: &Args, block_size: usize) {
     if let Some(prompt) = &args.prompt {
         generation.prompt = prompt.clone();
@@ -576,10 +564,7 @@ fn merge_model_overrides(base: &mut ModelOverrides, incoming: &ModelOverrides) {
     }
 }
 
-fn resolve_run_config_path(
-    checkpoint: Option<&PathBuf>,
-    backend_name: &str,
-) -> Option<PathBuf> {
+fn resolve_run_config_path(checkpoint: Option<&PathBuf>, backend_name: &str) -> Option<PathBuf> {
     let checkpoint_path = checkpoint
         .cloned()
         .unwrap_or_else(|| default_checkpoint_dir(backend_name));
@@ -596,9 +581,7 @@ fn resolve_run_config_path(
         }
     } else if let Some(parent) = checkpoint_path.parent() {
         candidates.push(parent.join("config.json"));
-        if parent
-            .file_name()
-            .is_some_and(|name| name == "checkpoint")
+        if parent.file_name().is_some_and(|name| name == "checkpoint")
             && let Some(grandparent) = parent.parent()
         {
             candidates.push(grandparent.join("config.json"));
@@ -689,7 +672,6 @@ enum ContextModeArg {
     Infinite,
     Sliding,
 }
-
 
 fn backend_name(backend: BackendArg) -> &'static str {
     match backend {

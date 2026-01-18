@@ -8,8 +8,11 @@ use burn::tensor::backend::{AutodiffBackend, Backend};
 use serde::{Deserialize, Serialize};
 use toml::Value;
 
-use crate::model::{FusedKernelConfig, SpatialPositionalEncodingKind, VisionAttentionMode};
 use crate::model::VisionDistillationLossConfig;
+use crate::model::{
+    FusedKernelConfig, SpatialPositionalEncodingKind, VisionAttentionMode, VisionLatentActivation,
+    VisionPatchEmbedMode,
+};
 
 use super::{GdpoConfig, GdpoHardGate, OptimizerConfig, WgpuRuntimeConfig};
 
@@ -372,9 +375,7 @@ impl VisionTrainingConfig {
             return Err(anyhow!("training.batch_repeats must be > 0"));
         }
         if self.training.trace_train_loss_every == 0 {
-            return Err(anyhow!(
-                "training.trace_train_loss_every must be > 0"
-            ));
+            return Err(anyhow!("training.trace_train_loss_every must be > 0"));
         }
         if let Some(epochs) = self.training.epochs {
             if epochs == 0 {
@@ -398,19 +399,32 @@ impl VisionTrainingConfig {
         if self.vision.steps == 0 {
             return Err(anyhow!("vision.steps must be > 0"));
         }
+        if self.vision.cross_eye_steps > self.vision.steps {
+            return Err(anyhow!(
+                "vision.cross_eye_steps ({}) must be <= vision.steps ({})",
+                self.vision.cross_eye_steps,
+                self.vision.steps
+            ));
+        }
         if self.vision.n_head == 0 {
             return Err(anyhow!("vision.n_head must be > 0"));
         }
         if self.vision.mlp_internal_dim_multiplier == 0 {
-            return Err(anyhow!(
-                "vision.mlp_internal_dim_multiplier must be > 0"
-            ));
+            return Err(anyhow!("vision.mlp_internal_dim_multiplier must be > 0"));
         }
         if self.vision.projection_dim == 0 {
             return Err(anyhow!("vision.projection_dim must be > 0"));
         }
         if self.vision.projection_hidden_dim == 0 {
             return Err(anyhow!("vision.projection_hidden_dim must be > 0"));
+        }
+        if self.vision.num_eyes == 0 {
+            return Err(anyhow!("vision.num_eyes must be > 0"));
+        }
+        if self.vision.cls_sync_alpha < 0.0 || self.vision.cls_sync_alpha > 1.0 {
+            return Err(anyhow!(
+                "vision.cls_sync_alpha must be between 0.0 and 1.0"
+            ));
         }
         if self.vision.dropout < 0.0 {
             return Err(anyhow!("vision.dropout must be >= 0"));
@@ -422,6 +436,7 @@ impl VisionTrainingConfig {
             return Err(anyhow!("vision.pos_max_width must be > 0 when set"));
         }
 
+        validate_vision_mhc(&self.vision)?;
         validate_vision_rollout(&self.training, self.vision.steps)?;
         validate_vision_mode(&self.mode, &self.vision)?;
 
@@ -497,7 +512,9 @@ impl Default for VisionTeacherFeatureConfig {
     fn default() -> Self {
         Self {
             train_cls_path: PathBuf::from("data/imagenet1k/features/dinov3_small/train_cls.bin"),
-            train_patch_path: PathBuf::from("data/imagenet1k/features/dinov3_small/train_patch.bin"),
+            train_patch_path: PathBuf::from(
+                "data/imagenet1k/features/dinov3_small/train_patch.bin",
+            ),
             val_cls_path: PathBuf::from("data/imagenet1k/features/dinov3_small/val_cls.bin"),
             val_patch_path: PathBuf::from("data/imagenet1k/features/dinov3_small/val_patch.bin"),
             feature_dim: 384,
@@ -577,6 +594,10 @@ pub struct VisionReconLossConfig {
     /// When true, compute reconstruction loss on all patches (not only masked ones).
     #[serde(alias = "full_loss")]
     pub loss_on_all_patches: bool,
+    /// Enable LayerNorm before the reconstruction head.
+    #[serde(alias = "norm")]
+    pub recon_head_norm: bool,
+    /// Hidden dimension for the recon head MLP (set to 0 for a linear head).
     pub hidden_dim: usize,
 }
 
@@ -586,6 +607,7 @@ impl Default for VisionReconLossConfig {
             weight: 0.0,
             mask_ratio: 0.75,
             loss_on_all_patches: false,
+            recon_head_norm: true,
             hidden_dim: 256,
         }
     }
@@ -597,6 +619,7 @@ impl ModuleDisplayDefault for VisionReconLossConfig {
             .add("weight", &self.weight)
             .add("mask_ratio", &self.mask_ratio)
             .add("loss_on_all_patches", &self.loss_on_all_patches)
+            .add("recon_head_norm", &self.recon_head_norm)
             .add("hidden_dim", &self.hidden_dim)
             .optional()
     }
@@ -655,6 +678,80 @@ impl ModuleDisplayDefault for VisionMaeLossConfig {
 }
 
 impl ModuleDisplay for VisionMaeLossConfig {}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(default)]
+pub struct VisionMaeCrossViewConfig {
+    pub enabled: bool,
+    pub min_overlap: f32,
+    pub max_attempts: usize,
+    /// Index into `vision.num_eyes` for the masked view.
+    pub masked_eye: usize,
+    pub fuse_alpha: f32,
+    pub visible_weight: f32,
+}
+
+impl Default for VisionMaeCrossViewConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            min_overlap: 0.3,
+            max_attempts: 10,
+            masked_eye: 1,
+            fuse_alpha: 0.0,
+            visible_weight: 0.0,
+        }
+    }
+}
+
+impl ModuleDisplayDefault for VisionMaeCrossViewConfig {
+    fn content(&self, content: Content) -> Option<Content> {
+        content
+            .add("enabled", &self.enabled)
+            .add("min_overlap", &self.min_overlap)
+            .add("max_attempts", &self.max_attempts)
+            .add("masked_eye", &self.masked_eye)
+            .add("fuse_alpha", &self.fuse_alpha)
+            .add("visible_weight", &self.visible_weight)
+            .optional()
+    }
+}
+
+impl ModuleDisplay for VisionMaeCrossViewConfig {}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(default)]
+pub struct VisionSaccadeCrossViewConfig {
+    pub enabled: bool,
+    pub min_overlap: f32,
+    pub max_attempts: usize,
+    /// Index into `vision.num_eyes` for the masked view.
+    pub masked_eye: usize,
+}
+
+impl Default for VisionSaccadeCrossViewConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            min_overlap: 0.3,
+            max_attempts: 10,
+            masked_eye: 1,
+        }
+    }
+}
+
+impl ModuleDisplayDefault for VisionSaccadeCrossViewConfig {
+    fn content(&self, content: Content) -> Option<Content> {
+        content
+            .add("enabled", &self.enabled)
+            .add("min_overlap", &self.min_overlap)
+            .add("max_attempts", &self.max_attempts)
+            .add("masked_eye", &self.masked_eye)
+            .optional()
+    }
+}
+
+impl ModuleDisplay for VisionSaccadeCrossViewConfig {}
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
@@ -756,6 +853,7 @@ impl ModuleDisplay for VisionLejepaConfig {}
 #[serde(default)]
 pub struct VisionMaeConfig {
     pub loss: VisionMaeLossConfig,
+    pub cross_view: VisionMaeCrossViewConfig,
     #[serde(default = "default_mae_pyramid_levels")]
     pub pyramid_levels: usize,
     pub artifact_output: VisionArtifactOutputMode,
@@ -770,6 +868,7 @@ impl Default for VisionMaeConfig {
     fn default() -> Self {
         Self {
             loss: VisionMaeLossConfig::default(),
+            cross_view: VisionMaeCrossViewConfig::default(),
             pyramid_levels: default_mae_pyramid_levels(),
             artifact_output: VisionArtifactOutputMode::Images,
             artifact_fps: 4,
@@ -821,6 +920,7 @@ impl ModuleDisplayDefault for VisionMaeConfig {
     fn content(&self, content: Content) -> Option<Content> {
         content
             .add("loss", &self.loss)
+            .add("cross_view", &self.cross_view)
             .add("pyramid_levels", &self.pyramid_levels)
             .add("artifact_output", &self.artifact_output)
             .add("artifact_fps", &self.artifact_fps)
@@ -891,13 +991,10 @@ impl Default for VisionSaccadeInputProjectionConfig {
 impl ModuleDisplayDefault for VisionSaccadeInputProjectionConfig {
     fn content(&self, content: Content) -> Option<Content> {
         match self {
-            VisionSaccadeInputProjectionConfig::Linear => {
-                content.add("type", "linear").optional()
+            VisionSaccadeInputProjectionConfig::Linear => content.add("type", "linear").optional(),
+            VisionSaccadeInputProjectionConfig::Cnn(cfg) => {
+                content.add("type", "cnn").add("config", cfg).optional()
             }
-            VisionSaccadeInputProjectionConfig::Cnn(cfg) => content
-                .add("type", "cnn")
-                .add("config", cfg)
-                .optional(),
             VisionSaccadeInputProjectionConfig::RadialMicroVit(cfg) => content
                 .add("type", "radial_micro_vit")
                 .add("config", cfg)
@@ -1010,6 +1107,7 @@ pub struct VisionSaccadeConfig {
     pub tbptt: VisionTbpttConfig,
     pub policy: VisionSaccadePolicyConfig,
     pub cache: VisionSaccadeCacheConfig,
+    pub cross_view: VisionSaccadeCrossViewConfig,
     pub loss: VisionLossConfig,
     pub artifact_output: VisionArtifactOutputMode,
     pub artifact_fps: u32,
@@ -1022,7 +1120,7 @@ pub struct VisionSaccadeConfig {
 impl Default for VisionSaccadeConfig {
     fn default() -> Self {
         Self {
-            num_eyes: 1,
+            num_eyes: 0,
             traj_tokens: 1,
             traj_update_alpha: default_traj_update_alpha(),
             mip_levels: 4,
@@ -1044,6 +1142,7 @@ impl Default for VisionSaccadeConfig {
             tbptt: VisionTbpttConfig::default(),
             policy: VisionSaccadePolicyConfig::default(),
             cache: VisionSaccadeCacheConfig::default(),
+            cross_view: VisionSaccadeCrossViewConfig::default(),
             loss: VisionLossConfig::default(),
             artifact_output: VisionArtifactOutputMode::Mp4,
             artifact_fps: 8,
@@ -1116,6 +1215,7 @@ impl ModuleDisplayDefault for VisionSaccadeConfig {
             .add("tbptt", &self.tbptt)
             .add("policy", &self.policy)
             .add("cache", &self.cache)
+            .add("cross_view", &self.cross_view)
             .add("loss", &self.loss)
             .add("artifact_output", &self.artifact_output)
             .add("artifact_fps", &self.artifact_fps)
@@ -1152,6 +1252,10 @@ fn default_prefetch_batches() -> usize {
 
 fn default_batch_repeats() -> usize {
     1
+}
+
+fn default_enable_checkpoints() -> bool {
+    true
 }
 
 fn default_trace_train_loss_every() -> usize {
@@ -1266,6 +1370,8 @@ pub struct VisionTrainingHyperparameters {
     pub memory_cleanup_iters: usize,
     #[serde(default)]
     pub disable_cuda_memory_cleanup: bool,
+    #[serde(default = "default_enable_checkpoints")]
+    pub enable_checkpoints: bool,
     #[serde(default)]
     pub trace_train_loss: bool,
     #[serde(default = "default_trace_train_loss_every")]
@@ -1292,6 +1398,7 @@ impl Default for VisionTrainingHyperparameters {
             memory_cleanup_every: 0,
             memory_cleanup_iters: 0,
             disable_cuda_memory_cleanup: false,
+            enable_checkpoints: default_enable_checkpoints(),
             trace_train_loss: false,
             trace_train_loss_every: default_trace_train_loss_every(),
             rollout_min_steps: None,
@@ -1304,9 +1411,55 @@ impl Default for VisionTrainingHyperparameters {
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
+pub struct VisionManifoldHyperConnectionsConfig {
+    pub enabled: bool,
+    pub num_streams: usize,
+    pub num_views: usize,
+    pub mhc_iters: usize,
+    pub mhc_tau: f32,
+    pub add_branch_out_to_residual: bool,
+    pub dropout: f64,
+}
+
+impl Default for VisionManifoldHyperConnectionsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            num_streams: 0,
+            num_views: 0,
+            mhc_iters: 10,
+            mhc_tau: 0.05,
+            add_branch_out_to_residual: true,
+            dropout: 0.0,
+        }
+    }
+}
+
+impl ModuleDisplayDefault for VisionManifoldHyperConnectionsConfig {
+    fn content(&self, content: Content) -> Option<Content> {
+        content
+            .add("enabled", &self.enabled)
+            .add("num_streams", &self.num_streams)
+            .add("num_views", &self.num_views)
+            .add("mhc_iters", &self.mhc_iters)
+            .add("mhc_tau", &self.mhc_tau)
+            .add(
+                "add_branch_out_to_residual",
+                &self.add_branch_out_to_residual,
+            )
+            .add("dropout", &self.dropout)
+            .optional()
+    }
+}
+
+impl ModuleDisplay for VisionManifoldHyperConnectionsConfig {}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(default)]
 pub struct VisionModelConfig {
     pub image_size: usize,
     pub patch_size: usize,
+    pub patch_embed_mode: VisionPatchEmbedMode,
     pub in_channels: usize,
     pub embed_dim: usize,
     pub steps: usize,
@@ -1316,12 +1469,20 @@ pub struct VisionModelConfig {
     pub projection_dim: usize,
     pub projection_hidden_dim: usize,
     pub use_cls_token: bool,
+    pub cls_sync_alpha: f32,
+    pub num_eyes: usize,
+    pub cross_eye_steps: usize,
+    /// Enable LayerNorm on the token state/residual stream.
+    #[serde(alias = "token_norm")]
+    pub token_state_norm: bool,
+    pub latent_activation: VisionLatentActivation,
     pub pos_encoding: SpatialPositionalEncodingKind,
     pub pos_max_height: Option<usize>,
     pub pos_max_width: Option<usize>,
     pub attention_mode: VisionAttentionMode,
     pub fused_kernels: bool,
     pub relu_threshold: f32,
+    pub mhc: VisionManifoldHyperConnectionsConfig,
 }
 
 impl Default for VisionModelConfig {
@@ -1331,6 +1492,7 @@ impl Default for VisionModelConfig {
         Self {
             image_size,
             patch_size,
+            patch_embed_mode: VisionPatchEmbedMode::default(),
             in_channels: 3,
             embed_dim: 256,
             steps: 6,
@@ -1340,12 +1502,18 @@ impl Default for VisionModelConfig {
             projection_dim: 384,
             projection_hidden_dim: 512,
             use_cls_token: true,
+            cls_sync_alpha: 0.0,
+            num_eyes: 1,
+            cross_eye_steps: 0,
+            token_state_norm: true,
+            latent_activation: VisionLatentActivation::default(),
             pos_encoding: SpatialPositionalEncodingKind::Learned2d,
             pos_max_height: None,
             pos_max_width: None,
             attention_mode: VisionAttentionMode::RowL1,
             fused_kernels: false,
             relu_threshold: 0.0,
+            mhc: VisionManifoldHyperConnectionsConfig::default(),
         }
     }
 }
@@ -1354,6 +1522,17 @@ impl VisionModelConfig {
     pub fn build(&self) -> crate::model::VisionDragonHatchlingConfig {
         let patch_size = self.patch_size.max(1);
         let grid = (self.image_size + patch_size - 1) / patch_size;
+        let num_eyes = self.num_eyes.max(1);
+        let mhc_streams = if self.mhc.num_streams == 0 {
+            num_eyes
+        } else {
+            self.mhc.num_streams
+        };
+        let mhc_views = if self.mhc.num_views == 0 {
+            num_eyes
+        } else {
+            self.mhc.num_views
+        };
         let kernels = FusedKernelConfig {
             enabled: self.fused_kernels,
             relu_threshold: self.relu_threshold,
@@ -1363,6 +1542,7 @@ impl VisionModelConfig {
         crate::model::VisionDragonHatchlingConfig {
             image_size: self.image_size,
             patch_size: self.patch_size,
+            patch_embed_mode: self.patch_embed_mode,
             in_channels: self.in_channels,
             embed_dim: self.embed_dim,
             steps: self.steps,
@@ -1372,11 +1552,25 @@ impl VisionModelConfig {
             projection_dim: self.projection_dim,
             projection_hidden_dim: self.projection_hidden_dim,
             use_cls_token: self.use_cls_token,
+            cls_sync_alpha: self.cls_sync_alpha,
+            num_eyes,
+            cross_eye_steps: self.cross_eye_steps,
+            token_state_norm: self.token_state_norm,
+            latent_activation: self.latent_activation,
             pos_encoding: self.pos_encoding,
             pos_max_height: self.pos_max_height.unwrap_or(grid),
             pos_max_width: self.pos_max_width.unwrap_or(grid),
             attention_mode: self.attention_mode,
             fused_kernels: kernels,
+            mhc: crate::model::ManifoldHyperConnectionsConfig {
+                enabled: self.mhc.enabled,
+                num_streams: mhc_streams,
+                num_views: mhc_views,
+                mhc_iters: self.mhc.mhc_iters,
+                mhc_tau: self.mhc.mhc_tau,
+                add_branch_out_to_residual: self.mhc.add_branch_out_to_residual,
+                dropout: self.mhc.dropout,
+            },
         }
     }
 }
@@ -1485,6 +1679,40 @@ fn validate_vision_rollout(
     Ok(())
 }
 
+fn validate_vision_mhc(vision: &VisionModelConfig) -> Result<()> {
+    if !vision.mhc.enabled {
+        return Ok(());
+    }
+    let num_eyes = vision.num_eyes.max(1);
+    if vision.mhc.num_streams != 0 && vision.mhc.num_streams != num_eyes {
+        return Err(anyhow!(
+            "vision.mhc.num_streams ({}) must match vision.num_eyes ({})",
+            vision.mhc.num_streams,
+            num_eyes
+        ));
+    }
+    if vision.mhc.num_views != 0 && vision.mhc.num_views != num_eyes {
+        return Err(anyhow!(
+            "vision.mhc.num_views ({}) must match vision.num_eyes ({})",
+            vision.mhc.num_views,
+            num_eyes
+        ));
+    }
+    if vision.mhc.mhc_iters == 0 {
+        return Err(anyhow!("vision.mhc.mhc_iters must be > 0"));
+    }
+    if vision.mhc.mhc_tau <= 0.0 {
+        return Err(anyhow!(
+            "vision.mhc.mhc_tau must be > 0 (got {})",
+            vision.mhc.mhc_tau
+        ));
+    }
+    if vision.mhc.dropout < 0.0 {
+        return Err(anyhow!("vision.mhc.dropout must be >= 0"));
+    }
+    Ok(())
+}
+
 fn validate_vision_mode(mode: &VisionTrainingModeConfig, vision: &VisionModelConfig) -> Result<()> {
     match mode {
         VisionTrainingModeConfig::Distill(distill) => {
@@ -1548,10 +1776,75 @@ fn validate_vision_mode(mode: &VisionTrainingModeConfig, vision: &VisionModelCon
             if mae.pyramid_levels == 0 {
                 return Err(anyhow!("mode.pyramid_levels must be > 0"));
             }
+            if mae.cross_view.enabled {
+                let num_eyes = vision.num_eyes.max(1);
+                if num_eyes < 2 {
+                    return Err(anyhow!("vision.num_eyes must be >= 2 when cross_view is enabled"));
+                }
+                if !(0.0..=1.0).contains(&mae.cross_view.min_overlap) {
+                    return Err(anyhow!(
+                        "mode.cross_view.min_overlap must be in [0, 1] (got {})",
+                        mae.cross_view.min_overlap
+                    ));
+                }
+                if mae.cross_view.max_attempts == 0 {
+                    return Err(anyhow!("mode.cross_view.max_attempts must be > 0"));
+                }
+                if !(0.0..=1.0).contains(&mae.cross_view.fuse_alpha) {
+                    return Err(anyhow!(
+                        "mode.cross_view.fuse_alpha must be in [0, 1] (got {})",
+                        mae.cross_view.fuse_alpha
+                    ));
+                }
+                if mae.cross_view.visible_weight < 0.0 {
+                    return Err(anyhow!(
+                        "mode.cross_view.visible_weight must be >= 0 (got {})",
+                        mae.cross_view.visible_weight
+                    ));
+                }
+                if mae.cross_view.masked_eye >= num_eyes {
+                    return Err(anyhow!(
+                        "mode.cross_view.masked_eye ({}) must be < vision.num_eyes ({})",
+                        mae.cross_view.masked_eye,
+                        num_eyes
+                    ));
+                }
+                if !vision.mhc.enabled {
+                    return Err(anyhow!(
+                        "vision.mhc.enabled must be true when mode.cross_view.enabled is true"
+                    ));
+                }
+                if vision.mhc.num_streams != 0 && vision.mhc.num_streams != num_eyes {
+                    return Err(anyhow!(
+                        "vision.mhc.num_streams ({}) must match vision.num_eyes ({})",
+                        vision.mhc.num_streams,
+                        num_eyes
+                    ));
+                }
+                if vision.mhc.num_views != 0 && vision.mhc.num_views != num_eyes {
+                    return Err(anyhow!(
+                        "vision.mhc.num_views ({}) must match vision.num_eyes ({})",
+                        vision.mhc.num_views,
+                        num_eyes
+                    ));
+                }
+            }
         }
         VisionTrainingModeConfig::Saccade(saccade) => {
-            if saccade.num_eyes == 0 {
-                return Err(anyhow!("saccade.num_eyes must be > 0"));
+            let num_eyes = if saccade.num_eyes == 0 {
+                vision.num_eyes
+            } else {
+                saccade.num_eyes
+            };
+            if num_eyes == 0 {
+                return Err(anyhow!("vision.num_eyes must be > 0"));
+            }
+            if saccade.num_eyes != 0 && saccade.num_eyes != vision.num_eyes {
+                return Err(anyhow!(
+                    "saccade.num_eyes ({}) must match vision.num_eyes ({})",
+                    saccade.num_eyes,
+                    vision.num_eyes
+                ));
             }
             if saccade.traj_tokens == 0 {
                 return Err(anyhow!("saccade.traj_tokens must be > 0"));
@@ -1578,24 +1871,16 @@ fn validate_vision_mode(mode: &VisionTrainingModeConfig, vision: &VisionModelCon
                 ));
             }
             if saccade.grid_sample_max_mb == 0 {
-                return Err(anyhow!(
-                    "saccade.grid_sample_max_mb must be > 0"
-                ));
+                return Err(anyhow!("saccade.grid_sample_max_mb must be > 0"));
             }
             if saccade.mip_concat_max_mb == 0 {
-                return Err(anyhow!(
-                    "saccade.mip_concat_max_mb must be > 0"
-                ));
+                return Err(anyhow!("saccade.mip_concat_max_mb must be > 0"));
             }
             if saccade.recon_max_elems == 0 {
-                return Err(anyhow!(
-                    "saccade.recon_max_elems must be > 0"
-                ));
+                return Err(anyhow!("saccade.recon_max_elems must be > 0"));
             }
             validate_input_projection(&saccade.input_projection)?;
-            if saccade.fovea_subpatch_size > 0
-                && saccade.fovea_subpatch_size > vision.patch_size
-            {
+            if saccade.fovea_subpatch_size > 0 && saccade.fovea_subpatch_size > vision.patch_size {
                 return Err(anyhow!(
                     "saccade.fovea_subpatch_size ({}) must be <= vision.patch_size ({})",
                     saccade.fovea_subpatch_size,
@@ -1603,17 +1888,13 @@ fn validate_vision_mode(mode: &VisionTrainingModeConfig, vision: &VisionModelCon
                 ));
             }
             if matches!(saccade.pyramid_feature_dim, Some(0)) {
-                return Err(anyhow!(
-                    "saccade.pyramid_feature_dim must be > 0 when set"
-                ));
+                return Err(anyhow!("saccade.pyramid_feature_dim must be > 0 when set"));
             }
             if saccade.cache.max_entries == 0 {
                 return Err(anyhow!("saccade.cache.max_entries must be > 0"));
             }
             if saccade.policy.info_reward.stride == 0 {
-                return Err(anyhow!(
-                    "saccade.policy.info_reward.stride must be > 0"
-                ));
+                return Err(anyhow!("saccade.policy.info_reward.stride must be > 0"));
             }
             if saccade.policy.location_embedding.quantize_bins < 2 {
                 return Err(anyhow!(
@@ -1622,6 +1903,31 @@ fn validate_vision_mode(mode: &VisionTrainingModeConfig, vision: &VisionModelCon
             }
             validate_recon_loss("saccade.loss.recon", &saccade.loss.recon)?;
             validate_lejepa_loss(&saccade.loss.lejepa)?;
+            if saccade.cross_view.enabled {
+                if num_eyes < 2 {
+                    return Err(anyhow!(
+                        "vision.num_eyes must be >= 2 when mode.cross_view.enabled is true"
+                    ));
+                }
+                if !(0.0..=1.0).contains(&saccade.cross_view.min_overlap) {
+                    return Err(anyhow!(
+                        "mode.cross_view.min_overlap must be in [0, 1] (got {})",
+                        saccade.cross_view.min_overlap
+                    ));
+                }
+                if saccade.cross_view.max_attempts == 0 {
+                    return Err(anyhow!(
+                        "mode.cross_view.max_attempts must be > 0 when mode.cross_view.enabled is true"
+                    ));
+                }
+                if saccade.cross_view.masked_eye >= num_eyes {
+                    return Err(anyhow!(
+                        "mode.cross_view.masked_eye ({}) must be < vision.num_eyes ({})",
+                        saccade.cross_view.masked_eye,
+                        num_eyes
+                    ));
+                }
+            }
 
             if saccade.policy.gdpo.enabled {
                 if saccade.policy.gdpo.group_size == 0 {
@@ -1633,27 +1939,20 @@ fn validate_vision_mode(mode: &VisionTrainingModeConfig, vision: &VisionModelCon
                     ));
                 }
                 if saccade.policy.gdpo.hard_weight < 0.0 {
-                    return Err(anyhow!(
-                        "saccade.policy.gdpo.hard_weight must be >= 0"
-                    ));
+                    return Err(anyhow!("saccade.policy.gdpo.hard_weight must be >= 0"));
                 }
                 if saccade.policy.gdpo.easy_weight < 0.0 {
-                    return Err(anyhow!(
-                        "saccade.policy.gdpo.easy_weight must be >= 0"
-                    ));
+                    return Err(anyhow!("saccade.policy.gdpo.easy_weight must be >= 0"));
                 }
                 if saccade.policy.gdpo.policy_weight < 0.0 {
-                    return Err(anyhow!(
-                        "saccade.policy.gdpo.policy_weight must be >= 0"
-                    ));
+                    return Err(anyhow!("saccade.policy.gdpo.policy_weight must be >= 0"));
                 }
                 if saccade.policy.gdpo.policy_clip_range < 0.0 {
                     return Err(anyhow!(
                         "saccade.policy.gdpo.policy_clip_range must be >= 0"
                     ));
                 }
-                if let GdpoHardGate::Percentile { quantile } = saccade.policy.gdpo.hard_gate
-                {
+                if let GdpoHardGate::Percentile { quantile } = saccade.policy.gdpo.hard_gate {
                     if !(0.0..=1.0).contains(&quantile) {
                         return Err(anyhow!(
                             "saccade.policy.gdpo.hard_gate.quantile must be in [0, 1] (got {})",
@@ -1672,13 +1971,17 @@ fn validate_input_projection(config: &VisionSaccadeInputProjectionConfig) -> Res
         VisionSaccadeInputProjectionConfig::Linear => Ok(()),
         VisionSaccadeInputProjectionConfig::Cnn(cfg) => {
             if matches!(cfg.channels, Some(0)) {
-                return Err(anyhow!("saccade.input_projection.channels must be > 0 when set"));
+                return Err(anyhow!(
+                    "saccade.input_projection.channels must be > 0 when set"
+                ));
             }
             if cfg.expansion == 0 {
                 return Err(anyhow!("saccade.input_projection.expansion must be > 0"));
             }
             if cfg.kernel != 0 && cfg.kernel % 2 == 0 {
-                return Err(anyhow!("saccade.input_projection.kernel must be odd when set"));
+                return Err(anyhow!(
+                    "saccade.input_projection.kernel must be odd when set"
+                ));
             }
             Ok(())
         }
@@ -1687,9 +1990,7 @@ fn validate_input_projection(config: &VisionSaccadeInputProjectionConfig) -> Res
                 return Err(anyhow!("saccade.input_projection.mlp_ratio must be > 0"));
             }
             if cfg.radial_scale <= 0.0 {
-                return Err(anyhow!(
-                    "saccade.input_projection.radial_scale must be > 0"
-                ));
+                return Err(anyhow!("saccade.input_projection.radial_scale must be > 0"));
             }
             Ok(())
         }
@@ -1705,9 +2006,6 @@ fn validate_recon_loss(label: &str, loss: &VisionReconLossConfig) -> Result<()> 
     }
     if loss.weight < 0.0 {
         return Err(anyhow!("{label}.weight must be >= 0"));
-    }
-    if loss.hidden_dim == 0 {
-        return Err(anyhow!("{label}.hidden_dim must be > 0"));
     }
     Ok(())
 }
@@ -1727,9 +2025,7 @@ fn validate_lejepa_loss(loss: &VisionLejepaLossConfig) -> Result<()> {
             return Err(anyhow!("mode.loss.lejepa.sigreg_t_max must be > 0"));
         }
         if loss.sigreg_proj_dim == 0 {
-            return Err(anyhow!(
-                "mode.loss.lejepa.sigreg_proj_dim must be > 0"
-            ));
+            return Err(anyhow!("mode.loss.lejepa.sigreg_proj_dim must be > 0"));
         }
     }
     Ok(())
@@ -2056,6 +2352,7 @@ mod tests {
             projection_dim = 384
             projection_hidden_dim = 512
             use_cls_token = true
+            num_eyes = 2
             pos_encoding = "learned2d"
             attention_mode = "row_l1"
             fused_kernels = false
@@ -2063,7 +2360,6 @@ mod tests {
 
             [mode]
             type = "saccade"
-            num_eyes = 2
             mip_levels = 4
             pyramid_mode = "laplacian"
             fovea_sampling_mode = "subpatch"
@@ -2091,12 +2387,16 @@ mod tests {
         "#;
 
         let config: VisionTrainingConfig = toml::from_str(text).expect("parse saccade config");
+        assert_eq!(config.vision.num_eyes, 2);
         match config.mode {
             VisionTrainingModeConfig::Saccade(saccade) => {
-                assert_eq!(saccade.num_eyes, 2);
+                assert_eq!(saccade.num_eyes, 0);
                 assert_eq!(saccade.mip_levels, 4);
                 assert_eq!(saccade.pyramid_mode, VisionPyramidMode::Laplacian);
-                assert_eq!(saccade.fovea_sampling_mode, VisionFoveaSamplingMode::Subpatch);
+                assert_eq!(
+                    saccade.fovea_sampling_mode,
+                    VisionFoveaSamplingMode::Subpatch
+                );
                 assert_eq!(saccade.fovea_warp_mode, VisionFoveaWarpMode::Patched);
                 assert_eq!(saccade.fovea_subpatch_size, 12);
                 assert_eq!(saccade.inner_steps, 2);

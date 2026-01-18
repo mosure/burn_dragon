@@ -1,13 +1,13 @@
 use std::any::{Any, TypeId};
 
+use burn::tensor::Tensor as BurnTensor;
 use burn::tensor::backend::Backend as BackendTrait;
 use burn::tensor::{DType, Shape, TensorPrimitive};
-use burn::tensor::Tensor as BurnTensor;
-use burn_cubecl::{BoolElement, CubeBackend, CubeRuntime};
 use burn_cubecl::fusion::FusionCubeRuntime;
 use burn_cubecl::kernel::into_contiguous;
 use burn_cubecl::ops::numeric::empty_device;
 use burn_cubecl::tensor::CubeTensor;
+use burn_cubecl::{BoolElement, CubeBackend, CubeRuntime};
 use burn_fusion::FusionTensor;
 use burn_fusion::stream::StreamId;
 use burn_wgpu::WgpuRuntime;
@@ -139,7 +139,9 @@ where
     let handle = output.into();
     let fusion_out = fusion_client.register_tensor(handle, shape, StreamId::current(), dtype);
     let out_prim = try_cast_backend::<B, _>(fusion_out)?;
-    Some(BurnTensor::<B, 2>::from_primitive(TensorPrimitive::Float(out_prim)))
+    Some(BurnTensor::<B, 2>::from_primitive(TensorPrimitive::Float(
+        out_prim,
+    )))
 }
 
 fn try_percentile_thresholds_cubecl_direct<B, R>(
@@ -162,7 +164,9 @@ where
 
     let output = percentile_thresholds_cubecl_runtime::<R>(values, quantile);
     let out_prim = try_cast_backend::<B, _>(output)?;
-    Some(BurnTensor::<B, 2>::from_primitive(TensorPrimitive::Float(out_prim)))
+    Some(BurnTensor::<B, 2>::from_primitive(TensorPrimitive::Float(
+        out_prim,
+    )))
 }
 
 fn percentile_thresholds_cubecl_runtime<R: CubeRuntime>(
@@ -192,11 +196,7 @@ fn percentile_thresholds_cubecl_runtime<R: CubeRuntime>(
 }
 
 #[cube(launch)]
-fn percentile_thresholds_kernel(
-    values: &Tensor<f32>,
-    output: &mut Tensor<f32>,
-    quantile: f32,
-) {
+fn percentile_thresholds_kernel(values: &Tensor<f32>, output: &mut Tensor<f32>, quantile: f32) {
     if ABSOLUTE_POS >= output.len() {
         terminate!();
     }
@@ -261,7 +261,11 @@ fn percentile_thresholds_kernel(
 
     let pos = (group - 1u32) as f32 * quantile;
     let lower = pos as u32;
-    let upper = if lower + 1u32 < group { lower + 1u32 } else { lower };
+    let upper = if lower + 1u32 < group {
+        lower + 1u32
+    } else {
+        lower
+    };
     let weight = pos - lower as f32;
     let lower_val = scratch[lower];
     let upper_val = scratch[upper];
@@ -272,9 +276,7 @@ fn matches_type<A: 'static, B: 'static>() -> bool {
     TypeId::of::<A>() == TypeId::of::<B>()
 }
 
-fn try_cast_primitive<B: BackendTrait, T: 'static>(
-    value: B::FloatTensorPrimitive,
-) -> Option<T>
+fn try_cast_primitive<B: BackendTrait, T: 'static>(value: B::FloatTensorPrimitive) -> Option<T>
 where
     B::FloatTensorPrimitive: 'static,
 {

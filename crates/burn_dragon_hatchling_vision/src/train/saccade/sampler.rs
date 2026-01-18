@@ -1,5 +1,5 @@
-use crate::train::prelude::*;
 use crate::train::gdpo;
+use crate::train::prelude::*;
 
 /// GPU foveation sampler that reuses the saccade pipeline's mip + patch sampling.
 pub struct SaccadeFoveationSampler<B: BackendTrait> {
@@ -54,18 +54,17 @@ impl<B: BackendTrait> SaccadeFoveationSampler<B> {
 
     pub fn update_image(&mut self, images: Tensor<B, 4>) {
         self.levels = build_sampling_pyramid::<B>(images, self.saccade.config.mip_levels);
-        self.laplacian = if matches!(self.saccade.config.pyramid_mode, VisionPyramidMode::Laplacian) {
+        self.laplacian = if matches!(
+            self.saccade.config.pyramid_mode,
+            VisionPyramidMode::Laplacian
+        ) {
             self.saccade.build_laplacian_images(&self.levels)
         } else {
             None
         };
     }
 
-    pub fn sample_patch(
-        &self,
-        mean: Tensor<B, 2>,
-        sigma: Tensor<B, 2>,
-    ) -> Tensor<B, 4> {
+    pub fn sample_patch(&self, mean: Tensor<B, 2>, sigma: Tensor<B, 2>) -> Tensor<B, 4> {
         self.saccade.foveated_patch_image(
             &self.levels,
             &self.base_grid,
@@ -108,7 +107,10 @@ pub(crate) fn build_sampling_pyramid<B: BackendTrait>(
         let tokens = Tensor::<B, 3>::zeros([batch.max(1), 1, 1], &device);
         levels.push(SaccadeMipLevel {
             tokens,
-            grid: PatchGrid { height: 1, width: 1 },
+            grid: PatchGrid {
+                height: 1,
+                width: 1,
+            },
             image: current.clone(),
         });
         if level + 1 == max_levels {
@@ -122,9 +124,7 @@ pub(crate) fn build_sampling_pyramid<B: BackendTrait>(
     levels
 }
 
-impl<B: AutodiffBackend> TrainStep<ImageNetBatch<B>, VisionTrainItem<B>>
-    for VisionDistillModel<B>
-{
+impl<B: AutodiffBackend> TrainStep<ImageNetBatch<B>, VisionTrainItem<B>> for VisionDistillModel<B> {
     fn step(&self, batch: ImageNetBatch<B>) -> TrainOutput<VisionTrainItem<B>> {
         let ImageNetBatch {
             images,
@@ -198,9 +198,9 @@ impl<B: BackendTrait> ValidStep<ImageNetBatch<B>, VisionOutput<B>> for VisionDis
         };
 
         let backprop_steps = self.rollout.backprop_steps(self.rollout.max_steps);
-        let output = self
-            .model
-            .forward_images_steps_rollout(images, self.rollout.max_steps, backprop_steps);
+        let output =
+            self.model
+                .forward_images_steps_rollout(images, self.rollout.max_steps, backprop_steps);
         let loss = vision_distillation_loss(
             output.patch_tokens,
             teacher_patch,
@@ -433,13 +433,8 @@ impl<B: AutodiffBackend> TrainStep<ImageNetBatch<B>, VisionTrainItem<B>> for Vis
             } else {
                 batch.repeat_batch(chunk)
             };
-            let losses = self.forward_losses_train(
-                batch_chunk,
-                rollout_steps,
-                backprop_steps,
-                true,
-                false,
-            );
+            let losses =
+                self.forward_losses_train(batch_chunk, rollout_steps, backprop_steps, true, false);
             let chunk_scale = scale * chunk as f32;
             let loss_scaled = losses.total.clone().mul_scalar(chunk_scale);
             let grads_step = GradientsParams::from_grads(loss_scaled.backward(), self);
@@ -566,5 +561,3 @@ impl<B: BackendTrait> ValidStep<ImageNetBatch<B>, VisionOutput<B>> for VisionSac
         )
     }
 }
-
-

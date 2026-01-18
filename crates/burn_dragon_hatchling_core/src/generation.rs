@@ -23,10 +23,7 @@ pub struct GenerationSettings {
     pub strategy: ContextStrategy,
 }
 
-fn sample_from_logits_values(
-    mut logits_values: Vec<f32>,
-    top_k: Option<usize>,
-) -> Result<i64> {
+fn sample_from_logits_values(mut logits_values: Vec<f32>, top_k: Option<usize>) -> Result<i64> {
     let vocab = logits_values.len();
     if vocab == 0 {
         return Err(anyhow!("logits are empty"));

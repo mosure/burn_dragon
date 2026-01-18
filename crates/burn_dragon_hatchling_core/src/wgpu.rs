@@ -38,7 +38,9 @@ fn runtime_options(config: &WgpuRuntimeConfig) -> RuntimeOptions {
         WgpuMemoryConfig::Exclusive => MemoryConfiguration::ExclusivePages,
     };
     RuntimeOptions {
-        tasks_max: config.tasks_max.unwrap_or(RuntimeOptions::default().tasks_max),
+        tasks_max: config
+            .tasks_max
+            .unwrap_or(RuntimeOptions::default().tasks_max),
         memory_config,
     }
 }

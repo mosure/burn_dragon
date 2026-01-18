@@ -1,9 +1,11 @@
 use std::path::PathBuf;
 
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 
-use super::{TrainingConfig, VisionTrainingConfig, load_training_config, load_vision_training_config};
+use super::{
+    TrainingConfig, VisionTrainingConfig, load_training_config, load_vision_training_config,
+};
 
 fn config_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -52,6 +54,7 @@ fn vision_configs_parse_serialize_validate() {
     let files = [
         "vision_base.toml",
         "vision_mae_tiny.toml",
+        "vision_croco_tiny.toml",
         "vision_lejepa_tiny.toml",
         "vision_saccade_tiny.toml",
     ];

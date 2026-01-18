@@ -111,10 +111,7 @@ fn build_train_dataset(config: &VisionTrainingConfig) -> Option<Arc<ImageNetData
     } else {
         None
     };
-    let train_root = config
-        .dataset
-        .imagenet_root
-        .join(&config.dataset.train_dir);
+    let train_root = config.dataset.imagenet_root.join(&config.dataset.train_dir);
     let dataset = ImageNetDataset::new(ImageNetDatasetConfig {
         root: train_root,
         split: ImageNetSplit::Train,
@@ -125,6 +122,8 @@ fn build_train_dataset(config: &VisionTrainingConfig) -> Option<Arc<ImageNetData
         teacher: None,
         views: global_views,
         local_views,
+        min_view_overlap: 0.0,
+        view_overlap_attempts: 1,
         cache_decoded: config.dataset.cache_decoded,
         cache_capacity: config.dataset.cache_capacity,
         cache_preprocessed: config.dataset.cache_preprocessed,

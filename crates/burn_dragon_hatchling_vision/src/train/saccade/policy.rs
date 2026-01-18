@@ -5,8 +5,8 @@ use burn::tensor::{Distribution as TensorDistribution, Tensor, TensorData};
 
 use burn_dragon_hatchling_core::{VisionLocationEmbeddingMode, VisionNullGlimpseMode};
 
-use crate::train::constants::{SACCADE_EPS, SACCADE_SIGMA_MAX, SACCADE_SIGMA_MIN};
 use super::structs::VisionSaccadeModel;
+use crate::train::constants::{SACCADE_EPS, SACCADE_SIGMA_MAX, SACCADE_SIGMA_MIN};
 
 pub(crate) struct SaccadePolicySample<B: BackendTrait> {
     pub(crate) mean: Tensor<B, 3>,
@@ -87,14 +87,9 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
         let mean_clamped = (mean_low + mean_high).clamp_max(1.0);
         let sigma_clamped = (sigma_low + sigma_high).clamp_max(1.0);
         let clamp_count = mean_clamped.sum_dim(2) + sigma_clamped.sum_dim(2);
-        let clamp_rate = clamp_count
-            .div_scalar(3.0)
-            .mean_dim(1)
-            .reshape([batch]);
+        let clamp_rate = clamp_count.div_scalar(3.0).mean_dim(1).reshape([batch]);
 
-        let mean = mean_raw
-            .clamp_min(SACCADE_EPS)
-            .clamp_max(1.0 - SACCADE_EPS);
+        let mean = mean_raw.clamp_min(SACCADE_EPS).clamp_max(1.0 - SACCADE_EPS);
         let sigma = sigma_raw
             .clamp_min(SACCADE_SIGMA_MIN)
             .clamp_max(SACCADE_SIGMA_MAX);
@@ -106,10 +101,7 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
         }
     }
 
-    pub(crate) fn null_patch_tokens(
-        &self,
-        reference: &Tensor<B, 3>,
-    ) -> Tensor<B, 3> {
+    pub(crate) fn null_patch_tokens(&self, reference: &Tensor<B, 3>) -> Tensor<B, 3> {
         let device = reference.device();
         match self.config.policy.info_reward.null_mode {
             VisionNullGlimpseMode::Zero => {
@@ -140,12 +132,7 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
                 Some(self.fovea_proj.forward(params))
             }
             VisionLocationEmbeddingMode::Sinusoidal | VisionLocationEmbeddingMode::Quantized => {
-                Some(fixed_location_embedding(
-                    mean,
-                    sigma,
-                    embed_dim,
-                    config,
-                ))
+                Some(fixed_location_embedding(mean, sigma, embed_dim, config))
             }
             VisionLocationEmbeddingMode::Rope | VisionLocationEmbeddingMode::Pope => {
                 Some(rotary_location_embedding(
@@ -218,10 +205,7 @@ fn fixed_location_embedding<B: BackendTrait>(
     if freq_count * 6 > target_dim {
         embed = embed.slice_dim(2, 0..target_dim);
     } else if freq_count * 6 < target_dim {
-        let pad = Tensor::<B, 3>::zeros(
-            [batch, traj_tokens, target_dim - freq_count * 6],
-            &device,
-        );
+        let pad = Tensor::<B, 3>::zeros([batch, traj_tokens, target_dim - freq_count * 6], &device);
         embed = Tensor::cat(vec![embed, pad], 2);
     }
     if target_dim < embed_dim {
@@ -282,10 +266,7 @@ fn rotary_location_embedding<B: BackendTrait>(
             .slice_dim(2, 0..1)
             .clamp_min(-0.5)
             .clamp_max(0.5);
-        let rest = coords
-            .slice_dim(2, 1..axes)
-            .clamp_min(0.0)
-            .clamp_max(1.0);
+        let rest = coords.slice_dim(2, 1..axes).clamp_min(0.0).clamp_max(1.0);
         coords = Tensor::cat(vec![angle, rest], 2);
     } else {
         coords = coords.clamp_min(0.0).clamp_max(1.0);
@@ -308,15 +289,11 @@ fn rotary_location_embedding<B: BackendTrait>(
         for idx in 0..freq_count {
             inv_freq.push(1.0 / 10000.0_f32.powf(idx as f32 / denom));
         }
-        let inv_freq =
-            Tensor::<B, 1>::from_data(TensorData::new(inv_freq, [freq_count]), &device)
-                .reshape([1, freq_count])
-                .repeat_dim(0, batch * traj_tokens);
+        let inv_freq = Tensor::<B, 1>::from_data(TensorData::new(inv_freq, [freq_count]), &device)
+            .reshape([1, freq_count])
+            .repeat_dim(0, batch * traj_tokens);
         let coord = coords.clone().slice_dim(1, axis..axis + 1);
-        let phase = coord
-            .repeat_dim(1, freq_count)
-            .mul_scalar(2.0 * PI)
-            * inv_freq;
+        let phase = coord.repeat_dim(1, freq_count).mul_scalar(2.0 * PI) * inv_freq;
         features.push(phase.clone().sin());
         features.push(phase.cos());
     }
@@ -337,10 +314,7 @@ fn rotary_location_embedding<B: BackendTrait>(
     }
 }
 
-fn pope_coords<B: BackendTrait>(
-    mean: Tensor<B, 3>,
-    sigma_norm: Tensor<B, 3>,
-) -> Tensor<B, 3> {
+fn pope_coords<B: BackendTrait>(mean: Tensor<B, 3>, sigma_norm: Tensor<B, 3>) -> Tensor<B, 3> {
     let dx = mean.clone().sub_scalar(0.5).slice_dim(2, 0..1);
     let dy = mean.sub_scalar(0.5).slice_dim(2, 1..2);
     let r = (dx.clone().powf_scalar(2.0) + dy.clone().powf_scalar(2.0)).sqrt();

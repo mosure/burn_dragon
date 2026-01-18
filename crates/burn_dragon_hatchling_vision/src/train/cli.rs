@@ -1,9 +1,9 @@
 #[cfg(feature = "cli")]
 use crate::train::prelude::*;
 #[cfg(feature = "cli")]
-use burn_dragon_hatchling_core::train::train::train_backend;
-#[cfg(feature = "cli")]
 use crate::train::vision::train_vision_backend;
+#[cfg(feature = "cli")]
+use burn_dragon_hatchling_core::train::train::train_backend;
 
 #[cfg(feature = "cli")]
 fn run_in_training_thread<F, T>(name: &str, work: F) -> Result<T>
@@ -74,11 +74,11 @@ pub fn run_cli() -> Result<()> {
         config_paths.extend(args.train.config.clone());
         let config = load_vision_training_config(&config_paths)?;
         return run_in_training_thread("vision-train", move || match backend {
-            BackendArg::Wgpu => train_vision_backend::<Autodiff<Wgpu<f32>>, _>(
-                &config,
-                "wgpu",
-                |device| init_runtime(device, &config.wgpu),
-            ),
+            BackendArg::Wgpu => {
+                train_vision_backend::<Autodiff<Wgpu<f32>>, _>(&config, "wgpu", |device| {
+                    init_runtime(device, &config.wgpu)
+                })
+            }
             BackendArg::Cuda => {
                 #[cfg(feature = "cuda")]
                 {
@@ -128,5 +128,3 @@ pub fn run_cli() -> Result<()> {
         }
     })
 }
-
-

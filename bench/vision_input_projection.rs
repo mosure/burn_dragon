@@ -9,7 +9,7 @@ mod projection_bench {
     use super::*;
     use burn::tensor::backend::Backend as BackendTrait;
     use burn_dragon_hatchling::{
-        VisionSaccadeInputProjectionConfig, VisionSaccadeInputProjectionCnnConfig,
+        VisionSaccadeInputProjectionCnnConfig, VisionSaccadeInputProjectionConfig,
         VisionSaccadeInputProjectionMicroVitConfig,
         vision::train::bench::VisionInputProjectionBench,
     };
@@ -29,9 +29,7 @@ mod projection_bench {
     }
 
     fn config_cnn() -> VisionSaccadeInputProjectionConfig {
-        VisionSaccadeInputProjectionConfig::Cnn(
-            VisionSaccadeInputProjectionCnnConfig::default(),
-        )
+        VisionSaccadeInputProjectionConfig::Cnn(VisionSaccadeInputProjectionCnnConfig::default())
     }
 
     fn config_micro_vit() -> VisionSaccadeInputProjectionConfig {
@@ -63,17 +61,10 @@ mod projection_bench {
             for (name, make_config) in configs {
                 let config = make_config();
                 let bench = VisionInputProjectionBench::<Backend>::new(
-                    embed_dim,
-                    patch_size,
-                    tokens,
-                    batch,
-                    config,
-                    &device,
+                    embed_dim, patch_size, tokens, batch, config, &device,
                 );
                 let param_count = bench.param_count();
-                println!(
-                    "vision_input_projection/{name}/p{patch_size}: params={param_count}"
-                );
+                println!("vision_input_projection/{name}/p{patch_size}: params={param_count}");
                 group.bench_function(BenchmarkId::new(name, patch_size), |b| {
                     b.iter(|| black_box(bench.forward()));
                 });

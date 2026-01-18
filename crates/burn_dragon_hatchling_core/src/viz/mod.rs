@@ -6,12 +6,12 @@ pub mod transport;
 
 use bevy::prelude::App;
 use burn::tensor::backend::Backend;
-#[cfg(not(target_arch = "wasm32"))]
-use std::sync::{Arc, atomic::AtomicBool};
 #[cfg(target_arch = "wasm32")]
 use std::cell::RefCell;
 #[cfg(target_arch = "wasm32")]
 use std::rc::Rc;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::{Arc, atomic::AtomicBool};
 
 pub use bevy_app::VizDimensions;
 pub use encoder::VizEncoder;
@@ -99,8 +99,7 @@ where
 {
     let (sender, receiver) = transport::channel();
     let stop = Arc::new(AtomicBool::new(false));
-    let (app, device) =
-        bevy_app::build_app::<B>(config, dims, receiver, exit_rx, stop.clone());
+    let (app, device) = bevy_app::build_app::<B>(config, dims, receiver, exit_rx, stop.clone());
     VizOverlay {
         app,
         handle: VizHandle {
@@ -123,13 +122,9 @@ where
 {
     let (sender, receiver) = transport::channel();
     let device_slot = Rc::new(RefCell::new(None));
-    let (app, device) =
-        bevy_app::build_app::<B>(config, dims, receiver, None, device_slot.clone());
+    let (app, device) = bevy_app::build_app::<B>(config, dims, receiver, None, device_slot.clone());
     VizOverlay {
         app,
-        handle: VizHandle {
-            sender,
-            device,
-        },
+        handle: VizHandle { sender, device },
     }
 }

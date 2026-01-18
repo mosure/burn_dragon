@@ -202,11 +202,7 @@ pub fn render_foveated_patch_with_radius(
             let uy_base = base_dy / half.max(1.0);
             let warp_x_base = foveated_warp(ux_base, sigma_px, radius_px);
             let warp_y_base = foveated_warp(uy_base, sigma_px, radius_px);
-            let local_scale_base = warp_x_base
-                .deriv
-                .abs()
-                .max(warp_y_base.deriv.abs())
-                * pixel_du;
+            let local_scale_base = warp_x_base.deriv.abs().max(warp_y_base.deriv.abs()) * pixel_du;
             let mut color = [0.0; 3];
             let mut count = 0.0;
             if local_scale_base <= FOVEA_AA_THRESHOLD {
@@ -256,11 +252,7 @@ pub fn render_foveated_patch_with_radius(
                         let warp_y = foveated_warp(uy, sigma_px, radius_px);
                         let offset_x = warp_x.offset;
                         let offset_y = warp_y.offset;
-                        let local_scale = warp_x
-                            .deriv
-                            .abs()
-                            .max(warp_y.deriv.abs())
-                            * pixel_du;
+                        let local_scale = warp_x.deriv.abs().max(warp_y.deriv.abs()) * pixel_du;
                         let img_x = center_x + offset_x;
                         let img_y = center_y + offset_y;
                         let fx = img_x / width as f32;
@@ -334,8 +326,7 @@ fn erf_approx(x: f32) -> f32 {
     let a3 = 1.421_413_8;
     let a4 = -1.453_152_1;
     let a5 = 1.061_405_4;
-    let y = 1.0
-        - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * (-ax * ax).exp();
+    let y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * (-ax * ax).exp();
     sign * y
 }
 
@@ -487,11 +478,7 @@ fn compute_lod(
     let sx = sigma_x.max(1e-3);
     let sy = sigma_y.max(1e-3);
     let dist = ((dx * dx) / (sx * sx) + (dy * dy) / (sy * sy)).sqrt();
-    let lod_dist = if dist <= 1.0 {
-        0.0
-    } else {
-        dist.ln() / LN_2
-    };
+    let lod_dist = if dist <= 1.0 { 0.0 } else { dist.ln() / LN_2 };
     let lod_scale = if local_scale <= FOVEA_AA_THRESHOLD {
         0.0
     } else {
@@ -633,7 +620,11 @@ fn resample(level: &CpuImageLevel, width: usize, height: usize) -> CpuImageLevel
             data[idx + 2] = sample[2];
         }
     }
-    CpuImageLevel { width, height, data }
+    CpuImageLevel {
+        width,
+        height,
+        data,
+    }
 }
 
 fn sample_bilinear(level: &CpuImageLevel, fx: f32, fy: f32) -> [f32; 3] {
@@ -682,11 +673,7 @@ fn sample_bilinear(level: &CpuImageLevel, fx: f32, fy: f32) -> [f32; 3] {
 
 fn get_pixel(level: &CpuImageLevel, x: usize, y: usize) -> [f32; 3] {
     let idx = (y * level.width + x) * 3;
-    [
-        level.data[idx],
-        level.data[idx + 1],
-        level.data[idx + 2],
-    ]
+    [level.data[idx], level.data[idx + 1], level.data[idx + 2]]
 }
 
 #[cfg(test)]
@@ -735,8 +722,7 @@ mod tests {
     fn foveated_patch_constant_image_is_constant() {
         let base = constant_image(16, 16, 0.25);
         let cache = build_pyramid_cache(base, 4, PyramidMode::Stacked);
-        let patch =
-            render_foveated_patch(&cache, [0.5, 0.5], 0.1, 8, FoveaWarpMode::Warped);
+        let patch = render_foveated_patch(&cache, [0.5, 0.5], 0.1, 8, FoveaWarpMode::Warped);
         for value in patch {
             assert!((value - 0.25).abs() < 1e-3);
         }

@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::kernel::{BlockPattern1d, relu_lowrank};
 
 use super::config::FusedKernelConfig;
+use super::residual::{ManifoldHyperConnections, ManifoldHyperConnectionsConfig};
 
 const ROW_NORM_EPS: f32 = 1e-6;
 
@@ -83,13 +84,99 @@ pub enum VisionAttentionMode {
     Softmax,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum VisionPatchEmbedMode {
+    #[default]
+    Conv,
+    Linear,
+    Identity,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum VisionLatentActivation {
+    #[default]
+    Relu,
+    Gelu,
+    Identity,
+}
+
 impl core::fmt::Display for VisionAttentionMode {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{self:?}")
     }
 }
 
+impl core::fmt::Display for VisionPatchEmbedMode {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+
+impl core::fmt::Display for VisionLatentActivation {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+
 impl<B: Backend> Module<B> for VisionAttentionMode {
+    type Record = ();
+
+    fn collect_devices(&self, devices: Devices<B>) -> Devices<B> {
+        devices
+    }
+
+    fn fork(self, _device: &B::Device) -> Self {
+        self
+    }
+
+    fn to_device(self, _device: &B::Device) -> Self {
+        self
+    }
+
+    fn visit<Visitor: ModuleVisitor<B>>(&self, _visitor: &mut Visitor) {}
+
+    fn map<Mapper: ModuleMapper<B>>(self, _mapper: &mut Mapper) -> Self {
+        self
+    }
+
+    fn load_record(self, _record: Self::Record) -> Self {
+        self
+    }
+
+    fn into_record(self) -> Self::Record {}
+}
+
+impl<B: Backend> Module<B> for VisionPatchEmbedMode {
+    type Record = ();
+
+    fn collect_devices(&self, devices: Devices<B>) -> Devices<B> {
+        devices
+    }
+
+    fn fork(self, _device: &B::Device) -> Self {
+        self
+    }
+
+    fn to_device(self, _device: &B::Device) -> Self {
+        self
+    }
+
+    fn visit<Visitor: ModuleVisitor<B>>(&self, _visitor: &mut Visitor) {}
+
+    fn map<Mapper: ModuleMapper<B>>(self, _mapper: &mut Mapper) -> Self {
+        self
+    }
+
+    fn load_record(self, _record: Self::Record) -> Self {
+        self
+    }
+
+    fn into_record(self) -> Self::Record {}
+}
+
+impl<B: Backend> Module<B> for VisionLatentActivation {
     type Record = ();
 
     fn collect_devices(&self, devices: Devices<B>) -> Devices<B> {
@@ -125,7 +212,35 @@ impl<B: AutodiffBackend> AutodiffModule<B> for VisionAttentionMode {
     }
 }
 
+impl<B: AutodiffBackend> AutodiffModule<B> for VisionPatchEmbedMode {
+    type InnerModule = VisionPatchEmbedMode;
+
+    fn valid(&self) -> Self::InnerModule {
+        *self
+    }
+}
+
+impl<B: AutodiffBackend> AutodiffModule<B> for VisionLatentActivation {
+    type InnerModule = VisionLatentActivation;
+
+    fn valid(&self) -> Self::InnerModule {
+        *self
+    }
+}
+
 impl ModuleDisplayDefault for VisionAttentionMode {
+    fn content(&self, content: Content) -> Option<Content> {
+        content.add_formatted(self).optional()
+    }
+}
+
+impl ModuleDisplayDefault for VisionPatchEmbedMode {
+    fn content(&self, content: Content) -> Option<Content> {
+        content.add_formatted(self).optional()
+    }
+}
+
+impl ModuleDisplayDefault for VisionLatentActivation {
     fn content(&self, content: Content) -> Option<Content> {
         content.add_formatted(self).optional()
     }
@@ -133,10 +248,15 @@ impl ModuleDisplayDefault for VisionAttentionMode {
 
 impl ModuleDisplay for VisionAttentionMode {}
 
+impl ModuleDisplay for VisionPatchEmbedMode {}
+
+impl ModuleDisplay for VisionLatentActivation {}
+
 #[derive(Clone, Debug)]
 pub struct VisionDragonHatchlingConfig {
     pub image_size: usize,
     pub patch_size: usize,
+    pub patch_embed_mode: VisionPatchEmbedMode,
     pub in_channels: usize,
     pub embed_dim: usize,
     pub steps: usize,
@@ -146,11 +266,17 @@ pub struct VisionDragonHatchlingConfig {
     pub projection_dim: usize,
     pub projection_hidden_dim: usize,
     pub use_cls_token: bool,
+    pub cls_sync_alpha: f32,
+    pub num_eyes: usize,
+    pub cross_eye_steps: usize,
+    pub token_state_norm: bool,
+    pub latent_activation: VisionLatentActivation,
     pub pos_encoding: SpatialPositionalEncodingKind,
     pub pos_max_height: usize,
     pub pos_max_width: usize,
     pub attention_mode: VisionAttentionMode,
     pub fused_kernels: FusedKernelConfig,
+    pub mhc: ManifoldHyperConnectionsConfig,
 }
 
 impl Default for VisionDragonHatchlingConfig {
@@ -161,6 +287,7 @@ impl Default for VisionDragonHatchlingConfig {
         Self {
             image_size,
             patch_size,
+            patch_embed_mode: VisionPatchEmbedMode::default(),
             in_channels: 3,
             embed_dim: 256,
             steps: 6,
@@ -170,11 +297,17 @@ impl Default for VisionDragonHatchlingConfig {
             projection_dim: 384,
             projection_hidden_dim: 512,
             use_cls_token: true,
+            cls_sync_alpha: 0.0,
+            num_eyes: 1,
+            cross_eye_steps: 0,
+            token_state_norm: true,
+            latent_activation: VisionLatentActivation::default(),
             pos_encoding: SpatialPositionalEncodingKind::Learned2d,
             pos_max_height: grid,
             pos_max_width: grid,
             attention_mode: VisionAttentionMode::RowL1,
             fused_kernels: FusedKernelConfig::default(),
+            mhc: ManifoldHyperConnectionsConfig::default(),
         }
     }
 }
@@ -229,8 +362,8 @@ impl<B: Backend> PatchConvNeXtBlock<B> {
             .with_padding(PaddingConfig2d::Same)
             .with_groups(channels.max(1))
             .init(device);
-        let pointwise_in = Conv2dConfig::new([channels, channels.saturating_mul(expansion)], [1, 1])
-            .init(device);
+        let pointwise_in =
+            Conv2dConfig::new([channels, channels.saturating_mul(expansion)], [1, 1]).init(device);
         let pointwise_out =
             Conv2dConfig::new([channels.saturating_mul(expansion), channels], [1, 1]).init(device);
         Self {
@@ -273,10 +406,11 @@ impl<B: Backend> PatchEmbedStage<B> {
         } else {
             PaddingConfig2d::Same
         };
-        let downsample = Conv2dConfig::new([in_channels.max(1), out_channels.max(1)], [kernel, kernel])
-            .with_stride([stride, stride])
-            .with_padding(padding)
-            .init(device);
+        let downsample =
+            Conv2dConfig::new([in_channels.max(1), out_channels.max(1)], [kernel, kernel])
+                .with_stride([stride, stride])
+                .with_padding(padding)
+                .init(device);
         let blocks = (0..blocks.max(1))
             .map(|_| PatchConvNeXtBlock::new(out_channels.max(1), expansion, device))
             .collect();
@@ -294,8 +428,11 @@ impl<B: Backend> PatchEmbedStage<B> {
 
 #[derive(Module, Debug)]
 pub struct PatchEmbed<B: Backend> {
+    #[module(ignore)]
+    mode: VisionPatchEmbedMode,
     stages: Vec<PatchEmbedStage<B>>,
-    proj: Conv2d<B>,
+    proj: Option<Conv2d<B>>,
+    linear: Option<Linear<B>>,
     pos_encoding: SpatialPositionalEncoding<B>,
     patch_size: usize,
     embed_dim: usize,
@@ -304,26 +441,48 @@ pub struct PatchEmbed<B: Backend> {
 impl<B: Backend> PatchEmbed<B> {
     pub fn new(config: &VisionDragonHatchlingConfig, device: &B::Device) -> Self {
         let patch_size = config.patch_size.max(1);
-        let mut strides = patch_downsample_strides(patch_size);
-        if strides.is_empty() {
-            strides.push(1);
-        }
-        let hidden_dim = (config.embed_dim / 2).max(16).min(config.embed_dim.max(1));
-        let mut stages = Vec::with_capacity(strides.len());
-        let mut in_channels = config.in_channels.max(1);
-        for stride in strides {
-            stages.push(PatchEmbedStage::new(
-                in_channels,
-                hidden_dim,
-                stride,
-                PATCH_EMBED_BLOCKS_PER_STAGE,
-                PATCH_EMBED_EXPANSION,
-                device,
-            ));
-            in_channels = hidden_dim;
-        }
-        let proj = Conv2dConfig::new([in_channels.max(1), config.embed_dim.max(1)], [1, 1])
-            .init(device);
+        let patch_dim = patch_size
+            .saturating_mul(patch_size)
+            .saturating_mul(config.in_channels.max(1));
+        let (stages, proj, linear) = match config.patch_embed_mode {
+            VisionPatchEmbedMode::Conv => {
+                let mut strides = patch_downsample_strides(patch_size);
+                if strides.is_empty() {
+                    strides.push(1);
+                }
+                let hidden_dim = (config.embed_dim / 2).max(16).min(config.embed_dim.max(1));
+                let mut stages = Vec::with_capacity(strides.len());
+                let mut in_channels = config.in_channels.max(1);
+                for stride in strides {
+                    stages.push(PatchEmbedStage::new(
+                        in_channels,
+                        hidden_dim,
+                        stride,
+                        PATCH_EMBED_BLOCKS_PER_STAGE,
+                        PATCH_EMBED_EXPANSION,
+                        device,
+                    ));
+                    in_channels = hidden_dim;
+                }
+                let proj = Conv2dConfig::new([in_channels.max(1), config.embed_dim.max(1)], [1, 1])
+                    .init(device);
+                (stages, Some(proj), None)
+            }
+            VisionPatchEmbedMode::Linear => {
+                let linear =
+                    LinearConfig::new(patch_dim.max(1), config.embed_dim.max(1)).init(device);
+                (Vec::new(), None, Some(linear))
+            }
+            VisionPatchEmbedMode::Identity => {
+                assert!(
+                    patch_dim == config.embed_dim,
+                    "identity patch embed requires embed_dim ({}) to match patch_dim ({})",
+                    config.embed_dim,
+                    patch_dim
+                );
+                (Vec::new(), None, None)
+            }
+        };
         let pos_encoding = SpatialPositionalEncoding::new(
             config.pos_encoding,
             config.pos_max_height,
@@ -332,8 +491,10 @@ impl<B: Backend> PatchEmbed<B> {
             device,
         );
         Self {
+            mode: config.patch_embed_mode,
             stages,
             proj,
+            linear,
             pos_encoding,
             patch_size,
             embed_dim: config.embed_dim,
@@ -350,37 +511,72 @@ impl<B: Backend> PatchEmbed<B> {
     }
 
     pub fn forward_raw(&self, images: Tensor<B, 4>) -> PatchEmbedOutput<B> {
-        let [batch, channels, height, width] = images.shape().dims::<4>();
-        let device = images.device();
-        let patch_size = self.patch_size.max(1);
-        let padded_h = div_ceil(height, patch_size) * patch_size;
-        let padded_w = div_ceil(width, patch_size) * patch_size;
-        let mut patches = images;
-        let pad_w = padded_w.saturating_sub(width);
-        let pad_h = padded_h.saturating_sub(height);
-        if pad_w > 0 {
-            let pad = Tensor::<B, 4>::zeros([batch, channels, height, pad_w], &device);
-            patches = Tensor::cat(vec![patches, pad], 3);
-        }
-        if pad_h > 0 {
-            let pad = Tensor::<B, 4>::zeros([batch, channels, pad_h, padded_w], &device);
-            patches = Tensor::cat(vec![patches, pad], 2);
-        }
-        for stage in &self.stages {
-            patches = stage.forward(patches);
-        }
-        let patches = self.proj.forward(patches);
-        let [_, _, grid_h, grid_w] = patches.shape().dims::<4>();
-        let tokens = patches
-            .reshape([batch, self.embed_dim, grid_h * grid_w])
-            .swap_dims(1, 2);
+        match self.mode {
+            VisionPatchEmbedMode::Conv => {
+                let [batch, channels, height, width] = images.shape().dims::<4>();
+                let device = images.device();
+                let patch_size = self.patch_size.max(1);
+                let padded_h = div_ceil(height, patch_size) * patch_size;
+                let padded_w = div_ceil(width, patch_size) * patch_size;
+                let mut patches = images;
+                let pad_w = padded_w.saturating_sub(width);
+                let pad_h = padded_h.saturating_sub(height);
+                if pad_w > 0 {
+                    let pad = Tensor::<B, 4>::zeros([batch, channels, height, pad_w], &device);
+                    patches = Tensor::cat(vec![patches, pad], 3);
+                }
+                if pad_h > 0 {
+                    let pad = Tensor::<B, 4>::zeros([batch, channels, pad_h, padded_w], &device);
+                    patches = Tensor::cat(vec![patches, pad], 2);
+                }
+                for stage in &self.stages {
+                    patches = stage.forward(patches);
+                }
+                let proj = self.proj.as_ref().expect("patch embed conv projection");
+                let patches = proj.forward(patches);
+                let [_, _, grid_h, grid_w] = patches.shape().dims::<4>();
+                let tokens = patches
+                    .reshape([batch, self.embed_dim, grid_h * grid_w])
+                    .swap_dims(1, 2);
 
-        PatchEmbedOutput {
-            tokens,
-            grid: PatchGrid {
-                height: grid_h,
-                width: grid_w,
-            },
+                PatchEmbedOutput {
+                    tokens,
+                    grid: PatchGrid {
+                        height: grid_h,
+                        width: grid_w,
+                    },
+                }
+            }
+            VisionPatchEmbedMode::Linear => {
+                let [_batch, _, height, width] = images.shape().dims::<4>();
+                let patch_size = self.patch_size.max(1);
+                let grid_h = div_ceil(height, patch_size);
+                let grid_w = div_ceil(width, patch_size);
+                let patches = patchify(images, patch_size);
+                let linear = self.linear.as_ref().expect("patch embed linear projection");
+                let tokens = linear.forward(patches);
+                PatchEmbedOutput {
+                    tokens,
+                    grid: PatchGrid {
+                        height: grid_h,
+                        width: grid_w,
+                    },
+                }
+            }
+            VisionPatchEmbedMode::Identity => {
+                let [_batch, _, height, width] = images.shape().dims::<4>();
+                let patch_size = self.patch_size.max(1);
+                let grid_h = div_ceil(height, patch_size);
+                let grid_w = div_ceil(width, patch_size);
+                let tokens = patchify(images, patch_size);
+                PatchEmbedOutput {
+                    tokens,
+                    grid: PatchGrid {
+                        height: grid_h,
+                        width: grid_w,
+                    },
+                }
+            }
         }
     }
 
@@ -420,11 +616,7 @@ fn patch_downsample_strides(patch_size: usize) -> Vec<usize> {
 }
 
 fn patch_kernel_for_stride(stride: usize) -> usize {
-    if stride <= 1 {
-        3
-    } else {
-        stride
-    }
+    if stride <= 1 { 3 } else { stride }
 }
 
 pub fn pool_patch_tokens<B: Backend>(
@@ -443,9 +635,7 @@ pub fn pool_patch_tokens<B: Backend>(
         return (tokens, grid);
     }
     let tokens = tokens.reshape([batch, grid_h, grid_w, dim]);
-    let tokens = tokens
-        .slice_dim(1, 0..even_h)
-        .slice_dim(2, 0..even_w);
+    let tokens = tokens.slice_dim(1, 0..even_h).slice_dim(2, 0..even_w);
     let next_h = even_h / 2;
     let next_w = even_w / 2;
     let tokens = tokens
@@ -486,11 +676,7 @@ pub fn patchify<B: Backend>(images: Tensor<B, 4>, patch_size: usize) -> Tensor<B
         .swap_dims(1, 2)
         .swap_dims(2, 4)
         .swap_dims(3, 4)
-        .reshape([
-            batch,
-            grid_h * grid_w,
-            channels * patch_size * patch_size,
-        ])
+        .reshape([batch, grid_h * grid_w, channels * patch_size * patch_size])
 }
 
 pub fn unpatchify<B: Backend>(
@@ -681,6 +867,12 @@ pub struct VisionDragonHatchlingOutput<B: Backend> {
     pub cls_token: Tensor<B, 2>,
 }
 
+#[derive(Clone)]
+pub struct VisionDragonHatchlingMultiOutput<B: Backend> {
+    pub patch_tokens: Tensor<B, 4>,
+    pub cls_token: Tensor<B, 3>,
+}
+
 #[derive(Module, Debug)]
 pub struct VisionDragonHatchling<B: Backend> {
     steps: usize,
@@ -689,23 +881,55 @@ pub struct VisionDragonHatchling<B: Backend> {
     mlp_internal_dim_multiplier: usize,
     use_cls_token: bool,
     attention_mode: VisionAttentionMode,
+    latent_activation: VisionLatentActivation,
     kernel: FusedKernelConfig,
     patch_embed: PatchEmbed<B>,
     dropout: Dropout,
-    token_norm: LayerNorm<B>,
+    token_norm: Option<LayerNorm<B>>,
+    mhc_layers: Option<Vec<ManifoldHyperConnections<B>>>,
+    eye_token: Option<Param<Tensor<B, 2>>>,
     encoder: Param<Tensor<B, 3>>,
     encoder_v: Param<Tensor<B, 3>>,
     decoder: Param<Tensor<B, 2>>,
     projection: VisionProjectionHead<B>,
     cls_token: Option<Param<Tensor<B, 2>>>,
     cls_pos: Option<Param<Tensor<B, 2>>>,
+    cls_sync_alpha: f32,
+    cross_eye_steps: usize,
 }
 
 impl<B: Backend> VisionDragonHatchling<B> {
     pub fn new(config: VisionDragonHatchlingConfig, device: &B::Device) -> Self {
         let patch_embed = PatchEmbed::new(&config, device);
         let dropout = DropoutConfig::new(config.dropout).init();
-        let token_norm = LayerNormConfig::new(config.embed_dim).init(device);
+        let token_norm = if config.token_state_norm {
+            Some(LayerNormConfig::new(config.embed_dim).init(device))
+        } else {
+            None
+        };
+        let mhc_layers = if config.mhc.enabled && config.mhc.num_streams > 1 {
+            let mut layers = Vec::with_capacity(config.steps.max(1));
+            for layer_idx in 0..config.steps.max(1) {
+                layers.push(ManifoldHyperConnections::new(
+                    &config.mhc,
+                    layer_idx,
+                    device,
+                ));
+            }
+            Some(layers)
+        } else {
+            None
+        };
+        let eye_token = if config.num_eyes.max(1) > 1 {
+            let eye = Tensor::<B, 2>::random(
+                [config.num_eyes.max(1), config.embed_dim.max(1)],
+                TensorDistribution::Normal(0.0, 0.02),
+                device,
+            );
+            Some(Param::from_tensor(eye))
+        } else {
+            None
+        };
 
         let latent_per_head = config.latent_per_head();
         let latent_total = config.latent_total();
@@ -761,16 +985,21 @@ impl<B: Backend> VisionDragonHatchling<B> {
             mlp_internal_dim_multiplier: config.mlp_internal_dim_multiplier,
             use_cls_token: config.use_cls_token,
             attention_mode: config.attention_mode,
+            latent_activation: config.latent_activation,
             kernel: config.fused_kernels,
             patch_embed,
             dropout,
             token_norm,
+            mhc_layers,
+            eye_token,
             encoder,
             encoder_v,
             decoder,
             projection,
             cls_token,
             cls_pos,
+            cls_sync_alpha: config.cls_sync_alpha,
+            cross_eye_steps: config.cross_eye_steps,
         }
     }
 
@@ -788,6 +1017,13 @@ impl<B: Backend> VisionDragonHatchling<B> {
 
     pub fn add_patch_position(&self, tokens: Tensor<B, 3>, grid: PatchGrid) -> Tensor<B, 3> {
         self.patch_embed.add_position(tokens, grid)
+    }
+
+    pub fn add_patch_position_multi(&self, tokens: Tensor<B, 4>, grid: PatchGrid) -> Tensor<B, 4> {
+        let [batch, streams, time, dim] = tokens.shape().dims::<4>();
+        let flat = tokens.reshape([batch * streams, time, dim]);
+        let flat = self.patch_embed.add_position(flat, grid);
+        flat.reshape([batch, streams, time, dim])
     }
 
     pub fn project_tokens(&self, tokens: Tensor<B, 3>) -> Tensor<B, 3> {
@@ -888,13 +1124,23 @@ impl<B: Backend> VisionDragonHatchling<B> {
         self.split_output(tokens)
     }
 
+    pub fn forward_tokens_embed_steps_rollout_multi(
+        &self,
+        tokens: Tensor<B, 4>,
+        steps: usize,
+        backprop_steps: usize,
+    ) -> VisionDragonHatchlingMultiOutput<B> {
+        let tokens = self.encode_tokens_steps_rollout_multi(tokens, steps, backprop_steps);
+        self.split_output_multi(tokens)
+    }
+
     fn encode_tokens(&self, tokens: Tensor<B, 3>) -> Tensor<B, 3> {
         self.encode_tokens_steps(tokens, self.steps)
     }
 
     fn encode_tokens_steps(&self, tokens: Tensor<B, 3>, steps: usize) -> Tensor<B, 3> {
         let steps = steps.max(1).min(self.steps);
-        self.encode_tokens_steps_inner(tokens, steps, 0)
+        self.encode_tokens_steps_inner(tokens, steps, 0, true)
     }
 
     fn encode_tokens_steps_rollout(
@@ -906,7 +1152,19 @@ impl<B: Backend> VisionDragonHatchling<B> {
         let steps = steps.max(1).min(self.steps);
         let backprop_steps = backprop_steps.max(1).min(steps);
         let detach_until = steps.saturating_sub(backprop_steps);
-        self.encode_tokens_steps_inner(tokens, steps, detach_until)
+        self.encode_tokens_steps_inner(tokens, steps, detach_until, true)
+    }
+
+    fn encode_tokens_steps_rollout_multi(
+        &self,
+        tokens: Tensor<B, 4>,
+        steps: usize,
+        backprop_steps: usize,
+    ) -> Tensor<B, 4> {
+        let steps = steps.max(1).min(self.steps);
+        let backprop_steps = backprop_steps.max(1).min(steps);
+        let detach_until = steps.saturating_sub(backprop_steps);
+        self.encode_tokens_steps_inner_multi(tokens, steps, detach_until)
     }
 
     fn encode_tokens_steps_inner(
@@ -914,8 +1172,9 @@ impl<B: Backend> VisionDragonHatchling<B> {
         tokens: Tensor<B, 3>,
         steps: usize,
         detach_until: usize,
+        add_cls: bool,
     ) -> Tensor<B, 3> {
-        let tokens = if self.use_cls_token {
+        let tokens = if add_cls && self.use_cls_token {
             self.prepend_cls(tokens)
         } else {
             tokens
@@ -923,7 +1182,7 @@ impl<B: Backend> VisionDragonHatchling<B> {
 
         let [batch, time, _] = tokens.shape().dims::<3>();
         let mut current = tokens.reshape([batch, 1, time, self.embed_dim]);
-        current = self.token_norm.forward(current);
+        current = self.apply_token_norm(current);
 
         let encoder_raw = self.encoder.val();
         let [heads, embd_enc, latent] = encoder_raw.shape().dims::<3>();
@@ -934,7 +1193,8 @@ impl<B: Backend> VisionDragonHatchling<B> {
         let encoder_v = encoder_v_raw.reshape([1, heads_v, embd_v, latent_v]);
 
         let decoder = self.decoder.val();
-        let fused = self.kernel.enabled;
+        let fused =
+            self.kernel.enabled && matches!(self.latent_activation, VisionLatentActivation::Relu);
         let latent_pattern: &BlockPattern1d = &self.kernel.block_sparse.latent;
 
         for step_idx in 0..steps {
@@ -948,14 +1208,16 @@ impl<B: Backend> VisionDragonHatchling<B> {
                 )
             } else {
                 let mut x_latent = current.clone().matmul(encoder.clone());
-                if self.kernel.relu_threshold != 0.0 {
+                if self.kernel.relu_threshold != 0.0
+                    && matches!(self.latent_activation, VisionLatentActivation::Relu)
+                {
                     x_latent = x_latent.sub_scalar(self.kernel.relu_threshold);
                 }
-                activation::relu(x_latent)
+                self.apply_latent_activation(x_latent)
             };
 
             let attn = self.full_attention(x_sparse.clone(), current.clone());
-            let attn = self.token_norm.forward(attn);
+            let attn = self.apply_token_norm(attn);
 
             let y_sparse = if fused {
                 relu_lowrank::fused_forward(
@@ -967,10 +1229,12 @@ impl<B: Backend> VisionDragonHatchling<B> {
                 )
             } else {
                 let mut y_latent = attn.matmul(encoder_v.clone());
-                if self.kernel.relu_threshold != 0.0 {
+                if self.kernel.relu_threshold != 0.0
+                    && matches!(self.latent_activation, VisionLatentActivation::Relu)
+                {
                     y_latent = y_latent.sub_scalar(self.kernel.relu_threshold);
                 }
-                activation::relu(y_latent)
+                self.apply_latent_activation(y_latent)
             };
 
             let xy_sparse = x_sparse * y_sparse;
@@ -981,14 +1245,186 @@ impl<B: Backend> VisionDragonHatchling<B> {
             let mixed_flat = mixed.reshape([batch * time, heads * latent]);
             let mlp_flat = mixed_flat.matmul(decoder.clone());
             let mlp_out = mlp_flat.reshape([batch, 1, time, self.embed_dim]);
-            let mlp_out = self.token_norm.forward(mlp_out);
-            current = self.token_norm.forward(current + mlp_out);
+            let mlp_out = self.apply_token_norm(mlp_out);
+            current = self.apply_token_norm(current + mlp_out);
             if step_idx < detach_until {
                 current = current.detach();
             }
         }
 
         current.reshape([batch, time, self.embed_dim])
+    }
+
+    fn encode_tokens_steps_inner_multi(
+        &self,
+        tokens: Tensor<B, 4>,
+        steps: usize,
+        detach_until: usize,
+    ) -> Tensor<B, 4> {
+        let tokens = if self.use_cls_token {
+            let [batch, streams, time, dim] = tokens.shape().dims::<4>();
+            let flat = tokens.reshape([batch * streams, time, dim]);
+            let flat = self.prepend_cls(flat);
+            let [flat_batch, time, dim] = flat.shape().dims::<3>();
+            let streams = (flat_batch / batch).max(1);
+            flat.reshape([batch, streams, time, dim])
+        } else {
+            tokens
+        };
+
+        let [batch, streams, time, _] = tokens.shape().dims::<4>();
+        let mut current = tokens.reshape([batch, streams, time, self.embed_dim]);
+        current = self.apply_token_norm(current);
+
+        if let Some(eye_token) = &self.eye_token {
+            let eye = eye_token
+                .val()
+                .reshape([1, streams, 1, self.embed_dim])
+                .repeat_dim(0, batch)
+                .repeat_dim(2, time);
+            current = current + eye;
+        }
+        current = self.sync_cls_tokens_multi(current);
+
+        let encoder_raw = self.encoder.val();
+        let [heads, embd_enc, latent] = encoder_raw.shape().dims::<3>();
+        let encoder = encoder_raw.reshape([1, heads, embd_enc, latent]);
+
+        let encoder_v_raw = self.encoder_v.val();
+        let [heads_v, embd_v, latent_v] = encoder_v_raw.shape().dims::<3>();
+        let encoder_v = encoder_v_raw.reshape([1, heads_v, embd_v, latent_v]);
+
+        let decoder = self.decoder.val();
+        let fused =
+            self.kernel.enabled && matches!(self.latent_activation, VisionLatentActivation::Relu);
+        let latent_pattern: &BlockPattern1d = &self.kernel.block_sparse.latent;
+
+        for step_idx in 0..steps {
+            let (branch_input, residuals_base, beta) = if let Some(mhc_layers) = &self.mhc_layers {
+                let mhc = &mhc_layers[step_idx.min(mhc_layers.len().saturating_sub(1))];
+                mhc.width_connection(current.clone())
+            } else {
+                (current.clone(), current.clone(), None)
+            };
+
+            let [batch, views, time, dim] = branch_input.shape().dims::<4>();
+            let mut branch_flat = branch_input.reshape([batch * views, 1, time, dim]);
+
+            let x_sparse = if fused {
+                relu_lowrank::fused_forward(
+                    branch_flat.clone(),
+                    encoder.clone(),
+                    None,
+                    self.kernel.relu_threshold,
+                    latent_pattern,
+                )
+            } else {
+                let mut x_latent = branch_flat.clone().matmul(encoder.clone());
+                if self.kernel.relu_threshold != 0.0
+                    && matches!(self.latent_activation, VisionLatentActivation::Relu)
+                {
+                    x_latent = x_latent.sub_scalar(self.kernel.relu_threshold);
+                }
+                self.apply_latent_activation(x_latent)
+            };
+
+            let attn = self.full_attention(x_sparse.clone(), branch_flat.clone());
+            let attn = self.apply_token_norm(attn);
+
+            let y_sparse = if fused {
+                relu_lowrank::fused_forward(
+                    attn.clone(),
+                    encoder_v.clone(),
+                    None,
+                    self.kernel.relu_threshold,
+                    latent_pattern,
+                )
+            } else {
+                let mut y_latent = attn.matmul(encoder_v.clone());
+                if self.kernel.relu_threshold != 0.0
+                    && matches!(self.latent_activation, VisionLatentActivation::Relu)
+                {
+                    y_latent = y_latent.sub_scalar(self.kernel.relu_threshold);
+                }
+                self.apply_latent_activation(y_latent)
+            };
+
+            let xy_sparse = x_sparse * y_sparse;
+            let xy_sparse = self.dropout.forward(xy_sparse);
+
+            let mixed = xy_sparse.clone().swap_dims(1, 2);
+            let [batch_flat, time_flat, heads, latent] = mixed.shape().dims();
+            let mixed_flat = mixed.reshape([batch_flat * time_flat, heads * latent]);
+            let mlp_flat = mixed_flat.matmul(decoder.clone());
+            let mlp_out = mlp_flat.reshape([batch_flat, 1, time_flat, self.embed_dim]);
+            let mlp_out = self.apply_token_norm(mlp_out);
+            branch_flat = self.apply_token_norm(branch_flat + mlp_out);
+
+            let branch_out = branch_flat.reshape([batch, views, time, dim]);
+            let next = if let Some(mhc_layers) = &self.mhc_layers {
+                let mhc = &mhc_layers[step_idx.min(mhc_layers.len().saturating_sub(1))];
+                mhc.depth_connection(branch_out, residuals_base, beta)
+            } else {
+                branch_out
+            };
+
+            current = self.sync_cls_tokens_multi(self.apply_token_norm(next));
+            if step_idx < detach_until {
+                current = current.detach();
+            }
+        }
+
+        if self.cross_eye_steps > 0 && streams > 1 && time > 0 {
+            let cross_steps = self.cross_eye_steps.min(self.steps);
+            if cross_steps > 0 {
+                let flat = current.reshape([batch, streams * time, self.embed_dim]);
+                let mixed = self.encode_tokens_steps_inner(flat, cross_steps, 0, false);
+                current = self
+                    .sync_cls_tokens_multi(self.apply_token_norm(mixed.reshape([
+                        batch, streams, time, self.embed_dim,
+                    ])));
+            }
+        }
+
+        current.reshape([batch, streams, time, self.embed_dim])
+    }
+
+    fn apply_token_norm<const D: usize>(&self, tokens: Tensor<B, D>) -> Tensor<B, D> {
+        match &self.token_norm {
+            Some(norm) => norm.forward(tokens),
+            None => tokens,
+        }
+    }
+
+    fn apply_latent_activation<const D: usize>(&self, values: Tensor<B, D>) -> Tensor<B, D> {
+        match self.latent_activation {
+            VisionLatentActivation::Relu => activation::relu(values),
+            VisionLatentActivation::Gelu => activation::gelu(values),
+            VisionLatentActivation::Identity => values,
+        }
+    }
+
+    fn sync_cls_tokens_multi(&self, tokens: Tensor<B, 4>) -> Tensor<B, 4> {
+        if !(self.use_cls_token && self.cls_sync_alpha > 0.0) {
+            return tokens;
+        }
+        let [batch, streams, time, dim] = tokens.shape().dims::<4>();
+        if streams <= 1 || time == 0 {
+            return tokens;
+        }
+        let alpha = self.cls_sync_alpha.clamp(0.0, 1.0);
+        let cls = tokens.clone().slice_dim(2, 0..1);
+        let shared = cls
+            .clone()
+            .mean_dim(1)
+            .reshape([batch, 1, 1, dim])
+            .repeat_dim(1, streams);
+        let blended = cls.mul_scalar(1.0 - alpha) + shared.mul_scalar(alpha);
+        if time <= 1 {
+            return blended;
+        }
+        let rest = tokens.slice_dim(2, 1..time);
+        Tensor::cat(vec![blended, rest], 2)
     }
 
     fn full_attention(&self, query: Tensor<B, 4>, value: Tensor<B, 4>) -> Tensor<B, 4> {
@@ -1030,10 +1466,7 @@ impl<B: Backend> VisionDragonHatchling<B> {
     fn split_output(&self, tokens: Tensor<B, 3>) -> VisionDragonHatchlingOutput<B> {
         let [batch, time, dim] = tokens.shape().dims::<3>();
         if self.use_cls_token && time > 0 {
-            let cls_token = tokens
-                .clone()
-                .slice_dim(1, 0..1)
-                .reshape([batch, dim]);
+            let cls_token = tokens.clone().slice_dim(1, 0..1).reshape([batch, dim]);
             let patch_tokens = tokens.slice_dim(1, 1..time);
             VisionDragonHatchlingOutput {
                 patch_tokens,
@@ -1042,6 +1475,27 @@ impl<B: Backend> VisionDragonHatchling<B> {
         } else {
             let cls_token = tokens.clone().mean_dim(1).reshape([batch, dim]);
             VisionDragonHatchlingOutput {
+                patch_tokens: tokens,
+                cls_token,
+            }
+        }
+    }
+
+    fn split_output_multi(&self, tokens: Tensor<B, 4>) -> VisionDragonHatchlingMultiOutput<B> {
+        let [batch, streams, time, dim] = tokens.shape().dims::<4>();
+        if self.use_cls_token && time > 0 {
+            let cls_token = tokens
+                .clone()
+                .slice_dim(2, 0..1)
+                .reshape([batch, streams, dim]);
+            let patch_tokens = tokens.slice_dim(2, 1..time);
+            VisionDragonHatchlingMultiOutput {
+                patch_tokens,
+                cls_token,
+            }
+        } else {
+            let cls_token = tokens.clone().mean_dim(2).reshape([batch, streams, dim]);
+            VisionDragonHatchlingMultiOutput {
                 patch_tokens: tokens,
                 cls_token,
             }
@@ -1122,10 +1576,7 @@ mod cifar {
                 labels.extend_from_slice(&file_labels);
             }
 
-            Ok(Self {
-                images,
-                labels,
-            })
+            Ok(Self { images, labels })
         }
 
         pub fn len(&self) -> usize {
@@ -1172,10 +1623,8 @@ mod cifar {
                 ),
                 device,
             );
-            let labels_tensor = Tensor::<B, 1, Int>::from_data(
-                TensorData::new(labels, [batch_size]),
-                device,
-            );
+            let labels_tensor =
+                Tensor::<B, 1, Int>::from_data(TensorData::new(labels, [batch_size]), device);
             CifarBatch::new(images_tensor, labels_tensor)
         }
     }
@@ -1331,7 +1780,10 @@ mod cifar {
                     counter.fetch_add(1, Ordering::Relaxed);
                 }
             }
-            Some(self.dataset.sample_batch::<B>(self.batch_size, &self.device))
+            Some(
+                self.dataset
+                    .sample_batch::<B>(self.batch_size, &self.device),
+            )
         }
     }
 
@@ -1362,8 +1814,8 @@ mod cifar {
         record_len: usize,
         label_offset: usize,
     ) -> Result<(Vec<u8>, Vec<u8>)> {
-        let bytes = fs::read(path)
-            .map_err(|err| anyhow!("failed to read {}: {err}", path.display()))?;
+        let bytes =
+            fs::read(path).map_err(|err| anyhow!("failed to read {}: {err}", path.display()))?;
         if bytes.len() % record_len != 0 {
             return Err(anyhow!(
                 "invalid CIFAR record size in {}: {} bytes (record_len={})",
@@ -1373,10 +1825,7 @@ mod cifar {
             ));
         }
         if label_offset >= record_len {
-            return Err(anyhow!(
-                "label offset out of range for {}",
-                path.display()
-            ));
+            return Err(anyhow!("label offset out of range for {}", path.display()));
         }
 
         let records = bytes.len() / record_len;
@@ -1401,8 +1850,8 @@ mod imagenet {
     use burn::data::dataloader::{DataLoader, DataLoaderIterator, Progress};
     use burn::tensor::backend::Backend;
     use burn::tensor::{Int, Tensor, TensorData};
-    use image::{DynamicImage, GenericImageView, RgbImage};
     use image::imageops::FilterType;
+    use image::{DynamicImage, GenericImageView, RgbImage};
     use rand::prelude::*;
     use std::collections::{HashMap, VecDeque};
     use std::fs::{self, File};
@@ -1443,6 +1892,39 @@ mod imagenet {
         blur_sigma_max: f32,
         solarize_prob: f32,
         solarize_threshold: u8,
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    struct CropParams {
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+    }
+
+    fn crop_overlap_ratio(a: CropParams, b: CropParams) -> f32 {
+        let x1 = a.x.max(b.x);
+        let y1 = a.y.max(b.y);
+        let x2 = (a.x + a.width).min(b.x + b.width);
+        let y2 = (a.y + a.height).min(b.y + b.height);
+        let inter_w = x2.saturating_sub(x1);
+        let inter_h = y2.saturating_sub(y1);
+        let inter_area = (inter_w * inter_h) as f32;
+        let area_a = (a.width * a.height) as f32;
+        let area_b = (b.width * b.height) as f32;
+        let denom = area_a.min(area_b).max(1.0);
+        inter_area / denom
+    }
+
+    fn push_crop_normalized(buffer: &mut Vec<f32>, crop: CropParams, width: u32, height: u32) {
+        let width = width.max(1) as f32;
+        let height = height.max(1) as f32;
+        buffer.extend_from_slice(&[
+            crop.x as f32 / width,
+            crop.y as f32 / height,
+            crop.width as f32 / width,
+            crop.height as f32 / height,
+        ]);
     }
 
     impl ImageNetAugmentations {
@@ -1520,23 +2002,21 @@ mod imagenet {
         }
 
         fn apply_train(&self, image: &DynamicImage, rng: &mut impl Rng) -> RgbImage {
-            if self.flip_prob <= 0.0
-                && self.color_jitter_prob <= 0.0
-                && self.grayscale_prob <= 0.0
-                && self.blur_prob <= 0.0
-                && self.solarize_prob <= 0.0
-                && (self.min_scale - 1.0).abs() <= f32::EPSILON
-                && (self.max_scale - 1.0).abs() <= f32::EPSILON
-                && (self.min_aspect_ratio - 1.0).abs() <= f32::EPSILON
-                && (self.max_aspect_ratio - 1.0).abs() <= f32::EPSILON
-            {
-                let (width, height) = image.dimensions();
-                if width == self.image_size && height == self.image_size {
-                    return image.to_rgb8();
-                }
+            if self.is_deterministic() {
+                return self.apply_val(image);
             }
 
-            let mut image = self.random_resized_crop(image, rng);
+            let crop = self.random_resized_crop_params(image, rng);
+            self.apply_train_with_crop(image, rng, crop)
+        }
+
+        fn apply_train_with_crop(
+            &self,
+            image: &DynamicImage,
+            rng: &mut impl Rng,
+            crop: CropParams,
+        ) -> RgbImage {
+            let mut image = self.apply_crop(image, crop);
 
             if self.flip_prob > 0.0 && rng.r#gen::<f32>() < self.flip_prob {
                 image = image.fliph();
@@ -1587,9 +2067,15 @@ mod imagenet {
             let target = self.resize_short.max(1);
 
             let (new_width, new_height) = if width < height {
-                (target, (height as f32 * (target as f32 / width as f32)).round() as u32)
+                (
+                    target,
+                    (height as f32 * (target as f32 / width as f32)).round() as u32,
+                )
             } else {
-                ((width as f32 * (target as f32 / height as f32)).round() as u32, target)
+                (
+                    (width as f32 * (target as f32 / height as f32)).round() as u32,
+                    target,
+                )
             };
 
             let resized = image.resize_exact(new_width, new_height, FilterType::CatmullRom);
@@ -1599,7 +2085,47 @@ mod imagenet {
             cropped.to_rgb8()
         }
 
-        fn random_resized_crop(&self, image: &DynamicImage, rng: &mut impl Rng) -> DynamicImage {
+        fn val_crop_params(&self, image: &DynamicImage) -> CropParams {
+            let (width, height) = image.dimensions();
+            let target = self.resize_short.max(1);
+            let (new_width, new_height) = if width < height {
+                (
+                    target,
+                    (height as f32 * (target as f32 / width as f32)).round() as u32,
+                )
+            } else {
+                (
+                    (width as f32 * (target as f32 / height as f32)).round() as u32,
+                    target,
+                )
+            };
+            let scale = target as f32 / width.min(height).max(1) as f32;
+            let crop_x = (new_width.saturating_sub(self.image_size)) / 2;
+            let crop_y = (new_height.saturating_sub(self.image_size)) / 2;
+            let crop_w = (self.image_size as f32 / scale).round().max(1.0);
+            let crop_h = (self.image_size as f32 / scale).round().max(1.0);
+            let x = (crop_x as f32 / scale).round().max(0.0);
+            let y = (crop_y as f32 / scale).round().max(0.0);
+            let max_w = width.max(1) as f32;
+            let max_h = height.max(1) as f32;
+            CropParams {
+                x: x.min(max_w - 1.0).max(0.0) as u32,
+                y: y.min(max_h - 1.0).max(0.0) as u32,
+                width: crop_w.min(max_w).max(1.0) as u32,
+                height: crop_h.min(max_h).max(1.0) as u32,
+            }
+        }
+
+        fn apply_crop(&self, image: &DynamicImage, crop: CropParams) -> DynamicImage {
+            let cropped = image.crop_imm(crop.x, crop.y, crop.width, crop.height);
+            cropped.resize_exact(self.image_size, self.image_size, FilterType::CatmullRom)
+        }
+
+        fn random_resized_crop_params(
+            &self,
+            image: &DynamicImage,
+            rng: &mut impl Rng,
+        ) -> CropParams {
             let (width, height) = image.dimensions();
             let area = (width * height) as f32;
             let log_min = self.min_aspect_ratio.ln();
@@ -1623,20 +2149,24 @@ mod imagenet {
                 if new_width > 0 && new_height > 0 && new_width <= width && new_height <= height {
                     let x = rng.gen_range(0..=width - new_width);
                     let y = rng.gen_range(0..=height - new_height);
-                    let cropped = image.crop_imm(x, y, new_width, new_height);
-                    return cropped.resize_exact(
-                        self.image_size,
-                        self.image_size,
-                        FilterType::CatmullRom,
-                    );
+                    return CropParams {
+                        x,
+                        y,
+                        width: new_width,
+                        height: new_height,
+                    };
                 }
             }
 
             let side = width.min(height).max(1);
             let x = (width - side) / 2;
             let y = (height - side) / 2;
-            let cropped = image.crop_imm(x, y, side, side);
-            cropped.resize_exact(self.image_size, self.image_size, FilterType::CatmullRom)
+            CropParams {
+                x,
+                y,
+                width: side,
+                height: side,
+            }
         }
 
         fn adjust_saturation(&self, image: DynamicImage, factor: f32) -> DynamicImage {
@@ -1767,9 +2297,7 @@ mod imagenet {
                     patch_records
                 ));
             }
-            if let Some(expected) =
-                expected_records.filter(|expected| *expected > cls_records)
-            {
+            if let Some(expected) = expected_records.filter(|expected| *expected > cls_records) {
                 return Err(anyhow!(
                     "teacher records fewer than expected: expected={}, available={}",
                     expected,
@@ -1861,6 +2389,8 @@ mod imagenet {
         pub teacher: Option<Arc<DinoFeatureStore>>,
         pub views: usize,
         pub local_views: usize,
+        pub min_view_overlap: f32,
+        pub view_overlap_attempts: usize,
         pub cache_decoded: bool,
         pub cache_capacity: usize,
         pub cache_preprocessed: bool,
@@ -1970,6 +2500,8 @@ mod imagenet {
         teacher: Option<Arc<DinoFeatureStore>>,
         global_views: usize,
         local_views: usize,
+        min_view_overlap: f32,
+        view_overlap_attempts: usize,
         cache: Option<ImageCache>,
         preprocessed_cache: Option<Vec<Arc<Vec<f32>>>>,
     }
@@ -1985,10 +2517,10 @@ mod imagenet {
             }
             let global_views = config.views.max(1);
             let local_views = config.local_views;
+            let min_view_overlap = config.min_view_overlap.max(0.0);
+            let view_overlap_attempts = config.view_overlap_attempts.max(1);
             if local_views > 0 && config.local_augmentations.is_none() {
-                return Err(anyhow!(
-                    "local_augmentations required when local_views > 0"
-                ));
+                return Err(anyhow!("local_augmentations required when local_views > 0"));
             }
             let cache = if config.cache_decoded && config.cache_capacity > 0 {
                 Some(ImageCache::new(config.cache_capacity))
@@ -2011,6 +2543,8 @@ mod imagenet {
                 teacher: config.teacher,
                 global_views,
                 local_views,
+                min_view_overlap,
+                view_overlap_attempts,
                 cache,
                 preprocessed_cache: None,
             };
@@ -2100,8 +2634,9 @@ mod imagenet {
             }
 
             let global_image_size = self.augmentations.image_size();
-            let mut images =
-                Vec::with_capacity(batch_size * global_image_size * global_image_size * IMAGE_CHANNELS);
+            let mut images = Vec::with_capacity(
+                batch_size * global_image_size * global_image_size * IMAGE_CHANNELS,
+            );
             let mut target_images = if self.global_views > 1 {
                 Some(Vec::with_capacity(
                     batch_size * global_image_size * global_image_size * IMAGE_CHANNELS,
@@ -2117,6 +2652,11 @@ mod imagenet {
                         * global_image_size
                         * IMAGE_CHANNELS,
                 ))
+            } else {
+                None
+            };
+            let mut view_crops = if self.local_views == 0 && self.global_views > 1 {
+                Some(Vec::with_capacity(batch_size * self.global_views * 4))
             } else {
                 None
             };
@@ -2151,33 +2691,103 @@ mod imagenet {
 
             for &index in &indices {
                 let sample = &self.samples[index];
-                if let Some(preprocessed_cache) = &self.preprocessed_cache {
-                    if let Some(cached) = preprocessed_cache.get(index) {
-                        images.extend_from_slice(cached.as_ref());
-                        labels.push(sample.label as i64);
-                        continue;
+                if self.global_views == 1 && self.local_views == 0 {
+                    if let Some(preprocessed_cache) = &self.preprocessed_cache {
+                        if let Some(cached) = preprocessed_cache.get(index) {
+                            images.extend_from_slice(cached.as_ref());
+                            labels.push(sample.label as i64);
+                            continue;
+                        }
                     }
                 }
                 let image = self.load_image_cached(&sample.path)?;
+                let (img_w, img_h) = image.dimensions();
                 if self.global_views == 1 && self.local_views == 0 {
                     let primary = self.augmentations.apply(image.as_ref(), &mut rng);
                     self.normalize.apply(&primary, &mut images);
                 } else {
-                    for view_idx in 0..self.global_views {
-                        let aug = self.augmentations.apply(image.as_ref(), &mut rng);
-                        if view_idx == 0 {
-                            self.normalize.apply(&aug, &mut images);
+                    if self.min_view_overlap > 0.0
+                        && matches!(self.augmentations.split, ImageNetSplit::Train)
+                    {
+                        let primary_crop = self
+                            .augmentations
+                            .random_resized_crop_params(image.as_ref(), &mut rng);
+                        let mut crops = Vec::with_capacity(self.global_views);
+                        crops.push(primary_crop);
+                        for _ in 1..self.global_views {
+                            let mut selected = None;
+                            for _ in 0..self.view_overlap_attempts {
+                                let candidate = self
+                                    .augmentations
+                                    .random_resized_crop_params(image.as_ref(), &mut rng);
+                                if crop_overlap_ratio(primary_crop, candidate)
+                                    >= self.min_view_overlap
+                                {
+                                    selected = Some(candidate);
+                                    break;
+                                }
+                            }
+                            crops.push(selected.unwrap_or(primary_crop));
                         }
-                        if view_idx == 1 {
-                            if let Some(buffer) = target_images.as_mut() {
+
+                        for (view_idx, crop) in crops.into_iter().enumerate() {
+                            if let Some(buffer) = view_crops.as_mut() {
+                                push_crop_normalized(buffer, crop, img_w, img_h);
+                            }
+                            let aug = self.augmentations.apply_train_with_crop(
+                                image.as_ref(),
+                                &mut rng,
+                                crop,
+                            );
+                            if view_idx == 0 {
+                                self.normalize.apply(&aug, &mut images);
+                            }
+                            if view_idx == 1 {
+                                if let Some(buffer) = target_images.as_mut() {
+                                    self.normalize.apply(&aug, buffer);
+                                }
+                            }
+                            if let Some(buffer) = view_images.as_mut() {
+                                self.normalize.apply(&aug, buffer);
+                            }
+                            if let Some(buffer) = global_view_images.as_mut() {
                                 self.normalize.apply(&aug, buffer);
                             }
                         }
-                        if let Some(buffer) = view_images.as_mut() {
-                            self.normalize.apply(&aug, buffer);
-                        }
-                        if let Some(buffer) = global_view_images.as_mut() {
-                            self.normalize.apply(&aug, buffer);
+                    } else {
+                        for view_idx in 0..self.global_views {
+                            let (aug, crop) = if matches!(self.augmentations.split, ImageNetSplit::Train)
+                                && !self.augmentations.is_deterministic()
+                            {
+                                let crop = self
+                                    .augmentations
+                                    .random_resized_crop_params(image.as_ref(), &mut rng);
+                                let aug = self
+                                    .augmentations
+                                    .apply_train_with_crop(image.as_ref(), &mut rng, crop);
+                                (aug, crop)
+                            } else {
+                                let crop = self.augmentations.val_crop_params(image.as_ref());
+                                let aug = self.augmentations.apply_val(image.as_ref());
+                                (aug, crop)
+                            };
+                            if view_idx == 0 {
+                                self.normalize.apply(&aug, &mut images);
+                            }
+                            if view_idx == 1 {
+                                if let Some(buffer) = target_images.as_mut() {
+                                    self.normalize.apply(&aug, buffer);
+                                }
+                            }
+                            if let Some(buffer) = view_crops.as_mut() {
+                                push_crop_normalized(buffer, crop, img_w, img_h);
+                            }
+                            if let Some(buffer) = view_images.as_mut() {
+                                self.normalize.apply(&aug, buffer);
+                            }
+                            if let Some(buffer) = global_view_images.as_mut() {
+                                self.normalize.apply(&aug, buffer);
+                            }
                         }
                     }
 
@@ -2214,6 +2824,7 @@ mod imagenet {
                 images,
                 target_images,
                 view_images,
+                view_crops,
                 global_view_images,
                 local_view_images,
                 labels,
@@ -2234,6 +2845,7 @@ mod imagenet {
         images: Vec<f32>,
         target_images: Option<Vec<f32>>,
         view_images: Option<Vec<f32>>,
+        view_crops: Option<Vec<f32>>,
         global_view_images: Option<Vec<f32>>,
         local_view_images: Option<Vec<f32>>,
         labels: Vec<i64>,
@@ -2295,6 +2907,12 @@ mod imagenet {
                     device,
                 )
             });
+            let view_crops_tensor = self.view_crops.map(|buffer| {
+                Tensor::<B, 3>::from_data(
+                    TensorData::new(buffer, [self.batch_size, self.global_views, 4]),
+                    device,
+                )
+            });
             let global_view_images_tensor = self.global_view_images.map(|buffer| {
                 Tensor::<B, 5>::from_data(
                     TensorData::new(
@@ -2330,10 +2948,7 @@ mod imagenet {
                 let dim = self
                     .teacher_feature_dim
                     .expect("teacher feature dim required");
-                Tensor::<B, 2>::from_data(
-                    TensorData::new(data, [self.batch_size, dim]),
-                    device,
-                )
+                Tensor::<B, 2>::from_data(TensorData::new(data, [self.batch_size, dim]), device)
             });
             let teacher_patch = self.teacher_patch.map(|data| {
                 let dim = self
@@ -2352,6 +2967,7 @@ mod imagenet {
                 images_tensor,
                 target_images_tensor,
                 view_images_tensor,
+                view_crops_tensor,
                 global_view_images_tensor,
                 local_view_images_tensor,
                 labels_tensor,
@@ -2366,6 +2982,7 @@ mod imagenet {
         pub images: Tensor<B, 4>,
         pub target_images: Option<Tensor<B, 4>>,
         pub view_images: Option<Tensor<B, 5>>,
+        pub view_crops: Option<Tensor<B, 3>>,
         pub global_view_images: Option<Tensor<B, 5>>,
         pub local_view_images: Option<Tensor<B, 5>>,
         pub labels: Tensor<B, 1, Int>,
@@ -2373,13 +2990,14 @@ mod imagenet {
         pub teacher_cls: Option<Tensor<B, 2>>,
     }
 
-impl<B: Backend> ImageNetBatch<B> {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        images: Tensor<B, 4>,
-        target_images: Option<Tensor<B, 4>>,
-        view_images: Option<Tensor<B, 5>>,
-        global_view_images: Option<Tensor<B, 5>>,
+    impl<B: Backend> ImageNetBatch<B> {
+        #[allow(clippy::too_many_arguments)]
+        pub fn new(
+            images: Tensor<B, 4>,
+            target_images: Option<Tensor<B, 4>>,
+            view_images: Option<Tensor<B, 5>>,
+            view_crops: Option<Tensor<B, 3>>,
+            global_view_images: Option<Tensor<B, 5>>,
             local_view_images: Option<Tensor<B, 5>>,
             labels: Tensor<B, 1, Int>,
             teacher_patch: Option<Tensor<B, 3>>,
@@ -2389,6 +3007,7 @@ impl<B: Backend> ImageNetBatch<B> {
                 images,
                 target_images,
                 view_images,
+                view_crops,
                 global_view_images,
                 local_view_images,
                 labels,
@@ -2410,6 +3029,10 @@ impl<B: Backend> ImageNetBatch<B> {
                     .map(|tensor| tensor.clone().repeat_dim(0, repeats)),
                 view_images: self
                     .view_images
+                    .as_ref()
+                    .map(|tensor| tensor.clone().repeat_dim(0, repeats)),
+                view_crops: self
+                    .view_crops
                     .as_ref()
                     .map(|tensor| tensor.clone().repeat_dim(0, repeats)),
                 global_view_images: self
@@ -2461,13 +3084,13 @@ impl<B: Backend> ImageNetBatch<B> {
         }
     }
 
-impl<B: Backend> ImageNetDataLoader<B> {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        dataset: Arc<ImageNetDataset>,
-        batch_size: usize,
-        device: &B::Device,
-        steps_per_epoch: usize,
+    impl<B: Backend> ImageNetDataLoader<B> {
+        #[allow(clippy::too_many_arguments)]
+        pub fn new(
+            dataset: Arc<ImageNetDataset>,
+            batch_size: usize,
+            device: &B::Device,
+            steps_per_epoch: usize,
             total_steps: Option<usize>,
             prefetch_batches: usize,
             prefetch_workers: usize,
@@ -2665,11 +3288,8 @@ impl<B: Backend> ImageNetDataLoader<B> {
                         }
                         let item = match data {
                             Ok(data) => {
-                                let _guard =
-                                    crate::device::device_allocation_lock().lock().ok();
-                                Ok(ImageNetPrefetchItem::Batch(
-                                    data.into_batch::<B>(&device),
-                                ))
+                                let _guard = crate::device::device_allocation_lock().lock().ok();
+                                Ok(ImageNetPrefetchItem::Batch(data.into_batch::<B>(&device)))
                             }
                             Err(err) => Err(err),
                         };
@@ -2799,10 +3419,7 @@ impl<B: Backend> ImageNetDataLoader<B> {
         class_dirs.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
 
         if class_dirs.is_empty() {
-            return Err(anyhow!(
-                "no class directories found in {}",
-                root.display()
-            ));
+            return Err(anyhow!("no class directories found in {}", root.display()));
         }
 
         let mut samples = Vec::new();
@@ -2810,10 +3427,7 @@ impl<B: Backend> ImageNetDataLoader<B> {
             let mut images = collect_images(class_dir)?;
             images.sort();
             for image in images {
-                samples.push(ImageNetSample {
-                    path: image,
-                    label,
-                });
+                samples.push(ImageNetSample { path: image, label });
             }
         }
 
@@ -2841,10 +3455,7 @@ impl<B: Backend> ImageNetDataLoader<B> {
 
     fn is_image_file(path: &Path) -> bool {
         match path.extension().and_then(|ext| ext.to_str()) {
-            Some(ext) => matches!(
-                ext.to_ascii_lowercase().as_str(),
-                "jpg" | "jpeg" | "png"
-            ),
+            Some(ext) => matches!(ext.to_ascii_lowercase().as_str(), "jpg" | "jpeg" | "png"),
             None => false,
         }
     }

@@ -2,14 +2,14 @@
 
 use std::any::{Any, TypeId};
 
-use burn::tensor::{Tensor as BurnTensor, TensorPrimitive};
 use burn::tensor::backend::Backend as BackendTrait;
 use burn::tensor::{DType, Shape, TensorData};
-use burn_cubecl::{BoolElement, CubeBackend, CubeRuntime};
+use burn::tensor::{Tensor as BurnTensor, TensorPrimitive};
 use burn_cubecl::fusion::FusionCubeRuntime;
 use burn_cubecl::kernel::into_contiguous;
 use burn_cubecl::ops::numeric::{empty_device, zeros_device};
 use burn_cubecl::tensor::CubeTensor;
+use burn_cubecl::{BoolElement, CubeBackend, CubeRuntime};
 use burn_fusion::FusionTensor;
 use burn_fusion::stream::StreamId;
 use burn_wgpu::WgpuRuntime;
@@ -19,8 +19,8 @@ use cubecl::{calculate_cube_count_elemwise, prelude::*};
 
 use crate::train::constants::{
     SACCADE_EPS, SACCADE_FOVEA_AA_THRESHOLD, SACCADE_FOVEA_ERF_A, SACCADE_FOVEA_LOD_WINDOW,
-    SACCADE_FOVEA_PI, SACCADE_FOVEA_SQRT2, SACCADE_FOVEA_SQRT_PI_OVER_2,
-    SACCADE_FOVEA_SUBSAMPLES, SACCADE_LN_2,
+    SACCADE_FOVEA_PI, SACCADE_FOVEA_SQRT_PI_OVER_2, SACCADE_FOVEA_SQRT2, SACCADE_FOVEA_SUBSAMPLES,
+    SACCADE_LN_2,
 };
 use crate::train::saccade::{SaccadeLaplacianImages, SaccadeMipLevel};
 use crate::train::saccade::{build_image_grid, grid_sample_2d_bilinear};
@@ -182,19 +182,17 @@ where
                     return Some(result);
                 }
             }
-            if let Some(result) =
-                try_foveated_patch_cubecl_laplacian_direct_runtime::<B, WgpuRuntime>(
-                    laplacian,
-                    level_count,
-                    center_x,
-                    center_y,
-                    sigma_px,
-                    radius_px,
-                    lod_sigma,
-                    patch_h,
-                    patch_w,
-                )
-            {
+            if let Some(result) = try_foveated_patch_cubecl_laplacian_direct_runtime::<B, WgpuRuntime>(
+                laplacian,
+                level_count,
+                center_x,
+                center_y,
+                sigma_px,
+                radius_px,
+                lod_sigma,
+                patch_h,
+                patch_w,
+            ) {
                 return Some(result);
             }
             return None;
@@ -335,8 +333,7 @@ where
     cube_levels.push(first_level);
     for level in level_images.iter().skip(1) {
         let prim = level.clone().into_primitive().tensor();
-        let fusion: FusionTensor<FusionCubeRuntime<R, BT>> =
-            try_cast_primitive::<B, _>(prim)?;
+        let fusion: FusionTensor<FusionCubeRuntime<R, BT>> = try_cast_primitive::<B, _>(prim)?;
         let client = fusion.client.clone();
         let cube = client.resolve_tensor_float::<CubeBackend<R, f32, i32, BT>>(fusion);
         if cube.dtype != DType::F32 {
@@ -370,18 +367,15 @@ where
     );
     let params = resolve_fusion_tensor::<B, BT, R, 3>(&params)?;
 
-    let output = foveated_patch_cubecl_runtime::<R>(
-        cube_levels,
-        params,
-        patch_h,
-        patch_w,
-    );
+    let output = foveated_patch_cubecl_runtime::<R>(cube_levels, params, patch_h, patch_w);
     let shape = output.shape.clone();
     let dtype = output.dtype;
     let handle = output.into();
     let fusion_out = fusion_client.register_tensor(handle, shape, StreamId::current(), dtype);
     let out_prim = try_cast_backend::<B, _>(fusion_out)?;
-    Some(BurnTensor::<B, 4>::from_primitive(TensorPrimitive::Float(out_prim)))
+    Some(BurnTensor::<B, 4>::from_primitive(TensorPrimitive::Float(
+        out_prim,
+    )))
 }
 
 fn try_foveated_patch_cubecl_direct_runtime<B: BackendTrait, R: CubeRuntime>(
@@ -435,14 +429,11 @@ where
     );
     let params = resolve_direct_tensor::<B, R, 3>(&params)?;
 
-    let output = foveated_patch_cubecl_runtime::<R>(
-        cube_levels,
-        params,
-        patch_h,
-        patch_w,
-    );
+    let output = foveated_patch_cubecl_runtime::<R>(cube_levels, params, patch_h, patch_w);
     let out_prim = try_cast_backend::<B, _>(output)?;
-    Some(BurnTensor::<B, 4>::from_primitive(TensorPrimitive::Float(out_prim)))
+    Some(BurnTensor::<B, 4>::from_primitive(TensorPrimitive::Float(
+        out_prim,
+    )))
 }
 
 fn try_foveated_patch_cubecl_laplacian_fused_runtime<
@@ -474,17 +465,13 @@ where
     let fusion_coarse: FusionTensor<FusionCubeRuntime<R, BT>> =
         try_cast_primitive::<B, _>(prim_coarse)?;
     let fusion_client = fusion_coarse.client.clone();
-    let coarse =
-        fusion_client.resolve_tensor_float::<CubeBackend<R, f32, i32, BT>>(fusion_coarse);
+    let coarse = fusion_client.resolve_tensor_float::<CubeBackend<R, f32, i32, BT>>(fusion_coarse);
     if coarse.dtype != DType::F32 {
         return None;
     }
 
     let device = center_x.device();
-    let base_source = laplacian
-        .residuals
-        .first()
-        .unwrap_or(&laplacian.coarse);
+    let base_source = laplacian.residuals.first().unwrap_or(&laplacian.coarse);
     let [_, _, base_h, base_w] = base_source.shape().dims::<4>();
     let base_dims = BurnTensor::<B, 1>::from_data(
         TensorData::new(vec![base_w as f32, base_h as f32], [2]),
@@ -522,7 +509,9 @@ where
     let handle = output.into();
     let fusion_out = fusion_client.register_tensor(handle, shape, StreamId::current(), dtype);
     let out_prim = try_cast_backend::<B, _>(fusion_out)?;
-    Some(BurnTensor::<B, 4>::from_primitive(TensorPrimitive::Float(out_prim)))
+    Some(BurnTensor::<B, 4>::from_primitive(TensorPrimitive::Float(
+        out_prim,
+    )))
 }
 
 fn try_foveated_patch_cubecl_laplacian_direct_runtime<B: BackendTrait, R: CubeRuntime>(
@@ -548,10 +537,7 @@ where
     let coarse = resolve_direct_tensor::<B, R, 4>(&laplacian.coarse)?;
 
     let device = center_x.device();
-    let base_source = laplacian
-        .residuals
-        .first()
-        .unwrap_or(&laplacian.coarse);
+    let base_source = laplacian.residuals.first().unwrap_or(&laplacian.coarse);
     let [_, _, base_h, base_w] = base_source.shape().dims::<4>();
     let base_dims = BurnTensor::<B, 1>::from_data(
         TensorData::new(vec![base_w as f32, base_h as f32], [2]),
@@ -585,7 +571,9 @@ where
         level_count as u32,
     );
     let out_prim = try_cast_backend::<B, _>(output)?;
-    Some(BurnTensor::<B, 4>::from_primitive(TensorPrimitive::Float(out_prim)))
+    Some(BurnTensor::<B, 4>::from_primitive(TensorPrimitive::Float(
+        out_prim,
+    )))
 }
 
 fn resolve_fusion_tensor<B: BackendTrait, BT: BoolElement, R: CubeRuntime, const D: usize>(
@@ -597,8 +585,7 @@ where
     R: CubeRuntime + 'static,
 {
     let prim = tensor.clone().into_primitive().tensor();
-    let fusion: FusionTensor<FusionCubeRuntime<R, BT>> =
-        try_cast_primitive::<B, _>(prim)?;
+    let fusion: FusionTensor<FusionCubeRuntime<R, BT>> = try_cast_primitive::<B, _>(prim)?;
     let client = fusion.client.clone();
     let cube = client.resolve_tensor_float::<CubeBackend<R, f32, i32, BT>>(fusion);
     if cube.dtype != DType::F32 {
@@ -817,9 +804,7 @@ fn matches_type<A: 'static, B: 'static>() -> bool {
     TypeId::of::<A>() == TypeId::of::<B>()
 }
 
-fn try_cast_primitive<B: BackendTrait, T: 'static>(
-    value: B::FloatTensorPrimitive,
-) -> Option<T>
+fn try_cast_primitive<B: BackendTrait, T: 'static>(value: B::FloatTensorPrimitive) -> Option<T>
 where
     B::FloatTensorPrimitive: 'static,
 {
@@ -1034,19 +1019,7 @@ fn foveated_gaussian_fused_kernel(
             let diff = (level_f - lod) / lod_sigma;
             let weight = Exp::exp(-0.5f32 * diff * diff);
             let sample = sample_gaussian_level(
-                level,
-                b,
-                c,
-                fx,
-                fy,
-                level0,
-                level1,
-                level2,
-                level3,
-                level4,
-                level5,
-                level6,
-                level7,
+                level, b, c, fx, fy, level0, level1, level2, level3, level4, level5, level6, level7,
             );
             color += sample * weight;
             weight_sum += weight;
@@ -1062,10 +1035,10 @@ fn foveated_gaussian_fused_kernel(
         while sy < SUBSAMPLE_AXIS {
             let mut sx = 0u32;
             while sx < SUBSAMPLE_AXIS {
-                let jitter_x = (f32::cast_from(sx) + 0.5f32) / f32::cast_from(SUBSAMPLE_AXIS)
-                    - 0.5f32;
-                let jitter_y = (f32::cast_from(sy) + 0.5f32) / f32::cast_from(SUBSAMPLE_AXIS)
-                    - 0.5f32;
+                let jitter_x =
+                    (f32::cast_from(sx) + 0.5f32) / f32::cast_from(SUBSAMPLE_AXIS) - 0.5f32;
+                let jitter_y =
+                    (f32::cast_from(sy) + 0.5f32) / f32::cast_from(SUBSAMPLE_AXIS) - 0.5f32;
                 let ux = x_base + jitter_x / half_safe;
                 let uy = y_base + jitter_y / half_safe;
                 let u_scaled_x = clamp_f32(ux, -1.0f32, 1.0f32) * u_max;
@@ -1078,8 +1051,7 @@ fn foveated_gaussian_fused_kernel(
                     sigma * SQRT2 * u_max * SQRT_PI_OVER_2 * Exp::exp(erf_inv_x * erf_inv_x);
                 let dy_deriv =
                     sigma * SQRT2 * u_max * SQRT_PI_OVER_2 * Exp::exp(erf_inv_y * erf_inv_y);
-                let local_scale =
-                    max_f32(Abs::abs(dx_deriv), Abs::abs(dy_deriv)) * pixel_du;
+                let local_scale = max_f32(Abs::abs(dx_deriv), Abs::abs(dy_deriv)) * pixel_du;
                 let fx = (cx + dx) / base_width;
                 let fy = (cy + dy) / base_height;
                 let lod = compute_lod(dx, dy, sigma, local_scale, max_level);
@@ -1102,19 +1074,8 @@ fn foveated_gaussian_fused_kernel(
                     let diff = (level_f - lod) / lod_sigma;
                     let weight = Exp::exp(-0.5f32 * diff * diff);
                     let sample = sample_gaussian_level(
-                        level,
-                        b,
-                        c,
-                        fx,
-                        fy,
-                        level0,
-                        level1,
-                        level2,
-                        level3,
-                        level4,
-                        level5,
-                        level6,
-                        level7,
+                        level, b, c, fx, fy, level0, level1, level2, level3, level4, level5,
+                        level6, level7,
                     );
                     color += sample * weight;
                     weight_sum += weight;
@@ -1131,10 +1092,8 @@ fn foveated_gaussian_fused_kernel(
         }
     }
 
-    let out_idx = b * output.stride(0)
-        + c * output.stride(1)
-        + y * output.stride(2)
-        + x * output.stride(3);
+    let out_idx =
+        b * output.stride(0) + c * output.stride(1) + y * output.stride(2) + x * output.stride(3);
     output[out_idx] = if samples > 0.0f32 {
         accum / samples
     } else {
@@ -1281,10 +1240,10 @@ fn foveated_laplacian_fused_kernel(
         while sy < SUBSAMPLE_AXIS {
             let mut sx = 0u32;
             while sx < SUBSAMPLE_AXIS {
-                let jitter_x = (f32::cast_from(sx) + 0.5f32) / f32::cast_from(SUBSAMPLE_AXIS)
-                    - 0.5f32;
-                let jitter_y = (f32::cast_from(sy) + 0.5f32) / f32::cast_from(SUBSAMPLE_AXIS)
-                    - 0.5f32;
+                let jitter_x =
+                    (f32::cast_from(sx) + 0.5f32) / f32::cast_from(SUBSAMPLE_AXIS) - 0.5f32;
+                let jitter_y =
+                    (f32::cast_from(sy) + 0.5f32) / f32::cast_from(SUBSAMPLE_AXIS) - 0.5f32;
                 let ux = x_base + jitter_x / half_safe;
                 let uy = y_base + jitter_y / half_safe;
                 let u_scaled_x = clamp_f32(ux, -1.0f32, 1.0f32) * u_max;
@@ -1297,8 +1256,7 @@ fn foveated_laplacian_fused_kernel(
                     sigma * SQRT2 * u_max * SQRT_PI_OVER_2 * Exp::exp(erf_inv_x * erf_inv_x);
                 let dy_deriv =
                     sigma * SQRT2 * u_max * SQRT_PI_OVER_2 * Exp::exp(erf_inv_y * erf_inv_y);
-                let local_scale =
-                    max_f32(Abs::abs(dx_deriv), Abs::abs(dy_deriv)) * pixel_du;
+                let local_scale = max_f32(Abs::abs(dx_deriv), Abs::abs(dy_deriv)) * pixel_du;
                 let fx = (cx + dx) / base_width;
                 let fy = (cy + dy) / base_height;
                 let lod = compute_lod(dx, dy, sigma, local_scale, max_level);
@@ -1356,10 +1314,8 @@ fn foveated_laplacian_fused_kernel(
         }
     }
 
-    let out_idx = b * output.stride(0)
-        + c * output.stride(1)
-        + y * output.stride(2)
-        + x * output.stride(3);
+    let out_idx =
+        b * output.stride(0) + c * output.stride(1) + y * output.stride(2) + x * output.stride(3);
     output[out_idx] = if samples > 0.0f32 {
         accum / samples
     } else {
@@ -1462,10 +1418,8 @@ fn foveated_accumulate_kernel(
     let erf_inv_y = erfinv_approx(u_scaled_y);
     let dx = sigma * SQRT2 * erf_inv_x;
     let dy = sigma * SQRT2 * erf_inv_y;
-    let dx_deriv =
-        sigma * SQRT2 * u_max * SQRT_PI_OVER_2 * Exp::exp(erf_inv_x * erf_inv_x);
-    let dy_deriv =
-        sigma * SQRT2 * u_max * SQRT_PI_OVER_2 * Exp::exp(erf_inv_y * erf_inv_y);
+    let dx_deriv = sigma * SQRT2 * u_max * SQRT_PI_OVER_2 * Exp::exp(erf_inv_x * erf_inv_x);
+    let dy_deriv = sigma * SQRT2 * u_max * SQRT_PI_OVER_2 * Exp::exp(erf_inv_y * erf_inv_y);
 
     let local_scale = max_f32(Abs::abs(dx_deriv), Abs::abs(dy_deriv)) * pixel_du;
     let img_x = cx + dx;
@@ -1509,16 +1463,12 @@ fn foveated_accumulate_kernel(
     };
 
     let sample = sample_bilinear(input, batch_idx, c, fx, fy);
-    let out_idx = sb * output.stride(0)
-        + c * output.stride(1)
-        + y * output.stride(2)
-        + x * output.stride(3);
+    let out_idx =
+        sb * output.stride(0) + c * output.stride(1) + y * output.stride(2) + x * output.stride(3);
     output[out_idx] = output[out_idx] + sample * weight;
 
     if c == 0 {
-        let w_idx = sb * weight_sum.stride(0)
-            + y * weight_sum.stride(1)
-            + x * weight_sum.stride(2);
+        let w_idx = sb * weight_sum.stride(0) + y * weight_sum.stride(1) + x * weight_sum.stride(2);
         weight_sum[w_idx] = weight_sum[w_idx] + weight;
     }
 }
@@ -1607,10 +1557,8 @@ fn foveated_laplacian_weight_kernel(
     let erf_inv_y = erfinv_approx(u_scaled_y);
     let dx = sigma * SQRT2 * erf_inv_x;
     let dy = sigma * SQRT2 * erf_inv_y;
-    let dx_deriv =
-        sigma * SQRT2 * u_max * SQRT_PI_OVER_2 * Exp::exp(erf_inv_x * erf_inv_x);
-    let dy_deriv =
-        sigma * SQRT2 * u_max * SQRT_PI_OVER_2 * Exp::exp(erf_inv_y * erf_inv_y);
+    let dx_deriv = sigma * SQRT2 * u_max * SQRT_PI_OVER_2 * Exp::exp(erf_inv_x * erf_inv_x);
+    let dy_deriv = sigma * SQRT2 * u_max * SQRT_PI_OVER_2 * Exp::exp(erf_inv_y * erf_inv_y);
 
     let local_scale = max_f32(Abs::abs(dx_deriv), Abs::abs(dy_deriv)) * pixel_du;
 
@@ -1641,9 +1589,7 @@ fn foveated_laplacian_weight_kernel(
         Exp::exp(-0.5f32 * diff * diff)
     };
 
-    let w_idx = sb * weight_sum.stride(0)
-        + y * weight_sum.stride(1)
-        + x * weight_sum.stride(2);
+    let w_idx = sb * weight_sum.stride(0) + y * weight_sum.stride(1) + x * weight_sum.stride(2);
     let prefix = prefix_weight[w_idx] + weight;
     prefix_weight[w_idx] = prefix;
     weight_sum[w_idx] = weight_sum[w_idx] + weight;
@@ -1751,14 +1697,11 @@ fn foveated_laplacian_residual_kernel(
     let fy = img_y / base_height;
 
     let sample = sample_bilinear(residual, batch_idx, c, fx, fy);
-    let w_idx = sb * prefix_weight.stride(0)
-        + y * prefix_weight.stride(1)
-        + x * prefix_weight.stride(2);
+    let w_idx =
+        sb * prefix_weight.stride(0) + y * prefix_weight.stride(1) + x * prefix_weight.stride(2);
     let weight = prefix_weight[w_idx];
-    let out_idx = sb * output.stride(0)
-        + c * output.stride(1)
-        + y * output.stride(2)
-        + x * output.stride(3);
+    let out_idx =
+        sb * output.stride(0) + c * output.stride(1) + y * output.stride(2) + x * output.stride(3);
     output[out_idx] = output[out_idx] + sample * weight;
 }
 
@@ -1864,14 +1807,10 @@ fn foveated_laplacian_coarse_kernel(
     let fy = img_y / base_height;
 
     let sample = sample_bilinear(coarse, batch_idx, c, fx, fy);
-    let w_idx = sb * weight_sum.stride(0)
-        + y * weight_sum.stride(1)
-        + x * weight_sum.stride(2);
+    let w_idx = sb * weight_sum.stride(0) + y * weight_sum.stride(1) + x * weight_sum.stride(2);
     let weight = weight_sum[w_idx];
-    let out_idx = sb * output.stride(0)
-        + c * output.stride(1)
-        + y * output.stride(2)
-        + x * output.stride(3);
+    let out_idx =
+        sb * output.stride(0) + c * output.stride(1) + y * output.stride(2) + x * output.stride(3);
     output[out_idx] = output[out_idx] + sample * weight;
 }
 
@@ -1908,9 +1847,7 @@ fn foveated_finalize_kernel(
             + c * color_accum.stride(1)
             + y * color_accum.stride(2)
             + x * color_accum.stride(3);
-        let w_idx = sb * weight_sum.stride(0)
-            + y * weight_sum.stride(1)
-            + x * weight_sum.stride(2);
+        let w_idx = sb * weight_sum.stride(0) + y * weight_sum.stride(1) + x * weight_sum.stride(2);
         let weight = if weight_sum[w_idx] < EPS {
             EPS.into()
         } else {
@@ -1919,10 +1856,8 @@ fn foveated_finalize_kernel(
         sum += color_accum[color_idx] / weight;
         subsample += 1u32;
     }
-    let out_idx = b * output.stride(0)
-        + c * output.stride(1)
-        + y * output.stride(2)
-        + x * output.stride(3);
+    let out_idx =
+        b * output.stride(0) + c * output.stride(1) + y * output.stride(2) + x * output.stride(3);
     output[out_idx] = sum / f32::cast_from(SUBSAMPLES);
 }
 
@@ -1940,9 +1875,7 @@ fn erf_approx(x: f32) -> f32 {
     let a3 = 1.421413741f32;
     let a4 = -1.453152027f32;
     let a5 = 1.061405429f32;
-    let y = 1.0f32
-        - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t
-            * Exp::exp(-ax * ax);
+    let y = 1.0f32 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * Exp::exp(-ax * ax);
     sign * y
 }
 
@@ -1962,13 +1895,7 @@ fn erfinv_approx(x: f32) -> f32 {
 }
 
 #[cube]
-fn sample_bilinear(
-    input: &Tensor<f32>,
-    batch_idx: u32,
-    channel: u32,
-    fx: f32,
-    fy: f32,
-) -> f32 {
+fn sample_bilinear(input: &Tensor<f32>, batch_idx: u32, channel: u32, fx: f32, fy: f32) -> f32 {
     let width = input.shape(3);
     let height = input.shape(2);
     let mut out = 0.0f32;

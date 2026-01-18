@@ -1,5 +1,5 @@
-use crate::train::prelude::*;
 use crate::train::gdpo;
+use crate::train::prelude::*;
 use burn::optim::{GradientsAccumulator, GradientsParams, Optimizer};
 use burn::tensor::Distribution as TensorDistribution;
 use burn::tensor::backend::{AutodiffBackend, Backend as BackendTrait};
@@ -186,17 +186,23 @@ impl<B: AutodiffBackend> VisionSaccadeBench<B> {
             .reshape([batch, 1, saccade.pyramid_feature_dim()]);
 
         let base_grid = build_foveated_base_grid::<B>(vision.patch_size, device);
-        let laplacian_images = if matches!(saccade.config.pyramid_mode, VisionPyramidMode::Laplacian)
-        {
-            saccade.build_laplacian_images(&levels)
-        } else {
-            None
-        };
+        let laplacian_images =
+            if matches!(saccade.config.pyramid_mode, VisionPyramidMode::Laplacian) {
+                saccade.build_laplacian_images(&levels)
+            } else {
+                None
+            };
         let gdpo_group = 4usize;
-        let gdpo_hard =
-            Tensor::<B, 2>::random([batch_size, gdpo_group], TensorDistribution::Default, device);
-        let gdpo_easy =
-            Tensor::<B, 2>::random([batch_size, gdpo_group], TensorDistribution::Default, device);
+        let gdpo_hard = Tensor::<B, 2>::random(
+            [batch_size, gdpo_group],
+            TensorDistribution::Default,
+            device,
+        );
+        let gdpo_easy = Tensor::<B, 2>::random(
+            [batch_size, gdpo_group],
+            TensorDistribution::Default,
+            device,
+        );
         let gdpo_batch = batch_size * gdpo_group;
         let gdpo_log_prob_new = Tensor::<B, 2>::random(
             [gdpo_batch, 1],
@@ -243,7 +249,9 @@ impl<B: AutodiffBackend> VisionSaccadeBench<B> {
     }
 
     pub fn fovea_patch_kernel_estimate(&self) -> FoveaKernelEstimate {
-        let levels = self.model.build_mip_pyramid(self.images.clone(), self.patch_size);
+        let levels = self
+            .model
+            .build_mip_pyramid(self.images.clone(), self.patch_size);
         let level_count = levels.len();
         let subsamples_axis = self.model.config.fovea_subsamples.max(1);
         let subsamples = subsamples_axis * subsamples_axis;
@@ -263,7 +271,9 @@ impl<B: AutodiffBackend> VisionSaccadeBench<B> {
     }
 
     pub fn stage_mip_pyramid(&self) -> Tensor<B, 1> {
-        let levels = self.model.build_mip_pyramid(self.images.clone(), self.patch_size);
+        let levels = self
+            .model
+            .build_mip_pyramid(self.images.clone(), self.patch_size);
         let device = self.images.device();
         let mut total = Tensor::<B, 1>::zeros([1], &device);
         for level in levels {
@@ -273,9 +283,9 @@ impl<B: AutodiffBackend> VisionSaccadeBench<B> {
     }
 
     pub fn stage_fovea_weights(&self) -> Tensor<B, 1> {
-        let weights = self
-            .model
-            .mip_gaussian_weights(&self.levels, self.mean.clone(), self.sigma.clone());
+        let weights =
+            self.model
+                .mip_gaussian_weights(&self.levels, self.mean.clone(), self.sigma.clone());
         let device = self.images.device();
         let mut total = Tensor::<B, 1>::zeros([1], &device);
         for weight in weights {
@@ -364,17 +374,17 @@ impl<B: AutodiffBackend> VisionSaccadeBench<B> {
 
     pub fn stage_full_forward(&self) -> Tensor<B, 1> {
         let batch = self.make_batch();
-        let losses = self
-            .model
-            .forward_losses_train(batch, self.steps, self.backprop_steps, true, false);
+        let losses =
+            self.model
+                .forward_losses_train(batch, self.steps, self.backprop_steps, true, false);
         losses.total
     }
 
     pub fn stage_full_backward(&self) -> Tensor<B, 1> {
         let batch = self.make_batch();
-        let losses = self
-            .model
-            .forward_losses_train(batch, self.steps, self.backprop_steps, true, false);
+        let losses =
+            self.model
+                .forward_losses_train(batch, self.steps, self.backprop_steps, true, false);
         let total = losses.total.clone();
         let grads = GradientsParams::from_grads(total.backward(), &self.model);
         let grad = grads
@@ -391,12 +401,12 @@ impl<B: AutodiffBackend> VisionSaccadeBench<B> {
             None,
             None,
             None,
+            None,
             self.labels.clone(),
             None,
             None,
         )
     }
-
 }
 
 impl<B: AutodiffBackend> VisionSaccadeTrainStepBench<B> {
@@ -484,10 +494,7 @@ impl<B: AutodiffBackend> VisionSaccadeTrainStepBench<B> {
             consumed += chunk;
         }
         let grads = grads.grads();
-        let loss = loss_sum
-            .expect("repeat loss")
-            .mul_scalar(scale)
-            .detach();
+        let loss = loss_sum.expect("repeat loss").mul_scalar(scale).detach();
         model = self.optimizer.step(self.lr, model, grads);
         self.model = Some(model);
         loss
@@ -504,11 +511,13 @@ impl<B: AutodiffBackend> VisionMaeTrainStepBench<B> {
     ) -> Result<Self> {
         let rollout = resolve_vision_rollout(training, vision.steps)?;
         let embed_dim = vision.embed_dim;
+        let num_eyes = vision.num_eyes;
         let recon_patch_dim = vision.patch_size * vision.patch_size * vision.in_channels;
         let model = VisionDragonHatchling::<B>::new(vision, device);
         let mae = VisionMaeModel::new(
             model,
             mae,
+            num_eyes,
             embed_dim,
             rollout,
             recon_patch_dim,
@@ -529,13 +538,8 @@ impl<B: AutodiffBackend> VisionMaeTrainStepBench<B> {
 
     pub fn train_step(&mut self, batch: ImageNetBatch<B>) -> Tensor<B, 1> {
         let mut model = self.model.take().expect("mae model");
-        let losses = model.forward_losses(
-            batch,
-            self.rollout_steps,
-            self.backprop_steps,
-            true,
-            false,
-        );
+        let losses =
+            model.forward_losses(batch, self.rollout_steps, self.backprop_steps, true, false);
         let grads = GradientsParams::from_grads(losses.total.clone().backward(), &model);
         let loss = losses.total.detach();
         model = self.optimizer.step(self.lr, model, grads);
@@ -600,12 +604,7 @@ impl<B: BackendTrait> VisionInputProjectionBench<B> {
         config: VisionSaccadeInputProjectionConfig,
         device: &B::Device,
     ) -> Self {
-        let projection = VisionSaccadeInputProjection::new(
-            embed_dim,
-            patch_size,
-            &config,
-            device,
-        );
+        let projection = VisionSaccadeInputProjection::new(embed_dim, patch_size, &config, device);
         let tokens = Tensor::<B, 3>::random(
             [batch, token_count, embed_dim],
             TensorDistribution::Default,

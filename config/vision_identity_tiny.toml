@@ -3,7 +3,7 @@
 [dataset]
 imagenet_root = "data/imagenette2-160"
 train_dir = "train"
-val_dir = "val"
+val_dir = "train"
 max_records = 1
 prefetch_batches = 1
 prefetch_workers = 2
@@ -18,21 +18,23 @@ variant = "imagenette2-160"
 
 [training]
 batch_size = 1
-max_iters = 200
+epochs = 300
+max_iters = 300
 log_frequency = 10
 batch_repeats = 1
 memory_cleanup_every = 0
 memory_cleanup_iters = 0
 disable_cuda_memory_cleanup = false
+enable_checkpoints = false
 train_repeat_chunk = 0
 trace_train_loss = true
 trace_train_loss_every = 1
-rollout_min_steps = 4
-rollout_max_steps = 4
-rollout_backprop_steps = 4
+rollout_min_steps = 6
+rollout_max_steps = 6
+rollout_backprop_steps = 6
 
 [optimizer]
-learning_rate = 0.01
+learning_rate = 0.003
 weight_decay = 0.0
 grad_clip_norm = 1.0
 
@@ -45,16 +47,19 @@ memory = "subslices"
 
 [vision]
 image_size = 64
-patch_size = 8
+patch_size = 16
+patch_embed_mode = "identity"
 in_channels = 3
-embed_dim = 64
-steps = 4
+embed_dim = 768
+steps = 6
 n_head = 4
-mlp_internal_dim_multiplier = 2
+mlp_internal_dim_multiplier = 4
 dropout = 0.0
-projection_dim = 64
-projection_hidden_dim = 128
-use_cls_token = true
+projection_dim = 768
+projection_hidden_dim = 512
+use_cls_token = false
+token_state_norm = true
+latent_activation = "gelu"
 pos_encoding = "learned2d"
 attention_mode = "row_l1"
 fused_kernels = false
@@ -73,7 +78,8 @@ artifact_overwrite = true
 [mode.loss.recon]
 mask_ratio = 0.0
 weight = 1.0
-hidden_dim = 128
+hidden_dim = 0
+recon_head_norm = false
 # compute reconstruction loss on all patches (not only masked ones)
 loss_on_all_patches = true
 

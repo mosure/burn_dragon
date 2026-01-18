@@ -52,6 +52,63 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
         levels
     }
 
+    pub(crate) fn build_masked_mip_pyramid(
+        &self,
+        images: Tensor<B, 4>,
+        patch_size: usize,
+        mask_ratio: f32,
+        randomize_mask: bool,
+    ) -> (
+        Vec<SaccadeMipLevel<B>>,
+        Vec<Tensor<B, 3>>,
+        Vec<Tensor<B, 2>>,
+    ) {
+        let max_levels = self.config.mip_levels.max(1);
+        let mut levels = Vec::new();
+        let mut target_patches = Vec::new();
+        let mut masks = Vec::new();
+        let mut current = images;
+        for level in 0..max_levels {
+            let [batch, channels, height, width] = current.shape().dims::<4>();
+            if height < patch_size || width < patch_size {
+                break;
+            }
+            let patch = self.model.patch_embed_raw(current.clone());
+            let grid = patch.grid;
+            let tokens = grid.num_patches();
+            if grid.height == 0 || grid.width == 0 || tokens == 0 {
+                break;
+            }
+            let target = patchify(current.clone(), patch_size);
+            let device = current.device();
+            let mask = sample_patch_mask(&device, batch, tokens, mask_ratio, randomize_mask);
+            let mask_expanded = mask.clone().unsqueeze_dim::<3>(2);
+            let keep = mask_expanded.clone().mul_scalar(-1.0).add_scalar(1.0);
+            let masked_patches = target.clone().mul(keep);
+            let masked_image = unpatchify(masked_patches, patch_size, height, width, channels);
+            let masked_patch = self.model.patch_embed_raw(masked_image.clone());
+            let masked_tokens = self.project_pyramid_tokens(masked_patch.tokens);
+            levels.push(SaccadeMipLevel {
+                tokens: masked_tokens,
+                grid,
+                image: masked_image,
+            });
+            target_patches.push(target);
+            masks.push(mask);
+
+            if level + 1 == max_levels {
+                break;
+            }
+            let next = downsample_image(current.clone());
+            if let Some(next) = next {
+                current = next;
+            } else {
+                break;
+            }
+        }
+        (levels, target_patches, masks)
+    }
+
     pub(crate) fn build_laplacian_images(
         &self,
         levels: &[SaccadeMipLevel<B>],
@@ -79,15 +136,10 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
             } else {
                 grid.repeat_dim(0, batch)
             };
-            let upsampled =
-                grid_sample_2d_bilinear::<B>(next.clone(), grid, grid_sample_max_bytes);
+            let upsampled = grid_sample_2d_bilinear::<B>(next.clone(), grid, grid_sample_max_bytes);
             residuals.push(current.clone() - upsampled);
         }
-        let coarse = levels
-            .last()
-            .expect("levels not empty")
-            .image
-            .clone();
+        let coarse = levels.last().expect("levels not empty").image.clone();
         Some(SaccadeLaplacianImages { residuals, coarse })
     }
 
@@ -118,10 +170,7 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
             return Vec::new();
         }
         let mut composed_rev = Vec::with_capacity(residuals.len());
-        let mut current = residuals
-            .last()
-            .expect("residuals not empty")
-            .clone();
+        let mut current = residuals.last().expect("residuals not empty").clone();
         composed_rev.push(current.clone());
         if residuals.len() > 1 {
             for idx in (0..residuals.len() - 1).rev() {
@@ -297,6 +346,4 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
         }
         weights_out
     }
-
 }
-

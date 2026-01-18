@@ -9,17 +9,18 @@ use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 #[cfg(all(feature = "train", feature = "benchmark"))]
 mod vision_bench {
     use super::*;
-    use burn::tensor::backend::{AutodiffBackend, Backend as BackendTrait};
     use burn::tensor::Tensor;
+    use burn::tensor::backend::{AutodiffBackend, Backend as BackendTrait};
     use burn_autodiff::Autodiff;
-    use burn_dragon_hatchling::{
-        ImageNetAugmentations, ImageNetSplit, VisionAugmentationConfig, VisionDragonHatchlingConfig,
-        VisionFoveaSamplingMode, VisionFoveaScatterMode, VisionFoveaWarpMode, VisionPyramidMode,
-        VisionSaccadeConfig, VisionNormalize, WgpuRuntimeConfig, wgpu::init_runtime,
-    };
-    use burn_dragon_hatchling_vision::foveation;
-    use burn_dragon_hatchling_vision::FOVEATION_SHADER;
     use burn_dragon_hatchling::vision::train::bench::{VisionSaccadeBench, VisionScatterBench};
+    use burn_dragon_hatchling::{
+        ImageNetAugmentations, ImageNetSplit, ManifoldHyperConnectionsConfig,
+        VisionAugmentationConfig, VisionDragonHatchlingConfig, VisionFoveaSamplingMode,
+        VisionFoveaScatterMode, VisionFoveaWarpMode, VisionLatentActivation, VisionNormalize,
+        VisionPyramidMode, VisionSaccadeConfig, WgpuRuntimeConfig, wgpu::init_runtime,
+    };
+    use burn_dragon_hatchling_vision::FOVEATION_SHADER;
+    use burn_dragon_hatchling_vision::foveation;
     use burn_wgpu::{Wgpu, WgpuDevice};
     use bytemuck::{Pod, Zeroable};
     use half::f16;
@@ -27,8 +28,8 @@ mod vision_bench {
     use rand::SeedableRng;
     use rand::rngs::StdRng;
     use serde::Deserialize;
-    use std::hint::black_box;
     use std::fs;
+    use std::hint::black_box;
     use std::path::PathBuf;
     use std::sync::Once;
     use wgpu::util::DeviceExt;
@@ -81,20 +82,18 @@ mod vision_bench {
         ("warped", VisionFoveaWarpMode::Warped),
         ("patched", VisionFoveaWarpMode::Patched),
     ];
-    const WARP_MODES_QUICK: &[(&str, VisionFoveaWarpMode)] =
-        &[
-            ("warped", VisionFoveaWarpMode::Warped),
-            ("patched", VisionFoveaWarpMode::Patched),
-        ];
+    const WARP_MODES_QUICK: &[(&str, VisionFoveaWarpMode)] = &[
+        ("warped", VisionFoveaWarpMode::Warped),
+        ("patched", VisionFoveaWarpMode::Patched),
+    ];
     const BASELINE_WARP_MODES_FULL: &[(&str, foveation::FoveaWarpMode)] = &[
         ("warped", foveation::FoveaWarpMode::Warped),
         ("patched", foveation::FoveaWarpMode::Patched),
     ];
-    const BASELINE_WARP_MODES_QUICK: &[(&str, foveation::FoveaWarpMode)] =
-        &[
-            ("warped", foveation::FoveaWarpMode::Warped),
-            ("patched", foveation::FoveaWarpMode::Patched),
-        ];
+    const BASELINE_WARP_MODES_QUICK: &[(&str, foveation::FoveaWarpMode)] = &[
+        ("warped", foveation::FoveaWarpMode::Warped),
+        ("patched", foveation::FoveaWarpMode::Patched),
+    ];
 
     #[derive(Debug, Default, Deserialize)]
     struct BenchSettings {
@@ -134,13 +133,21 @@ mod vision_bench {
         let full = settings.full;
         let include_cuda = settings.include_cuda;
         BenchProfile {
-            configs: if full { VISION_CONFIGS } else { &VISION_CONFIGS[..1] },
+            configs: if full {
+                VISION_CONFIGS
+            } else {
+                &VISION_CONFIGS[..1]
+            },
             sampling_modes: if full {
                 SAMPLING_MODES_FULL
             } else {
                 SAMPLING_MODES_QUICK
             },
-            warp_modes: if full { WARP_MODES_FULL } else { WARP_MODES_QUICK },
+            warp_modes: if full {
+                WARP_MODES_FULL
+            } else {
+                WARP_MODES_QUICK
+            },
             baseline_warp_modes: if full {
                 BASELINE_WARP_MODES_FULL
             } else {
@@ -217,8 +224,7 @@ mod vision_bench {
         name: &'static str,
         profile: &BenchProfile,
         init: Init,
-    )
-    where
+    ) where
         B: AutodiffBackend + Clone + 'static,
         Init: Fn(&<B as BackendTrait>::Device),
     {
@@ -239,6 +245,7 @@ mod vision_bench {
             let vision = VisionDragonHatchlingConfig {
                 image_size: cfg.image_size,
                 patch_size: cfg.patch_size,
+                patch_embed_mode: burn_dragon_hatchling::VisionPatchEmbedMode::default(),
                 in_channels: 3,
                 embed_dim: cfg.embed_dim,
                 steps: bench_steps,
@@ -248,11 +255,17 @@ mod vision_bench {
                 projection_dim: 128,
                 projection_hidden_dim: 256,
                 use_cls_token: true,
+                cls_sync_alpha: 0.0,
+                num_eyes: 2,
+                cross_eye_steps: 0,
+                token_state_norm: true,
+                latent_activation: VisionLatentActivation::default(),
                 pos_encoding: burn_dragon_hatchling::SpatialPositionalEncodingKind::Learned2d,
                 pos_max_height: cfg.image_size / cfg.patch_size,
                 pos_max_width: cfg.image_size / cfg.patch_size,
                 attention_mode: burn_dragon_hatchling::VisionAttentionMode::RowL1,
                 fused_kernels: burn_dragon_hatchling::FusedKernelConfig::default(),
+                mhc: ManifoldHyperConnectionsConfig::default(),
             };
             let saccade_base = VisionSaccadeConfig {
                 num_eyes: 2,
@@ -261,8 +274,14 @@ mod vision_bench {
                 low_mem_pre_rollout: true,
                 ..VisionSaccadeConfig::default()
             };
-            let bench =
-                VisionSaccadeBench::<B>::new(vision.clone(), saccade_base.clone(), cfg.batch, bench_steps, 1, &device);
+            let bench = VisionSaccadeBench::<B>::new(
+                vision.clone(),
+                saccade_base.clone(),
+                cfg.batch,
+                bench_steps,
+                1,
+                &device,
+            );
             let estimate = bench.fovea_patch_kernel_estimate();
             eprintln!(
                 "[{name}:{cfg_name}] fovea_patch grid_sample calls={calls} (unfused={unfused}) levels={levels} subsamples={subsamples}",
@@ -274,18 +293,78 @@ mod vision_bench {
                 subsamples = estimate.subsamples
             );
 
-            bench_stage(&mut group, cfg, "patch_embed", &bench, VisionSaccadeBench::stage_patch_embed);
-            bench_stage(&mut group, cfg, "mip_pyramid", &bench, VisionSaccadeBench::stage_mip_pyramid);
-            bench_stage(&mut group, cfg, "fovea_weights", &bench, VisionSaccadeBench::stage_fovea_weights);
-            bench_stage(&mut group, cfg, "fovea_context", &bench, VisionSaccadeBench::stage_fovea_context);
-            bench_stage(&mut group, cfg, "gdpo_advantage", &bench, VisionSaccadeBench::stage_gdpo_advantage);
-            bench_stage(&mut group, cfg, "gdpo_policy_loss", &bench, VisionSaccadeBench::stage_gdpo_policy_loss);
-            bench_stage(&mut group, cfg, "token_forward", &bench, VisionSaccadeBench::stage_token_forward);
-            bench_stage(&mut group, cfg, "residual_scatter", &bench, VisionSaccadeBench::stage_residual_scatter);
+            bench_stage(
+                &mut group,
+                cfg,
+                "patch_embed",
+                &bench,
+                VisionSaccadeBench::stage_patch_embed,
+            );
+            bench_stage(
+                &mut group,
+                cfg,
+                "mip_pyramid",
+                &bench,
+                VisionSaccadeBench::stage_mip_pyramid,
+            );
+            bench_stage(
+                &mut group,
+                cfg,
+                "fovea_weights",
+                &bench,
+                VisionSaccadeBench::stage_fovea_weights,
+            );
+            bench_stage(
+                &mut group,
+                cfg,
+                "fovea_context",
+                &bench,
+                VisionSaccadeBench::stage_fovea_context,
+            );
+            bench_stage(
+                &mut group,
+                cfg,
+                "gdpo_advantage",
+                &bench,
+                VisionSaccadeBench::stage_gdpo_advantage,
+            );
+            bench_stage(
+                &mut group,
+                cfg,
+                "gdpo_policy_loss",
+                &bench,
+                VisionSaccadeBench::stage_gdpo_policy_loss,
+            );
+            bench_stage(
+                &mut group,
+                cfg,
+                "token_forward",
+                &bench,
+                VisionSaccadeBench::stage_token_forward,
+            );
+            bench_stage(
+                &mut group,
+                cfg,
+                "residual_scatter",
+                &bench,
+                VisionSaccadeBench::stage_residual_scatter,
+            );
             if profile.include_full {
-                bench_stage(&mut group, cfg, "full_forward", &bench, VisionSaccadeBench::stage_full_forward);
+                bench_stage(
+                    &mut group,
+                    cfg,
+                    "full_forward",
+                    &bench,
+                    VisionSaccadeBench::stage_full_forward,
+                );
                 if name != "wgpu" {
-                    bench_stage(&mut group, cfg, "full_backward", &bench, VisionSaccadeBench::stage_full_backward);
+                    bench_stage(
+                        &mut group,
+                        cfg,
+                        "full_backward",
+                        &bench,
+                        VisionSaccadeBench::stage_full_backward,
+                    );
                 }
             }
 
@@ -294,14 +373,12 @@ mod vision_bench {
                     let mut saccade = saccade_base.clone();
                     saccade.fovea_sampling_mode = sampling_mode;
                     saccade.fovea_warp_mode = warp_mode;
-                    saccade.fovea_subpatch_size = if matches!(
-                        sampling_mode,
-                        VisionFoveaSamplingMode::Subpatch
-                    ) {
-                        (cfg.patch_size / 2).max(1)
-                    } else {
-                        0
-                    };
+                    saccade.fovea_subpatch_size =
+                        if matches!(sampling_mode, VisionFoveaSamplingMode::Subpatch) {
+                            (cfg.patch_size / 2).max(1)
+                        } else {
+                            0
+                        };
                     let bench = VisionSaccadeBench::<B>::new(
                         vision.clone(),
                         saccade,
@@ -341,6 +418,7 @@ mod vision_bench {
             let vision = VisionDragonHatchlingConfig {
                 image_size: cfg.image_size,
                 patch_size: cfg.patch_size,
+                patch_embed_mode: burn_dragon_hatchling::VisionPatchEmbedMode::default(),
                 in_channels: 3,
                 embed_dim: cfg.embed_dim,
                 steps: cfg.steps,
@@ -350,11 +428,17 @@ mod vision_bench {
                 projection_dim: 128,
                 projection_hidden_dim: 256,
                 use_cls_token: true,
+                cls_sync_alpha: 0.0,
+                num_eyes: 1,
+                cross_eye_steps: 0,
+                token_state_norm: true,
+                latent_activation: VisionLatentActivation::default(),
                 pos_encoding: burn_dragon_hatchling::SpatialPositionalEncodingKind::Learned2d,
                 pos_max_height: cfg.image_size / cfg.patch_size,
                 pos_max_width: cfg.image_size / cfg.patch_size,
                 attention_mode: burn_dragon_hatchling::VisionAttentionMode::RowL1,
                 fused_kernels: burn_dragon_hatchling::FusedKernelConfig::default(),
+                mhc: ManifoldHyperConnectionsConfig::default(),
             };
             let grid = (cfg.image_size / cfg.patch_size).max(1);
             let out_tokens = grid * grid;
@@ -490,7 +574,11 @@ mod vision_bench {
                 data.push(0.55 * fx + 0.35 * fy + 0.1 * checker);
             }
         }
-        foveation::CpuImageLevel { width, height, data }
+        foveation::CpuImageLevel {
+            width,
+            height,
+            data,
+        }
     }
 
     fn make_foveation_uniform(
@@ -500,7 +588,11 @@ mod vision_bench {
         warp_mode: foveation::FoveaWarpMode,
     ) -> FoveationUniform {
         let width = cache.gaussian.first().map(|level| level.width).unwrap_or(1);
-        let height = cache.gaussian.first().map(|level| level.height).unwrap_or(1);
+        let height = cache
+            .gaussian
+            .first()
+            .map(|level| level.height)
+            .unwrap_or(1);
         let min_dim = width.min(height).max(1) as f32;
         let radius_norm = foveation::sigma_from_unit(0.6);
         let sigma_norm = (radius_norm * 0.6).clamp(1e-3, radius_norm);
@@ -568,24 +660,22 @@ mod vision_bench {
             uniform: FoveationUniform,
         ) -> Self {
             let instance = wgpu::Instance::default();
-            let adapter = pollster::block_on(instance.request_adapter(
-                &wgpu::RequestAdapterOptions {
+            let adapter =
+                pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
                     power_preference: wgpu::PowerPreference::LowPower,
                     compatible_surface: None,
                     force_fallback_adapter: false,
-                },
-            ))
-            .expect("wgpu adapter");
-            let (device, queue) = pollster::block_on(adapter.request_device(
-                &wgpu::DeviceDescriptor {
+                }))
+                .expect("wgpu adapter");
+            let (device, queue) =
+                pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
                     label: None,
                     required_features: wgpu::Features::empty(),
                     required_limits: wgpu::Limits::default(),
                     memory_hints: wgpu::MemoryHints::default(),
                     trace: wgpu::Trace::Off,
-                },
-            ))
-            .expect("wgpu device");
+                }))
+                .expect("wgpu device");
 
             let gaussian = create_mip_texture(&device, &queue, &cache.gaussian);
             let residual_levels = build_residual_levels(cache);
@@ -758,11 +848,10 @@ mod vision_bench {
                     label: Some("foveation_encoder"),
                 });
             {
-                let mut pass =
-                    encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                        label: Some("foveation_pass"),
-                        timestamp_writes: None,
-                    });
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("foveation_pass"),
+                    timestamp_writes: None,
+                });
                 pass.set_pipeline(&self.pipeline);
                 pass.set_bind_group(0, &self.bind_group, &[]);
                 let groups_x =
@@ -804,9 +893,7 @@ mod vision_bench {
         }
     }
 
-    fn build_residual_levels(
-        cache: &foveation::CpuPyramidCache,
-    ) -> Vec<foveation::CpuImageLevel> {
+    fn build_residual_levels(cache: &foveation::CpuPyramidCache) -> Vec<foveation::CpuImageLevel> {
         let mut levels = cache.laplacian.clone();
         let coarse = &cache.coarse;
         let data = vec![0.0; coarse.width * coarse.height * 3];
@@ -930,22 +1017,18 @@ mod vision_bench {
         B: AutodiffBackend + Clone + 'static,
         F: FnMut(&VisionSaccadeBench<B>) -> Tensor<B, 1>,
     {
-        group.bench_with_input(
-            BenchmarkId::new(stage, cfg.name),
-            cfg,
-            |b, _cfg| {
-                b.iter_custom(|iters| {
-                    let mut total = Duration::ZERO;
-                    for _ in 0..iters {
-                        let start = Instant::now();
-                        let value = func(bench);
-                        force_sync(value);
-                        total += start.elapsed();
-                    }
-                    total
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new(stage, cfg.name), cfg, |b, _cfg| {
+            b.iter_custom(|iters| {
+                let mut total = Duration::ZERO;
+                for _ in 0..iters {
+                    let start = Instant::now();
+                    let value = func(bench);
+                    force_sync(value);
+                    total += start.elapsed();
+                }
+                total
+            });
+        });
     }
 
     fn bench_scatter_stage<B, F>(
@@ -958,29 +1041,24 @@ mod vision_bench {
         B: BackendTrait + Clone + 'static,
         F: FnMut(&VisionScatterBench<B>) -> Tensor<B, 1>,
     {
-        group.bench_with_input(
-            BenchmarkId::new(stage, cfg.name),
-            cfg,
-            |b, _cfg| {
-                b.iter_custom(|iters| {
-                    let mut total = Duration::ZERO;
-                    for _ in 0..iters {
-                        let start = Instant::now();
-                        let value = func(bench);
-                        force_sync(value);
-                        total += start.elapsed();
-                    }
-                    total
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new(stage, cfg.name), cfg, |b, _cfg| {
+            b.iter_custom(|iters| {
+                let mut total = Duration::ZERO;
+                for _ in 0..iters {
+                    let start = Instant::now();
+                    let value = func(bench);
+                    force_sync(value);
+                    total += start.elapsed();
+                }
+                total
+            });
+        });
     }
 
     fn force_sync<B: BackendTrait>(value: Tensor<B, 1>) {
         // Force lazy execution to finish before timing ends.
         let _ = value.to_data();
     }
-
 
     pub fn vision_augment_bench(c: &mut Criterion) {
         let config = VisionAugmentationConfig::default();
@@ -1006,17 +1084,22 @@ mod vision_bench {
             config.solarize_threshold,
         );
         let normalize = VisionNormalize::new(config.normalize_mean, config.normalize_std);
-        let base = RgbImage::from_fn(config.image_size as u32, config.image_size as u32, |x, y| {
-            let r = ((x + y) % 255) as u8;
-            let g = (x % 255) as u8;
-            let b = (y % 255) as u8;
-            image::Rgb([r, g, b])
-        });
+        let base = RgbImage::from_fn(
+            config.image_size as u32,
+            config.image_size as u32,
+            |x, y| {
+                let r = ((x + y) % 255) as u8;
+                let g = (x % 255) as u8;
+                let b = (y % 255) as u8;
+                image::Rgb([r, g, b])
+            },
+        );
         let mut group = c.benchmark_group("vision_augment_pipeline");
         group.bench_function("augment_train", |b| {
             let mut rng = StdRng::seed_from_u64(42);
             b.iter(|| {
-                let view = augment.apply(DynamicImage::ImageRgb8(base.clone()), &mut rng);
+                let image = DynamicImage::ImageRgb8(base.clone());
+                let view = augment.apply(&image, &mut rng);
                 black_box(view);
             });
         });

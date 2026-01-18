@@ -10,16 +10,16 @@ use std::sync::Mutex;
 #[cfg(feature = "integration_test")]
 use std::sync::OnceLock;
 
-use burn::tensor::{Int, Tensor};
 use burn::tensor::backend::{AutodiffBackend, Backend as BackendTrait};
+use burn::tensor::{Int, Tensor};
 use burn_train::metric::{Adaptor, ItemLazy, LossInput};
 
 #[cfg(any(feature = "train", feature = "cli"))]
 use cubecl::Runtime;
 
-use crate::train::constants::LEJEPA_EPS;
-use crate::train::artifacts::{ArtifactFrame, collect_frames, write_video};
 use crate::VisionArtifactOutputMode;
+use crate::train::artifacts::{ArtifactFrame, collect_frames, write_video};
+use crate::train::constants::LEJEPA_EPS;
 
 pub struct LanguageModelOutput<B: BackendTrait> {
     loss: Tensor<B, 1>,
@@ -68,7 +68,9 @@ pub struct LanguageModelTrainItem<B: AutodiffBackend> {
 
 impl<B: AutodiffBackend> LanguageModelTrainItem<B> {
     pub fn new(loss: Tensor<B, 1>) -> Self {
-        Self { loss: loss.detach() }
+        Self {
+            loss: loss.detach(),
+        }
     }
 }
 
@@ -384,7 +386,9 @@ impl<B: BackendTrait> Adaptor<ProbeAccInput<B>> for VisionOutput<B> {
 
 impl<B: BackendTrait> Adaptor<VisionArtifactInput<B>> for VisionOutput<B> {
     fn adapt(&self) -> VisionArtifactInput<B> {
-        self.artifacts.clone().unwrap_or_else(VisionArtifactInput::empty)
+        self.artifacts
+            .clone()
+            .unwrap_or_else(VisionArtifactInput::empty)
     }
 }
 
@@ -787,7 +791,10 @@ where
     B::Device: 'static,
 {
     #[cfg(feature = "cuda")]
-    if (_device as &dyn Any).downcast_ref::<burn_cuda::CudaDevice>().is_some() {
+    if (_device as &dyn Any)
+        .downcast_ref::<burn_cuda::CudaDevice>()
+        .is_some()
+    {
         return _allow_cuda_cleanup;
     }
     true
@@ -878,7 +885,11 @@ where
             } else {
                 "skip".to_string()
             },
-            if cleaned { "1".to_string() } else { "0".to_string() },
+            if cleaned {
+                "1".to_string()
+            } else {
+                "0".to_string()
+            },
         )
     }
 
@@ -1144,26 +1155,25 @@ impl<B: BackendTrait> burn_train::metric::Metric for VisionArtifactMetric<B> {
                             );
                         }
                     };
-                    let probe_preds = if let (Some(logits), Some(labels)) =
-                        (&item.probe_logits, &item.labels)
-                    {
-                        let preds = logits
-                            .clone()
-                            .argmax(1)
-                            .to_data()
-                            .convert::<i64>()
-                            .into_vec::<i64>()
-                            .ok();
-                        let labels = labels
-                            .clone()
-                            .to_data()
-                            .convert::<i64>()
-                            .into_vec::<i64>()
-                            .ok();
-                        preds.zip(labels)
-                    } else {
-                        None
-                    };
+                    let probe_preds =
+                        if let (Some(logits), Some(labels)) = (&item.probe_logits, &item.labels) {
+                            let preds = logits
+                                .clone()
+                                .argmax(1)
+                                .to_data()
+                                .convert::<i64>()
+                                .into_vec::<i64>()
+                                .ok();
+                            let labels = labels
+                                .clone()
+                                .to_data()
+                                .convert::<i64>()
+                                .into_vec::<i64>()
+                                .ok();
+                            preds.zip(labels)
+                        } else {
+                            None
+                        };
 
                     let mut saved = 0usize;
                     let mut last_mode = self.output_mode;
@@ -1226,8 +1236,7 @@ impl<B: BackendTrait> burn_train::metric::Metric for VisionArtifactMetric<B> {
                     "0".to_string(),
                 );
             };
-            let [batch, frame_count, channels, height, width] =
-                frames_tensor.shape().dims::<5>();
+            let [batch, frame_count, channels, height, width] = frames_tensor.shape().dims::<5>();
             if batch == 0 || frame_count == 0 || channels == 0 || height == 0 || width == 0 {
                 return burn_train::metric::MetricEntry::new(
                     Arc::clone(&self.name),
@@ -1238,11 +1247,7 @@ impl<B: BackendTrait> burn_train::metric::Metric for VisionArtifactMetric<B> {
             if let Some(legend) = item.legend.as_ref() {
                 self.write_legend(legend);
             }
-            let frames_vec = match frames_tensor
-                .to_data()
-                .convert::<f32>()
-                .into_vec::<f32>()
-            {
+            let frames_vec = match frames_tensor.to_data().convert::<f32>().into_vec::<f32>() {
                 Ok(vec) => vec,
                 Err(_) => {
                     return burn_train::metric::MetricEntry::new(
@@ -1336,11 +1341,7 @@ impl<B: BackendTrait> burn_train::metric::Metric for VisionArtifactMetric<B> {
             );
         }
 
-        let views_vec = match views
-            .to_data()
-            .convert::<f32>()
-            .into_vec::<f32>()
-        {
+        let views_vec = match views.to_data().convert::<f32>().into_vec::<f32>() {
             Ok(vec) => vec,
             Err(_) => {
                 return burn_train::metric::MetricEntry::new(
@@ -1350,11 +1351,7 @@ impl<B: BackendTrait> burn_train::metric::Metric for VisionArtifactMetric<B> {
                 );
             }
         };
-        let patch_vec = match patch_norms
-            .to_data()
-            .convert::<f32>()
-            .into_vec::<f32>()
-        {
+        let patch_vec = match patch_norms.to_data().convert::<f32>().into_vec::<f32>() {
             Ok(vec) => vec,
             Err(_) => {
                 return burn_train::metric::MetricEntry::new(
@@ -1364,9 +1361,7 @@ impl<B: BackendTrait> burn_train::metric::Metric for VisionArtifactMetric<B> {
                 );
             }
         };
-        let probe_preds = if let (Some(logits), Some(labels)) =
-            (&item.probe_logits, &item.labels)
-        {
+        let probe_preds = if let (Some(logits), Some(labels)) = (&item.probe_logits, &item.labels) {
             let preds = logits
                 .clone()
                 .argmax(1)
@@ -1424,11 +1419,9 @@ impl<B: BackendTrait> burn_train::metric::Metric for VisionArtifactMetric<B> {
             ) else {
                 continue;
             };
-            if let Some(image) = image::RgbImage::from_vec(
-                frame.width as u32,
-                frame.height as u32,
-                frame.rgb,
-            ) {
+            if let Some(image) =
+                image::RgbImage::from_vec(frame.width as u32, frame.height as u32, frame.rgb)
+            {
                 let filename = if self.overwrite {
                     format!("sample_{:02}.png", batch_idx)
                 } else if let Some((preds, labels)) = &probe_preds {
@@ -1436,14 +1429,12 @@ impl<B: BackendTrait> burn_train::metric::Metric for VisionArtifactMetric<B> {
                     let label = labels.get(batch_idx).copied().unwrap_or(-1);
                     format!(
                         "lejepa_iter_{:06}_sample_{:02}_pred_{pred}_label_{label}.png",
-                        metadata.iteration,
-                        batch_idx
+                        metadata.iteration, batch_idx
                     )
                 } else {
                     format!(
                         "lejepa_iter_{:06}_sample_{:02}.png",
-                        metadata.iteration,
-                        batch_idx
+                        metadata.iteration, batch_idx
                     )
                 };
                 let path = self.output_dir.join(filename);
@@ -1537,8 +1528,7 @@ mod tests {
     fn scalar_metric_respects_every() {
         type Backend = NdArray<f32>;
         let counter = Arc::new(AtomicUsize::new(0));
-        let mut metric =
-            ScalarMetric::<Backend, CountValue>::new_every("test_scalar", 2);
+        let mut metric = ScalarMetric::<Backend, CountValue>::new_every("test_scalar", 2);
         for iteration in 0..4 {
             let input = CountValue {
                 counter: Arc::clone(&counter),
@@ -1651,9 +1641,7 @@ mod tests {
             legend: None,
         };
         let _ = metric.update(&input, &test_metadata(5));
-        let expected = output_dir
-            .path()
-            .join("lejepa_iter_000005_sample_00.png");
+        let expected = output_dir.path().join("lejepa_iter_000005_sample_00.png");
         assert!(expected.is_file());
     }
 
@@ -1732,7 +1720,6 @@ mod tests {
         assert!(bytes.starts_with(b"RIFF"));
         let key_path = output_dir.path().join("vision_artifacts_key.txt");
         assert!(key_path.is_file());
-
     }
 
     #[test]
@@ -1775,6 +1762,5 @@ exit /b 0
         assert!(path.is_file());
         let key_path = output_dir.path().join("vision_artifacts_key.txt");
         assert!(key_path.is_file());
-
     }
 }

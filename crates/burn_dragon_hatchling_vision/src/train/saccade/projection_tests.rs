@@ -1,12 +1,12 @@
-use crate::train::prelude::*;
-use burn_ndarray::NdArray;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::train::init_wgpu_test_runtime;
+use crate::train::prelude::*;
+use burn_ndarray::NdArray;
 
-#[cfg(not(target_arch = "wasm32"))]
-use burn_wgpu::Wgpu;
 #[cfg(all(feature = "cuda", not(target_arch = "wasm32")))]
 use burn_cuda::Cuda;
+#[cfg(not(target_arch = "wasm32"))]
+use burn_wgpu::Wgpu;
 
 fn token_count_for_patch(patch_size: usize) -> usize {
     let image_size = 128usize;
@@ -32,12 +32,7 @@ fn run_projection_backend<B: BackendTrait>(
         TensorDistribution::Default,
         device,
     );
-    let projection = VisionSaccadeInputProjection::new(
-        embed_dim,
-        patch_size,
-        &config,
-        device,
-    );
+    let projection = VisionSaccadeInputProjection::new(embed_dim, patch_size, &config, device);
     let output = projection.forward(input.clone());
     assert_eq!(output.shape().dims::<3>(), input.shape().dims::<3>());
     let data = output
@@ -49,12 +44,14 @@ fn run_projection_backend<B: BackendTrait>(
 }
 
 fn run_projection_variants<B: BackendTrait>(device: &B::Device, patch_size: usize) {
-    run_projection_backend::<B>(device, VisionSaccadeInputProjectionConfig::Linear, patch_size);
     run_projection_backend::<B>(
         device,
-        VisionSaccadeInputProjectionConfig::Cnn(
-            VisionSaccadeInputProjectionCnnConfig::default(),
-        ),
+        VisionSaccadeInputProjectionConfig::Linear,
+        patch_size,
+    );
+    run_projection_backend::<B>(
+        device,
+        VisionSaccadeInputProjectionConfig::Cnn(VisionSaccadeInputProjectionCnnConfig::default()),
         patch_size,
     );
     run_projection_backend::<B>(
@@ -106,12 +103,8 @@ fn input_projection_linear_param_count_matches_formula() {
     let embed_dim = 32usize;
     let patch_size = 32usize;
     let config = VisionSaccadeInputProjectionConfig::Linear;
-    let projection: VisionSaccadeInputProjection<Backend> = VisionSaccadeInputProjection::new(
-        embed_dim,
-        patch_size,
-        &config,
-        &device,
-    );
+    let projection: VisionSaccadeInputProjection<Backend> =
+        VisionSaccadeInputProjection::new(embed_dim, patch_size, &config, &device);
     let expected = embed_dim * embed_dim + 3 * embed_dim;
     assert_eq!(projection.param_count(), expected);
 }

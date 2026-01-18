@@ -4,8 +4,8 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::{env, fmt};
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::{env, fmt};
 
 use anyhow::{Context, Result, anyhow};
 use image::RgbImage;
@@ -81,11 +81,7 @@ pub fn write_video(
         return Err(anyhow!("no frames to write"));
     }
     fs::create_dir_all(output_dir).context("create artifact output dir")?;
-    let fps = if fps == 0 {
-        ARTIFACT_DEFAULT_FPS
-    } else {
-        fps
-    };
+    let fps = if fps == 0 { ARTIFACT_DEFAULT_FPS } else { fps };
     match output_mode {
         VisionArtifactOutputMode::Avi => {
             let filename = video_filename(output_mode, overwrite, iteration, sample_idx);
@@ -151,21 +147,21 @@ fn video_filename(
     }
 }
 
-fn write_mp4(path: &Path, frames: &[ArtifactFrame], fps: u32, ffmpeg_path: Option<&Path>) -> Result<()> {
+fn write_mp4(
+    path: &Path,
+    frames: &[ArtifactFrame],
+    fps: u32,
+    ffmpeg_path: Option<&Path>,
+) -> Result<()> {
     let output_path = prepare_output_path(path)?;
-    let ffmpeg =
-        resolve_ffmpeg(ffmpeg_path).ok_or_else(|| anyhow!("ffmpeg not found"))?;
+    let ffmpeg = resolve_ffmpeg(ffmpeg_path).ok_or_else(|| anyhow!("ffmpeg not found"))?;
     let temp_dir = create_temp_dir("artifact_frames")?;
     let temp_path = temp_dir.as_path();
     for (idx, frame) in frames.iter().enumerate() {
         let filename = format!("frame_{idx:05}.png");
         let frame_path = temp_path.join(filename);
-        let image = RgbImage::from_vec(
-            frame.width as u32,
-            frame.height as u32,
-            frame.rgb.clone(),
-        )
-        .ok_or_else(|| anyhow!("invalid frame buffer"))?;
+        let image = RgbImage::from_vec(frame.width as u32, frame.height as u32, frame.rgb.clone())
+            .ok_or_else(|| anyhow!("invalid frame buffer"))?;
         image.save(&frame_path).context("save mp4 frame")?;
     }
     let mut cmd = Command::new(ffmpeg);
@@ -222,7 +218,12 @@ fn create_temp_dir(prefix: &str) -> Result<PathBuf> {
     Ok(base)
 }
 
-fn write_avi(path: &Path, frames: &[ArtifactFrame], fps: u32, ffmpeg_path: Option<&Path>) -> Result<()> {
+fn write_avi(
+    path: &Path,
+    frames: &[ArtifactFrame],
+    fps: u32,
+    ffmpeg_path: Option<&Path>,
+) -> Result<()> {
     if ffmpeg_path.is_some() {
         if let Ok(()) = write_avi_ffmpeg(path, frames, fps, ffmpeg_path) {
             return Ok(());
@@ -238,19 +239,14 @@ fn write_avi_ffmpeg(
     ffmpeg_path: Option<&Path>,
 ) -> Result<()> {
     let output_path = prepare_output_path(path)?;
-    let ffmpeg =
-        resolve_ffmpeg(ffmpeg_path).ok_or_else(|| anyhow!("ffmpeg not found"))?;
+    let ffmpeg = resolve_ffmpeg(ffmpeg_path).ok_or_else(|| anyhow!("ffmpeg not found"))?;
     let temp_dir = create_temp_dir("artifact_frames")?;
     let temp_path = temp_dir.as_path();
     for (idx, frame) in frames.iter().enumerate() {
         let filename = format!("frame_{idx:05}.png");
         let frame_path = temp_path.join(filename);
-        let image = RgbImage::from_vec(
-            frame.width as u32,
-            frame.height as u32,
-            frame.rgb.clone(),
-        )
-        .ok_or_else(|| anyhow!("invalid frame buffer"))?;
+        let image = RgbImage::from_vec(frame.width as u32, frame.height as u32, frame.rgb.clone())
+            .ok_or_else(|| anyhow!("invalid frame buffer"))?;
         image.save(&frame_path).context("save avi frame")?;
     }
     let mut cmd = Command::new(ffmpeg);
@@ -367,8 +363,16 @@ fn write_avi_raw(path: &Path, frames: &[ArtifactFrame], fps: u32) -> Result<()> 
     write_u32(&mut buf, 0);
 
     let hdrl_end = buf.len();
-    patch_u32(&mut buf, strl_size_pos, (hdrl_end - (strl_size_pos + 4)) as u32);
-    patch_u32(&mut buf, hdrl_size_pos, (hdrl_end - (hdrl_size_pos + 4)) as u32);
+    patch_u32(
+        &mut buf,
+        strl_size_pos,
+        (hdrl_end - (strl_size_pos + 4)) as u32,
+    );
+    patch_u32(
+        &mut buf,
+        hdrl_size_pos,
+        (hdrl_end - (hdrl_size_pos + 4)) as u32,
+    );
 
     write_fourcc(&mut buf, "LIST");
     let movi_size_pos = buf.len();
@@ -394,7 +398,11 @@ fn write_avi_raw(path: &Path, frames: &[ArtifactFrame], fps: u32) -> Result<()> 
     }
 
     let movi_end = buf.len();
-    patch_u32(&mut buf, movi_size_pos, (movi_end - (movi_size_pos + 4)) as u32);
+    patch_u32(
+        &mut buf,
+        movi_size_pos,
+        (movi_end - (movi_size_pos + 4)) as u32,
+    );
 
     write_fourcc(&mut buf, "idx1");
     write_u32(&mut buf, (idx_entries.len() * 16) as u32);
@@ -591,8 +599,7 @@ exit /b 0
         fs::write(&script_path, script).expect("write stub");
 
         let output = temp_dir.join("sample.mp4");
-        write_mp4(&output, &sample_frames(), 8, Some(&script_path))
-            .expect("mp4 write");
+        write_mp4(&output, &sample_frames(), 8, Some(&script_path)).expect("mp4 write");
         assert!(output.is_file());
         let _ = fs::remove_dir_all(&temp_dir);
     }

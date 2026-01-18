@@ -1,8 +1,11 @@
 use crate::train::prelude::*;
-use burn_dragon_hatchling_core::{FusedKernelConfig, SpatialPositionalEncodingKind, VisionAttentionMode};
 use burn::optim::Optimizer;
 use burn::tensor::Distribution;
 use burn_autodiff::Autodiff;
+use burn_dragon_hatchling_core::{
+    FusedKernelConfig, ManifoldHyperConnectionsConfig, SpatialPositionalEncodingKind,
+    VisionAttentionMode, VisionLatentActivation, VisionPatchEmbedMode,
+};
 use burn_ndarray::NdArray;
 
 #[test]
@@ -129,7 +132,10 @@ fn toy_images<B: BackendTrait>(
             }
         }
     }
-    Tensor::<B, 4>::from_data(TensorData::new(data, [batch, channels, height, width]), device)
+    Tensor::<B, 4>::from_data(
+        TensorData::new(data, [batch, channels, height, width]),
+        device,
+    )
 }
 
 #[test]
@@ -143,6 +149,7 @@ fn lejepa_recon_psnr_improves_on_toy_batch() {
     let vision_config = VisionDragonHatchlingConfig {
         image_size,
         patch_size,
+        patch_embed_mode: VisionPatchEmbedMode::default(),
         in_channels: 3,
         embed_dim: 32,
         steps: 1,
@@ -152,11 +159,17 @@ fn lejepa_recon_psnr_improves_on_toy_batch() {
         projection_dim: 32,
         projection_hidden_dim: 64,
         use_cls_token: true,
+        cls_sync_alpha: 0.0,
+        num_eyes: 1,
+        cross_eye_steps: 0,
+        token_state_norm: true,
+        latent_activation: VisionLatentActivation::default(),
         pos_encoding: SpatialPositionalEncodingKind::Learned2d,
         pos_max_height: grid,
         pos_max_width: grid,
         attention_mode: VisionAttentionMode::RowL1,
         fused_kernels: FusedKernelConfig::default(),
+        mhc: ManifoldHyperConnectionsConfig::default(),
     };
     let mut lejepa_config = VisionLejepaConfig::default();
     lejepa_config.views = 1;
@@ -191,7 +204,7 @@ fn lejepa_recon_psnr_improves_on_toy_batch() {
     let batch_size = 2;
     let images = toy_images::<Backend>(batch_size, 3, image_size, image_size, &device);
     let labels = Tensor::<Backend, 1, Int>::zeros([batch_size], &device);
-    let batch = ImageNetBatch::new(images, None, None, None, None, labels, None, None);
+    let batch = ImageNetBatch::new(images, None, None, None, None, None, labels, None, None);
     let steps = 1;
     let backprop_steps = 1;
 
@@ -226,4 +239,3 @@ fn lejepa_recon_psnr_improves_on_toy_batch() {
     assert!(final_psnr > initial_psnr);
     assert!(final_psnr > 24.0);
 }
-

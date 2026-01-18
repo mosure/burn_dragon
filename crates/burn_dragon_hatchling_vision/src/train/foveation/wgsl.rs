@@ -2,14 +2,14 @@
 
 use std::any::{Any, TypeId};
 
-use burn::tensor::{DType, Shape, TensorData, TensorPrimitive};
-use burn::tensor::backend::Backend as BackendTrait;
 use burn::tensor::Tensor as BurnTensor;
-use burn_cubecl::{BoolElement, CubeBackend, CubeRuntime};
+use burn::tensor::backend::Backend as BackendTrait;
+use burn::tensor::{DType, Shape, TensorData, TensorPrimitive};
 use burn_cubecl::fusion::FusionCubeRuntime;
 use burn_cubecl::kernel::into_contiguous;
 use burn_cubecl::ops::numeric::empty_device;
 use burn_cubecl::tensor::CubeTensor;
+use burn_cubecl::{BoolElement, CubeBackend, CubeRuntime};
 use burn_fusion::FusionTensor;
 use burn_fusion::stream::StreamId;
 use burn_wgpu::{KernelSource, SourceKernel, SourceTemplate, WgpuRuntime};
@@ -31,13 +31,10 @@ pub(crate) fn supports_backend<B: BackendTrait>() -> bool
 where
     B::FloatTensorPrimitive: 'static,
 {
-    matches_type::<
-        B::FloatTensorPrimitive,
-        FusionTensor<FusionCubeRuntime<WgpuRuntime, u32>>,
-    >() || matches_type::<
-        B::FloatTensorPrimitive,
-        FusionTensor<FusionCubeRuntime<WgpuRuntime, u8>>,
-    >() || matches_type::<B::FloatTensorPrimitive, CubeTensor<WgpuRuntime>>()
+    matches_type::<B::FloatTensorPrimitive, FusionTensor<FusionCubeRuntime<WgpuRuntime, u32>>>()
+        || matches_type::<B::FloatTensorPrimitive, FusionTensor<FusionCubeRuntime<WgpuRuntime, u8>>>(
+        )
+        || matches_type::<B::FloatTensorPrimitive, CubeTensor<WgpuRuntime>>()
 }
 
 pub(crate) fn try_foveated_patch_wgsl<B: BackendTrait>(
@@ -80,36 +77,32 @@ where
         }
     }
 
-    if let Some(result) =
-        try_foveated_patch_wgsl_fusion::<B, u32>(
-            levels,
-            center_x,
-            center_y,
-            sigma_px,
-            radius_px,
-            lod_sigma,
-            laplacian_images,
-            patch_h,
-            patch_w,
-            warp_mode,
-        )
-    {
+    if let Some(result) = try_foveated_patch_wgsl_fusion::<B, u32>(
+        levels,
+        center_x,
+        center_y,
+        sigma_px,
+        radius_px,
+        lod_sigma,
+        laplacian_images,
+        patch_h,
+        patch_w,
+        warp_mode,
+    ) {
         return Some(result);
     }
-    if let Some(result) =
-        try_foveated_patch_wgsl_fusion::<B, u8>(
-            levels,
-            center_x,
-            center_y,
-            sigma_px,
-            radius_px,
-            lod_sigma,
-            laplacian_images,
-            patch_h,
-            patch_w,
-            warp_mode,
-        )
-    {
+    if let Some(result) = try_foveated_patch_wgsl_fusion::<B, u8>(
+        levels,
+        center_x,
+        center_y,
+        sigma_px,
+        radius_px,
+        lod_sigma,
+        laplacian_images,
+        patch_h,
+        patch_w,
+        warp_mode,
+    ) {
         return Some(result);
     }
     try_foveated_patch_wgsl_direct::<B>(
@@ -142,7 +135,8 @@ where
     B::FloatTensorPrimitive: 'static,
     BT: BoolElement + 'static,
 {
-    if !matches_type::<B::FloatTensorPrimitive, FusionTensor<FusionCubeRuntime<WgpuRuntime, BT>>>() {
+    if !matches_type::<B::FloatTensorPrimitive, FusionTensor<FusionCubeRuntime<WgpuRuntime, BT>>>()
+    {
         return None;
     }
 
@@ -177,21 +171,16 @@ where
 
     let [batch, channels, _, _] = levels.first()?.image.shape().dims::<4>();
     let output = foveated_patch_wgsl_runtime::<WgpuRuntime>(
-        gaussian,
-        residual,
-        params,
-        meta,
-        patch_h,
-        patch_w,
-        batch,
-        channels,
+        gaussian, residual, params, meta, patch_h, patch_w, batch, channels,
     );
     let shape = output.shape.clone();
     let dtype = output.dtype;
     let handle = output.into();
     let fusion_out = fusion_client.register_tensor(handle, shape, StreamId::current(), dtype);
     let out_prim = try_cast_backend::<B, _>(fusion_out)?;
-    Some(BurnTensor::<B, 4>::from_primitive(TensorPrimitive::Float(out_prim)))
+    Some(BurnTensor::<B, 4>::from_primitive(TensorPrimitive::Float(
+        out_prim,
+    )))
 }
 
 fn try_foveated_patch_wgsl_direct<B: BackendTrait>(
@@ -215,8 +204,7 @@ where
 
     let use_laplacian = laplacian_images.is_some();
     let gaussian = build_gaussian_buffer(levels, use_laplacian)?;
-    let (residual, residual_meta) =
-        build_residual_buffer(laplacian_images, &gaussian.device())?;
+    let (residual, residual_meta) = build_residual_buffer(laplacian_images, &gaussian.device())?;
     let params = build_params(center_x, center_y, sigma_px, radius_px, lod_sigma);
     let meta = build_meta(
         levels,
@@ -235,17 +223,12 @@ where
 
     let [batch, channels, _, _] = levels.first()?.image.shape().dims::<4>();
     let output = foveated_patch_wgsl_runtime::<WgpuRuntime>(
-        gaussian,
-        residual,
-        params,
-        meta,
-        patch_h,
-        patch_w,
-        batch,
-        channels,
+        gaussian, residual, params, meta, patch_h, patch_w, batch, channels,
     );
     let out_prim = try_cast_backend::<B, _>(output)?;
-    Some(BurnTensor::<B, 4>::from_primitive(TensorPrimitive::Float(out_prim)))
+    Some(BurnTensor::<B, 4>::from_primitive(TensorPrimitive::Float(
+        out_prim,
+    )))
 }
 
 fn build_params<B: BackendTrait>(
@@ -360,8 +343,10 @@ fn build_meta<B: BackendTrait>(
     meta[8] = base_h as f32;
     meta[9] = batch as f32;
 
-    let (gauss_offsets, gauss_widths, gauss_heights) =
-        pack_level_meta(levels.iter().map(|level| &level.image).collect(), level_count);
+    let (gauss_offsets, gauss_widths, gauss_heights) = pack_level_meta(
+        levels.iter().map(|level| &level.image).collect(),
+        level_count,
+    );
     write_meta_array(&mut meta, 10, &gauss_offsets);
     write_meta_array(&mut meta, 10 + MAX_LEVELS, &gauss_widths);
     write_meta_array(&mut meta, 10 + MAX_LEVELS * 2, &gauss_heights);
@@ -397,9 +382,7 @@ fn pack_level_meta<B: BackendTrait>(
     (offsets, widths, heights)
 }
 
-fn pack_levels<B: BackendTrait>(
-    levels: Vec<&BurnTensor<B, 4>>,
-) -> Option<(BurnTensor<B, 1>, usize)>
+fn pack_levels<B: BackendTrait>(levels: Vec<&BurnTensor<B, 4>>) -> Option<(BurnTensor<B, 1>, usize)>
 where
     B::FloatTensorPrimitive: 'static,
 {
@@ -530,7 +513,10 @@ fn foveated_patch_wgsl_runtime<R: CubeRuntime>(
     let workgroups_y = div_ceil_u32(patch_h as u32, WORKGROUP_SIZE);
     let count = CubeCount::Static(workgroups_x, workgroups_y, batch as u32);
 
-    let kernel = SourceKernel::new(FoveationBufferKernel, CubeDim::new(WORKGROUP_SIZE, WORKGROUP_SIZE, 1));
+    let kernel = SourceKernel::new(
+        FoveationBufferKernel,
+        CubeDim::new(WORKGROUP_SIZE, WORKGROUP_SIZE, 1),
+    );
     let bindings = Bindings::new().with_buffers(vec![
         gaussian.handle.clone().binding(),
         residual.handle.clone().binding(),
@@ -566,9 +552,7 @@ fn matches_type<A: 'static, B: 'static>() -> bool {
     TypeId::of::<A>() == TypeId::of::<B>()
 }
 
-fn try_cast_primitive<B: BackendTrait, T: 'static>(
-    value: B::FloatTensorPrimitive,
-) -> Option<T>
+fn try_cast_primitive<B: BackendTrait, T: 'static>(value: B::FloatTensorPrimitive) -> Option<T>
 where
     B::FloatTensorPrimitive: 'static,
 {

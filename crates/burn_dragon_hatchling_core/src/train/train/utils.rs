@@ -140,8 +140,6 @@ pub fn write_run_config(config: &TrainingConfig, run_dir: &Path, run_name: &str)
     let payload =
         serde_json::to_string_pretty(&output).context("failed to serialize web config")?;
     let path = run_dir.join("config.json");
-    fs::write(&path, payload)
-        .with_context(|| format!("failed to write {}", path.display()))?;
+    fs::write(&path, payload).with_context(|| format!("failed to write {}", path.display()))?;
     Ok(())
 }
-

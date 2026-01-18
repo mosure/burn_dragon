@@ -1,6 +1,9 @@
 use crate::train::prelude::*;
 
-pub(crate) fn gaussian_downsample_kernel<B: BackendTrait>(channels: usize, device: &B::Device) -> Tensor<B, 4> {
+pub(crate) fn gaussian_downsample_kernel<B: BackendTrait>(
+    channels: usize,
+    device: &B::Device,
+) -> Tensor<B, 4> {
     let weights = [1.0_f32, 4.0, 6.0, 4.0, 1.0];
     let mut kernel = vec![0.0_f32; channels * 5 * 5];
     for c in 0..channels {
@@ -22,19 +25,13 @@ pub(crate) fn replicate_pad2d<B: BackendTrait>(images: Tensor<B, 4>, pad: usize)
     if height == 0 || width == 0 {
         return images;
     }
-    let top = images
-        .clone()
-        .slice_dim(2, 0..1)
-        .repeat_dim(2, pad);
+    let top = images.clone().slice_dim(2, 0..1).repeat_dim(2, pad);
     let bottom = images
         .clone()
         .slice_dim(2, height - 1..height)
         .repeat_dim(2, pad);
     let padded_v = Tensor::cat(vec![top, images, bottom], 2);
-    let left = padded_v
-        .clone()
-        .slice_dim(3, 0..1)
-        .repeat_dim(3, pad);
+    let left = padded_v.clone().slice_dim(3, 0..1).repeat_dim(3, pad);
     let right = padded_v
         .clone()
         .slice_dim(3, width - 1..width)
@@ -53,9 +50,7 @@ pub(crate) fn downsample_image<B: BackendTrait>(images: Tensor<B, 4>) -> Option<
         return None;
     }
     let device = images.device();
-    let images = images
-        .slice_dim(2, 0..even_h)
-        .slice_dim(3, 0..even_w);
+    let images = images.slice_dim(2, 0..even_h).slice_dim(3, 0..even_w);
     let padded = replicate_pad2d(images, 2);
     let kernel = gaussian_downsample_kernel::<B>(channels, &device);
     let options = ConvOptions::new([2, 2], [0, 0], [1, 1], channels.max(1));
@@ -81,7 +76,7 @@ pub(crate) fn should_fix_grid<B: BackendTrait>() -> bool
 where
     B::Device: 'static,
 {
-#[cfg(any(feature = "train", feature = "cli"))]
+    #[cfg(any(feature = "train", feature = "cli"))]
     {
         if TypeId::of::<B::Device>() == TypeId::of::<NdArrayDevice>() {
             return false;
@@ -240,7 +235,10 @@ pub(crate) fn build_fovea_jitter<B: BackendTrait>(
         TensorData::new(jitter_values, [subsamples, 1, 1, 1, 2]),
         device,
     );
-    FoveaJitter { batched, sequential }
+    FoveaJitter {
+        batched,
+        sequential,
+    }
 }
 
 pub(crate) fn build_image_grid<B: BackendTrait>(
@@ -285,12 +283,18 @@ pub(crate) fn build_image_grid<B: BackendTrait>(
             coords.push(gy);
         }
     }
-    Tensor::<B, 1>::from_data(TensorData::new(coords, [out_height * out_width * 2]), device)
-        .reshape([out_height, out_width, 2])
-        .unsqueeze_dim::<4>(0)
+    Tensor::<B, 1>::from_data(
+        TensorData::new(coords, [out_height * out_width * 2]),
+        device,
+    )
+    .reshape([out_height, out_width, 2])
+    .unsqueeze_dim::<4>(0)
 }
 
-pub(crate) fn build_level_coords<B: BackendTrait>(grid: PatchGrid, device: &B::Device) -> Tensor<B, 2> {
+pub(crate) fn build_level_coords<B: BackendTrait>(
+    grid: PatchGrid,
+    device: &B::Device,
+) -> Tensor<B, 2> {
     let mut coords = Vec::with_capacity(grid.height * grid.width * 2);
     let inv_w = 1.0 / (grid.width.max(1) as f32);
     let inv_h = 1.0 / (grid.height.max(1) as f32);
@@ -375,23 +379,16 @@ pub(crate) fn saccade_ring_overlay<B: BackendTrait>(
     )
     .reshape([1, 1, height, 1]);
 
-    let cx = mean
-        .clone()
-        .slice_dim(1, 0..1)
-        .reshape([batch, 1, 1, 1]);
-    let cy = mean
-        .slice_dim(1, 1..2)
-        .reshape([batch, 1, 1, 1]);
+    let cx = mean.clone().slice_dim(1, 0..1).reshape([batch, 1, 1, 1]);
+    let cy = mean.slice_dim(1, 1..2).reshape([batch, 1, 1, 1]);
     let radius = radius.reshape([batch, 1, 1, 1]);
 
     let dx = x_coords - cx;
     let dy = y_coords - cy;
     let dist = (dx.powf_scalar(2.0) + dy.powf_scalar(2.0)).sqrt();
     let ring = dist.sub(radius).abs();
-    let ring_mask = activation::relu(
-        ring.mul_scalar(-1.0).add_scalar(SACCADE_RING_WIDTH),
-    )
-    .div_scalar(SACCADE_RING_WIDTH.max(SACCADE_EPS));
+    let ring_mask = activation::relu(ring.mul_scalar(-1.0).add_scalar(SACCADE_RING_WIDTH))
+        .div_scalar(SACCADE_RING_WIDTH.max(SACCADE_EPS));
     let color_tensor = Tensor::<B, 1>::from_data(
         TensorData::new(vec![color[0], color[1], color[2]], [3]),
         &device,
@@ -422,7 +419,10 @@ pub(crate) fn saccade_patch_views<B: BackendTrait>(
     Some(views)
 }
 
-pub(crate) fn pad_view_width<B: BackendTrait>(view: Tensor<B, 4>, target_width: usize) -> Tensor<B, 4> {
+pub(crate) fn pad_view_width<B: BackendTrait>(
+    view: Tensor<B, 4>,
+    target_width: usize,
+) -> Tensor<B, 4> {
     let [batch, channels, height, width] = view.shape().dims::<4>();
     if target_width <= width {
         return view;
@@ -456,10 +456,16 @@ pub(crate) fn pad_view_width_centered<B: BackendTrait>(
     Tensor::cat(vec![padding_left, view, padding_right], 3)
 }
 
-pub(crate) fn view_separator_like<B: BackendTrait>(like: &Tensor<B, 4>, width: usize) -> Tensor<B, 4> {
+pub(crate) fn view_separator_like<B: BackendTrait>(
+    like: &Tensor<B, 4>,
+    width: usize,
+) -> Tensor<B, 4> {
     let [batch, channels, height, _] = like.shape().dims::<4>();
     if width == 0 || batch == 0 || channels == 0 || height == 0 {
-        return Tensor::<B, 4>::zeros([batch.max(1), channels.max(1), height.max(1), width.max(1)], &like.device());
+        return Tensor::<B, 4>::zeros(
+            [batch.max(1), channels.max(1), height.max(1), width.max(1)],
+            &like.device(),
+        );
     }
     Tensor::<B, 4>::zeros([batch, channels, height, width], &like.device())
 }
@@ -483,5 +489,3 @@ pub(crate) fn pad_view_height_centered<B: BackendTrait>(
     let padding_bottom = Tensor::<B, 4>::zeros([batch, channels, bottom, width], &device);
     Tensor::cat(vec![padding_top, view, padding_bottom], 2)
 }
-
-

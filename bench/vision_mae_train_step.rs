@@ -11,19 +11,25 @@ use burn_dragon_hatchling::{
     ImageNetAugmentations, ImageNetBatch, ImageNetDataLoader, ImageNetDataset,
     ImageNetDatasetConfig, ImageNetSplit, VisionNormalize, VisionTrainingConfig,
     VisionTrainingModeConfig, load_vision_training_config,
-    vision::train::bench::VisionMaeTrainStepBench, wgpu::init_runtime,
+    vision::train::bench::VisionMaeTrainStepBench,
 };
+use burn_ndarray::NdArray;
+#[cfg(feature = "cli")]
 use burn_wgpu::{CubeBackend, WgpuDevice, WgpuRuntime};
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use serde::Deserialize;
 
 #[cfg(feature = "cuda")]
 use burn_cuda::Cuda;
+#[cfg(feature = "cli")]
+use burn_dragon_hatchling::wgpu::init_runtime;
 
 #[derive(Debug, Default, Deserialize)]
 struct BenchSettings {
     #[serde(default)]
     include_cuda: bool,
+    #[serde(default)]
+    include_wgpu: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -38,13 +44,40 @@ fn load_bench_settings(path: &Path) -> BenchSettings {
     config.bench
 }
 
-fn load_bench_config() -> (VisionTrainingConfig, BenchSettings) {
-    let base_path = PathBuf::from("config").join("vision_mae_tiny.toml");
-    let bench_path = PathBuf::from("config").join("vision_mae_tiny_bench.toml");
-    let config =
-        load_vision_training_config(&[base_path, bench_path.clone()]).expect("load bench config");
-    let bench = load_bench_settings(&bench_path);
-    (config, bench)
+fn load_bench_config(name: &str) -> Option<(VisionTrainingConfig, BenchSettings)> {
+    let base_path = PathBuf::from("config").join(format!("{name}.toml"));
+    if !base_path.is_file() {
+        return None;
+    }
+    let bench_path = PathBuf::from("config").join(format!("{name}_bench.toml"));
+    let config_paths = if bench_path.is_file() {
+        vec![base_path, bench_path.clone()]
+    } else {
+        vec![base_path]
+    };
+    let config = load_vision_training_config(&config_paths).expect("load bench config");
+    let bench = if bench_path.is_file() {
+        load_bench_settings(&bench_path)
+    } else {
+        BenchSettings::default()
+    };
+    Some((config, bench))
+}
+
+fn bench_config_names() -> Vec<String> {
+    if let Ok(names) = std::env::var("VISION_BENCH_CONFIGS") {
+        let mut configs = Vec::new();
+        for name in names.split(&[',', ';'][..]) {
+            let trimmed = name.trim();
+            if !trimmed.is_empty() {
+                configs.push(trimmed.to_string());
+            }
+        }
+        if !configs.is_empty() {
+            return configs;
+        }
+    }
+    vec!["vision_mae_tiny".to_string(), "vision_croco_tiny".to_string()]
 }
 
 fn build_train_dataset(config: &VisionTrainingConfig) -> Option<Arc<ImageNetDataset>> {
@@ -71,10 +104,15 @@ fn build_train_dataset(config: &VisionTrainingConfig) -> Option<Arc<ImageNetData
         config.augment.solarize_prob,
         config.augment.solarize_threshold,
     );
-    let train_root = config
-        .dataset
-        .imagenet_root
-        .join(&config.dataset.train_dir);
+    let train_root = config.dataset.imagenet_root.join(&config.dataset.train_dir);
+    let (views, min_view_overlap, view_overlap_attempts) = match &config.mode {
+        VisionTrainingModeConfig::Mae(mae) if mae.cross_view.enabled => (
+            config.vision.num_eyes.max(1),
+            mae.cross_view.min_overlap.max(0.0),
+            mae.cross_view.max_attempts.max(1),
+        ),
+        _ => (1, 0.0, 1),
+    };
     let dataset = ImageNetDataset::new(ImageNetDatasetConfig {
         root: train_root,
         split: ImageNetSplit::Train,
@@ -83,8 +121,10 @@ fn build_train_dataset(config: &VisionTrainingConfig) -> Option<Arc<ImageNetData
         local_augmentations: None,
         normalize,
         teacher: None,
-        views: 1,
+        views,
         local_views: 0,
+        min_view_overlap,
+        view_overlap_attempts,
         cache_decoded: config.dataset.cache_decoded,
         cache_capacity: config.dataset.cache_capacity,
         cache_preprocessed: config.dataset.cache_preprocessed,
@@ -98,6 +138,7 @@ fn build_train_dataset(config: &VisionTrainingConfig) -> Option<Arc<ImageNetData
     }
 }
 
+#[cfg(feature = "cli")]
 fn init_wgpu_runtime(device: &WgpuDevice, config: &burn_dragon_hatchling::WgpuRuntimeConfig) {
     static INIT: std::sync::Once = std::sync::Once::new();
     INIT.call_once(|| {
@@ -106,25 +147,53 @@ fn init_wgpu_runtime(device: &WgpuDevice, config: &burn_dragon_hatchling::WgpuRu
 }
 
 fn vision_mae_train_step_bench(c: &mut Criterion) {
-    let (config, bench) = load_bench_config();
-    let Some(dataset) = build_train_dataset(&config) else {
-        return;
-    };
+    let configs = bench_config_names();
+    for name in configs {
+        let Some((config, bench)) = load_bench_config(&name) else {
+            continue;
+        };
+        let include_cuda = bench.include_cuda;
+        let include_wgpu = bench.include_wgpu;
+        let _ = (include_cuda, include_wgpu);
+        let Some(dataset) = build_train_dataset(&config) else {
+            continue;
+        };
 
-    type WgpuBackend = CubeBackend<WgpuRuntime, f32, i32, u32>;
-    run_backend::<Autodiff<WgpuBackend>, _>(c, "wgpu", &config, Arc::clone(&dataset), |device| {
-        init_wgpu_runtime(device, &config.wgpu);
-    });
+        run_backend::<Autodiff<NdArray<f32>>, _>(
+            c,
+            "cpu",
+            &name,
+            &config,
+            Arc::clone(&dataset),
+            |_| {},
+        );
 
-    #[cfg(feature = "cuda")]
-    if bench.include_cuda {
-        run_backend::<Autodiff<Cuda<f32>>, _>(c, "cuda", &config, dataset, |_| {});
+        #[cfg(feature = "cli")]
+        if include_wgpu {
+            type WgpuBackend = CubeBackend<WgpuRuntime, f32, i32, u32>;
+            run_backend::<Autodiff<WgpuBackend>, _>(
+                c,
+                "wgpu",
+                &name,
+                &config,
+                Arc::clone(&dataset),
+                |device| {
+                    init_wgpu_runtime(device, &config.wgpu);
+                },
+            );
+        }
+
+        #[cfg(feature = "cuda")]
+        if include_cuda {
+            run_backend::<Autodiff<Cuda<f32>>, _>(c, "cuda", &name, &config, dataset, |_| {});
+        }
     }
 }
 
 fn run_backend<B, Init>(
     c: &mut Criterion,
     name: &'static str,
+    config_name: &str,
     config: &VisionTrainingConfig,
     dataset: Arc<ImageNetDataset>,
     init_backend: Init,
@@ -179,7 +248,7 @@ fn run_backend<B, Init>(
     group.measurement_time(Duration::from_secs(3));
     group.sample_size(10);
     group.bench_with_input(
-        BenchmarkId::from_parameter("vision_mae_tiny"),
+        BenchmarkId::from_parameter(config_name),
         &vision_cfg,
         |b, _| {
             let loader = Arc::clone(&loader);

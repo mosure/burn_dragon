@@ -61,7 +61,7 @@ fn main() {
     let mut args = env::args().skip(1);
     let Some(path) = args.next() else {
         eprintln!(
-            "usage: cargo run --manifest-path crates/foveation_viewer/Cargo.toml -- <image_path>"
+            "usage: cargo run --manifest-path crates/burn_dragon_fovea_viewer/Cargo.toml -- <image_path>"
         );
         std::process::exit(1);
     };

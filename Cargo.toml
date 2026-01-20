@@ -40,7 +40,7 @@ members = [
   "crates/burn_dragon_train",
   "crates/burn_dragon_vision",
   "crates/burn_dragon_web",
-  "crates/foveation_viewer",
+  "crates/burn_dragon_fovea_viewer",
 ]
 
 

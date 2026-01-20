@@ -2488,6 +2488,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "burn_dragon_fovea_viewer"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bevy",
+ "bevy-inspector-egui",
+ "bevy_burn",
+ "bevy_egui",
+ "bevy_shader",
+ "burn",
+ "burn-wgpu",
+ "burn_dragon_core",
+ "burn_dragon_train",
+ "burn_dragon_vision",
+ "half",
+ "image",
+ "noise",
+ "pollster",
+ "wgpu",
+]
+
+[[package]]
 name = "burn_dragon_language"
 version = "0.4.0"
 dependencies = [
@@ -4544,28 +4566,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
 dependencies = [
  "percent-encoding",
-]
-
-[[package]]
-name = "foveation_viewer"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bevy",
- "bevy-inspector-egui",
- "bevy_burn",
- "bevy_egui",
- "bevy_shader",
- "burn",
- "burn-wgpu",
- "burn_dragon_core",
- "burn_dragon_train",
- "burn_dragon_vision",
- "half",
- "image",
- "noise",
- "pollster",
- "wgpu",
 ]
 
 [[package]]

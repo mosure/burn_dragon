@@ -1,6 +1,6 @@
 use burn::tensor::backend::Backend as BackendTrait;
 use burn::tensor::{Distribution, Tensor};
-use burn_dragon_hatchling::{
+use burn_dragon::{
     FusedKernelConfig, ManifoldHyperConnectionsConfig, PatchEmbed, PatchGrid,
     SpatialPositionalEncodingKind, VisionAttentionMode, VisionDragonHatchling,
     VisionDragonHatchlingConfig, VisionLatentActivation, VisionPatchEmbedMode, pool_patch_tokens,
@@ -34,6 +34,7 @@ fn patch_embed_and_model_shapes() {
         pos_max_height: 4,
         pos_max_width: 4,
         attention_mode: VisionAttentionMode::RowL1,
+        use_alibi: true,
         fused_kernels: FusedKernelConfig::default(),
         mhc: ManifoldHyperConnectionsConfig::default(),
     };
@@ -78,6 +79,7 @@ fn patch_embed_raw_matches_add_position() {
         pos_max_height: 4,
         pos_max_width: 4,
         attention_mode: VisionAttentionMode::RowL1,
+        use_alibi: true,
         fused_kernels: FusedKernelConfig::default(),
         mhc: ManifoldHyperConnectionsConfig::default(),
     };
@@ -123,6 +125,7 @@ fn vision_forward_steps_shapes() {
         pos_max_height: 4,
         pos_max_width: 4,
         attention_mode: VisionAttentionMode::RowL1,
+        use_alibi: true,
         fused_kernels: FusedKernelConfig::default(),
         mhc: ManifoldHyperConnectionsConfig::default(),
     };
@@ -168,11 +171,11 @@ mod train_tests {
     use super::*;
     use burn::data::dataloader::DataLoader;
     use burn_autodiff::Autodiff;
-    use burn_dragon_hatchling::{
+    use burn_dragon::{
         CifarDataset, CifarSplit, CifarType, DinoFeatureStore, ImageNetAugmentations,
         ImageNetDataLoader, ImageNetDataset, ImageNetDatasetConfig, ImageNetSplit, VisionNormalize,
-        VisionTrainingModeConfig, load_vision_training_config,
     };
+    use burn_dragon::train::{VisionTrainingModeConfig, load_vision_training_config};
     use image::RgbImage;
     use std::fs;
     use std::path::Path;

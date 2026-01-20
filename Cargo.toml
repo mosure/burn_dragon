@@ -1,7 +1,7 @@
 [package]
-name = "burn_dragon_hatchling"
-description = "burn (baby) dragon hatchling inference and training"
-version = "0.3.0"
+name = "burn_dragon"
+description = "burn dragon inference and training"
+version = "0.4.0"
 edition = "2024"
 authors = ["mosure <mitchell@mosure.me>"]
 license = "MIT OR Apache-2.0"
@@ -32,9 +32,14 @@ exclude = [
 [workspace]
 members = [
   ".",
-  "crates/burn_dragon_hatchling_core",
-  "crates/burn_dragon_hatchling_cli",
-  "crates/burn_dragon_hatchling_vision",
+  "crates/burn_dragon_bevy",
+  "crates/burn_dragon_core",
+  "crates/burn_dragon_cli",
+  "crates/burn_dragon_language",
+  "crates/burn_dragon_loss",
+  "crates/burn_dragon_train",
+  "crates/burn_dragon_vision",
+  "crates/burn_dragon_web",
   "crates/foveation_viewer",
 ]
 
@@ -42,21 +47,46 @@ members = [
 [features]
 default = ["cli", "cuda"]
 
-benchmark = ["burn_dragon_hatchling_core/benchmark", "burn_dragon_hatchling_vision/benchmark"]
-cli = ["burn_dragon_hatchling_core/cli", "burn_dragon_hatchling_vision/cli"]
-train = ["burn_dragon_hatchling_core/train", "burn_dragon_hatchling_vision/train"]
-cuda = ["burn_dragon_hatchling_core/cuda", "burn_dragon_hatchling_vision/cuda"]
-integration_test = [
-  "burn_dragon_hatchling_core/integration_test",
-  "burn_dragon_hatchling_vision/integration_test",
+benchmark = [
+  "train",
+  "burn_dragon_core/benchmark",
+  "burn_dragon_train/benchmark",
+  "burn_dragon_vision/benchmark",
 ]
-web = ["burn_dragon_hatchling_core/web"]
-viz = ["burn_dragon_hatchling_core/viz"]
+cli = [
+  "train",
+  "burn_dragon_train/cli",
+  "burn_dragon_vision/cli",
+]
+train = [
+  "burn_dragon_core/train",
+  "burn_dragon_language/train",
+  "burn_dragon_train/train",
+  "burn_dragon_vision/train",
+]
+cuda = [
+  "burn_dragon_core/cuda",
+  "burn_dragon_language/cuda",
+  "burn_dragon_train/cuda",
+  "burn_dragon_vision/cuda",
+]
+integration_test = [
+  "train",
+  "burn_dragon_train/integration_test",
+  "burn_dragon_vision/integration_test",
+]
+web = ["burn_dragon_core/web", "burn_dragon_language/web", "burn_dragon_web"]
+viz = ["burn_dragon_core/viz", "burn_dragon_language/viz", "burn_dragon_bevy/viz", "burn_dragon_bevy"]
 
 
 [dependencies]
-burn_dragon_hatchling_core = { path = "crates/burn_dragon_hatchling_core", default-features = false }
-burn_dragon_hatchling_vision = { path = "crates/burn_dragon_hatchling_vision", default-features = false }
+burn_dragon_core = { path = "crates/burn_dragon_core", version = "0.4.0", default-features = false }
+burn_dragon_language = { path = "crates/burn_dragon_language", version = "0.4.0", default-features = false }
+burn_dragon_train = { path = "crates/burn_dragon_train", version = "0.4.0", default-features = false, optional = true }
+burn_dragon_loss = { path = "crates/burn_dragon_loss", version = "0.4.0", default-features = false }
+burn_dragon_vision = { path = "crates/burn_dragon_vision", version = "0.4.0", default-features = false }
+burn_dragon_bevy = { path = "crates/burn_dragon_bevy", version = "0.4.0", default-features = false, optional = true }
+burn_dragon_web = { path = "crates/burn_dragon_web", version = "0.4.0", default-features = false, optional = true }
 
 
 [dev-dependencies]

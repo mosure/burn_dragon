@@ -25,14 +25,15 @@ use bevy_inspector_egui::quick::ResourceInspectorPlugin;
 use burn::tensor::backend::Backend;
 use burn::tensor::{Tensor, TensorData};
 #[cfg(test)]
-use burn_dragon_hatchling_core::constants::FOVEA_AA_THRESHOLD;
-use burn_dragon_hatchling_core::{
-    ManifoldHyperConnectionsConfig, SpatialPositionalEncodingKind, VisionAttentionMode,
-    VisionDragonHatchlingConfig, VisionFoveaSamplingMode, VisionFoveaWarpMode, VisionPyramidMode,
-    VisionSaccadeConfig,
+use burn_dragon_core::constants::FOVEA_AA_THRESHOLD;
+use burn_dragon_core::{
+    SpatialPositionalEncodingKind, VisionAttentionMode, VisionDragonHatchlingConfig,
 };
-use burn_dragon_hatchling_vision::foveation;
-use burn_dragon_hatchling_vision::train::SaccadeFoveationSampler;
+use burn_dragon_train::{
+    VisionFoveaSamplingMode, VisionFoveaWarpMode, VisionPyramidMode, VisionSaccadeConfig,
+};
+use burn_dragon_vision::foveation;
+use burn_dragon_vision::train::SaccadeFoveationSampler;
 use burn_wgpu::Wgpu;
 use half::f16;
 use image::ImageReader;
@@ -1579,7 +1580,7 @@ pub(crate) fn render_patch_f32(
     settings: &FoveationSettings,
     patch_size: usize,
 ) -> Vec<f32> {
-    const SUBSAMPLES: usize = 4;
+    let subsamples = burn_dragon_train::train::constants::SACCADE_FOVEA_SUBSAMPLES.max(1);
     let patch = patch_size.max(1);
     let width = patch;
     let height = patch;
@@ -1728,10 +1729,10 @@ pub(crate) fn render_patch_f32(
                 color = sample;
                 count = 1.0;
             } else {
-                for sy in 0..SUBSAMPLES {
-                    for sx in 0..SUBSAMPLES {
-                        let jitter_x = (sx as f32 + 0.5) / SUBSAMPLES as f32 - 0.5;
-                        let jitter_y = (sy as f32 + 0.5) / SUBSAMPLES as f32 - 0.5;
+                for sy in 0..subsamples {
+                    for sx in 0..subsamples {
+                        let jitter_x = (sx as f32 + 0.5) / subsamples as f32 - 0.5;
+                        let jitter_y = (sy as f32 + 0.5) / subsamples as f32 - 0.5;
                         let ux = (base_dx + jitter_x) / half;
                         let uy = (base_dy + jitter_y) / half;
                         let warp_x = foveated_warp(ux, sigma, radius);
@@ -1801,18 +1802,18 @@ const PI: f32 = std::f32::consts::PI;
 const ERF_A: f32 = 0.147;
 
 #[cfg(test)]
-const SQRT_PI_OVER_2: f32 = 0.88622692545;
+const SQRT_PI_OVER_2: f32 = 0.886_226_95;
 
 #[cfg(test)]
 fn erf_approx(x: f32) -> f32 {
     let sign = if x >= 0.0 { 1.0 } else { -1.0 };
     let ax = x.abs();
     let t = 1.0 / (1.0 + 0.3275911 * ax);
-    let a1 = 0.254829592;
-    let a2 = -0.284496736;
-    let a3 = 1.421413741;
-    let a4 = -1.453152027;
-    let a5 = 1.061405429;
+    let a1 = 0.254_829_6;
+    let a2 = -0.284_496_72;
+    let a3 = 1.421_413_8;
+    let a4 = -1.453_152_1;
+    let a5 = 1.061_405_4;
     let y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * (-ax * ax).exp();
     sign * y
 }

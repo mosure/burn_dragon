@@ -6,7 +6,7 @@
       name="viewport"
       content="width=device-width, initial-scale=1, viewport-fit=cover"
     />
-    <title>burn_dragon_hatchling</title>
+    <title>burn_dragon</title>
     <style>
       @font-face {
         font-family: "Nanum Gothic Coding Bold";
@@ -210,7 +210,7 @@
     <canvas id="bevy" data-bdh-layout="css"></canvas>
 
     <script type="module">
-      import init, { loadModel } from "./out/burn_dragon_hatchling.js";
+      import init, { loadModel } from "./out/burn_dragon.js";
 
       const overlay = document.getElementById("overlay");
       const status = document.getElementById("status");
@@ -227,7 +227,7 @@
       // Config JSON: { "block_size": 256, "max_tokens": -1, "overrides": { "n_layer": 6, ... } }
       const prompt =
         params.get("prompt") ||
-        "dragon hatchlings dream in sparse pulses\n";
+        "dragons dream in sparse pulses\n";
       const maxTokensParam = params.get("max_tokens") || -1;
       const temperature = Number(params.get("temp") || 0.9);
       const topKParam = params.get("top_k");

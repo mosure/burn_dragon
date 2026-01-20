@@ -8,11 +8,11 @@ use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 mod projection_bench {
     use super::*;
     use burn::tensor::backend::Backend as BackendTrait;
-    use burn_dragon_hatchling::{
+    use burn_dragon::train::{
         VisionSaccadeInputProjectionCnnConfig, VisionSaccadeInputProjectionConfig,
         VisionSaccadeInputProjectionMicroVitConfig,
-        vision::train::bench::VisionInputProjectionBench,
     };
+    use burn_dragon::vision::train::bench::VisionInputProjectionBench;
     use burn_ndarray::NdArray;
     use std::hint::black_box;
 

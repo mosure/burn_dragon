@@ -6,9 +6,10 @@ use burn::optim::{AdamWConfig, GradientsParams, LearningRate, Optimizer};
 use burn::tensor::backend::{AutodiffBackend, Backend as BackendTrait};
 use burn::tensor::{Int, Tensor, TensorData};
 use burn_autodiff::Autodiff;
-use burn_dragon_hatchling::{
-    BDH, BDHConfig, WgpuRuntimeConfig, language_model_loss, wgpu::init_runtime,
-};
+use burn_dragon::loss::language_model_loss;
+use burn_dragon::train::WgpuRuntimeConfig;
+use burn_dragon::train::wgpu::init_runtime;
+use burn_dragon::{BDH, BDHConfig};
 use burn_wgpu::Wgpu;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 

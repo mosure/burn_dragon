@@ -1,0 +1,66 @@
+[package]
+name = "burn_dragon_train"
+description = "Training utilities for burn_dragon"
+version = "0.4.0"
+edition = "2024"
+authors = ["mosure <mitchell@mosure.me>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/mosure/burn_bdh"
+repository = "https://github.com/mosure/burn_bdh"
+readme = "../../README.md"
+
+[features]
+default = []
+benchmark = ["burn/autotune", "burn/fusion"]
+cli = [
+  "train",
+  "dep:burn-autodiff",
+  "dep:burn-ndarray",
+  "dep:burn-train",
+  "dep:clap",
+  "dep:names",
+]
+train = [
+  "burn/dataset",
+  "dep:burn-autodiff",
+  "dep:burn-ndarray",
+  "dep:burn-train",
+  "dep:names",
+  "dep:toml",
+  "dep:tracing",
+  "dep:image",
+  "dep:burn_dino",
+]
+cuda = ["burn-cuda"]
+integration_test = ["train"]
+
+[dependencies]
+burn_dragon_core = { path = "../burn_dragon_core", version = "0.4.0", default-features = false, features = ["train"] }
+burn_dragon_loss = { path = "../burn_dragon_loss", version = "0.4.0", default-features = false }
+
+anyhow = "1"
+rand = "0.8"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+clap = { version = "4.5", features = ["derive"], optional = true }
+names = { version = "0.14", optional = true }
+toml = { version = "0.9", optional = true }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"], optional = true }
+burn_dino = { version = "0.6", default-features = false, optional = true }
+tracing = { version = "0.1", optional = true }
+
+burn = { version = "0.19", default-features = false, features = ["fusion", "ndarray", "std", "wgpu"] }
+burn-wgpu = { version = "0.19", default-features = false, features = ["fusion", "std"] }
+burn-ndarray = { version = "0.19", optional = true }
+burn-autodiff = { version = "0.19", optional = true }
+burn-train = { version = "0.19", optional = true, default-features = false, features = ["tui"] }
+burn-cubecl = { version = "0.19", default-features = false, features = ["std", "fusion"] }
+burn-fusion = { version = "0.19", default-features = false, features = ["std"] }
+cubecl = { version = "0.8", default-features = true, features = ["std"] }
+cubecl-runtime = { version = "0.8", default-features = true, features = ["channel-mpsc", "std"] }
+burn-cuda = { version = "0.19", optional = true, default-features = false, features = ["std"] }
+
+[dev-dependencies]
+avirus = "0.2"
+burn-ndarray = "0.19"
+tempfile = "3"

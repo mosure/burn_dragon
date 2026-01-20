@@ -1,0 +1,30 @@
+[package]
+name = "burn_dragon_cli"
+version = "0.4.0"
+edition = "2024"
+authors = ["mosure <mitchell@mosure.me>"]
+license = "MIT OR Apache-2.0"
+description = "CLI for burn_dragon"
+default-run = "train"
+
+[features]
+default = ["cli", "cuda"]
+cli = ["burn_dragon/cli"]
+train = ["burn_dragon/train"]
+cuda = ["dep:burn-cuda", "burn_dragon/cuda"]
+viz = ["burn_dragon/viz", "dep:ctrlc", "dep:bevy_burn"]
+web = ["burn_dragon/web"]
+benchmark = ["burn_dragon/benchmark"]
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4.5", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+burn = { version = "0.19", default-features = false, features = ["ndarray", "std", "wgpu", "fusion"] }
+burn-wgpu = { version = "0.19", default-features = false, features = ["fusion", "std"] }
+burn-ndarray = "0.19"
+bevy_burn = { version = "0.4", optional = true }
+ctrlc = { version = "3.4", optional = true }
+burn-cuda = { version = "0.19", optional = true, default-features = false, features = ["std"] }
+burn_dragon = { path = "../..", version = "0.4.0", default-features = false }

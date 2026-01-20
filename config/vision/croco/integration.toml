@@ -1,0 +1,30 @@
+# overrides for vision/croco/tiny integration test
+
+[dataset]
+max_records = 64
+
+[training]
+batch_size = 48
+epochs = 1
+max_iters = 8
+batch_repeats = 16
+log_frequency = 4
+trace_train_loss = true
+trace_train_loss_every = 2
+memory_cleanup_iters = 25
+device_memory_check_every = 1
+max_device_memory_mb = 92160
+
+[mode]
+artifact_every = 0
+
+[test.integration]
+skip_gpu_util = false
+gpu_util_interval_ms = 250
+gpu_util_timeout_secs = 1800
+gpu_util_warmup_samples = 4
+min_train_loss = 0.05
+max_train_loss = 10.0
+min_gpu_util = 80.0
+max_mem_growth_mb = 4096.0
+max_gpu_mem_mb = 92160

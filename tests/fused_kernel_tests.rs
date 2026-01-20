@@ -2,8 +2,8 @@ use std::f32::consts::PI;
 
 use burn::tensor::backend::Backend as BackendTrait;
 use burn::tensor::{Distribution as TensorDistribution, Int, Tensor, activation};
-use burn_dragon_hatchling::kernel::{linear_attention, relu_lowrank};
-use burn_dragon_hatchling::{BlockPattern1d, BlockPattern2d, RotaryEmbedding};
+use burn_dragon::kernel::{linear_attention, relu_lowrank};
+use burn_dragon::{BlockPattern1d, BlockPattern2d, RotaryEmbedding};
 use burn_ndarray::NdArray;
 
 type Backend = NdArray<f32>;

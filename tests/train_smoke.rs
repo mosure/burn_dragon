@@ -5,15 +5,17 @@ use burn::tensor::{Int, Tensor, TensorData};
 use burn_autodiff::Autodiff;
 use burn_ndarray::NdArray;
 
-use burn_dragon_hatchling::{BDH, build_model_config, language_model_loss, load_training_config};
+use burn_dragon::language::{build_model_config, load_training_config};
+use burn_dragon::loss::language_model_loss;
+use burn_dragon::BDH;
 
 type TrainBackend = Autodiff<NdArray<f32>>;
 
 #[test]
 fn training_forward_backward_from_configs() {
     let config_paths = [
-        PathBuf::from("config/base.toml"),
-        PathBuf::from("config/small.toml"),
+        PathBuf::from("config/language/base.toml"),
+        PathBuf::from("config/language/small.toml"),
     ];
     let config = load_training_config(&config_paths).expect("load training config");
     let mut model_config = build_model_config(&config.model, config.training.block_size);

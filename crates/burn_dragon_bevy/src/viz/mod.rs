@@ -87,13 +87,13 @@ impl<B: Backend> VizOverlay<B> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub fn start_overlay_native<B: Backend<Device = burn_wgpu::WgpuDevice>>(
+pub fn start_overlay_native<B>(
     config: VizConfig,
     dims: VizDimensions,
     exit_rx: Option<std::sync::mpsc::Receiver<()>>,
 ) -> VizOverlay<B>
 where
-    B: Backend + 'static,
+    B: Backend<Device = burn_wgpu::WgpuDevice> + 'static,
     B::Device: Default + Clone,
     (): bevy_burn::gpu_burn_to_bevy::BurnBevyPrepare<B>,
 {
@@ -111,12 +111,12 @@ where
 }
 
 #[cfg(target_arch = "wasm32")]
-pub fn start_overlay_wasm<B: Backend<Device = burn_wgpu::WgpuDevice>>(
+pub fn start_overlay_wasm<B>(
     config: VizConfig,
     dims: VizDimensions,
 ) -> VizOverlay<B>
 where
-    B: Backend + 'static,
+    B: Backend<Device = burn_wgpu::WgpuDevice> + 'static,
     B::Device: Default + Clone,
     (): bevy_burn::gpu_burn_to_bevy::BurnBevyPrepare<B>,
 {

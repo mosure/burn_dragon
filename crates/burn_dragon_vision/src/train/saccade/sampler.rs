@@ -12,11 +12,11 @@ pub struct SaccadeFoveationSampler<B: BackendTrait> {
 
 impl<B: BackendTrait> SaccadeFoveationSampler<B> {
     pub fn new(
-        vision: VisionDragonHatchlingConfig,
+        vision: VisionDragonConfig,
         saccade: VisionSaccadeConfig,
         device: &B::Device,
     ) -> Self {
-        let model = VisionDragonHatchling::<B>::new(vision.clone(), device);
+        let model = VisionDragon::<B>::new(vision.clone(), device);
         let recon_patch_dim = vision.patch_size * vision.patch_size * vision.in_channels;
         let rollout = VisionRollout {
             min_steps: 1,
@@ -561,3 +561,4 @@ impl<B: BackendTrait> ValidStep<ImageNetBatch<B>, VisionOutput<B>> for VisionSac
         )
     }
 }
+

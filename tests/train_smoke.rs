@@ -6,7 +6,7 @@ use burn_autodiff::Autodiff;
 use burn_ndarray::NdArray;
 
 use burn_dragon::language::{build_model_config, load_training_config};
-use burn_dragon::loss::language_model_loss;
+use burn_dragon::language::loss::language_model_loss;
 use burn_dragon::BDH;
 
 type TrainBackend = Autodiff<NdArray<f32>>;

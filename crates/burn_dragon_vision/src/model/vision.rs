@@ -10,10 +10,8 @@ use burn::tensor::backend::{AutodiffBackend, Backend};
 use burn::tensor::{Distribution as TensorDistribution, Tensor, TensorData, activation, Int};
 use serde::{Deserialize, Serialize};
 
-use crate::kernel::{BlockPattern1d, relu_lowrank};
-
-use super::config::FusedKernelConfig;
-use super::residual::{ManifoldHyperConnections, ManifoldHyperConnectionsConfig};
+use burn_dragon_core::kernel::{BlockPattern1d, relu_lowrank};
+use burn_dragon_core::{FusedKernelConfig, ManifoldHyperConnections, ManifoldHyperConnectionsConfig};
 
 const ROW_NORM_EPS: f32 = 1e-6;
 
@@ -253,7 +251,7 @@ impl ModuleDisplay for VisionPatchEmbedMode {}
 impl ModuleDisplay for VisionLatentActivation {}
 
 #[derive(Clone, Debug)]
-pub struct VisionDragonHatchlingConfig {
+pub struct VisionDragonConfig {
     pub image_size: usize,
     pub patch_size: usize,
     pub patch_embed_mode: VisionPatchEmbedMode,
@@ -280,7 +278,7 @@ pub struct VisionDragonHatchlingConfig {
     pub mhc: ManifoldHyperConnectionsConfig,
 }
 
-impl Default for VisionDragonHatchlingConfig {
+impl Default for VisionDragonConfig {
     fn default() -> Self {
         let image_size: usize = 224;
         let patch_size: usize = 16;
@@ -314,7 +312,7 @@ impl Default for VisionDragonHatchlingConfig {
     }
 }
 
-impl VisionDragonHatchlingConfig {
+impl VisionDragonConfig {
     pub fn latent_per_head(&self) -> usize {
         let total = self.mlp_internal_dim_multiplier * self.embed_dim;
         assert!(
@@ -441,7 +439,7 @@ pub struct PatchEmbed<B: Backend> {
 }
 
 impl<B: Backend> PatchEmbed<B> {
-    pub fn new(config: &VisionDragonHatchlingConfig, device: &B::Device) -> Self {
+    pub fn new(config: &VisionDragonConfig, device: &B::Device) -> Self {
         let patch_size = config.patch_size.max(1);
         let patch_dim = patch_size
             .saturating_mul(patch_size)
@@ -856,19 +854,19 @@ impl<B: Backend> VisionProjectionHead<B> {
 }
 
 #[derive(Clone)]
-pub struct VisionDragonHatchlingOutput<B: Backend> {
+pub struct VisionDragonOutput<B: Backend> {
     pub patch_tokens: Tensor<B, 3>,
     pub cls_token: Tensor<B, 2>,
 }
 
 #[derive(Clone)]
-pub struct VisionDragonHatchlingMultiOutput<B: Backend> {
+pub struct VisionDragonMultiOutput<B: Backend> {
     pub patch_tokens: Tensor<B, 4>,
     pub cls_token: Tensor<B, 3>,
 }
 
 #[derive(Module, Debug)]
-pub struct VisionDragonHatchling<B: Backend> {
+pub struct VisionDragon<B: Backend> {
     steps: usize,
     n_head: usize,
     embed_dim: usize,
@@ -894,8 +892,8 @@ pub struct VisionDragonHatchling<B: Backend> {
     cross_eye_steps: usize,
 }
 
-impl<B: Backend> VisionDragonHatchling<B> {
-    pub fn new(config: VisionDragonHatchlingConfig, device: &B::Device) -> Self {
+impl<B: Backend> VisionDragon<B> {
+    pub fn new(config: VisionDragonConfig, device: &B::Device) -> Self {
         let patch_embed = PatchEmbed::new(&config, device);
         let dropout = DropoutConfig::new(config.dropout).init();
         let token_norm = if config.token_state_norm {
@@ -974,7 +972,7 @@ impl<B: Backend> VisionDragonHatchling<B> {
             (None, None)
         };
         let (use_alibi, alibi_slopes) = if config.use_alibi {
-            let slopes = crate::kernel::linear_attention::default_alibi_slopes(
+            let slopes = burn_dragon_core::kernel::linear_attention::default_alibi_slopes(
                 config.n_head.max(1),
             );
             let slopes =
@@ -1038,7 +1036,7 @@ impl<B: Backend> VisionDragonHatchling<B> {
         self.projection.forward(tokens)
     }
 
-    pub fn forward_images(&self, images: Tensor<B, 4>) -> VisionDragonHatchlingOutput<B> {
+    pub fn forward_images(&self, images: Tensor<B, 4>) -> VisionDragonOutput<B> {
         let patch = self.patch_embed.forward(images);
         self.forward_tokens(patch.tokens)
     }
@@ -1047,7 +1045,7 @@ impl<B: Backend> VisionDragonHatchling<B> {
         &self,
         images: Tensor<B, 4>,
         steps: usize,
-    ) -> VisionDragonHatchlingOutput<B> {
+    ) -> VisionDragonOutput<B> {
         let patch = self.patch_embed.forward(images);
         self.forward_tokens_steps(patch.tokens, steps)
     }
@@ -1057,7 +1055,7 @@ impl<B: Backend> VisionDragonHatchling<B> {
         images: Tensor<B, 4>,
         steps: usize,
         backprop_steps: usize,
-    ) -> VisionDragonHatchlingOutput<B> {
+    ) -> VisionDragonOutput<B> {
         let patch = self.patch_embed.forward(images);
         self.forward_tokens_steps_rollout(patch.tokens, steps, backprop_steps)
     }
@@ -1066,7 +1064,7 @@ impl<B: Backend> VisionDragonHatchling<B> {
         &self,
         patch_tokens: Tensor<B, 3>,
         grid: PatchGrid,
-    ) -> VisionDragonHatchlingOutput<B> {
+    ) -> VisionDragonOutput<B> {
         let tokens = self.patch_embed.add_position(patch_tokens, grid);
         self.forward_tokens(tokens)
     }
@@ -1076,12 +1074,12 @@ impl<B: Backend> VisionDragonHatchling<B> {
         patch_tokens: Tensor<B, 3>,
         grid: PatchGrid,
         steps: usize,
-    ) -> VisionDragonHatchlingOutput<B> {
+    ) -> VisionDragonOutput<B> {
         let tokens = self.patch_embed.add_position(patch_tokens, grid);
         self.forward_tokens_steps(tokens, steps)
     }
 
-    pub fn forward_tokens(&self, tokens: Tensor<B, 3>) -> VisionDragonHatchlingOutput<B> {
+    pub fn forward_tokens(&self, tokens: Tensor<B, 3>) -> VisionDragonOutput<B> {
         let tokens = self.encode_tokens(tokens);
         let projected = self.projection.forward(tokens);
         self.split_output(projected)
@@ -1091,7 +1089,7 @@ impl<B: Backend> VisionDragonHatchling<B> {
         &self,
         tokens: Tensor<B, 3>,
         steps: usize,
-    ) -> VisionDragonHatchlingOutput<B> {
+    ) -> VisionDragonOutput<B> {
         let tokens = self.encode_tokens_steps(tokens, steps);
         let projected = self.projection.forward(tokens);
         self.split_output(projected)
@@ -1102,13 +1100,13 @@ impl<B: Backend> VisionDragonHatchling<B> {
         tokens: Tensor<B, 3>,
         steps: usize,
         backprop_steps: usize,
-    ) -> VisionDragonHatchlingOutput<B> {
+    ) -> VisionDragonOutput<B> {
         let tokens = self.encode_tokens_steps_rollout(tokens, steps, backprop_steps);
         let projected = self.projection.forward(tokens);
         self.split_output(projected)
     }
 
-    pub fn forward_tokens_embed(&self, tokens: Tensor<B, 3>) -> VisionDragonHatchlingOutput<B> {
+    pub fn forward_tokens_embed(&self, tokens: Tensor<B, 3>) -> VisionDragonOutput<B> {
         let tokens = self.encode_tokens(tokens);
         self.split_output(tokens)
     }
@@ -1117,7 +1115,7 @@ impl<B: Backend> VisionDragonHatchling<B> {
         &self,
         tokens: Tensor<B, 3>,
         steps: usize,
-    ) -> VisionDragonHatchlingOutput<B> {
+    ) -> VisionDragonOutput<B> {
         let tokens = self.encode_tokens_steps(tokens, steps);
         self.split_output(tokens)
     }
@@ -1127,7 +1125,7 @@ impl<B: Backend> VisionDragonHatchling<B> {
         tokens: Tensor<B, 3>,
         steps: usize,
         backprop_steps: usize,
-    ) -> VisionDragonHatchlingOutput<B> {
+    ) -> VisionDragonOutput<B> {
         let tokens = self.encode_tokens_steps_rollout(tokens, steps, backprop_steps);
         self.split_output(tokens)
     }
@@ -1137,7 +1135,7 @@ impl<B: Backend> VisionDragonHatchling<B> {
         tokens: Tensor<B, 4>,
         steps: usize,
         backprop_steps: usize,
-    ) -> VisionDragonHatchlingMultiOutput<B> {
+    ) -> VisionDragonMultiOutput<B> {
         let tokens = self.encode_tokens_steps_rollout_multi(tokens, steps, backprop_steps);
         self.split_output_multi(tokens)
     }
@@ -1485,25 +1483,25 @@ impl<B: Backend> VisionDragonHatchling<B> {
         Tensor::cat(vec![cls, tokens], 1)
     }
 
-    fn split_output(&self, tokens: Tensor<B, 3>) -> VisionDragonHatchlingOutput<B> {
+    fn split_output(&self, tokens: Tensor<B, 3>) -> VisionDragonOutput<B> {
         let [batch, time, dim] = tokens.shape().dims::<3>();
         if self.use_cls_token && time > 0 {
             let cls_token = tokens.clone().slice_dim(1, 0..1).reshape([batch, dim]);
             let patch_tokens = tokens.slice_dim(1, 1..time);
-            VisionDragonHatchlingOutput {
+            VisionDragonOutput {
                 patch_tokens,
                 cls_token,
             }
         } else {
             let cls_token = tokens.clone().mean_dim(1).reshape([batch, dim]);
-            VisionDragonHatchlingOutput {
+            VisionDragonOutput {
                 patch_tokens: tokens,
                 cls_token,
             }
         }
     }
 
-    fn split_output_multi(&self, tokens: Tensor<B, 4>) -> VisionDragonHatchlingMultiOutput<B> {
+    fn split_output_multi(&self, tokens: Tensor<B, 4>) -> VisionDragonMultiOutput<B> {
         let [batch, streams, time, dim] = tokens.shape().dims::<4>();
         if self.use_cls_token && time > 0 {
             let cls_token = tokens
@@ -1511,13 +1509,13 @@ impl<B: Backend> VisionDragonHatchling<B> {
                 .slice_dim(2, 0..1)
                 .reshape([batch, streams, dim]);
             let patch_tokens = tokens.slice_dim(2, 1..time);
-            VisionDragonHatchlingMultiOutput {
+            VisionDragonMultiOutput {
                 patch_tokens,
                 cls_token,
             }
         } else {
             let cls_token = tokens.clone().mean_dim(2).reshape([batch, streams, dim]);
-            VisionDragonHatchlingMultiOutput {
+            VisionDragonMultiOutput {
                 patch_tokens: tokens,
                 cls_token,
             }
@@ -3537,3 +3535,4 @@ pub use imagenet::{
     DinoFeatureStore, ImageNetAugmentations, ImageNetBatch, ImageNetDataLoader, ImageNetDataset,
     ImageNetDatasetConfig, ImageNetSplit, VisionNormalize,
 };
+

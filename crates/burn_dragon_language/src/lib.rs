@@ -3,6 +3,7 @@
 pub mod config;
 pub mod generation;
 pub mod inference;
+pub mod loss;
 pub mod tokenizer;
 
 #[cfg(feature = "train")]
@@ -11,6 +12,7 @@ pub mod dataset;
 pub mod train;
 
 pub use config::{ContextStrategyConfig, GenerationConfig, ModelOverrides};
+pub use loss::language_model_loss;
 #[cfg(feature = "train")]
 pub use config::{
     DatasetConfig, DatasetSourceConfig, HuggingFaceDatasetConfig, HuggingFaceRecordFormat,

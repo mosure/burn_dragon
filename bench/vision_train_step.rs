@@ -7,15 +7,15 @@ use std::time::{Duration, Instant};
 
 use burn::tensor::backend::AutodiffBackend;
 use burn_autodiff::Autodiff;
-use burn_dragon::train::{
-    VisionTrainingConfig, VisionTrainingModeConfig, WgpuRuntimeConfig,
-    load_vision_training_config,
+use burn_dragon::train::WgpuRuntimeConfig;
+use burn_dragon::vision::{
+    VisionTrainingConfig, VisionTrainingModeConfig, load_vision_training_config,
 };
-use burn_dragon::{
+use burn_dragon::vision::{
     ImageNetAugmentations, ImageNetBatch, ImageNetDataLoader, ImageNetDataset,
     ImageNetDatasetConfig, ImageNetSplit, VisionNormalize,
-    vision::train::bench::VisionSaccadeTrainStepBench,
 };
+use burn_dragon::vision::train::bench::VisionSaccadeTrainStepBench;
 use burn_dragon::train::wgpu::init_runtime;
 use burn_ndarray::NdArray;
 use burn_wgpu::{CubeBackend, WgpuDevice, WgpuRuntime};

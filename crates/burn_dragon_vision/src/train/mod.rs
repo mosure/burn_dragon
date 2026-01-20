@@ -4,6 +4,7 @@ mod prelude;
 
 pub(crate) mod constants;
 pub(crate) mod gdpo;
+pub(crate) mod pipeline;
 
 pub(crate) mod foveation;
 pub(crate) mod saccade;

@@ -56,7 +56,7 @@ pub(crate) use crate::tokenizer::TokenizerConfig;
 pub(crate) use crate::{ContextStrategyConfig, GenerationConfig, ModelOverrides};
 
 pub(crate) use burn_dragon_core::{BDH, BDHConfig};
-pub(crate) use burn_dragon_loss::language_model_loss;
+pub(crate) use crate::loss::language_model_loss;
 pub(crate) use burn_dragon_train::{
     GdpoConfig, GdpoHardGate, LearningRateScheduleConfig, OptimizerConfig, WgpuRuntimeConfig,
 };

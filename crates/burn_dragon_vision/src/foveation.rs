@@ -1,4 +1,4 @@
-use burn_dragon_core::constants::FOVEA_AA_THRESHOLD;
+use crate::constants::FOVEA_AA_THRESHOLD;
 
 const FOVEA_PARAM_EPS: f32 = 1e-3;
 const SIGMA_MIN: f32 = 0.03;

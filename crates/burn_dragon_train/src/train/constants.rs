@@ -14,7 +14,6 @@ pub const SACCADE_RING_OUTER_SCALE: f32 = 2.5;
 pub const SACCADE_RING_OUTER_INTENSITY: f32 = 0.7;
 pub const SACCADE_RING_INNER_COLOR: [f32; 3] = [60.0 / 255.0, 200.0 / 255.0, 1.0];
 pub const SACCADE_VIEW_GAP: usize = 2;
-pub const SACCADE_FOVEA_SUBSAMPLES: usize = 1;
 pub const SACCADE_FOVEA_LOD_WINDOW: f32 = 3.0;
 pub const SACCADE_FOVEA_AA_THRESHOLD: f32 = crate::constants::FOVEA_AA_THRESHOLD;
 pub const SACCADE_FOVEA_SQRT2: f32 = std::f32::consts::SQRT_2;

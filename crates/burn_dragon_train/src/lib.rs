@@ -9,21 +9,10 @@ pub mod wgpu;
 pub mod train;
 
 pub use config::{
-    GdpoConfig, GdpoHardGate, WgpuBackend, WgpuMemoryConfig, WgpuRuntimeConfig,
+    GdpoConfig, GdpoHardGate, VisionTeacherVariant, WgpuBackend, WgpuMemoryConfig,
+    WgpuRuntimeConfig,
 };
 #[cfg(feature = "train")]
 pub use config::{
-    ImagenetteVariant, LearningRateScheduleConfig, OptimizerConfig,
-    VisionArtifactOutputMode, VisionAugmentationConfig, VisionDatasetConfig,
-    VisionDatasetDownloadConfig, VisionDistillConfig, VisionFoveaSamplingMode,
-    VisionFoveaScatterMode, VisionFoveaWarpMode, VisionLejepaConfig, VisionLejepaLossConfig,
-    VisionLocationEmbeddingConfig, VisionLocationEmbeddingMode, VisionLossConfig, VisionMaeConfig,
-    VisionMaeCrossViewConfig, VisionMaeLossConfig, VisionModelConfig, VisionNullGlimpseMode,
-    VisionPyramidMode, VisionReconLossConfig, VisionSaccadeCacheConfig,
-    VisionSaccadeCrossViewConfig, VisionSaccadeConfig, VisionSaccadeInfoRewardConfig,
-    VisionSaccadeInputProjectionCnnConfig, VisionSaccadeInputProjectionConfig,
-    VisionSaccadeInputProjectionMicroVitConfig, VisionSaccadePolicyConfig, VisionTbpttConfig,
-    VisionTeacherConfig, VisionTeacherFeatureConfig, VisionTeacherModelConfig,
-    VisionTeacherVariant, VisionTrainingConfig, VisionTrainingHyperparameters,
-    VisionTrainingModeConfig, load_vision_training_config,
+    LearningRateScheduleConfig, OptimizerConfig, VisionArtifactOutputMode,
 };

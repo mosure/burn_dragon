@@ -16,7 +16,6 @@ train = [
   "burn/dataset",
   "burn_dragon_core/train",
   "burn_dragon_train/train",
-  "dep:burn_dragon_loss",
   "dep:burn-autodiff",
   "dep:burn-ndarray",
   "dep:burn-train",
@@ -36,7 +35,6 @@ web = ["burn_dragon_core/web"]
 [dependencies]
 burn_dragon_core = { path = "../burn_dragon_core", version = "0.4.0", default-features = false }
 burn_dragon_train = { path = "../burn_dragon_train", version = "0.4.0", default-features = false, optional = true }
-burn_dragon_loss = { path = "../burn_dragon_loss", version = "0.4.0", default-features = false, optional = true }
 
 anyhow = "1"
 rand = "0.8"

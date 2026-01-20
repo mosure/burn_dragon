@@ -107,3 +107,13 @@ impl ModuleDisplayDefault for GdpoConfig {
 }
 
 impl ModuleDisplay for GdpoConfig {}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum VisionTeacherVariant {
+    #[default]
+    Vits,
+    Vitb,
+    Vitl,
+    Vitg,
+}

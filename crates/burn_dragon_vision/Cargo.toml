@@ -39,7 +39,6 @@ train = [
   "dep:flate2",
   "dep:tar",
   "dep:burn_dino",
-  "dep:serde",
   "dep:serde_json",
   "dep:rand",
   "dep:burn_dragon_train",
@@ -52,7 +51,6 @@ integration_test = ["train", "burn_dragon_train/integration_test"]
 burn_dragon_core = { path = "../burn_dragon_core", version = "0.4.0", default-features = false }
 burn_dragon_language = { path = "../burn_dragon_language", version = "0.4.0", default-features = false, optional = true }
 burn_dragon_train = { path = "../burn_dragon_train", version = "0.4.0", default-features = false, optional = true }
-burn_dragon_loss = { path = "../burn_dragon_loss", version = "0.4.0", default-features = false }
 anyhow = { version = "1", optional = true }
 burn = { version = "0.19", default-features = false, optional = true, features = ["fusion", "ndarray", "std", "wgpu"] }
 burn-autodiff = { version = "0.19", optional = true }
@@ -75,7 +73,7 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png"]
 flate2 = { version = "1.1", optional = true }
 tar = { version = "0.4", optional = true }
 burn_dino = { version = "0.6", default-features = false, optional = true }
-serde = { version = "1.0", features = ["derive"], optional = true }
+serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", optional = true }
 rand = { version = "0.8", optional = true }
 clap = { version = "4.5", features = ["derive"], optional = true }

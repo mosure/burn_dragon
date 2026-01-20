@@ -12,14 +12,14 @@ mod vision_bench {
     use burn::tensor::Tensor;
     use burn::tensor::backend::{AutodiffBackend, Backend as BackendTrait};
     use burn_autodiff::Autodiff;
-    use burn_dragon::train::{
-        VisionAugmentationConfig, VisionFoveaSamplingMode, VisionFoveaScatterMode,
-        VisionFoveaWarpMode, VisionPyramidMode, VisionSaccadeConfig, WgpuRuntimeConfig,
-    };
+    use burn_dragon::train::WgpuRuntimeConfig;
     use burn_dragon::vision::train::bench::{VisionSaccadeBench, VisionScatterBench};
-    use burn_dragon::{
-        ImageNetAugmentations, ImageNetSplit, ManifoldHyperConnectionsConfig,
-        VisionDragonHatchlingConfig, VisionLatentActivation, VisionNormalize,
+    use burn_dragon::ManifoldHyperConnectionsConfig;
+    use burn_dragon::vision::{
+        ImageNetAugmentations, ImageNetSplit, SpatialPositionalEncodingKind, VisionAttentionMode,
+        VisionAugmentationConfig, VisionDragonConfig, VisionFoveaSamplingMode,
+        VisionFoveaScatterMode, VisionFoveaWarpMode, VisionLatentActivation, VisionNormalize,
+        VisionPatchEmbedMode, VisionPyramidMode, VisionSaccadeConfig,
     };
     use burn_dragon::train::wgpu::init_runtime;
     use burn_dragon_vision::FOVEATION_SHADER;
@@ -243,12 +243,12 @@ mod vision_bench {
             let bench_steps = if profile.include_full {
                 cfg.steps
             } else {
-                cfg.steps.min(2).max(1)
+                cfg.steps.clamp(1, 2)
             };
-            let vision = VisionDragonHatchlingConfig {
+            let vision = VisionDragonConfig {
                 image_size: cfg.image_size,
                 patch_size: cfg.patch_size,
-                patch_embed_mode: burn_dragon::VisionPatchEmbedMode::default(),
+                patch_embed_mode: VisionPatchEmbedMode::default(),
                 in_channels: 3,
                 embed_dim: cfg.embed_dim,
                 steps: bench_steps,
@@ -263,10 +263,10 @@ mod vision_bench {
                 cross_eye_steps: 0,
                 token_state_norm: true,
                 latent_activation: VisionLatentActivation::default(),
-                pos_encoding: burn_dragon::SpatialPositionalEncodingKind::Learned2d,
+                pos_encoding: SpatialPositionalEncodingKind::Learned2d,
                 pos_max_height: cfg.image_size / cfg.patch_size,
                 pos_max_width: cfg.image_size / cfg.patch_size,
-                attention_mode: burn_dragon::VisionAttentionMode::RowL1,
+                attention_mode: VisionAttentionMode::RowL1,
                 use_alibi: true,
                 fused_kernels: burn_dragon::FusedKernelConfig::default(),
                 mhc: ManifoldHyperConnectionsConfig::default(),
@@ -419,10 +419,10 @@ mod vision_bench {
         group.measurement_time(profile.measurement);
         group.sample_size(profile.sample_size);
         for cfg in profile.configs {
-            let vision = VisionDragonHatchlingConfig {
+            let vision = VisionDragonConfig {
                 image_size: cfg.image_size,
                 patch_size: cfg.patch_size,
-                patch_embed_mode: burn_dragon::VisionPatchEmbedMode::default(),
+                patch_embed_mode: VisionPatchEmbedMode::default(),
                 in_channels: 3,
                 embed_dim: cfg.embed_dim,
                 steps: cfg.steps,
@@ -437,10 +437,10 @@ mod vision_bench {
                 cross_eye_steps: 0,
                 token_state_norm: true,
                 latent_activation: VisionLatentActivation::default(),
-                pos_encoding: burn_dragon::SpatialPositionalEncodingKind::Learned2d,
+                pos_encoding: SpatialPositionalEncodingKind::Learned2d,
                 pos_max_height: cfg.image_size / cfg.patch_size,
                 pos_max_width: cfg.image_size / cfg.patch_size,
-                attention_mode: burn_dragon::VisionAttentionMode::RowL1,
+                attention_mode: VisionAttentionMode::RowL1,
                 use_alibi: true,
                 fused_kernels: burn_dragon::FusedKernelConfig::default(),
                 mhc: ManifoldHyperConnectionsConfig::default(),
@@ -533,7 +533,7 @@ mod vision_bench {
                                         cfg.patch_size,
                                         warp_mode,
                                     );
-                                    acc += patch.get(0).copied().unwrap_or(0.0);
+                                    acc += patch.first().copied().unwrap_or(0.0);
                                 }
                                 black_box(acc);
                                 total += start.elapsed();
@@ -859,10 +859,8 @@ mod vision_bench {
                 });
                 pass.set_pipeline(&self.pipeline);
                 pass.set_bind_group(0, &self.bind_group, &[]);
-                let groups_x =
-                    (self.output_size + FOVEATION_WORKGROUP_SIZE - 1) / FOVEATION_WORKGROUP_SIZE;
-                let groups_y =
-                    (self.output_size + FOVEATION_WORKGROUP_SIZE - 1) / FOVEATION_WORKGROUP_SIZE;
+                let groups_x = self.output_size.div_ceil(FOVEATION_WORKGROUP_SIZE);
+                let groups_y = self.output_size.div_ceil(FOVEATION_WORKGROUP_SIZE);
                 pass.dispatch_workgroups(groups_x.max(1), groups_y.max(1), 1);
             }
             encoder.copy_texture_to_buffer(
@@ -990,7 +988,7 @@ mod vision_bench {
 
     fn align_bytes_per_row(bytes_per_row: u32) -> u32 {
         let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-        ((bytes_per_row + align - 1) / align) * align
+        bytes_per_row.div_ceil(align) * align
     }
 
     fn pad_rows(
@@ -1132,3 +1130,4 @@ criterion_main!(benches);
 fn main() {
     eprintln!("vision_pipeline benchmarks require --features train,benchmark");
 }
+

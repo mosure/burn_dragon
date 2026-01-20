@@ -5,13 +5,13 @@ Config file: config/vision/croco/tiny.toml
 Note: when running via the CLI, config/vision/base.toml is prepended in crates/burn_dragon_vision/src/train/cli.rs.
 
 ## 1) Config load, merge, and validation
-- Config merge order: burn_dragon_train::load_vision_training_config merges TOML overlays in order; later files override earlier files. See crates/burn_dragon_train/src/config/vision.rs (load_vision_training_config).
+- Config merge order: burn_dragon_vision::load_vision_training_config merges TOML overlays in order; later files override earlier files. See crates/burn_dragon_vision/src/config/vision.rs (load_vision_training_config).
 - Core config types:
-  - VisionTrainingConfig, VisionTrainingHyperparameters, VisionModelConfig, VisionSaccadeConfig, VisionSaccadeCrossViewConfig, VisionManifoldHyperConnectionsConfig are all in crates/burn_dragon_train/src/config/vision.rs.
+  - VisionTrainingConfig, VisionTrainingHyperparameters, VisionModelConfig, VisionSaccadeConfig, VisionSaccadeCrossViewConfig, VisionManifoldHyperConnectionsConfig are all in crates/burn_dragon_vision/src/config/vision.rs.
 - Vision model config -> core model config:
-  - VisionModelConfig::build creates burn_dragon_core::VisionDragonHatchlingConfig (crates/burn_dragon_train/src/config/vision.rs, impl VisionModelConfig::build).
+  - VisionModelConfig::build creates VisionDragonConfig (crates/burn_dragon_vision/src/config/vision.rs, impl VisionModelConfig::build).
   - This is where vision.mhc is translated into core ManifoldHyperConnectionsConfig.
-- Rollout validation is performed in validate_vision_rollout (crates/burn_dragon_train/src/config/vision.rs).
+- Rollout validation is performed in validate_vision_rollout (crates/burn_dragon_vision/src/config/vision.rs).
 
 ## 2) Training entrypoint and dataset construction
 - Training entrypoint for vision is train_vision_backend in crates/burn_dragon_vision/src/train/vision/train.rs.
@@ -26,13 +26,13 @@ Note: when running via the CLI, config/vision/base.toml is prepended in crates/b
 
 ## 3) Training schedule and learner
 - The training schedule is resolved in resolve_vision_train_schedule and resolve_vision_lr_scheduler (crates/burn_dragon_vision/src/train/vision/train.rs).
-- The training loop is created in train_vision_with_scheduler (crates/burn_dragon_train/src/train/pipeline/schedule.rs) and uses burn_train::LearnerBuilder.
+- The training loop is created in train_vision_with_scheduler (crates/burn_dragon_vision/src/train/pipeline/schedule.rs) and uses burn_train::LearnerBuilder.
 - Metrics and device memory tracking are wired in train_vision_with_scheduler (same file) using:
   - ScalarMetric, LossMetric, LearningRateMetric, DeviceMetric
   - MemoryCleanupMetric and DeviceMemoryMetric when enabled by config.
 
-## 4) Core vision model (VisionDragonHatchling)
-Source: crates/burn_dragon_core/src/model/vision.rs
+## 4) Core vision model (VisionDragon)
+Source: crates/burn_dragon_vision/src/model/vision.rs
 
 ### 4.1 Patch embedding
 - PatchEmbed::new handles patch_embed_mode = conv | linear | identity in PatchEmbed (crates/burn_dragon_core/src/model/vision.rs).
@@ -42,14 +42,14 @@ Source: crates/burn_dragon_core/src/model/vision.rs
 
 ### 4.2 Residual stream and attention
 - The core recurrent steps are implemented in encode_tokens_steps_inner_multi (crates/burn_dragon_core/src/model/vision.rs).
-- Each step uses a low-rank latent projection defined by encoder / encoder_v / decoder parameters in VisionDragonHatchling.
+- Each step uses a low-rank latent projection defined by encoder / encoder_v / decoder parameters in VisionDragon.
 - Attention is implemented in full_attention (crates/burn_dragon_core/src/model/vision.rs) with:
   - ALiBi bias when use_alibi is true.
   - VisionAttentionMode::Softmax or VisionAttentionMode::RowL1 normalization.
 - Token normalization is optional (token_state_norm -> LayerNorm) applied in apply_token_norm (same file).
 
 ### 4.3 Multi-eye and cross-eye mixing
-- If num_eyes > 1, eye_token is created in VisionDragonHatchling::new and added in encode_tokens_steps_inner_multi (crates/burn_dragon_core/src/model/vision.rs).
+- If num_eyes > 1, eye_token is created in VisionDragon::new and added in encode_tokens_steps_inner_multi (crates/burn_dragon_vision/src/model/vision.rs).
 - cls token sync is done in sync_cls_tokens_multi using cls_sync_alpha.
 - After the main step loop, cross-eye mixing is optionally applied when cross_eye_steps > 0 via encode_tokens_steps_inner and then reshaping back (encode_tokens_steps_inner_multi).
 
@@ -62,8 +62,8 @@ Source: crates/burn_dragon_core/src/model/residual.rs
   - This yields (branch_input, residuals_out, beta).
 - Depth connection:
   - depth_connection optionally mixes branch_output back into residuals using beta and Dropout.
-- Integration into VisionDragonHatchling:
-  - encode_tokens_steps_inner_multi uses mhc.width_connection before the step core and mhc.depth_connection after it (crates/burn_dragon_core/src/model/vision.rs).
+- Integration into VisionDragon:
+  - encode_tokens_steps_inner_multi uses mhc.width_connection before the step core and mhc.depth_connection after it (crates/burn_dragon_vision/src/model/vision.rs).
 
 ## 6) Saccade model used by croco tiny
 Sources:
@@ -86,7 +86,7 @@ Sources:
 
 ### 7.1 TrainStep wiring
 - TrainStep::step for VisionSaccadeModel calls forward_losses_train (saccade/sampler.rs), which delegates to forward_losses_with_policy (saccade/impls/core.rs).
-- Rollout steps are sampled using VisionRollout::sample_steps (crates/burn_dragon_train/src/train/pipeline/schedule.rs).
+- Rollout steps are sampled using VisionRollout::sample_steps (crates/burn_dragon_vision/src/train/pipeline/schedule.rs).
 
 ### 7.2 Loss assembly and GDPO
 - forward_losses_with_policy:
@@ -130,10 +130,10 @@ Source: crates/burn_dragon_vision/src/train/vision/models.rs
 
 ## 11) Croco tiny specific config mapping
 config/vision/croco/tiny.toml maps to the following code paths:
-- [vision] -> VisionModelConfig::build -> VisionDragonHatchlingConfig (crates/burn_dragon_train/src/config/vision.rs).
+- [vision] -> VisionModelConfig::build -> VisionDragonConfig (crates/burn_dragon_vision/src/config/vision.rs).
 - [vision.mhc] -> VisionManifoldHyperConnectionsConfig -> ManifoldHyperConnectionsConfig (same file + crates/burn_dragon_core/src/model/residual.rs).
-- [mode] type = "saccade" -> VisionSaccadeConfig (crates/burn_dragon_train/src/config/vision.rs) -> VisionSaccadeModel (crates/burn_dragon_vision/src/train/saccade/structs.rs).
-- [mode.cross_view] -> VisionSaccadeCrossViewConfig (crates/burn_dragon_train/src/config/vision.rs) and cross-view logic in recon_loss (crates/burn_dragon_vision/src/train/saccade/impls/core.rs).
+- [mode] type = "saccade" -> VisionSaccadeConfig (crates/burn_dragon_vision/src/config/vision.rs) -> VisionSaccadeModel (crates/burn_dragon_vision/src/train/saccade/structs.rs).
+- [mode.cross_view] -> VisionSaccadeCrossViewConfig (crates/burn_dragon_vision/src/config/vision.rs) and cross-view logic in recon_loss (crates/burn_dragon_vision/src/train/saccade/impls/core.rs).
 - [mode.input_projection] -> VisionSaccadeInputProjection (crates/burn_dragon_vision/src/train/vision/models.rs).
 - [mode.policy.*] -> policy.rs (location embedding, GDPO inputs, action sampling).
 - [mode.loss.recon] -> recon_loss in saccade/impls/core.rs and VisionReconstructionHead in vision/models.rs.
@@ -144,5 +144,6 @@ config/vision/croco/tiny.toml maps to the following code paths:
 - Saccade rollout / cross-view logic: crates/burn_dragon_vision/src/train/saccade/impls/core.rs.
 - Foveation details: crates/burn_dragon_vision/src/train/saccade/impls/foveation.rs and scatter.rs.
 - Input projection: crates/burn_dragon_vision/src/train/vision/models.rs (VisionSaccadeInputProjection).
-- Config schema: crates/burn_dragon_train/src/config/vision.rs.
-- Training schedule + metrics: crates/burn_dragon_train/src/train/pipeline/schedule.rs.
+- Config schema: crates/burn_dragon_vision/src/config/vision.rs.
+- Training schedule + metrics: crates/burn_dragon_vision/src/train/pipeline/schedule.rs.
+

@@ -468,7 +468,7 @@ impl<B: BackendTrait> ModuleDisplay for FoveaJitterCache<B> {}
 
 #[derive(Module, Debug)]
 pub(crate) struct VisionSaccadeModel<B: BackendTrait> {
-    pub(crate) model: VisionDragonHatchling<B>,
+    pub(crate) model: VisionDragon<B>,
     pub(crate) recon: VisionReconstructionHead<B>,
     // Learned initial trajectory state for the recurrent rollout.
     pub(crate) trajectory_token: Param<Tensor<B, 2>>,
@@ -535,3 +535,4 @@ pub(crate) struct SaccadeLaplacianImages<B: BackendTrait> {
     pub(crate) residuals: Vec<Tensor<B, 4>>,
     pub(crate) coarse: Tensor<B, 4>,
 }
+

@@ -2,9 +2,10 @@ use crate::train::prelude::*;
 use burn::optim::Optimizer;
 use burn::tensor::Distribution;
 use burn_autodiff::Autodiff;
-use burn_dragon_core::{
-    FusedKernelConfig, ManifoldHyperConnectionsConfig, SpatialPositionalEncodingKind,
-    VisionAttentionMode, VisionLatentActivation, VisionPatchEmbedMode,
+use burn_dragon_core::{FusedKernelConfig, ManifoldHyperConnectionsConfig};
+use crate::{
+    SpatialPositionalEncodingKind, VisionAttentionMode, VisionLatentActivation,
+    VisionPatchEmbedMode,
 };
 use burn_ndarray::NdArray;
 
@@ -146,7 +147,7 @@ fn lejepa_recon_psnr_improves_on_toy_batch() {
     let image_size: usize = 8;
     let patch_size: usize = 4;
     let grid = image_size.div_ceil(patch_size);
-    let vision_config = VisionDragonHatchlingConfig {
+    let vision_config = VisionDragonConfig {
         image_size,
         patch_size,
         patch_embed_mode: VisionPatchEmbedMode::default(),
@@ -193,7 +194,7 @@ fn lejepa_recon_psnr_improves_on_toy_batch() {
     };
     let recon_patch_dim =
         vision_config.patch_size * vision_config.patch_size * vision_config.in_channels;
-    let model = VisionDragonHatchling::<Backend>::new(vision_config.clone(), &device);
+    let model = VisionDragon::<Backend>::new(vision_config.clone(), &device);
     let mut lejepa = VisionLejepaModel::new(
         model,
         lejepa_config,
@@ -242,3 +243,4 @@ fn lejepa_recon_psnr_improves_on_toy_batch() {
     assert!(final_psnr > initial_psnr);
     assert!(final_psnr > 24.0);
 }
+

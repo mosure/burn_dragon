@@ -65,33 +65,32 @@ pub(crate) use burn_dino::model::dino::{DinoVisionTransformer, DinoVisionTransfo
 #[cfg(feature = "cli")]
 pub(crate) use burn_dragon_train::wgpu::init_runtime;
 pub(crate) use burn_dragon_train::{
-    GdpoHardGate, ImagenetteVariant, LearningRateScheduleConfig, OptimizerConfig,
-    VisionArtifactOutputMode, VisionDatasetConfig,
-    VisionDatasetDownloadConfig, VisionFoveaSamplingMode, VisionFoveaScatterMode,
-    VisionFoveaWarpMode, VisionLejepaConfig, VisionLejepaLossConfig, VisionMaeConfig,
-    VisionPyramidMode, VisionSaccadeConfig, VisionSaccadeInputProjectionCnnConfig,
-    VisionSaccadeInputProjectionConfig, VisionSaccadeInputProjectionMicroVitConfig,
-    VisionTeacherConfig, VisionTeacherVariant, VisionTrainingConfig, VisionTrainingHyperparameters,
-    VisionTrainingModeConfig,
+    GdpoHardGate, LearningRateScheduleConfig, OptimizerConfig, VisionArtifactOutputMode,
 };
-pub(crate) use burn_dragon_core::{
+pub(crate) use crate::config::{
+    ImagenetteVariant, VisionDatasetConfig, VisionDatasetDownloadConfig, VisionFoveaSamplingMode,
+    VisionFoveaScatterMode, VisionFoveaWarpMode, VisionLejepaConfig, VisionLejepaLossConfig,
+    VisionMaeConfig, VisionPyramidMode, VisionSaccadeConfig,
+    VisionSaccadeInputProjectionCnnConfig, VisionSaccadeInputProjectionConfig,
+    VisionSaccadeInputProjectionMicroVitConfig, VisionTeacherConfig, VisionTeacherVariant,
+    VisionTrainingConfig, VisionTrainingHyperparameters, VisionTrainingModeConfig,
+};
+pub(crate) use crate::{
     DinoFeatureStore, ImageNetAugmentations, ImageNetBatch, ImageNetDataLoader, ImageNetDataset,
     ImageNetDatasetConfig, ImageNetSplit, PatchGrid, SpatialPositionalEncodingKind,
-    VisionAttentionMode, VisionDragonHatchling, VisionDragonHatchlingConfig,
+    VisionAttentionMode, VisionDragon, VisionDragonConfig,
     VisionLatentActivation, VisionNormalize, VisionPatchEmbedMode, patchify, unpatchify,
 };
-pub(crate) use burn_dragon_loss::{
-    VisionDistillationLossConfig, vision_distillation_loss,
-};
+pub(crate) use crate::loss::{VisionDistillationLossConfig, vision_distillation_loss};
 #[cfg(feature = "cli")]
-pub(crate) use burn_dragon_train::load_vision_training_config;
+pub(crate) use crate::config::load_vision_training_config;
 pub(crate) use serde::Serialize;
 
 pub(crate) use crate::train::constants::*;
 pub(crate) use crate::train::saccade::*;
 pub(crate) use crate::train::vision::*;
 pub(crate) use burn_dragon_train::train::teacher::*;
-pub(crate) use burn_dragon_train::train::pipeline::*;
+pub(crate) use crate::train::pipeline::*;
 
 pub(crate) use burn_dragon_train::train::metrics::{
     ActionClampRateInput, AdvantageAbsMeanInput, AdvantageStdInput, DeviceMemoryMetric,
@@ -100,3 +99,4 @@ pub(crate) use burn_dragon_train::train::metrics::{
     ProbeLossInput, ReconLossInput, ReconPsnrInput, ScalarMetric, SigRegLossInput,
     VisionArtifactInput, VisionArtifactMetric, VisionOutput, VisionTrainItem,
 };
+

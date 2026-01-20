@@ -914,7 +914,7 @@ mod tests {
     };
     use burn::tensor::backend::Backend;
     use burn::tensor::{Tensor, TensorData};
-    use burn_dragon_train::{VisionFoveaSamplingMode, VisionSaccadeConfig};
+    use burn_dragon_vision::config::{VisionFoveaSamplingMode, VisionSaccadeConfig};
     use burn_dragon_vision::train::SaccadeFoveationSampler;
     use burn_wgpu::graphics;
     use burn_wgpu::{self, RuntimeOptions, Wgpu};

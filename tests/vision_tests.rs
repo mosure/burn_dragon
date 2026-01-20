@@ -1,9 +1,9 @@
 use burn::tensor::backend::Backend as BackendTrait;
 use burn::tensor::{Distribution, Tensor};
-use burn_dragon::{
-    FusedKernelConfig, ManifoldHyperConnectionsConfig, PatchEmbed, PatchGrid,
-    SpatialPositionalEncodingKind, VisionAttentionMode, VisionDragonHatchling,
-    VisionDragonHatchlingConfig, VisionLatentActivation, VisionPatchEmbedMode, pool_patch_tokens,
+use burn_dragon::{FusedKernelConfig, ManifoldHyperConnectionsConfig};
+use burn_dragon::vision::{
+    PatchEmbed, PatchGrid, SpatialPositionalEncodingKind, VisionAttentionMode, VisionDragon,
+    VisionDragonConfig, VisionLatentActivation, VisionPatchEmbedMode, pool_patch_tokens,
 };
 use burn_ndarray::NdArray;
 
@@ -12,7 +12,7 @@ fn patch_embed_and_model_shapes() {
     type Backend = NdArray<f32>;
     let device = <Backend as BackendTrait>::Device::default();
 
-    let config = VisionDragonHatchlingConfig {
+    let config = VisionDragonConfig {
         image_size: 32,
         patch_size: 8,
         patch_embed_mode: VisionPatchEmbedMode::default(),
@@ -46,7 +46,7 @@ fn patch_embed_and_model_shapes() {
     assert_eq!(patch.grid.height, 4);
     assert_eq!(patch.grid.width, 4);
 
-    let model = VisionDragonHatchling::<Backend>::new(config, &device);
+    let model = VisionDragon::<Backend>::new(config, &device);
     let output = model.forward_images(images);
     assert_eq!(output.patch_tokens.shape().dims(), [2, 16, 8]);
     assert_eq!(output.cls_token.shape().dims(), [2, 8]);
@@ -57,7 +57,7 @@ fn patch_embed_raw_matches_add_position() {
     type Backend = NdArray<f32>;
     let device = <Backend as BackendTrait>::Device::default();
 
-    let config = VisionDragonHatchlingConfig {
+    let config = VisionDragonConfig {
         image_size: 32,
         patch_size: 8,
         patch_embed_mode: VisionPatchEmbedMode::default(),
@@ -85,7 +85,7 @@ fn patch_embed_raw_matches_add_position() {
     };
 
     let images = Tensor::<Backend, 4>::random([2, 3, 32, 32], Distribution::Default, &device);
-    let model = VisionDragonHatchling::<Backend>::new(config, &device);
+    let model = VisionDragon::<Backend>::new(config, &device);
     let raw = model.patch_embed_raw(images.clone());
     let with_pos = model.add_patch_position(raw.tokens.clone(), raw.grid);
     let embedded = model.patch_embed(images).tokens;
@@ -103,7 +103,7 @@ fn vision_forward_steps_shapes() {
     type Backend = NdArray<f32>;
     let device = <Backend as BackendTrait>::Device::default();
 
-    let config = VisionDragonHatchlingConfig {
+    let config = VisionDragonConfig {
         image_size: 32,
         patch_size: 8,
         patch_embed_mode: VisionPatchEmbedMode::default(),
@@ -131,7 +131,7 @@ fn vision_forward_steps_shapes() {
     };
 
     let images = Tensor::<Backend, 4>::random([2, 3, 32, 32], Distribution::Default, &device);
-    let model = VisionDragonHatchling::<Backend>::new(config.clone(), &device);
+    let model = VisionDragon::<Backend>::new(config.clone(), &device);
 
     let out_min = model.forward_images_steps(images.clone(), 1);
     let out_full = model.forward_images_steps(images.clone(), 3);
@@ -171,11 +171,11 @@ mod train_tests {
     use super::*;
     use burn::data::dataloader::DataLoader;
     use burn_autodiff::Autodiff;
-    use burn_dragon::{
+    use burn_dragon::vision::{
         CifarDataset, CifarSplit, CifarType, DinoFeatureStore, ImageNetAugmentations,
         ImageNetDataLoader, ImageNetDataset, ImageNetDatasetConfig, ImageNetSplit, VisionNormalize,
     };
-    use burn_dragon::train::{VisionTrainingModeConfig, load_vision_training_config};
+    use burn_dragon::vision::{VisionTrainingModeConfig, load_vision_training_config};
     use image::RgbImage;
     use std::fs;
     use std::path::Path;
@@ -243,8 +243,8 @@ mod train_tests {
             .load_batch::<Backend>(&[1], &device)
             .expect("load batch");
 
-        assert_eq!(cls.shape().dims(), [1, 3]);
-        assert_eq!(patch.shape().dims(), [1, 2, 3]);
+        assert_eq!(cls.shape().dims::<2>(), [1, 3]);
+        assert_eq!(patch.shape().dims::<3>(), [1, 2, 3]);
 
         let cls_vec = cls
             .to_data()
@@ -620,7 +620,7 @@ mod train_tests {
             [config.training.batch_size, 2, 3, 8, 8]
         );
         let vision_config = config.vision.build();
-        let model = VisionDragonHatchling::<Backend>::new(vision_config.clone(), &device);
+        let model = VisionDragon::<Backend>::new(vision_config.clone(), &device);
         let [batch_size, view_count, channels, height, width] = view_images.shape().dims::<5>();
         let mut proj_views = Vec::with_capacity(view_count);
         for view_idx in 0..view_count {
@@ -642,3 +642,4 @@ mod train_tests {
         assert!(value.is_finite());
     }
 }
+

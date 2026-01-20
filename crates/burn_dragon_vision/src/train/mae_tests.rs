@@ -2,17 +2,16 @@ use crate::train::prelude::*;
 use burn::optim::Optimizer;
 use burn::tensor::Distribution;
 use burn_autodiff::Autodiff;
-use burn_dragon_core::{
-    FusedKernelConfig, ManifoldHyperConnectionsConfig, SpatialPositionalEncodingKind,
-    VisionAttentionMode, VisionLatentActivation, VisionPatchEmbedMode,
+use burn_dragon_core::{FusedKernelConfig, ManifoldHyperConnectionsConfig};
+use crate::{
+    SpatialPositionalEncodingKind, VisionAttentionMode, VisionLatentActivation,
+    VisionPatchEmbedMode,
 };
 #[cfg(not(target_arch = "wasm32"))]
-use burn_dragon_train::{VisionTrainingModeConfig, load_vision_training_config};
+use crate::config::{VisionTrainingModeConfig, load_vision_training_config};
 #[cfg(not(target_arch = "wasm32"))]
-use burn_dragon_train::train::pipeline::resolve_vision_rollout;
-use burn_dragon_train::{
-    VisionMaeCrossViewConfig, VisionMaeLossConfig, VisionReconLossConfig,
-};
+use crate::train::pipeline::resolve_vision_rollout;
+use crate::config::{VisionMaeCrossViewConfig, VisionMaeLossConfig, VisionReconLossConfig};
 use burn_ndarray::NdArray;
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
@@ -22,7 +21,7 @@ fn mae_pyramid_recon_loss_is_finite() {
     type Backend = NdArray<f32>;
     let device = <Backend as BackendTrait>::Device::default();
 
-    let vision_config = VisionDragonHatchlingConfig {
+    let vision_config = VisionDragonConfig {
         image_size: 8,
         patch_size: 4,
         patch_embed_mode: VisionPatchEmbedMode::default(),
@@ -68,7 +67,7 @@ fn mae_pyramid_recon_loss_is_finite() {
         max_steps: 1,
         backprop_steps: 1,
     };
-    let model = VisionDragonHatchling::<Backend>::new(vision_config, &device);
+    let model = VisionDragon::<Backend>::new(vision_config, &device);
     let mae = VisionMaeModel::new(
         model,
         mae_config,
@@ -95,7 +94,7 @@ fn mae_cross_view_forward_is_finite() {
     type Backend = Autodiff<NdArray<f32>>;
     let device = <Backend as BackendTrait>::Device::default();
 
-    let vision_config = VisionDragonHatchlingConfig {
+    let vision_config = VisionDragonConfig {
         image_size: 8,
         patch_size: 4,
         patch_embed_mode: VisionPatchEmbedMode::default(),
@@ -157,7 +156,7 @@ fn mae_cross_view_forward_is_finite() {
         max_steps: 1,
         backprop_steps: 1,
     };
-    let model = VisionDragonHatchling::<Backend>::new(vision_config, &device);
+    let model = VisionDragon::<Backend>::new(vision_config, &device);
     let mae = VisionMaeModel::new(
         model,
         mae_config,
@@ -303,7 +302,7 @@ fn mae_config_smoke_from_env() {
     let vision_cfg = config.vision.build();
     let recon_patch_dim =
         vision_cfg.patch_size * vision_cfg.patch_size * vision_cfg.in_channels;
-    let model = VisionDragonHatchling::<Backend>::new(vision_cfg.clone(), &device);
+    let model = VisionDragon::<Backend>::new(vision_cfg.clone(), &device);
     let mae = VisionMaeModel::new(
         model,
         mae_cfg,
@@ -350,7 +349,7 @@ fn mae_recon_psnr_improves_on_toy_batch() {
     let image_size: usize = 8;
     let patch_size: usize = 4;
     let grid = image_size.div_ceil(patch_size);
-    let vision_config = VisionDragonHatchlingConfig {
+    let vision_config = VisionDragonConfig {
         image_size,
         patch_size,
         patch_embed_mode: VisionPatchEmbedMode::default(),
@@ -398,7 +397,7 @@ fn mae_recon_psnr_improves_on_toy_batch() {
     };
     let recon_patch_dim =
         vision_config.patch_size * vision_config.patch_size * vision_config.in_channels;
-    let model = VisionDragonHatchling::<Backend>::new(vision_config.clone(), &device);
+    let model = VisionDragon::<Backend>::new(vision_config.clone(), &device);
     let mut mae = VisionMaeModel::new(
         model,
         mae_config,
@@ -466,7 +465,7 @@ fn identity_config_recon_loss_decreases() {
         .patch_size
         .saturating_mul(vision_config.patch_size)
         .saturating_mul(vision_config.in_channels);
-    let model = VisionDragonHatchling::<Backend>::new(vision_config.clone(), &device);
+    let model = VisionDragon::<Backend>::new(vision_config.clone(), &device);
     let mut mae = VisionMaeModel::new(
         model,
         mae_config,
@@ -519,3 +518,4 @@ fn identity_config_recon_loss_decreases() {
     assert!(final_recon.is_finite());
     assert!(final_recon < initial_recon);
 }
+

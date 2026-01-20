@@ -10,13 +10,12 @@ use burn_dragon_language::ContextStrategyConfig;
 use burn_dragon_language::TrainingHyperparameters;
 use burn_dragon_language::dataset::SequenceBatch;
 use burn_dragon_language::train::resolve_train_schedule;
-use burn_dragon_core::{
-    BDH, BDHConfig, FusedKernelConfig, ManifoldHyperConnectionsConfig,
-    SpatialPositionalEncodingKind, VisionAttentionMode, VisionLatentActivation,
-};
+use burn_dragon_train::train::pipeline::ScheduleSource as TrainScheduleSource;
+use burn_dragon_core::{BDH, BDHConfig, FusedKernelConfig, ManifoldHyperConnectionsConfig};
+use crate::{SpatialPositionalEncodingKind, VisionAttentionMode, VisionLatentActivation};
 #[cfg(not(target_arch = "wasm32"))]
-use burn_dragon_train::{VisionTrainingModeConfig, load_vision_training_config};
-use burn_dragon_train::{
+use crate::config::{VisionTrainingModeConfig, load_vision_training_config};
+use crate::config::{
     VisionLossConfig, VisionPyramidMode, VisionReconLossConfig, VisionSaccadeCacheConfig,
     VisionSaccadeCrossViewConfig, VisionSaccadeInputProjectionConfig, VisionSaccadePolicyConfig,
     VisionTbpttConfig,
@@ -43,7 +42,7 @@ fn make_training(max_iters: usize, epochs: Option<usize>) -> TrainingHyperparame
 fn make_saccade_model<B: BackendTrait>(
     device: &B::Device,
     num_eyes: usize,
-) -> (VisionSaccadeModel<B>, VisionDragonHatchlingConfig) {
+) -> (VisionSaccadeModel<B>, VisionDragonConfig) {
     make_saccade_model_with_dims(device, num_eyes, 8, 8, 4)
 }
 
@@ -53,12 +52,12 @@ fn make_saccade_model_with_dims<B: BackendTrait>(
     image_width: usize,
     image_height: usize,
     patch_size: usize,
-) -> (VisionSaccadeModel<B>, VisionDragonHatchlingConfig) {
+) -> (VisionSaccadeModel<B>, VisionDragonConfig) {
     let patch_size = patch_size.max(1);
     let image_size = image_width.max(image_height).max(patch_size);
     let grid_w = (image_width / patch_size).max(1);
     let grid_h = (image_height / patch_size).max(1);
-    let vision_config = VisionDragonHatchlingConfig {
+    let vision_config = VisionDragonConfig {
         image_size,
         patch_size,
         patch_embed_mode: VisionPatchEmbedMode::default(),
@@ -84,7 +83,7 @@ fn make_saccade_model_with_dims<B: BackendTrait>(
         fused_kernels: FusedKernelConfig::default(),
         mhc: ManifoldHyperConnectionsConfig::default(),
     };
-    let model = VisionDragonHatchling::<B>::new(vision_config.clone(), device);
+    let model = VisionDragon::<B>::new(vision_config.clone(), device);
     let saccade_config = VisionSaccadeConfig {
         num_eyes,
         traj_tokens: 1,
@@ -338,7 +337,7 @@ fn run_foveation_snellen<B: BackendTrait>(device: &B::Device, backend_label: &st
 fn patch_embed_supports_large_patches() {
     type Backend = NdArray<f32>;
     let device = <Backend as BackendTrait>::Device::default();
-    let vision_config = VisionDragonHatchlingConfig {
+    let vision_config = VisionDragonConfig {
         image_size: 160,
         patch_size: 64,
         patch_embed_mode: VisionPatchEmbedMode::default(),
@@ -364,7 +363,7 @@ fn patch_embed_supports_large_patches() {
         fused_kernels: FusedKernelConfig::default(),
         mhc: ManifoldHyperConnectionsConfig::default(),
     };
-    let model = VisionDragonHatchling::<Backend>::new(vision_config, &device);
+    let model = VisionDragon::<Backend>::new(vision_config, &device);
     let images =
         Tensor::<Backend, 4>::random([1, 3, 160, 160], TensorDistribution::Default, &device);
     let patch = model.patch_embed_raw(images);
@@ -1254,7 +1253,7 @@ fn epochs_schedule_overrides_max_iters() {
     let training = make_training(5, Some(3));
     let schedule = resolve_train_schedule(&training, 4).expect("schedule");
 
-    assert_eq!(schedule.source, ScheduleSource::Epochs);
+    assert_eq!(schedule.source, TrainScheduleSource::Epochs);
     assert_eq!(schedule.steps_per_epoch, 4);
     assert_eq!(schedule.total_epochs, 3);
     assert_eq!(schedule.total_steps, 12);
@@ -1266,7 +1265,7 @@ fn max_iters_schedule_uses_step_limit() {
     let training = make_training(12, None);
     let schedule = resolve_train_schedule(&training, 5).expect("schedule");
 
-    assert_eq!(schedule.source, ScheduleSource::MaxIters);
+    assert_eq!(schedule.source, TrainScheduleSource::MaxIters);
     assert_eq!(schedule.steps_per_epoch, 5);
     assert_eq!(schedule.total_steps, 12);
     assert_eq!(schedule.total_epochs, 3);
@@ -1918,7 +1917,7 @@ fn wgpu_vision_saccade_memory_stays_bounded_across_epochs() {
         backprop_steps: fixed_steps,
     };
 
-    let model = VisionDragonHatchling::<Backend>::new(vision_config.clone(), &device);
+    let model = VisionDragon::<Backend>::new(vision_config.clone(), &device);
     let recon_patch_dim = vision_config
         .patch_size
         .saturating_mul(vision_config.patch_size)
@@ -2100,7 +2099,7 @@ fn cuda_vision_saccade_memory_stays_bounded_across_epochs() {
             backprop_steps: fixed_steps,
         };
 
-        let model = VisionDragonHatchling::<Backend>::new(vision_config.clone(), &device);
+        let model = VisionDragon::<Backend>::new(vision_config.clone(), &device);
         let recon_patch_dim = vision_config
             .patch_size
             .saturating_mul(vision_config.patch_size)
@@ -2223,3 +2222,4 @@ fn cuda_vision_saccade_train_memory_stays_bounded_small_config() {
         );
     }));
 }
+

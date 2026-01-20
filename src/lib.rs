@@ -2,7 +2,6 @@
 
 pub use burn_dragon_core::*;
 pub use burn_dragon_language as language;
-pub use burn_dragon_loss as loss;
 #[cfg(feature = "train")]
 pub use burn_dragon_train as train;
 pub use burn_dragon_vision as vision;

@@ -22,7 +22,7 @@ use serde::Deserialize;
 use burn_autodiff::Autodiff;
 #[cfg(feature = "cuda")]
 use burn_cubecl::CubeBackend;
-use burn_dragon_train::load_vision_training_config;
+use burn_dragon_vision::load_vision_training_config;
 #[cfg(feature = "cuda")]
 use burn_dragon_vision::train::{gdpo_cpu_fallbacks, loss_trace_len};
 use burn_dragon_vision::train::{

@@ -728,7 +728,7 @@ where
 
     match mode {
         VisionMode::Distill { loss, teacher } => {
-            let model = VisionDragonHatchling::<B>::new(vision_config.clone(), &device);
+            let model = VisionDragon::<B>::new(vision_config.clone(), &device);
             let teacher = teacher.map(|teacher| *teacher);
             let mut model = Some(VisionDistillModel::new(model, loss, teacher, rollout));
             let mut optim =
@@ -779,7 +779,7 @@ where
             }
         }
         VisionMode::Lejepa { config: lejepa } => {
-            let model = VisionDragonHatchling::<B>::new(vision_config.clone(), &device);
+            let model = VisionDragon::<B>::new(vision_config.clone(), &device);
             let recon_patch_dim = vision_config
                 .patch_size
                 .saturating_mul(vision_config.patch_size)
@@ -857,7 +857,7 @@ where
             }
         }
         VisionMode::Mae { config: mae } => {
-            let model = VisionDragonHatchling::<B>::new(vision_config.clone(), &device);
+            let model = VisionDragon::<B>::new(vision_config.clone(), &device);
             let recon_patch_dim = vision_config
                 .patch_size
                 .saturating_mul(vision_config.patch_size)
@@ -935,7 +935,7 @@ where
             }
         }
         VisionMode::Saccade { config: saccade } => {
-            let model = VisionDragonHatchling::<B>::new(vision_config.clone(), &device);
+            let model = VisionDragon::<B>::new(vision_config.clone(), &device);
             let recon_patch_dim = vision_config
                 .patch_size
                 .saturating_mul(vision_config.patch_size)
@@ -1034,3 +1034,4 @@ where
 {
     train_vision_backend::<B, Init>(config, backend_name, init_backend)
 }
+

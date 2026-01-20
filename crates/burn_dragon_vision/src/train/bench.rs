@@ -77,14 +77,14 @@ pub struct FoveaKernelEstimate {
 
 impl<B: AutodiffBackend> VisionSaccadeBench<B> {
     pub fn new(
-        vision: VisionDragonHatchlingConfig,
+        vision: VisionDragonConfig,
         saccade: VisionSaccadeConfig,
         batch_size: usize,
         steps: usize,
         backprop_steps: usize,
         device: &B::Device,
     ) -> Self {
-        let model = VisionDragonHatchling::<B>::new(vision.clone(), device);
+        let model = VisionDragon::<B>::new(vision.clone(), device);
         let recon_patch_dim = vision.patch_size * vision.patch_size * vision.in_channels;
         let rollout = VisionRollout {
             min_steps: steps,
@@ -411,7 +411,7 @@ impl<B: AutodiffBackend> VisionSaccadeBench<B> {
 
 impl<B: AutodiffBackend> VisionSaccadeTrainStepBench<B> {
     pub fn new(
-        vision: VisionDragonHatchlingConfig,
+        vision: VisionDragonConfig,
         saccade: VisionSaccadeConfig,
         training: &VisionTrainingHyperparameters,
         optimizer_cfg: &OptimizerConfig,
@@ -419,7 +419,7 @@ impl<B: AutodiffBackend> VisionSaccadeTrainStepBench<B> {
     ) -> Result<Self> {
         let rollout = resolve_vision_rollout(training, vision.steps)?;
         let recon_patch_dim = vision.patch_size * vision.patch_size * vision.in_channels;
-        let model = VisionDragonHatchling::<B>::new(vision.clone(), device);
+        let model = VisionDragon::<B>::new(vision.clone(), device);
         let saccade = VisionSaccadeModel::new(
             model,
             saccade,
@@ -503,7 +503,7 @@ impl<B: AutodiffBackend> VisionSaccadeTrainStepBench<B> {
 
 impl<B: AutodiffBackend> VisionMaeTrainStepBench<B> {
     pub fn new(
-        vision: VisionDragonHatchlingConfig,
+        vision: VisionDragonConfig,
         mae: VisionMaeConfig,
         training: &VisionTrainingHyperparameters,
         optimizer_cfg: &OptimizerConfig,
@@ -513,7 +513,7 @@ impl<B: AutodiffBackend> VisionMaeTrainStepBench<B> {
         let embed_dim = vision.embed_dim;
         let num_eyes = vision.num_eyes;
         let recon_patch_dim = vision.patch_size * vision.patch_size * vision.in_channels;
-        let model = VisionDragonHatchling::<B>::new(vision, device);
+        let model = VisionDragon::<B>::new(vision, device);
         let mae = VisionMaeModel::new(
             model,
             mae,
@@ -550,7 +550,7 @@ impl<B: AutodiffBackend> VisionMaeTrainStepBench<B> {
 
 impl<B: AutodiffBackend> VisionLejepaTrainStepBench<B> {
     pub fn new(
-        vision: VisionDragonHatchlingConfig,
+        vision: VisionDragonConfig,
         lejepa: VisionLejepaConfig,
         training: &VisionTrainingHyperparameters,
         optimizer_cfg: &OptimizerConfig,
@@ -560,7 +560,7 @@ impl<B: AutodiffBackend> VisionLejepaTrainStepBench<B> {
         let rollout = resolve_vision_rollout(training, vision.steps)?;
         let embed_dim = vision.embed_dim;
         let recon_patch_dim = vision.patch_size * vision.patch_size * vision.in_channels;
-        let model = VisionDragonHatchling::<B>::new(vision, device);
+        let model = VisionDragon::<B>::new(vision, device);
         let lejepa = VisionLejepaModel::new(
             model,
             lejepa,
@@ -624,7 +624,7 @@ impl<B: BackendTrait> VisionInputProjectionBench<B> {
 
 impl<B: BackendTrait> VisionScatterBench<B> {
     pub fn new(
-        vision: VisionDragonHatchlingConfig,
+        vision: VisionDragonConfig,
         saccade: VisionSaccadeConfig,
         batch_size: usize,
         out_tokens: usize,
@@ -632,7 +632,7 @@ impl<B: BackendTrait> VisionScatterBench<B> {
         feature_dim: usize,
         device: &B::Device,
     ) -> Self {
-        let model = VisionDragonHatchling::<B>::new(vision.clone(), device);
+        let model = VisionDragon::<B>::new(vision.clone(), device);
         let recon_patch_dim = vision.patch_size * vision.patch_size * vision.in_channels;
         let rollout = VisionRollout {
             min_steps: 1,
@@ -675,3 +675,4 @@ impl<B: BackendTrait> VisionScatterBench<B> {
             .sum()
     }
 }
+

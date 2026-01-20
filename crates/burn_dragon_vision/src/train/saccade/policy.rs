@@ -3,7 +3,7 @@ use std::f32::consts::PI;
 use burn::tensor::backend::Backend as BackendTrait;
 use burn::tensor::{Distribution as TensorDistribution, Tensor, TensorData};
 
-use burn_dragon_train::{
+use crate::config::{
     VisionLocationEmbeddingConfig, VisionLocationEmbeddingMode, VisionNullGlimpseMode,
 };
 

@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use bevy::asset::RenderAssetUsages;
 use bevy::ecs::hierarchy::ChildSpawnerCommands;
-use bevy::image::{ImageSampler, ImageSamplerDescriptor};
+use bevy::image::{ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
 use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use bevy::prelude::*;
 use bevy::render::RenderPlugin;
@@ -25,14 +25,14 @@ use bevy_inspector_egui::quick::ResourceInspectorPlugin;
 use burn::tensor::backend::Backend;
 use burn::tensor::{Tensor, TensorData};
 #[cfg(test)]
-use burn_dragon_core::constants::FOVEA_AA_THRESHOLD;
-use burn_dragon_core::{
-    SpatialPositionalEncodingKind, VisionAttentionMode, VisionDragonHatchlingConfig,
+use burn_dragon_vision::FOVEA_AA_THRESHOLD;
+use burn_dragon_vision::{
+    SpatialPositionalEncodingKind, VisionAttentionMode, VisionDragonConfig,
 };
-use burn_dragon_train::{
-    VisionFoveaSamplingMode, VisionFoveaWarpMode, VisionPyramidMode, VisionSaccadeConfig,
+use burn_dragon_vision::{
+    foveation, VisionFoveaSamplingMode, VisionFoveaWarpMode, VisionPyramidMode,
+    VisionSaccadeConfig,
 };
-use burn_dragon_vision::foveation;
 use burn_dragon_vision::train::SaccadeFoveationSampler;
 use burn_wgpu::Wgpu;
 use half::f16;
@@ -1580,7 +1580,7 @@ pub(crate) fn render_patch_f32(
     settings: &FoveationSettings,
     patch_size: usize,
 ) -> Vec<f32> {
-    let subsamples = burn_dragon_train::train::constants::SACCADE_FOVEA_SUBSAMPLES.max(1);
+    let subsamples = burn_dragon_vision::SACCADE_FOVEA_SUBSAMPLES.max(1);
     let patch = patch_size.max(1);
     let width = patch;
     let height = patch;
@@ -2201,9 +2201,9 @@ fn load_image(path: &PathBuf) -> anyhow::Result<SourceImage> {
     let (width, height) = image.dimensions();
     let mut data = Vec::with_capacity((width * height * 3) as usize);
     for pixel in image.pixels() {
-        data.push(pixel[0] as f32 / 255.0);
-        data.push(pixel[1] as f32 / 255.0);
-        data.push(pixel[2] as f32 / 255.0);
+        data.push(srgb_to_linear(pixel[0] as f32 / 255.0));
+        data.push(srgb_to_linear(pixel[1] as f32 / 255.0));
+        data.push(srgb_to_linear(pixel[2] as f32 / 255.0));
     }
     Ok(SourceImage {
         width: width as usize,
@@ -2266,7 +2266,7 @@ fn create_bevy_image_level(level: &ImageLevel, images: &mut Assets<Image>) -> Ha
         size,
         TextureDimension::D2,
         &data,
-        TextureFormat::Rgba8UnormSrgb,
+        TextureFormat::Rgba8Unorm,
         RenderAssetUsages::default(),
     );
     image.texture_descriptor.usage |= TextureUsages::COPY_DST | TextureUsages::TEXTURE_BINDING;
@@ -2371,7 +2371,12 @@ fn create_blank_image(size: usize, images: &mut Assets<Image>) -> Handle<Image> 
     );
     image.texture_descriptor.usage |=
         TextureUsages::COPY_DST | TextureUsages::TEXTURE_BINDING | TextureUsages::STORAGE_BINDING;
-    image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor::linear());
+    image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+        mag_filter: ImageFilterMode::Nearest,
+        min_filter: ImageFilterMode::Nearest,
+        mipmap_filter: ImageFilterMode::Nearest,
+        ..Default::default()
+    });
     images.add(image)
 }
 
@@ -2391,13 +2396,26 @@ fn create_burn_image(size: usize, images: &mut Assets<Image>) -> Handle<Image> {
     );
     image.texture_descriptor.usage |=
         TextureUsages::COPY_DST | TextureUsages::TEXTURE_BINDING | TextureUsages::STORAGE_BINDING;
-    image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor::linear());
+    image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+        mag_filter: ImageFilterMode::Nearest,
+        min_filter: ImageFilterMode::Nearest,
+        mipmap_filter: ImageFilterMode::Nearest,
+        ..Default::default()
+    });
     images.add(image)
 }
 
 fn push_f16(data: &mut Vec<u8>, value: f32) {
     let bits = f16::from_f32(value).to_bits();
     data.extend_from_slice(&bits.to_le_bytes());
+}
+
+fn srgb_to_linear(value: f32) -> f32 {
+    if value <= 0.04045 {
+        value / 12.92
+    } else {
+        ((value + 0.055) / 1.055).powf(2.4)
+    }
 }
 
 fn remap_noise_uniform(value: f64, min: f32, max: f32) -> f32 {
@@ -2464,10 +2482,10 @@ pub(crate) fn make_minimal_vision_config(
     width: usize,
     height: usize,
     patch_size: usize,
-) -> VisionDragonHatchlingConfig {
+) -> VisionDragonConfig {
     let image_size = width.max(height).max(patch_size.max(1));
     let grid = (image_size / patch_size.max(1)).max(1);
-    VisionDragonHatchlingConfig {
+    VisionDragonConfig {
         image_size,
         patch_size: patch_size.max(1),
         in_channels: 3,
@@ -2735,3 +2753,4 @@ fn patch_to_rgba<B: Backend>(patch: Tensor<B, 4>) -> Tensor<B, 3> {
         Tensor::cat(vec![patch, alpha], 2)
     }
 }
+

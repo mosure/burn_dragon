@@ -36,7 +36,7 @@ members = [
   "crates/burn_dragon_core",
   "crates/burn_dragon_cli",
   "crates/burn_dragon_language",
-  "crates/burn_dragon_loss",
+  "crates/burn_dragon_sudoku",
   "crates/burn_dragon_train",
   "crates/burn_dragon_vision",
   "crates/burn_dragon_web",
@@ -83,7 +83,6 @@ viz = ["burn_dragon_core/viz", "burn_dragon_language/viz", "burn_dragon_bevy/viz
 burn_dragon_core = { path = "crates/burn_dragon_core", version = "0.4.0", default-features = false }
 burn_dragon_language = { path = "crates/burn_dragon_language", version = "0.4.0", default-features = false }
 burn_dragon_train = { path = "crates/burn_dragon_train", version = "0.4.0", default-features = false, optional = true }
-burn_dragon_loss = { path = "crates/burn_dragon_loss", version = "0.4.0", default-features = false }
 burn_dragon_vision = { path = "crates/burn_dragon_vision", version = "0.4.0", default-features = false }
 burn_dragon_bevy = { path = "crates/burn_dragon_bevy", version = "0.4.0", default-features = false, optional = true }
 burn_dragon_web = { path = "crates/burn_dragon_web", version = "0.4.0", default-features = false, optional = true }

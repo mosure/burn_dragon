@@ -5,7 +5,7 @@ pub const LAYER_GAP: usize = 20;
 pub const VIZ_MAX_RES: usize = 8192;
 
 pub fn clamp_history(history: usize) -> usize {
-    history.max(1).min(VIZ_MAX_RES)
+    history.clamp(1, VIZ_MAX_RES)
 }
 
 pub fn clamp_layers(layers: usize, latent_total: usize) -> usize {

@@ -47,5 +47,8 @@ features = [
   "zstd_rust",
 ]
 
+[dev-dependencies]
+burn-ndarray = "0.19"
+
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen-futures = "0.4"

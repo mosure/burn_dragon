@@ -1,26 +1,10 @@
 use burn::module::{AutodiffModule, Content, Module, ModuleDisplay, ModuleDisplayDefault};
-use burn::nn::loss::CrossEntropyLossConfig;
 use burn::tensor::activation;
 use burn::tensor::backend::{AutodiffBackend, Backend};
-use burn::tensor::{Int, Tensor};
+use burn::tensor::Tensor;
 use serde::{Deserialize, Serialize};
 
 const DISTILL_EPS: f32 = 1e-6;
-
-pub fn language_model_loss<B: Backend>(
-    logits: Tensor<B, 3>,
-    targets: Tensor<B, 2, Int>,
-) -> Tensor<B, 1> {
-    let [batch, time, vocab] = logits.shape().dims();
-
-    let logits_flat = logits.reshape([batch * time, vocab]);
-    let targets_flat = targets.reshape([batch * time]);
-
-    let device = logits_flat.device();
-    CrossEntropyLossConfig::new()
-        .init::<B>(&device)
-        .forward(logits_flat, targets_flat)
-}
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct VisionDistillationLossConfig {

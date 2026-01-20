@@ -243,7 +243,7 @@ impl<B: BackendTrait> SaccadeStepScratch<B> {
 
 impl<B: BackendTrait> VisionSaccadeModel<B> {
     pub(crate) fn new(
-        model: VisionDragonHatchling<B>,
+        model: VisionDragon<B>,
         config: VisionSaccadeConfig,
         embed_dim: usize,
         patch_size: usize,
@@ -2087,3 +2087,4 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
         (loss_sum, mask_sum, inv, sigreg, artifacts, gdpo_inputs)
     }
 }
+

@@ -75,12 +75,17 @@ fn run() -> Result<()> {
         BackendArg::Wgpu => {
             #[cfg(feature = "viz")]
             if use_viz {
-                return infer_backend_with_viz::<Wgpu<f32>, _>(&config, &args, "wgpu", |device| {
-                    init_runtime(device, &config.wgpu)
-                });
+                let wgpu_config = config.wgpu.clone();
+                return infer_backend_with_viz::<Wgpu<f32>, _>(
+                    &config,
+                    &args,
+                    "wgpu",
+                    move |device| init_runtime(device, &wgpu_config),
+                );
             }
-            infer_backend::<Wgpu<f32>, _>(&config, &args, "wgpu", |device| {
-                init_runtime(device, &config.wgpu)
+            let wgpu_config = config.wgpu.clone();
+            infer_backend::<Wgpu<f32>, _>(&config, &args, "wgpu", move |device| {
+                init_runtime(device, &wgpu_config)
             })
         }
         BackendArg::Cuda => {
@@ -228,10 +233,10 @@ where
         let mut generated = 0usize;
         while max_tokens.is_none_or(|max| generated < max) {
             #[cfg(feature = "viz")]
-            if let Some(viz) = viz_runtime.as_ref() {
-                if viz.stop.load(Ordering::Relaxed) {
-                    break;
-                }
+            if let Some(viz) = viz_runtime.as_ref()
+                && viz.stop.load(Ordering::Relaxed)
+            {
+                break;
             }
 
             let (next, logits) = sample_next_token(
@@ -281,10 +286,10 @@ where
             }
 
             #[cfg(feature = "viz")]
-            if let Some(viz) = viz_runtime.as_ref() {
-                if viz.stop.load(Ordering::Relaxed) {
-                    break;
-                }
+            if let Some(viz) = viz_runtime.as_ref()
+                && viz.stop.load(Ordering::Relaxed)
+            {
+                break;
             }
 
             if let ContextStrategy::Sliding { window } = strategy
@@ -329,7 +334,7 @@ fn infer_backend_with_viz<B, Init>(
 where
     B: Backend<Device = burn_wgpu::WgpuDevice> + 'static,
     B::Device: Default + Clone + Send + Sync + 'static,
-    Init: Fn(&B::Device) + Copy + Send + 'static,
+    Init: Fn(&B::Device) + Send + 'static,
     (): bevy_burn::gpu_burn_to_bevy::BurnBevyPrepare<B>,
 {
     let model_config = build_model_config(&config.model, config.training.block_size);
@@ -392,10 +397,10 @@ where
     });
 
     app.run();
-    let result = infer_thread
+    infer_thread
         .join()
         .map_err(|_| anyhow!("inference thread crashed"))??;
-    Ok(result)
+    Ok(())
 }
 
 fn apply_generation_overrides(generation: &mut GenerationConfig, args: &Args, block_size: usize) {

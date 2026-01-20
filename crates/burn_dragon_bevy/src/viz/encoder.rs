@@ -110,7 +110,7 @@ impl<B: Backend> VizEncoder<B> {
 
     pub fn should_capture(&self, token_index: usize) -> bool {
         let stride = self.config.stride_tokens.max(1);
-        token_index % stride == 0
+        token_index.is_multiple_of(stride)
     }
 
     pub fn step(&mut self, layers: &[Option<LayerVizState<B>>], token_index: usize) -> VizFrame<B> {
@@ -124,27 +124,27 @@ impl<B: Backend> VizEncoder<B> {
         for layer_idx in 0..layer_count {
             let source_idx = layer_start + layer_idx;
             let offset = layer_idx.saturating_mul(self.latent_total.saturating_add(self.layer_gap));
-            if let Some(gap) = &self.zero_gap {
-                if layer_idx > 0 {
-                    let gap_start = offset.saturating_sub(self.layer_gap);
-                    let gap_end = offset;
-                    self.units_x = self
-                        .units_x
-                        .clone()
-                        .slice_assign([gap_start..gap_end, cursor..cursor + 1, 0..4], gap.clone());
-                    self.units_y = self
-                        .units_y
-                        .clone()
-                        .slice_assign([gap_start..gap_end, cursor..cursor + 1, 0..4], gap.clone());
-                    self.units_xy = self
-                        .units_xy
-                        .clone()
-                        .slice_assign([gap_start..gap_end, cursor..cursor + 1, 0..4], gap.clone());
-                    self.units_rho = self
-                        .units_rho
-                        .clone()
-                        .slice_assign([gap_start..gap_end, cursor..cursor + 1, 0..4], gap.clone());
-                }
+            if let Some(gap) = &self.zero_gap
+                && layer_idx > 0
+            {
+                let gap_start = offset.saturating_sub(self.layer_gap);
+                let gap_end = offset;
+                self.units_x = self
+                    .units_x
+                    .clone()
+                    .slice_assign([gap_start..gap_end, cursor..cursor + 1, 0..4], gap.clone());
+                self.units_y = self
+                    .units_y
+                    .clone()
+                    .slice_assign([gap_start..gap_end, cursor..cursor + 1, 0..4], gap.clone());
+                self.units_xy = self
+                    .units_xy
+                    .clone()
+                    .slice_assign([gap_start..gap_end, cursor..cursor + 1, 0..4], gap.clone());
+                self.units_rho = self
+                    .units_rho
+                    .clone()
+                    .slice_assign([gap_start..gap_end, cursor..cursor + 1, 0..4], gap.clone());
             }
 
             let (x_last, y_last, xy_last, rho_last) = layers
@@ -278,9 +278,9 @@ fn build_separator<B: Backend>(
         return None;
     }
     let mut mask = vec![0.0f32; latent_total];
-    for idx in 0..latent_total {
-        if idx > 0 && idx % latent_per_head == 0 {
-            mask[idx] = 1.0;
+    for (idx, value) in mask.iter_mut().enumerate().skip(1) {
+        if idx.is_multiple_of(latent_per_head) {
+            *value = 1.0;
         }
     }
     let mask = Tensor::<B, 1>::from_data(TensorData::new(mask, [latent_total]), device).reshape([
@@ -298,7 +298,7 @@ mod tests {
     use burn::tensor::{Int, Tensor, TensorData};
     use burn_ndarray::{NdArray, NdArrayDevice};
 
-    use burn_dragon_core::{BDH, BDHConfig, LayerVizState, ModelState};
+    use burn_dragon_core::{BDH, BDHConfig, FusedKernelConfig, LayerVizState, ModelState};
 
     type Backend = NdArray<f32>;
 
@@ -310,14 +310,19 @@ mod tests {
     fn viz_state_collects_last_token() {
         let device = device();
 
-        let mut config = BDHConfig::default();
-        config.n_layer = 2;
-        config.n_embd = 8;
-        config.n_head = 2;
-        config.mlp_internal_dim_multiplier = 2;
-        config.vocab_size = 16;
-        config.dropout = 0.0;
-        config.fused_kernels.enabled = false;
+        let config = BDHConfig {
+            n_layer: 2,
+            n_embd: 8,
+            n_head: 2,
+            mlp_internal_dim_multiplier: 2,
+            vocab_size: 16,
+            dropout: 0.0,
+            fused_kernels: FusedKernelConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
 
         let model = BDH::<Backend>::new(config.clone(), &device);
         let tokens = Tensor::<Backend, 2, Int>::from_data(

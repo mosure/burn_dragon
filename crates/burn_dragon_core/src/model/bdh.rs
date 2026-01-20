@@ -93,6 +93,87 @@ impl<B: Backend> BDH<B> {
         self.forward_with_state(tokens, &mut state)
     }
 
+    pub fn forward_with_hidden(
+        &self,
+        tokens: Tensor<B, 2, Int>,
+    ) -> (Tensor<B, 3>, Tensor<B, 3>) {
+        let embedded = self.embed.forward(tokens);
+        let [batch, time, embd] = embedded.shape().dims::<3>();
+        let mut current = embedded.reshape([batch, 1, time, embd]);
+        current = self.layer_norm(current);
+
+        let encoder_raw = self.encoder.val();
+        let [heads, embd_enc, latent] = encoder_raw.shape().dims::<3>();
+        let encoder = encoder_raw.reshape([1, heads, embd_enc, latent]);
+
+        let encoder_v_raw = self.encoder_v.val();
+        let [heads_v, embd_v, latent_v] = encoder_v_raw.shape().dims::<3>();
+        let encoder_v = encoder_v_raw.reshape([1, heads_v, embd_v, latent_v]);
+        let decoder = self.decoder.val();
+        let fused = self.kernel.enabled;
+        let latent_pattern: &BlockPattern1d = &self.kernel.block_sparse.latent;
+
+        for _ in 0..self.n_layer {
+            let x_sparse = if fused {
+                relu_lowrank::fused_forward(
+                    current.clone(),
+                    encoder.clone(),
+                    None,
+                    self.kernel.relu_threshold,
+                    latent_pattern,
+                )
+            } else {
+                let mut x_latent = current.clone().matmul(encoder.clone());
+                if self.kernel.relu_threshold != 0.0 {
+                    x_latent = x_latent.sub_scalar(self.kernel.relu_threshold);
+                }
+                activation::relu(x_latent)
+            };
+
+            let attn = self.attention.forward(x_sparse.clone(), current.clone());
+            let attn = self.layer_norm(attn);
+
+            let y_sparse = if fused {
+                relu_lowrank::fused_forward(
+                    attn.clone(),
+                    encoder_v.clone(),
+                    None,
+                    self.kernel.relu_threshold,
+                    latent_pattern,
+                )
+            } else {
+                let mut y_latent = attn.matmul(encoder_v.clone());
+                if self.kernel.relu_threshold != 0.0 {
+                    y_latent = y_latent.sub_scalar(self.kernel.relu_threshold);
+                }
+                activation::relu(y_latent)
+            };
+
+            let xy_sparse = x_sparse.clone() * y_sparse;
+            let xy_sparse = self.dropout.forward(xy_sparse);
+
+            let mixed = xy_sparse.clone().swap_dims(1, 2);
+            let [batch, time, heads, latent] = mixed.shape().dims();
+
+            let mixed_flat = mixed.reshape([batch * time, heads * latent]);
+
+            let mlp_flat = mixed_flat.matmul(decoder.clone());
+            let mlp_out = mlp_flat.reshape([batch, 1, time, self.n_embd]);
+            let mlp_out = self.layer_norm(mlp_out);
+            current = self.layer_norm(current + mlp_out);
+        }
+
+        let [batch, _, time, dim] = current.shape().dims();
+        let hidden = current.reshape([batch, time, dim]);
+        let logits = hidden
+            .clone()
+            .reshape([batch * time, dim])
+            .matmul(self.lm_head.val())
+            .reshape([batch, time, self.vocab_size]);
+
+        (hidden, logits)
+    }
+
     pub fn forward_fast(&self, tokens: Tensor<B, 2, Int>) -> Tensor<B, 3> {
         let embedded = self.embed.forward(tokens);
         let [batch, time, embd] = embedded.shape().dims::<3>();

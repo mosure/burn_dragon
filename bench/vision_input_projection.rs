@@ -8,7 +8,7 @@ use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 mod projection_bench {
     use super::*;
     use burn::tensor::backend::Backend as BackendTrait;
-    use burn_dragon::train::{
+    use burn_dragon::vision::{
         VisionSaccadeInputProjectionCnnConfig, VisionSaccadeInputProjectionConfig,
         VisionSaccadeInputProjectionMicroVitConfig,
     };
@@ -17,6 +17,7 @@ mod projection_bench {
     use std::hint::black_box;
 
     const PATCH_SIZES: [usize; 4] = [16, 32, 64, 128];
+    type ProjectionConfigBuilder = fn() -> VisionSaccadeInputProjectionConfig;
 
     fn token_count(image_size: usize, patch_size: usize) -> usize {
         let patch_size = patch_size.max(1);
@@ -45,7 +46,7 @@ mod projection_bench {
         let image_size = 128usize;
         let batch = 8usize;
 
-        let configs: [(&str, fn() -> VisionSaccadeInputProjectionConfig); 3] = [
+        let configs: [(&str, ProjectionConfigBuilder); 3] = [
             ("linear", config_linear),
             ("cnn", config_cnn),
             ("radial_micro_vit", config_micro_vit),

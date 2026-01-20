@@ -145,7 +145,7 @@ impl PanelKind {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub fn build_app<B: Backend<Device = WgpuDevice>>(
+pub fn build_app<B>(
     config: VizConfig,
     dims: VizDimensions,
     receiver: VizReceiver<B>,
@@ -153,7 +153,7 @@ pub fn build_app<B: Backend<Device = WgpuDevice>>(
     stop_flag: Arc<AtomicBool>,
 ) -> (App, B::Device)
 where
-    B: Backend + 'static,
+    B: Backend<Device = WgpuDevice> + 'static,
     B::Device: Default + Clone,
     (): bevy_burn::gpu_burn_to_bevy::BurnBevyPrepare<B>,
 {
@@ -241,7 +241,7 @@ pub fn run_app_wasm(mut app: App) {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub fn build_app<B: Backend<Device = WgpuDevice>>(
+pub fn build_app<B>(
     config: VizConfig,
     dims: VizDimensions,
     receiver: VizReceiver<B>,
@@ -249,7 +249,7 @@ pub fn build_app<B: Backend<Device = WgpuDevice>>(
     device_slot: Rc<RefCell<Option<B::Device>>>,
 ) -> (App, Rc<RefCell<Option<B::Device>>>)
 where
-    B: Backend + 'static,
+    B: Backend<Device = WgpuDevice> + 'static,
     B::Device: Default + Clone,
     (): bevy_burn::gpu_burn_to_bevy::BurnBevyPrepare<B>,
 {
@@ -405,10 +405,10 @@ fn insert_device_slot<B: Backend>(app: &mut App, device: Rc<RefCell<Option<B::De
 }
 
 fn poll_exit(receiver: Res<ExitReceiver>, mut exit: MessageWriter<AppExit>) {
-    if let Ok(rx) = receiver.inner.lock() {
-        if rx.try_recv().is_ok() {
-            exit.write(AppExit::Success);
-        }
+    if let Ok(rx) = receiver.inner.lock()
+        && rx.try_recv().is_ok()
+    {
+        exit.write(AppExit::Success);
     }
 }
 
@@ -711,7 +711,7 @@ fn pan_zoom_input(
         Ok(window) => window,
         Err(_) => return,
     };
-    let window_scale_factor = window.scale_factor() as f32;
+    let window_scale_factor = window.scale_factor();
 
     let mut touch_points: Vec<(u64, Vec2)> = touches
         .iter()
@@ -887,12 +887,12 @@ fn pan_zoom_input(
         state.dragging = true;
     }
 
-    if state.dragging {
-        if let Some(last) = state.last_cursor {
-            let delta = cursor - last;
-            state.offset += delta;
-            state.offset = clamp_offset(state.offset, viewport_size, texture.size, state.scale);
-        }
+    if state.dragging
+        && let Some(last) = state.last_cursor
+    {
+        let delta = cursor - last;
+        state.offset += delta;
+        state.offset = clamp_offset(state.offset, viewport_size, texture.size, state.scale);
     }
 
     state.last_cursor = Some(cursor);
@@ -934,12 +934,9 @@ fn cursor_local_from_viewport(
     node: &ComputedNode,
     transform: &UiGlobalTransform,
 ) -> Option<Vec2> {
-    let Some(local) = transform
+    let local = transform
         .try_inverse()
-        .map(|affine| affine.transform_point2(cursor))
-    else {
-        return None;
-    };
+        .map(|affine| affine.transform_point2(cursor))?;
     let size = node.size();
     Some(local + size * 0.5)
 }

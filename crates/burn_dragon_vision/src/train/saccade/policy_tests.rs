@@ -2,18 +2,19 @@ use crate::train::prelude::*;
 use burn::tensor::Distribution;
 use burn::tensor::TensorData;
 use burn::tensor::backend::Backend as BackendTrait;
-use burn_dragon_core::{
-    FusedKernelConfig, ManifoldHyperConnectionsConfig, SpatialPositionalEncodingKind,
-    VisionAttentionMode, VisionLatentActivation, VisionPatchEmbedMode,
+use burn_dragon_core::{FusedKernelConfig, ManifoldHyperConnectionsConfig};
+use crate::{
+    SpatialPositionalEncodingKind, VisionAttentionMode, VisionLatentActivation,
+    VisionPatchEmbedMode,
 };
-use burn_dragon_train::VisionLocationEmbeddingMode;
+use crate::config::VisionLocationEmbeddingMode;
 use burn_ndarray::NdArray;
 
 fn make_saccade_model<B: BackendTrait>(
     device: &B::Device,
     mode: VisionLocationEmbeddingMode,
 ) -> VisionSaccadeModel<B> {
-    let vision_config = VisionDragonHatchlingConfig {
+    let vision_config = VisionDragonConfig {
         image_size: 32,
         patch_size: 16,
         patch_embed_mode: VisionPatchEmbedMode::default(),
@@ -39,7 +40,7 @@ fn make_saccade_model<B: BackendTrait>(
         fused_kernels: FusedKernelConfig::default(),
         mhc: ManifoldHyperConnectionsConfig::default(),
     };
-    let model = VisionDragonHatchling::<B>::new(vision_config.clone(), device);
+    let model = VisionDragon::<B>::new(vision_config.clone(), device);
     let mut saccade_config = VisionSaccadeConfig {
         num_eyes: vision_config.num_eyes,
         mip_levels: 2,
@@ -254,3 +255,4 @@ fn location_embedding_pope_fills_double_budget() {
         assert!(tensor_scalar(tail_norm) < 1e-6);
     }
 }
+

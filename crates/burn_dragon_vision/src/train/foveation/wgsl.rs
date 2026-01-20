@@ -19,7 +19,7 @@ use cubecl_runtime::server::Bindings;
 use crate::FOVEATION_BUFFER_SHADER;
 
 use crate::train::saccade::{SaccadeLaplacianImages, SaccadeMipLevel};
-use burn_dragon_train::VisionFoveaWarpMode;
+use crate::config::VisionFoveaWarpMode;
 
 const MAX_LEVELS: usize = 8;
 const META_HEADER_LEN: usize = 10;

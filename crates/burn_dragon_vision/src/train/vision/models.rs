@@ -14,7 +14,7 @@ type ReconCrossViewOutput<B> = (
 
 #[derive(Module, Debug)]
 pub(crate) struct VisionDistillModel<B: BackendTrait> {
-    pub(crate) model: VisionDragonHatchling<B>,
+    pub(crate) model: VisionDragon<B>,
     pub(crate) loss: VisionDistillationLossConfig,
     pub(crate) teacher: Option<DinoVisionTransformer<B>>,
     #[module(ignore)]
@@ -23,7 +23,7 @@ pub(crate) struct VisionDistillModel<B: BackendTrait> {
 
 impl<B: BackendTrait> VisionDistillModel<B> {
     pub(crate) fn new(
-        model: VisionDragonHatchling<B>,
+        model: VisionDragon<B>,
         loss: VisionDistillationLossConfig,
         teacher: Option<DinoVisionTransformer<B>>,
         rollout: VisionRollout,
@@ -671,7 +671,7 @@ fn radial_params(embed_dim: usize, hidden_dim: usize) -> usize {
 
 #[derive(Module, Debug)]
 pub(crate) struct VisionLejepaModel<B: BackendTrait> {
-    pub(crate) model: VisionDragonHatchling<B>,
+    pub(crate) model: VisionDragon<B>,
     pub(crate) probe: VisionProbe<B>,
     pub(crate) probe_loss: burn::nn::loss::CrossEntropyLoss<B>,
     pub(crate) recon: Option<VisionReconstructionHead<B>>,
@@ -700,7 +700,7 @@ pub(crate) struct ViewGroupOutput<B: BackendTrait> {
 
 impl<B: BackendTrait> VisionLejepaModel<B> {
     pub(crate) fn new(
-        model: VisionDragonHatchling<B>,
+        model: VisionDragon<B>,
         config: VisionLejepaConfig,
         embed_dim: usize,
         num_classes: usize,
@@ -1078,7 +1078,7 @@ impl<B: BackendTrait> VisionLejepaModel<B> {
 
 #[derive(Module, Debug)]
 pub(crate) struct VisionMaeModel<B: BackendTrait> {
-    pub(crate) model: VisionDragonHatchling<B>,
+    pub(crate) model: VisionDragon<B>,
     pub(crate) recon: VisionReconstructionHead<B>,
     pub(crate) mask_token: Param<Tensor<B, 2>>,
     pub(crate) visible_token: Param<Tensor<B, 2>>,
@@ -1099,7 +1099,7 @@ pub(crate) struct VisionMaeLosses<B: BackendTrait> {
 
 impl<B: BackendTrait> VisionMaeModel<B> {
     pub(crate) fn new(
-        model: VisionDragonHatchling<B>,
+        model: VisionDragon<B>,
         config: VisionMaeConfig,
         num_eyes: usize,
         embed_dim: usize,
@@ -1593,3 +1593,4 @@ impl<B: BackendTrait> VisionMaeModel<B> {
         (loss_sum, mask_sum, visible_loss_sum, visible_mask_sum, artifacts)
     }
 }
+

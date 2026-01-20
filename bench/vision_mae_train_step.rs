@@ -7,10 +7,13 @@ use std::time::{Duration, Instant};
 
 use burn::tensor::backend::AutodiffBackend;
 use burn_autodiff::Autodiff;
-use burn_dragon_hatchling::{
+use burn_dragon::train::{
+    VisionTrainingConfig, VisionTrainingModeConfig, WgpuRuntimeConfig,
+    load_vision_training_config,
+};
+use burn_dragon::{
     ImageNetAugmentations, ImageNetBatch, ImageNetDataLoader, ImageNetDataset,
-    ImageNetDatasetConfig, ImageNetSplit, VisionNormalize, VisionTrainingConfig,
-    VisionTrainingModeConfig, load_vision_training_config,
+    ImageNetDatasetConfig, ImageNetSplit, VisionNormalize,
     vision::train::bench::VisionMaeTrainStepBench,
 };
 use burn_ndarray::NdArray;
@@ -22,7 +25,7 @@ use serde::Deserialize;
 #[cfg(feature = "cuda")]
 use burn_cuda::Cuda;
 #[cfg(feature = "cli")]
-use burn_dragon_hatchling::wgpu::init_runtime;
+use burn_dragon::train::wgpu::init_runtime;
 
 #[derive(Debug, Default, Deserialize)]
 struct BenchSettings {
@@ -45,11 +48,17 @@ fn load_bench_settings(path: &Path) -> BenchSettings {
 }
 
 fn load_bench_config(name: &str) -> Option<(VisionTrainingConfig, BenchSettings)> {
-    let base_path = PathBuf::from("config").join(format!("{name}.toml"));
+    let mut base_path = PathBuf::from("config").join(name);
+    if base_path.extension().is_none() {
+        base_path.set_extension("toml");
+    }
     if !base_path.is_file() {
         return None;
     }
-    let bench_path = PathBuf::from("config").join(format!("{name}_bench.toml"));
+    let bench_path = base_path
+        .parent()
+        .map(|dir| dir.join("bench.toml"))
+        .unwrap_or_else(|| PathBuf::from("config").join("bench.toml"));
     let config_paths = if bench_path.is_file() {
         vec![base_path, bench_path.clone()]
     } else {
@@ -77,7 +86,7 @@ fn bench_config_names() -> Vec<String> {
             return configs;
         }
     }
-    vec!["vision_mae_tiny".to_string(), "vision_croco_tiny".to_string()]
+    vec!["vision/mae/tiny".to_string(), "vision/croco/tiny".to_string()]
 }
 
 fn build_train_dataset(config: &VisionTrainingConfig) -> Option<Arc<ImageNetDataset>> {
@@ -139,7 +148,7 @@ fn build_train_dataset(config: &VisionTrainingConfig) -> Option<Arc<ImageNetData
 }
 
 #[cfg(feature = "cli")]
-fn init_wgpu_runtime(device: &WgpuDevice, config: &burn_dragon_hatchling::WgpuRuntimeConfig) {
+fn init_wgpu_runtime(device: &WgpuDevice, config: &WgpuRuntimeConfig) {
     static INIT: std::sync::Once = std::sync::Once::new();
     INIT.call_once(|| {
         init_runtime(device, config);

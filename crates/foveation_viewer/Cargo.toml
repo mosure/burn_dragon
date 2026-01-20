@@ -2,6 +2,11 @@
 name = "foveation_viewer"
 version = "0.1.0"
 edition = "2024"
+publish = false
+
+[features]
+default = []
+gpu_tests = []
 
 [dependencies]
 anyhow = "1"
@@ -26,8 +31,9 @@ bevy = { version = "0.17", default-features = false, features = [
 bevy_shader = "0.17"
 burn = { version = "0.19", default-features = false, features = ["std", "wgpu"] }
 burn-wgpu = { version = "0.19", default-features = false, features = ["std"] }
-burn_dragon_hatchling_core = { path = "../burn_dragon_hatchling_core", default-features = false, features = ["train"] }
-burn_dragon_hatchling_vision = { path = "../burn_dragon_hatchling_vision", default-features = false, features = ["train"] }
+burn_dragon_core = { path = "../burn_dragon_core", default-features = false }
+burn_dragon_train = { path = "../burn_dragon_train", default-features = false }
+burn_dragon_vision = { path = "../burn_dragon_vision", default-features = false, features = ["train"] }
 half = "2"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 noise = "0.9"

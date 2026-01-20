@@ -1,8 +1,8 @@
 use std::fs;
 
 use burn::tensor::backend::Backend as BackendTrait;
-use burn_dragon_hatchling::dataset::{ShakespeareDataset, ShakespeareSplit};
-use burn_dragon_hatchling::tokenizer::{ByteTokenizerConfig, TokenizerConfig, TokenizerKind};
+use burn_dragon::language::dataset::{ShakespeareDataset, ShakespeareSplit};
+use burn_dragon::language::tokenizer::{ByteTokenizerConfig, TokenizerConfig, TokenizerKind};
 use burn_ndarray::NdArray;
 use tempfile::tempdir;
 

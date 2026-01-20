@@ -1,0 +1,10 @@
+# overrides for vision/identity/tiny integration test
+
+[training]
+max_iters = 40
+log_frequency = 10
+trace_train_loss = true
+trace_train_loss_every = 1
+
+[mode]
+artifact_every = 0

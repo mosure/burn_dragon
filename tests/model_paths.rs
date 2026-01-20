@@ -3,20 +3,26 @@ use burn::tensor::{Int, Tensor, TensorData};
 use burn_autodiff::Autodiff;
 use burn_ndarray::NdArray;
 
-use burn_dragon_hatchling::{BDH, BDHConfig, RotaryEmbedding, language_model_loss};
+use burn_dragon::loss::language_model_loss;
+use burn_dragon::{BDH, BDHConfig, FusedKernelConfig, RotaryEmbedding};
 
 type TrainBackend = Autodiff<NdArray<f32>>;
 type InferBackend = NdArray<f32>;
 
 fn build_config(rotary: RotaryEmbedding, fused: bool) -> BDHConfig {
-    let mut config = BDHConfig::default();
-    config.n_layer = 2;
-    config.n_embd = 16;
-    config.n_head = 2;
-    config.mlp_internal_dim_multiplier = 4;
-    config.vocab_size = 32;
-    config.dropout = 0.0;
-    config.fused_kernels.enabled = fused;
+    let mut config = BDHConfig {
+        n_layer: 2,
+        n_embd: 16,
+        n_head: 2,
+        mlp_internal_dim_multiplier: 4,
+        vocab_size: 32,
+        dropout: 0.0,
+        fused_kernels: FusedKernelConfig {
+            enabled: fused,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
     config.fused_kernels.set_block_sizes(4, 4);
     config.fused_kernels.set_rotary_embedding(rotary);
     config

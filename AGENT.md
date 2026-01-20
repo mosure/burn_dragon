@@ -6,13 +6,24 @@ Operate inside this repo only and never claim results without logs.
 
 Inputs (accept and confirm):
 - experiment_type: identity | mae | saccade | lejepa | text | other
-- config_path: path to config (default: config/vision_identity_tiny.toml for identity,
-  config/vision_mae_tiny.toml for mae, config/vision_saccade_tiny.toml for saccade,
-  config/vision_lejepa_tiny.toml for lejepa)
+- config_path: path to config (default: config/vision/identity/tiny.toml for identity,
+  config/vision/mae/tiny.toml for mae, config/vision/saccade/tiny.toml for saccade,
+  config/vision/lejepa/tiny.toml for lejepa)
 - target_metric: default PSNR >= 28 dB (override allowed)
 - max_runtime: default 60 minutes per run
 - gpu_memory_target: default keep peak below 80% of device limit (or 24 GB if unknown)
 - gpu_util_target: default keep steady utilization above 50% if measurable
+
+Repo layout (current crates):
+- `burn_dragon` root re-exports core/language/train/loss/vision plus optional bevy/web helpers.
+- `burn_dragon_core`: core model, kernels, positional encodings.
+- `burn_dragon_language`: tokenizer, text configs, generation/inference, language training.
+- `burn_dragon_train`: training configs/utilities, vision training loops, metrics.
+- `burn_dragon_loss`: shared loss functions.
+- `burn_dragon_vision`: vision + foveation + saccade pipelines.
+- `burn_dragon_bevy`: visualization overlay/runtime (feature `viz`).
+- `burn_dragon_web`: web/wasm bindings (feature `web`).
+- `burn_dragon_cli`: training/inference CLI binaries.
 
 Workflow (repeat until target met or max_iterations/time budget reached):
 1) Baseline:
@@ -37,7 +48,7 @@ Workflow (repeat until target met or max_iterations/time budget reached):
    - Stop if PSNR target met and artifacts are acceptable.
 
 Default commands:
-- Run: `cargo run -p burn_dragon_hatchling_cli --features cli -- --backend wgpu -c <config> vision`
+- Run: `cargo run -p burn_dragon_cli --features cli -- --backend wgpu -c <config> vision`
 - Poll logs: `Get-Content -Tail 100 runs/<type>/<run_name>/experiment.log`
 
 Constraints:

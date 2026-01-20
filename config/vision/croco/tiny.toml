@@ -1,0 +1,235 @@
+# Tiny CroCo-style MAE training config (Imagenette auto-download).
+
+[dataset]
+imagenet_root = "data/imagenette2-160"
+train_dir = "train"
+val_dir = "val"
+max_records = 64
+prefetch_batches = 8
+prefetch_workers = 12
+prefetch_to_device = true
+cache_decoded = true
+cache_capacity = 512
+cache_preprocessed = true
+
+[dataset.download]
+type = "imagenette"
+variant = "imagenette2-160"
+
+[training]
+batch_size = 12
+epochs = 100
+max_iters = 800
+log_frequency = 20
+batch_repeats = 4
+# run GPU memory cleanup every N epochs (0 disables)
+memory_cleanup_every = 0
+# run GPU memory cleanup every N iterations (0 disables)
+memory_cleanup_iters = 0
+# check device memory usage every N iterations (0 uses log_frequency)
+device_memory_check_every = 0
+# cap device memory usage in MiB (0 disables)
+max_device_memory_mb = 92160
+# disable CUDA allocator cleanup even if memory_cleanup_* is set
+disable_cuda_memory_cleanup = false
+# repeat chunk size for batch_repeats (0 uses auto)
+train_repeat_chunk = 0
+# capture per-iteration loss samples (integration tests only)
+trace_train_loss = false
+trace_train_loss_every = 1
+# optional ffmpeg path for mp4/avi encoding
+# ffmpeg_path = "C:/path/to/ffmpeg"
+rollout_min_steps = 4
+rollout_max_steps = 64
+# backprop through the last N rollout steps (0 = all steps)
+rollout_backprop_steps = 0
+
+[optimizer]
+learning_rate = 0.002
+weight_decay = 0.01
+grad_clip_norm = 1.0
+
+[optimizer.lr_schedule]
+type = "constant"
+
+[wgpu]
+backend = "auto"
+memory = "subslices"
+
+[vision]
+image_size = 160
+patch_size = 16
+patch_embed_mode = "conv"
+in_channels = 3
+embed_dim = 384
+steps = 64
+n_head = 6
+mlp_internal_dim_multiplier = 6
+dropout = 0.0
+projection_dim = 384
+projection_hidden_dim = 768
+use_cls_token = true
+cls_sync_alpha = 0.9
+num_eyes = 2
+cross_eye_steps = 8
+token_state_norm = true
+latent_activation = "gelu"
+pos_encoding = "learned2d"
+attention_mode = "softmax"
+allow_softmax_attention = true
+fused_kernels = true
+relu_threshold = 0.0
+
+[vision.mhc]
+enabled = true
+mhc_iters = 10
+mhc_tau = 0.05
+add_branch_out_to_residual = true
+dropout = 0.0
+
+[mode]
+type = "saccade"
+# number of recurrent trajectory tokens processed per rollout step
+traj_tokens = 1
+# blend factor for recurrent trajectory updates (1.0 = full overwrite)
+traj_update_alpha = 0.7
+# number of MIP levels (2x downsample per level) used for Gaussian sampling
+mip_levels = 3
+# how pyramid scales are represented: stacked (raw) or laplacian (residual)
+pyramid_mode = "laplacian"
+# fovea sampling strategy: batched, sequential, subpatch, cubecl, or wgsl
+fovea_sampling_mode = "batched"
+# fovea warp mode: warped (continuous) or patched (level crop)
+fovea_warp_mode = "warped"
+# jitter subsamples per axis for fovea anti-aliasing (1 = off)
+fovea_subsamples = 1
+# scale applied to sigma to compute the fovea radius
+fovea_radius_scale = 1.5
+# subpatch size for "subpatch" sampling (0 uses full patch)
+fovea_subpatch_size = 0
+# fovea scatter mode for feature pyramid updates
+fovea_scatter_mode = "tensor"
+# max working set size for grid_sample chunking (MB)
+grid_sample_max_mb = 512
+# max matmul size for mip concat (MB)
+mip_concat_max_mb = 512
+# override recon batch chunk (0 uses auto)
+recon_batch_chunk = 0
+# max elements for recon chunking
+recon_max_elems = 50000000
+# feature pyramid embedding dim (unset uses model embed_dim)
+pyramid_feature_dim = 384
+# inner recurrent steps per rollout step
+inner_steps = 3
+# pre-rollout steps always run without grad to keep memory stable
+low_mem_pre_rollout = true
+# write artifact images every N validation iterations (0 disables)
+artifact_every = 1
+# artifact output: images (png), avi, or mp4
+artifact_output = "images"
+# artifact video fps (frames per second)
+artifact_fps = 8
+# max images per validation epoch to write artifacts for
+artifact_max_images = 8
+# max panels per image (input + per-eye views + patches + recon)
+artifact_max_views = 8
+# overwrite validation artifacts instead of keeping history
+artifact_overwrite = true
+
+[mode.cross_view]
+enabled = true
+min_overlap = 0.5
+max_attempts = 10
+masked_eye = 1
+
+# input projection module: linear | cnn | radial_micro_vit
+[mode.input_projection]
+type = "linear"
+
+# truncated BPTT chunk size (0 disables)
+[mode.tbptt]
+step_count = 0
+
+# policy training and side-channel controls (GDPO + location embedding)
+[mode.policy]
+# keep policy gradients separate from recon sampling if enabled
+detach_policy_from_recon = false
+# exploration noise for saccade params when GDPO is enabled
+action_noise_std = 0.01
+
+[mode.policy.location_embedding]
+# location embedding injected into input tokens: none | learned | sinusoidal | quantized | rope | pope
+mode = "pope"
+# channel budget for fixed/rotary embeddings (unused when mode = none/learned)
+# PoPE treats this as d (complex channels), producing 2*d real channels.
+embed_dim = 12
+# quantization bins for quantized mode
+quantize_bins = 32
+# coordinate noise before embedding (0 disables)
+noise_std = 0.0
+
+[mode.policy.info_reward]
+# enable counterfactual info reward (null glimpse vs real)
+enabled = false
+# stride for info reward eval (1 = every step)
+stride = 1
+# null glimpse mode: zero or noise
+null_mode = "zero"
+null_noise_std = 0.05
+
+[mode.policy.gdpo]
+# GDPO advantage conditioning for saccade policy
+enabled = true
+group_size = 4
+hard_weight = 1.0
+easy_weight = 1.0
+policy_weight = 1.0
+# PPO/GRPO clip range (0 disables clipping)
+policy_clip_range = 0.2
+norm_epsilon = 1e-6
+
+[mode.policy.gdpo.hard_gate]
+type = "percentile"
+quantile = 0.5
+
+[mode.cache]
+# cap cached GPU foveation tensors to avoid runaway VRAM on varying shapes
+max_entries = 64
+
+[mode.loss.lejepa]
+# enable LeJEPA invariance + sigreg losses
+enabled = false
+lambda = 0.02
+sigreg_knots = 17
+sigreg_t_max = 3.0
+sigreg_proj_dim = 384
+
+[mode.loss.recon]
+# fraction of patches to mask for reconstruction
+mask_ratio = 0.5
+weight = 1.0
+hidden_dim = 768
+recon_head_norm = true
+loss_on_all_patches = false
+
+[augment]
+image_size = 160
+resize_short = 160
+min_scale = 0.2
+max_scale = 1.0
+min_aspect_ratio = 0.75
+max_aspect_ratio = 1.3333334
+flip_prob = 0.5
+color_jitter_prob = 0.0
+brightness = 0.0
+contrast = 0.0
+saturation = 0.0
+hue = 0.0
+grayscale_prob = 0.0
+blur_prob = 0.0
+blur_sigma_min = 0.1
+blur_sigma_max = 2.0
+solarize_prob = 0.0
+solarize_threshold = 128
+normalize_mean = [0.485, 0.456, 0.406]
+normalize_std = [0.229, 0.224, 0.225]

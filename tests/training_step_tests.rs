@@ -3,9 +3,10 @@ use std::fs;
 use burn::optim::{AdamWConfig, GradientsParams, LearningRate, Optimizer};
 use burn::tensor::backend::Backend as BackendTrait;
 use burn_autodiff::Autodiff;
-use burn_dragon_hatchling::dataset::{ShakespeareDataset, ShakespeareSplit};
-use burn_dragon_hatchling::tokenizer::TokenizerConfig;
-use burn_dragon_hatchling::{BDH, BDHConfig, language_model_loss};
+use burn_dragon::language::dataset::{ShakespeareDataset, ShakespeareSplit};
+use burn_dragon::language::tokenizer::TokenizerConfig;
+use burn_dragon::loss::language_model_loss;
+use burn_dragon::{BDH, BDHConfig};
 use burn_ndarray::NdArray;
 use tempfile::tempdir;
 

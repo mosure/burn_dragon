@@ -1,0 +1,9 @@
+# Quick-run overrides for CroCo PSNR sanity checks.
+
+[training]
+epochs = 2
+max_iters = 120
+log_frequency = 20
+
+[mode]
+artifact_every = 0

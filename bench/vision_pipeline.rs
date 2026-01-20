@@ -12,15 +12,18 @@ mod vision_bench {
     use burn::tensor::Tensor;
     use burn::tensor::backend::{AutodiffBackend, Backend as BackendTrait};
     use burn_autodiff::Autodiff;
-    use burn_dragon_hatchling::vision::train::bench::{VisionSaccadeBench, VisionScatterBench};
-    use burn_dragon_hatchling::{
-        ImageNetAugmentations, ImageNetSplit, ManifoldHyperConnectionsConfig,
-        VisionAugmentationConfig, VisionDragonHatchlingConfig, VisionFoveaSamplingMode,
-        VisionFoveaScatterMode, VisionFoveaWarpMode, VisionLatentActivation, VisionNormalize,
-        VisionPyramidMode, VisionSaccadeConfig, WgpuRuntimeConfig, wgpu::init_runtime,
+    use burn_dragon::train::{
+        VisionAugmentationConfig, VisionFoveaSamplingMode, VisionFoveaScatterMode,
+        VisionFoveaWarpMode, VisionPyramidMode, VisionSaccadeConfig, WgpuRuntimeConfig,
     };
-    use burn_dragon_hatchling_vision::FOVEATION_SHADER;
-    use burn_dragon_hatchling_vision::foveation;
+    use burn_dragon::vision::train::bench::{VisionSaccadeBench, VisionScatterBench};
+    use burn_dragon::{
+        ImageNetAugmentations, ImageNetSplit, ManifoldHyperConnectionsConfig,
+        VisionDragonHatchlingConfig, VisionLatentActivation, VisionNormalize,
+    };
+    use burn_dragon::train::wgpu::init_runtime;
+    use burn_dragon_vision::FOVEATION_SHADER;
+    use burn_dragon_vision::foveation;
     use burn_wgpu::{Wgpu, WgpuDevice};
     use bytemuck::{Pod, Zeroable};
     use half::f16;
@@ -112,7 +115,7 @@ mod vision_bench {
     }
 
     fn load_bench_config() -> BenchConfig {
-        let path = PathBuf::from("config").join("vision_pipeline_bench.toml");
+        let path = PathBuf::from("config").join("vision/pipeline/bench.toml");
         let contents = fs::read_to_string(&path).expect("read bench config");
         toml::from_str(&contents).expect("parse bench config")
     }
@@ -245,7 +248,7 @@ mod vision_bench {
             let vision = VisionDragonHatchlingConfig {
                 image_size: cfg.image_size,
                 patch_size: cfg.patch_size,
-                patch_embed_mode: burn_dragon_hatchling::VisionPatchEmbedMode::default(),
+                patch_embed_mode: burn_dragon::VisionPatchEmbedMode::default(),
                 in_channels: 3,
                 embed_dim: cfg.embed_dim,
                 steps: bench_steps,
@@ -260,11 +263,12 @@ mod vision_bench {
                 cross_eye_steps: 0,
                 token_state_norm: true,
                 latent_activation: VisionLatentActivation::default(),
-                pos_encoding: burn_dragon_hatchling::SpatialPositionalEncodingKind::Learned2d,
+                pos_encoding: burn_dragon::SpatialPositionalEncodingKind::Learned2d,
                 pos_max_height: cfg.image_size / cfg.patch_size,
                 pos_max_width: cfg.image_size / cfg.patch_size,
-                attention_mode: burn_dragon_hatchling::VisionAttentionMode::RowL1,
-                fused_kernels: burn_dragon_hatchling::FusedKernelConfig::default(),
+                attention_mode: burn_dragon::VisionAttentionMode::RowL1,
+                use_alibi: true,
+                fused_kernels: burn_dragon::FusedKernelConfig::default(),
                 mhc: ManifoldHyperConnectionsConfig::default(),
             };
             let saccade_base = VisionSaccadeConfig {
@@ -418,7 +422,7 @@ mod vision_bench {
             let vision = VisionDragonHatchlingConfig {
                 image_size: cfg.image_size,
                 patch_size: cfg.patch_size,
-                patch_embed_mode: burn_dragon_hatchling::VisionPatchEmbedMode::default(),
+                patch_embed_mode: burn_dragon::VisionPatchEmbedMode::default(),
                 in_channels: 3,
                 embed_dim: cfg.embed_dim,
                 steps: cfg.steps,
@@ -433,11 +437,12 @@ mod vision_bench {
                 cross_eye_steps: 0,
                 token_state_norm: true,
                 latent_activation: VisionLatentActivation::default(),
-                pos_encoding: burn_dragon_hatchling::SpatialPositionalEncodingKind::Learned2d,
+                pos_encoding: burn_dragon::SpatialPositionalEncodingKind::Learned2d,
                 pos_max_height: cfg.image_size / cfg.patch_size,
                 pos_max_width: cfg.image_size / cfg.patch_size,
-                attention_mode: burn_dragon_hatchling::VisionAttentionMode::RowL1,
-                fused_kernels: burn_dragon_hatchling::FusedKernelConfig::default(),
+                attention_mode: burn_dragon::VisionAttentionMode::RowL1,
+                use_alibi: true,
+                fused_kernels: burn_dragon::FusedKernelConfig::default(),
                 mhc: ManifoldHyperConnectionsConfig::default(),
             };
             let grid = (cfg.image_size / cfg.patch_size).max(1);

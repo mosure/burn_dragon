@@ -1,0 +1,124 @@
+# Tiny MAE training config (Imagenette auto-download).
+
+[dataset]
+imagenet_root = "data/imagenette2-160"
+train_dir = "train"
+val_dir = "val"
+prefetch_batches = 2
+prefetch_workers = 4
+prefetch_to_device = true
+cache_decoded = true
+cache_capacity = 512
+cache_preprocessed = true
+
+[dataset.download]
+type = "imagenette"
+variant = "imagenette2-160"
+
+[training]
+batch_size = 8
+epochs = 2
+max_iters = 200
+log_frequency = 20
+batch_repeats = 1
+# run GPU memory cleanup every N epochs (0 disables)
+memory_cleanup_every = 0
+# run GPU memory cleanup every N iterations (0 disables)
+memory_cleanup_iters = 0
+# check device memory usage every N iterations (0 uses log_frequency)
+device_memory_check_every = 0
+# cap device memory usage in MiB (0 disables)
+max_device_memory_mb = 92160
+# disable CUDA allocator cleanup even if memory_cleanup_* is set
+disable_cuda_memory_cleanup = false
+# repeat chunk size for batch_repeats (0 uses auto)
+train_repeat_chunk = 0
+# capture per-iteration loss samples (integration tests only)
+trace_train_loss = false
+trace_train_loss_every = 1
+# optional ffmpeg path for mp4/avi encoding
+# ffmpeg_path = "C:/path/to/ffmpeg"
+rollout_min_steps = 8
+rollout_max_steps = 8
+# backprop through the last N rollout steps (0 = all steps)
+rollout_backprop_steps = 8
+
+[optimizer]
+learning_rate = 0.0005
+weight_decay = 0.05
+grad_clip_norm = 1.0
+
+[optimizer.lr_schedule]
+type = "constant"
+
+[wgpu]
+backend = "auto"
+memory = "subslices"
+
+[vision]
+image_size = 160
+patch_size = 16
+patch_embed_mode = "conv"
+in_channels = 3
+embed_dim = 384
+steps = 8
+n_head = 6
+mlp_internal_dim_multiplier = 6
+dropout = 0.0
+projection_dim = 384
+projection_hidden_dim = 768
+use_cls_token = false
+token_state_norm = true
+latent_activation = "gelu"
+pos_encoding = "learned2d"
+attention_mode = "softmax"
+allow_softmax_attention = true
+fused_kernels = false
+relu_threshold = 0.0
+
+[mode]
+type = "mae"
+# number of pyramid levels (coarse-to-fine) used for reconstruction
+pyramid_levels = 1
+# write artifact images every N validation iterations (0 disables)
+artifact_every = 1
+# artifact output: images (png), avi, or mp4
+artifact_output = "images"
+# artifact video fps (frames per second)
+artifact_fps = 8
+# max images per artifact batch (caps batch rows)
+artifact_max_images = 8
+# max panels per image (input/masked/recon)
+artifact_max_views = 3
+# overwrite validation artifacts instead of keeping history
+artifact_overwrite = true
+
+[mode.loss.recon]
+# fraction of patches to mask for reconstruction
+mask_ratio = 0.5
+weight = 1.0
+hidden_dim = 768
+recon_head_norm = true
+loss_on_all_patches = false
+
+[augment]
+image_size = 160
+resize_short = 160
+min_scale = 0.2
+max_scale = 1.0
+min_aspect_ratio = 0.75
+max_aspect_ratio = 1.3333334
+flip_prob = 0.5
+color_jitter_prob = 0.0
+brightness = 0.0
+contrast = 0.0
+saturation = 0.0
+hue = 0.0
+grayscale_prob = 0.0
+blur_prob = 0.0
+blur_sigma_min = 0.1
+blur_sigma_max = 2.0
+solarize_prob = 0.0
+solarize_threshold = 128
+normalize_mean = [0.485, 0.456, 0.406]
+normalize_std = [0.229, 0.224, 0.225]

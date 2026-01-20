@@ -3,10 +3,10 @@
 use std::hint::black_box;
 
 use burn::tensor::backend::Backend as BackendTrait;
-use burn_dragon_hatchling::{
-    BDH, BDHConfig, ContextStrategy, GenerationSettings, WgpuRuntimeConfig, generate_tokens,
-    wgpu::init_runtime,
-};
+use burn_dragon::language::{ContextStrategy, GenerationSettings, generate_tokens};
+use burn_dragon::train::WgpuRuntimeConfig;
+use burn_dragon::train::wgpu::init_runtime;
+use burn_dragon::{BDH, BDHConfig};
 use burn_wgpu::Wgpu;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 

@@ -7,12 +7,16 @@ use std::time::{Duration, Instant};
 
 use burn::tensor::backend::AutodiffBackend;
 use burn_autodiff::Autodiff;
-use burn_dragon_hatchling::{
-    ImageNetAugmentations, ImageNetBatch, ImageNetDataLoader, ImageNetDataset,
-    ImageNetDatasetConfig, ImageNetSplit, VisionNormalize, VisionTrainingConfig,
-    VisionTrainingModeConfig, load_vision_training_config,
-    vision::train::bench::VisionLejepaTrainStepBench, wgpu::init_runtime,
+use burn_dragon::train::{
+    VisionTrainingConfig, VisionTrainingModeConfig, WgpuRuntimeConfig,
+    load_vision_training_config,
 };
+use burn_dragon::{
+    ImageNetAugmentations, ImageNetBatch, ImageNetDataLoader, ImageNetDataset,
+    ImageNetDatasetConfig, ImageNetSplit, VisionNormalize,
+    vision::train::bench::VisionLejepaTrainStepBench,
+};
+use burn_dragon::train::wgpu::init_runtime;
 use burn_wgpu::{CubeBackend, WgpuDevice, WgpuRuntime};
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use serde::Deserialize;
@@ -39,8 +43,8 @@ fn load_bench_settings(path: &Path) -> BenchSettings {
 }
 
 fn load_bench_config() -> (VisionTrainingConfig, BenchSettings) {
-    let base_path = PathBuf::from("config").join("vision_lejepa_tiny.toml");
-    let bench_path = PathBuf::from("config").join("vision_lejepa_tiny_bench.toml");
+    let base_path = PathBuf::from("config").join("vision/lejepa/tiny.toml");
+    let bench_path = PathBuf::from("config").join("vision/lejepa/bench.toml");
     let config =
         load_vision_training_config(&[base_path, bench_path.clone()]).expect("load bench config");
     let bench = load_bench_settings(&bench_path);
@@ -137,7 +141,7 @@ fn build_train_dataset(config: &VisionTrainingConfig) -> Option<Arc<ImageNetData
     }
 }
 
-fn init_wgpu_runtime(device: &WgpuDevice, config: &burn_dragon_hatchling::WgpuRuntimeConfig) {
+fn init_wgpu_runtime(device: &WgpuDevice, config: &WgpuRuntimeConfig) {
     static INIT: std::sync::Once = std::sync::Once::new();
     INIT.call_once(|| {
         init_runtime(device, config);

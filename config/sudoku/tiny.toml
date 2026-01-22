@@ -1,6 +1,8 @@
 [dataset]
 cache_dir = "data/sudoku"
 train_split_ratio = 0.9
+augment = true
+augment_prob = 1.0
 type = "hugging_face"
 repo_id = "Ritvik19/Sudoku-Dataset"
 format = "parquet"
@@ -8,34 +10,56 @@ train_files = ["train_0.parquet"]
 validation_files = ["valid_0.parquet"]
 puzzle_field = "puzzle"
 solution_field = "solution"
-max_records = 100000
+max_records = 25000
 
 [training]
 batch_size = 64
-max_iters = 2000
-log_frequency = 50
-rollout_steps = 16
-halt_weight = 0.1
-policy_noise = 0.4
+max_iters = 50000
+log_frequency = 500
+rollout_steps = 128
+rollout_backprop_steps = 4
+halt_weight = 0.5
+halt_exploration_prob = 0.1
+halt_min_steps = 2
+policy_noise = 0.1
+teacher_forcing_prob = 1.0
+teacher_forcing_final = 0.0
+teacher_forcing_anneal_steps = 10000
+policy_temperature = 1.5
+policy_temperature_final = 1.0
+policy_temperature_anneal_steps = 10000
+policy_entropy_weight = 0.02
+policy_entropy_weight_final = 0.0
+policy_entropy_anneal_steps = 10000
+revisit_min_filled_frac = 1.0
+revisit_min_filled_final = 0.0
+revisit_min_filled_anneal_steps = 10000
+reward_unknown_power = 1.0
+recon_loss = "stablemax"
+loss_mask = "unknown"
+recon_loss_interval_steps = 8
 
 [training.gdpo]
 enabled = true
-group_size = 2
+group_size = 8
 hard_weight = 1.0
 easy_weight = 1.0
 policy_weight = 1.0
 policy_clip_range = 0.2
+advantage_clip = 5.0
+advantage_ema_decay = 0.99
 
 [optimizer]
-learning_rate = 0.001
-weight_decay = 0.01
+learning_rate = 0.0001
+weight_decay = 1.0
 
 [model]
-n_layer = 6
+n_layer = 2
 n_embd = 256
 n_head = 4
 mlp_internal_dim_multiplier = 4
-dropout = 0.1
+dropout = 0.0
+fused_kernels = true
 
 [artifacts]
 output = "mp4"

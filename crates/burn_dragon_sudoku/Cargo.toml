@@ -25,7 +25,7 @@ train = [
   "dep:parquet",
   "dep:tracing",
 ]
-cuda = ["burn-cuda", "burn_dragon_core/cuda", "burn_dragon_train/cuda"]
+cuda = ["burn-cuda", "burn_dragon_core/cuda", "burn_dragon_train/cuda", "dep:cubecl"]
 integration_test = ["train"]
 
 [dependencies]
@@ -49,6 +49,7 @@ burn-ndarray = { version = "0.19", optional = true }
 burn-train = { version = "0.19", optional = true, default-features = false, features = ["tui"] }
 burn-cuda = { version = "0.19", optional = true, default-features = false, features = ["std"] }
 burn-wgpu = { version = "0.19", optional = true, default-features = false, features = ["fusion", "std"] }
+cubecl = { version = "0.8", default-features = false, optional = true, features = ["std", "cuda"] }
 
 [dev-dependencies]
 tempfile = "3"

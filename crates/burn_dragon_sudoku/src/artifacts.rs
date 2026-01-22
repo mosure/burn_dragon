@@ -10,7 +10,7 @@ use burn_dragon_train::train::artifacts::{ArtifactFrame, write_video};
 use crate::config::{SudokuArtifactConfig, SudokuTrainingHyperparameters};
 use crate::dataset::{SudokuDataset, SudokuSplit};
 use crate::model::SudokuSaccadeModel;
-use crate::vocab::GRID_LEN;
+use crate::vocab::{GRID_LEN, VOCAB_SIZE};
 
 const GRID_SIZE: usize = 9;
 const CELL_SIZE: usize = 32;
@@ -24,6 +24,7 @@ const COLOR_BG: [u8; 3] = [245, 242, 235];
 const COLOR_LINE: [u8; 3] = [30, 30, 30];
 const COLOR_DIGIT: [u8; 3] = [25, 25, 25];
 const COLOR_HIGHLIGHT: [u8; 3] = [255, 187, 0];
+const POLICY_MASK_PENALTY: f32 = 1e9;
 
 pub fn write_validation_artifacts<B: BackendTrait>(
     model: &SudokuSaccadeModel<B>,
@@ -72,6 +73,7 @@ pub fn write_validation_artifacts<B: BackendTrait>(
         model,
         puzzle_grids,
         solution_grids,
+        training,
         training.rollout_steps.max(1),
         device,
     )?;
@@ -80,7 +82,7 @@ pub fn write_validation_artifacts<B: BackendTrait>(
         if sample_frames.is_empty() {
             continue;
         }
-        let outcome = write_video(
+        let _outcome = write_video(
             &output_dir,
             output_mode,
             config.overwrite,
@@ -90,7 +92,6 @@ pub fn write_validation_artifacts<B: BackendTrait>(
             config.fps,
             None,
         )?;
-        let _ = outcome;
     }
 
     Ok(())
@@ -100,6 +101,7 @@ fn generate_rollout_frames<B: BackendTrait>(
     model: &SudokuSaccadeModel<B>,
     mut puzzles: Vec<Vec<u8>>,
     solutions: Vec<Vec<u8>>,
+    training: &SudokuTrainingHyperparameters,
     steps: usize,
     device: &B::Device,
 ) -> Result<Vec<Vec<ArtifactFrame>>> {
@@ -110,38 +112,87 @@ fn generate_rollout_frames<B: BackendTrait>(
         return Ok(frames);
     }
 
+    let mut unknown_masks = Vec::with_capacity(batch);
+    let mut editable_masks = Vec::with_capacity(batch);
+    let mut editable_counts = Vec::with_capacity(batch);
+    for grid in puzzles.iter() {
+        let mut unknown = Vec::with_capacity(GRID_LEN);
+        let mut editable = Vec::with_capacity(GRID_LEN);
+        for &value in grid.iter().take(GRID_LEN) {
+            let clue = value > 0;
+            editable.push(if clue { 0.0 } else { 1.0 });
+            unknown.push(if value == 0 { 1.0 } else { 0.0 });
+        }
+        let editable_count = editable.iter().copied().sum::<f32>().max(1.0);
+        unknown_masks.push(unknown);
+        editable_masks.push(editable);
+        editable_counts.push(editable_count);
+    }
+
+    let ones_grid = Tensor::<B, 2>::ones([batch.max(1), GRID_LEN], device);
+    let revisit_min_filled = training.revisit_min_filled_final.clamp(0.0, 1.0);
+
     for _step in 0..steps {
         let tokens = build_tokens_tensor::<B>(&puzzles, device);
-        let (hidden, _logits) = model.forward_with_hidden(tokens.clone());
+        let (hidden, logits) = model.forward_with_hidden(tokens.clone());
         let policy_logits = model.policy_logits(hidden);
-        let seen_mask = tokens.clone().greater_equal_elem(1).float();
-        let masked_logits = policy_logits - seen_mask.mul_scalar(1e9);
+
+        let (select_mask, selectable_counts) = build_select_mask(
+            &unknown_masks,
+            &editable_masks,
+            &editable_counts,
+            revisit_min_filled,
+        );
+        let select_mask = Tensor::<B, 2>::from_data(
+            TensorData::new(select_mask, [batch.max(1), GRID_LEN]),
+            device,
+        );
+        let masked_logits = policy_logits
+            - ones_grid
+                .clone()
+                .sub(select_mask.clone())
+                .mul_scalar(POLICY_MASK_PENALTY);
         let actions = masked_logits.argmax(1);
         let action_data = actions
             .to_data()
             .convert::<i64>()
             .into_vec::<i64>()
             .map_err(|err| anyhow!("actions to vec: {err:?}"))?;
+        let preds = logits.argmax(2);
+        let pred_data = preds
+            .to_data()
+            .convert::<i64>()
+            .into_vec::<i64>()
+            .map_err(|err| anyhow!("preds to vec: {err:?}"))?;
 
         for (sample_idx, grid) in puzzles.iter_mut().enumerate() {
             let mut focus = None;
-            let mut unknown = 0;
-            for cell in grid.iter() {
-                if *cell == 0 {
-                    unknown += 1;
-                }
-            }
-            if unknown > 0 {
+            let selectable = selectable_counts
+                .get(sample_idx)
+                .copied()
+                .unwrap_or(0.0)
+                > 0.0;
+            let solved = solutions
+                .get(sample_idx)
+                .is_some_and(|sol| is_grid_solved(grid, sol));
+            if selectable && !solved {
                 let action = action_data
                     .get(sample_idx)
                     .copied()
                     .unwrap_or(0)
                     .clamp(0, (GRID_LEN - 1) as i64) as usize;
-                grid[action] = solutions
-                    .get(sample_idx)
-                    .and_then(|sol| sol.get(action))
+                let pred_idx = sample_idx * GRID_LEN + action;
+                let pred = pred_data
+                    .get(pred_idx)
                     .copied()
-                    .unwrap_or(0);
+                    .unwrap_or(0)
+                    .clamp(0, (VOCAB_SIZE - 1) as i64) as u8;
+                grid[action] = pred;
+                if let Some(mask) = unknown_masks.get_mut(sample_idx) {
+                    if let Some(entry) = mask.get_mut(action) {
+                        *entry = 0.0;
+                    }
+                }
                 focus = Some(action);
             }
             frames[sample_idx].push(render_sudoku_frame(grid, focus));
@@ -149,6 +200,37 @@ fn generate_rollout_frames<B: BackendTrait>(
     }
 
     Ok(frames)
+}
+
+fn build_select_mask(
+    unknown_masks: &[Vec<f32>],
+    editable_masks: &[Vec<f32>],
+    editable_counts: &[f32],
+    revisit_min_filled: f32,
+) -> (Vec<f32>, Vec<f32>) {
+    let mut select_mask = Vec::new();
+    let mut selectable_counts = Vec::new();
+    for (idx, unknown) in unknown_masks.iter().enumerate() {
+        let editable = editable_masks.get(idx).unwrap_or(unknown);
+        let editable_count = editable_counts.get(idx).copied().unwrap_or(1.0).max(1.0);
+        let unknown_count = unknown.iter().copied().sum::<f32>();
+        let filled_frac = (editable_count - unknown_count) / editable_count;
+        let allow_revisit = filled_frac >= revisit_min_filled;
+        let mask = if allow_revisit { editable } else { unknown };
+        selectable_counts.push(mask.iter().copied().sum::<f32>());
+        select_mask.extend(mask.iter().copied());
+    }
+    (select_mask, selectable_counts)
+}
+
+fn is_grid_solved(grid: &[u8], solution: &[u8]) -> bool {
+    if grid.len() < GRID_LEN || solution.len() < GRID_LEN {
+        return false;
+    }
+    grid.iter()
+        .take(GRID_LEN)
+        .zip(solution.iter().take(GRID_LEN))
+        .all(|(a, b)| a == b)
 }
 
 fn build_tokens_tensor<B: BackendTrait>(grids: &[Vec<u8>], device: &B::Device) -> Tensor<B, 2, Int> {

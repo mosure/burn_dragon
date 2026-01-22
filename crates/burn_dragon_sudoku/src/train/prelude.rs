@@ -3,7 +3,7 @@
 pub(crate) use std::fs;
 pub(crate) use std::path::{Path, PathBuf};
 pub(crate) use std::sync::Arc;
-pub(crate) use std::sync::atomic::{AtomicBool, Ordering};
+pub(crate) use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 pub(crate) use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(crate) use anyhow::{Context, Result, anyhow};
@@ -55,8 +55,8 @@ pub(crate) use burn_dragon_train::wgpu::{init_runtime, WgpuDevice};
 pub(crate) use serde::Serialize;
 
 pub(crate) use crate::config::{
-    SudokuArtifactConfig, SudokuDatasetConfig, SudokuDatasetSourceConfig, SudokuModelConfig,
-    SudokuTrainingConfig, SudokuTrainingHyperparameters,
+    SudokuArtifactConfig, SudokuDatasetConfig, SudokuDatasetSourceConfig, SudokuLossMask,
+    SudokuModelConfig, SudokuReconLoss, SudokuTrainingConfig, SudokuTrainingHyperparameters,
 };
 pub(crate) use crate::dataset::{SudokuBatch, SudokuDataset, SudokuRandomDataLoader, SudokuSplit};
 pub(crate) use crate::model::SudokuSaccadeModel;

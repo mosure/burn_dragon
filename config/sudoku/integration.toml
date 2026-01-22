@@ -17,6 +17,16 @@ log_frequency = 10
 rollout_steps = 4
 halt_weight = 0.1
 policy_noise = 0.2
+teacher_forcing_prob = 1.0
+teacher_forcing_final = 1.0
+teacher_forcing_anneal_steps = 0
+policy_temperature = 1.0
+policy_temperature_final = 1.0
+policy_temperature_anneal_steps = 0
+revisit_min_filled_frac = 0.0
+revisit_min_filled_final = 0.0
+revisit_min_filled_anneal_steps = 0
+reward_unknown_power = 0.0
 
 [training.gdpo]
 enabled = true

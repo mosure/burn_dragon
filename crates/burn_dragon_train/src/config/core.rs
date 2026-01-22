@@ -42,6 +42,8 @@ pub struct GdpoConfig {
     pub policy_clip_range: f32,
     pub hard_gate: GdpoHardGate,
     pub norm_epsilon: f32,
+    pub advantage_clip: f32,
+    pub advantage_ema_decay: f32,
 }
 
 impl Default for GdpoConfig {
@@ -55,6 +57,8 @@ impl Default for GdpoConfig {
             policy_clip_range: 0.2,
             hard_gate: GdpoHardGate::Percentile { quantile: 0.5 },
             norm_epsilon: 1e-6,
+            advantage_clip: 0.0,
+            advantage_ema_decay: 0.0,
         }
     }
 }
@@ -102,6 +106,8 @@ impl ModuleDisplayDefault for GdpoConfig {
             .add("policy_clip_range", &self.policy_clip_range)
             .add("hard_gate", &self.hard_gate)
             .add("norm_epsilon", &self.norm_epsilon)
+            .add("advantage_clip", &self.advantage_clip)
+            .add("advantage_ema_decay", &self.advantage_ema_decay)
             .optional()
     }
 }

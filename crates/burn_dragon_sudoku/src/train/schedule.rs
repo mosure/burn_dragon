@@ -1,10 +1,14 @@
 use crate::train::metrics::{
     SudokuAccInput, SudokuAdvantageAbsMeanInput, SudokuAdvantageStdInput, SudokuEasyRewardInput,
-    SudokuHaltLossInput, SudokuHaltProbInput, SudokuHaltTargetInput, SudokuHardRewardInput,
-    SudokuLogProbMeanInput, SudokuPolicyEntropyInput, SudokuPolicyLossInput, SudokuReconLossInput,
+    SudokuExactAccInput, SudokuHaltLossInput, SudokuHaltProbInput, SudokuHaltTargetInput,
+    SudokuHardRewardInput, SudokuLogProbMeanInput, SudokuPolicyEntropyInput,
+    SudokuPolicyLossInput, SudokuReconLossInput, SudokuSolveRateInput,
 };
 use crate::train::prelude::*;
 use crate::train::steps::SudokuTrainer;
+use burn_train::renderer::tui::TuiMetricsRenderer;
+use std::env;
+use std::io::IsTerminal;
 
 pub struct SudokuTrainEnvironment<'a, B>
 where
@@ -21,6 +25,19 @@ where
     pub epochs: usize,
 }
 
+fn env_flag(name: &str) -> Option<bool> {
+    let value = env::var(name).ok()?;
+    let normalized = value.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return None;
+    }
+    match normalized.as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
 pub fn train_with_scheduler<B, S>(
     env: &SudokuTrainEnvironment<'_, B>,
     model: SudokuTrainer<B>,
@@ -35,7 +52,7 @@ where
     fs::create_dir_all(env.run_dir)?;
 
     let metric_every = env.training.log_frequency.max(1);
-    let builder = LearnerBuilder::new(env.run_dir)
+    let mut builder = LearnerBuilder::new(env.run_dir)
         .num_epochs(env.epochs)
         .learning_strategy(LearningStrategy::SingleDevice(env.device.clone()))
         .with_file_checkpointer(BinFileRecorder::<FullPrecisionSettings>::new())
@@ -67,6 +84,22 @@ where
         ))
         .metric_train_numeric(ScalarMetric::<
             ValidBackend<B>,
+            SudokuExactAccInput<ValidBackend<B>>,
+        >::new_every("sudoku_exact_acc", metric_every))
+        .metric_valid_numeric(ScalarMetric::<
+            ValidBackend<B>,
+            SudokuExactAccInput<ValidBackend<B>>,
+        >::new_every("sudoku_exact_acc", metric_every))
+        .metric_train_numeric(ScalarMetric::<
+            ValidBackend<B>,
+            SudokuSolveRateInput<ValidBackend<B>>,
+        >::new_every("sudoku_solve_rate", metric_every))
+        .metric_valid_numeric(ScalarMetric::<
+            ValidBackend<B>,
+            SudokuSolveRateInput<ValidBackend<B>>,
+        >::new_every("sudoku_solve_rate", metric_every))
+        .metric_train_numeric(ScalarMetric::<
+            ValidBackend<B>,
             SudokuPolicyLossInput<ValidBackend<B>>,
         >::new_every("sudoku_policy_loss", metric_every))
         .metric_valid_numeric(ScalarMetric::<
@@ -145,14 +178,38 @@ where
             ValidBackend<B>,
             SudokuEasyRewardInput<ValidBackend<B>>,
         >::new_every("sudoku_easy_reward", metric_every))
-        .summary();
+        ;
+
+    let force_tui = env_flag("BURN_TUI").unwrap_or(false);
+    if force_tui {
+        let interrupter = builder.interrupter();
+        builder = builder.renderer(TuiMetricsRenderer::new(interrupter, None));
+        info!("burn-train renderer forced to TUI via BURN_TUI=1");
+    } else if !std::io::stdout().is_terminal() {
+        info!("burn-train renderer set to CLI because stdout is not a terminal");
+    }
+
+    let builder = builder.summary();
 
     info!("sudoku run name: {}", env.run_name);
 
     #[cfg(feature = "integration_test")]
-    let builder = builder.metric_train(
-        crate::train::metrics::LossTraceMetric::<ValidBackend<B>>::new("loss_trace", 1),
-    );
+    let builder = builder
+        .metric_train(
+            crate::train::metrics::LossTraceMetric::<ValidBackend<B>>::new("loss_trace", 1),
+        )
+        .metric_valid(
+            crate::train::metrics::SolveRateTraceMetric::<ValidBackend<B>>::new(
+                "solve_rate_trace",
+                1,
+            ),
+        )
+        .metric_valid(
+            crate::train::metrics::HaltProbTraceMetric::<ValidBackend<B>>::new(
+                "halt_prob_trace",
+                1,
+            ),
+        );
 
     let learner = builder.build(model, optimizer, scheduler);
     let TrainingResult { model, .. } =

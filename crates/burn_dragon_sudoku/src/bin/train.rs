@@ -23,7 +23,7 @@ use burn_wgpu::Wgpu;
 #[cfg(feature = "cli")]
 use burn_dragon_train::wgpu::{init_runtime, WgpuDevice};
 
-#[cfg(feature = "cuda")]
+#[cfg(all(feature = "cuda", feature = "cli"))]
 use burn_cuda::Cuda;
 
 #[cfg(feature = "cli")]

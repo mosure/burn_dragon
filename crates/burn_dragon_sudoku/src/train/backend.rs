@@ -110,7 +110,7 @@ where
         ));
 
     let model = SudokuSaccadeModel::<B>::new(&config.model, &device);
-    let trainer = SudokuTrainer::new(model, training.clone(), total_steps);
+    let mut trainer = SudokuTrainer::new(model, training.clone(), total_steps);
     let optimizer = adamw_config_from_optimizer(optimizer_cfg).init::<B, SudokuTrainer<B>>();
 
     let scheduler_iters = match schedule.source {
@@ -125,6 +125,10 @@ where
     write_latest_run(&run_root, &run_name)?;
     if write_config {
         write_run_config(config, &run_dir, &run_name)?;
+    }
+
+    if config.artifacts.max_samples > 0 {
+        trainer = trainer.with_validation_artifacts(config.artifacts.clone(), run_dir.clone());
     }
 
     info!("sudoku run name: {run_name}");

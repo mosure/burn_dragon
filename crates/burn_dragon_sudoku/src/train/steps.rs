@@ -1,8 +1,10 @@
+use crate::artifacts::write_validation_artifacts_from_batch;
 use crate::train::metrics::{SudokuOutput, SudokuTrainItem};
 use crate::train::prelude::*;
 use crate::vocab::{GRID_LEN, VOCAB_SIZE};
 use burn_dragon_train::train::gdpo::{gdpo_advantage_autodiff, gdpo_policy_loss};
 use std::sync::Mutex;
+use tracing::warn;
 
 const SUDOKU_EPS: f32 = 1e-6;
 const POLICY_MASK_PENALTY: f32 = 1e9;
@@ -17,6 +19,11 @@ pub struct SudokuTrainer<B: BackendTrait> {
     pub total_steps: usize,
     step_counter: Arc<AtomicUsize>,
     gdpo_stats: Arc<Mutex<GdpoAdvantageStats<B>>>,
+    valid_epoch_counter: Arc<AtomicUsize>,
+    valid_epoch: usize,
+    valid_step_counter: Arc<AtomicUsize>,
+    artifacts: Option<SudokuArtifactConfig>,
+    artifact_run_dir: Option<Arc<PathBuf>>,
 }
 
 impl<B: BackendTrait> SudokuTrainer<B> {
@@ -31,7 +38,22 @@ impl<B: BackendTrait> SudokuTrainer<B> {
             total_steps: total_steps.max(1),
             step_counter: Arc::new(AtomicUsize::new(0)),
             gdpo_stats: Arc::new(Mutex::new(GdpoAdvantageStats::default())),
+            valid_epoch_counter: Arc::new(AtomicUsize::new(0)),
+            valid_epoch: 0,
+            valid_step_counter: Arc::new(AtomicUsize::new(0)),
+            artifacts: None,
+            artifact_run_dir: None,
         }
+    }
+
+    pub fn with_validation_artifacts(
+        mut self,
+        artifacts: SudokuArtifactConfig,
+        run_dir: PathBuf,
+    ) -> Self {
+        self.artifacts = Some(artifacts);
+        self.artifact_run_dir = Some(Arc::new(run_dir));
+        self
     }
 }
 
@@ -55,6 +77,11 @@ impl<B: BackendTrait> Module<B> for SudokuTrainer<B> {
             total_steps: self.total_steps,
             step_counter: Arc::clone(&self.step_counter),
             gdpo_stats: Arc::clone(&self.gdpo_stats),
+            valid_epoch_counter: Arc::clone(&self.valid_epoch_counter),
+            valid_epoch: self.valid_epoch,
+            valid_step_counter: Arc::clone(&self.valid_step_counter),
+            artifacts: self.artifacts.clone(),
+            artifact_run_dir: self.artifact_run_dir.clone(),
         }
     }
 
@@ -65,6 +92,11 @@ impl<B: BackendTrait> Module<B> for SudokuTrainer<B> {
             total_steps: self.total_steps,
             step_counter: Arc::clone(&self.step_counter),
             gdpo_stats: Arc::clone(&self.gdpo_stats),
+            valid_epoch_counter: Arc::clone(&self.valid_epoch_counter),
+            valid_epoch: self.valid_epoch,
+            valid_step_counter: Arc::clone(&self.valid_step_counter),
+            artifacts: self.artifacts.clone(),
+            artifact_run_dir: self.artifact_run_dir.clone(),
         }
     }
 
@@ -79,6 +111,11 @@ impl<B: BackendTrait> Module<B> for SudokuTrainer<B> {
             total_steps: self.total_steps,
             step_counter: Arc::clone(&self.step_counter),
             gdpo_stats: Arc::clone(&self.gdpo_stats),
+            valid_epoch_counter: Arc::clone(&self.valid_epoch_counter),
+            valid_epoch: self.valid_epoch,
+            valid_step_counter: Arc::clone(&self.valid_step_counter),
+            artifacts: self.artifacts.clone(),
+            artifact_run_dir: self.artifact_run_dir.clone(),
         }
     }
 
@@ -89,6 +126,11 @@ impl<B: BackendTrait> Module<B> for SudokuTrainer<B> {
             total_steps: self.total_steps,
             step_counter: Arc::clone(&self.step_counter),
             gdpo_stats: Arc::clone(&self.gdpo_stats),
+            valid_epoch_counter: Arc::clone(&self.valid_epoch_counter),
+            valid_epoch: self.valid_epoch,
+            valid_step_counter: Arc::clone(&self.valid_step_counter),
+            artifacts: self.artifacts.clone(),
+            artifact_run_dir: self.artifact_run_dir.clone(),
         }
     }
 
@@ -101,12 +143,18 @@ impl<B: AutodiffBackend> AutodiffModule<B> for SudokuTrainer<B> {
     type InnerModule = SudokuTrainer<B::InnerBackend>;
 
     fn valid(&self) -> Self::InnerModule {
+        let valid_epoch = self.valid_epoch_counter.fetch_add(1, Ordering::Relaxed) + 1;
         SudokuTrainer {
             model: self.model.valid(),
             training: self.training.clone(),
             total_steps: self.total_steps,
             step_counter: Arc::new(AtomicUsize::new(0)),
             gdpo_stats: Arc::new(Mutex::new(GdpoAdvantageStats::default())),
+            valid_epoch_counter: Arc::clone(&self.valid_epoch_counter),
+            valid_epoch,
+            valid_step_counter: Arc::new(AtomicUsize::new(0)),
+            artifacts: self.artifacts.clone(),
+            artifact_run_dir: self.artifact_run_dir.clone(),
         }
     }
 }
@@ -176,6 +224,24 @@ impl<B: AutodiffBackend> TrainStep<SudokuBatch<B>, SudokuTrainItem<B>> for Sudok
 
 impl<B: BackendTrait> ValidStep<SudokuBatch<B>, SudokuOutput<B>> for SudokuTrainer<B> {
     fn step(&self, batch: SudokuBatch<B>) -> SudokuOutput<B> {
+        let step_idx = self.valid_step_counter.fetch_add(1, Ordering::Relaxed);
+        if step_idx == 0 {
+            if let (Some(artifacts), Some(run_dir)) = (&self.artifacts, &self.artifact_run_dir) {
+                if artifacts.max_samples > 0 {
+                    if let Err(err) = write_validation_artifacts_from_batch(
+                        &self.model,
+                        &batch,
+                        artifacts,
+                        &self.training,
+                        run_dir.as_ref(),
+                        self.valid_epoch,
+                    ) {
+                        warn!("validation artifacts failed: {err}");
+                    }
+                }
+            }
+        }
+
         let losses = rollout_losses_valid::<B>(&self.model, batch, &self.training);
         SudokuOutput::new(
             losses.loss,

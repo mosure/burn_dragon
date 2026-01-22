@@ -1885,6 +1885,18 @@ fn validate_vision_mode(mode: &VisionTrainingModeConfig, vision: &VisionModelCon
                         "saccade.policy.gdpo.policy_clip_range must be >= 0"
                     ));
                 }
+                if saccade.policy.gdpo.advantage_clip < 0.0 {
+                    return Err(anyhow!(
+                        "saccade.policy.gdpo.advantage_clip must be >= 0 (got {})",
+                        saccade.policy.gdpo.advantage_clip
+                    ));
+                }
+                if !(0.0..1.0).contains(&saccade.policy.gdpo.advantage_ema_decay) {
+                    return Err(anyhow!(
+                        "saccade.policy.gdpo.advantage_ema_decay must be in [0, 1) (got {})",
+                        saccade.policy.gdpo.advantage_ema_decay
+                    ));
+                }
                 if let GdpoHardGate::Percentile { quantile } = saccade.policy.gdpo.hard_gate
                     && !(0.0..=1.0).contains(&quantile)
                 {

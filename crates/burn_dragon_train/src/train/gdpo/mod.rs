@@ -40,7 +40,8 @@ pub fn gdpo_advantage<B: BackendTrait>(
     let rewards = Tensor::cat(vec![hard, easy], 2);
     let weights = [config.hard_weight, config.easy_weight];
     let advantage = group_normalize_rewards(rewards, &weights, config.norm_epsilon.max(0.0));
-    batch_normalize_advantage(advantage, config.norm_epsilon.max(0.0))
+    let advantage = batch_normalize_advantage(advantage, config.norm_epsilon.max(0.0));
+    clip_advantage(advantage, config.advantage_clip)
 }
 
 pub fn gdpo_advantage_autodiff<B: AutodiffBackend>(
@@ -263,6 +264,13 @@ fn batch_normalize_advantage<B: BackendTrait>(
         .repeat_dim(1, group);
     let std = var.add_scalar(epsilon.max(1e-12)).sqrt();
     centered / std
+}
+
+fn clip_advantage<B: BackendTrait>(advantage: Tensor<B, 2>, clip: f32) -> Tensor<B, 2> {
+    if clip <= 0.0 {
+        return advantage;
+    }
+    advantage.clamp_min(-clip).clamp_max(clip)
 }
 
 fn nan_to_num<B: BackendTrait>(values: Tensor<B, 2>) -> Tensor<B, 2> {

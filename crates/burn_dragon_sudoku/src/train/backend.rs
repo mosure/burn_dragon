@@ -110,7 +110,7 @@ where
         ));
 
     let model = SudokuSaccadeModel::<B>::new(&config.model, &device);
-    let trainer = SudokuTrainer::new(model, training.clone());
+    let trainer = SudokuTrainer::new(model, training.clone(), total_steps);
     let optimizer = adamw_config_from_optimizer(optimizer_cfg).init::<B, SudokuTrainer<B>>();
 
     let scheduler_iters = match schedule.source {

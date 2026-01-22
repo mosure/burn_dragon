@@ -52,6 +52,8 @@ pub struct SudokuDataset {
     train_len: usize,
     batch_size: usize,
     train_split_ratio: f32,
+    augment: bool,
+    augment_prob: f32,
 }
 
 impl SudokuDataset {
@@ -115,6 +117,8 @@ impl SudokuDataset {
                 train_len,
                 batch_size,
                 train_split_ratio: config.train_split_ratio,
+                augment: config.augment,
+                augment_prob: config.augment_prob,
             },
             summary,
         ))
@@ -168,6 +172,7 @@ impl SudokuDataset {
         let mut rng = thread_rng();
         let mut puzzles = vec![0i64; self.batch_size * GRID_LEN];
         let mut solutions = vec![0i64; self.batch_size * GRID_LEN];
+        let augment = self.augment && split == SudokuSplit::Train && self.augment_prob > 0.0;
 
         for batch_idx in 0..self.batch_size {
             let idx = if span == 0 {
@@ -177,9 +182,17 @@ impl SudokuDataset {
             };
             let puzzle = &self.puzzles[idx];
             let solution = &self.solutions[idx];
-            for cell in 0..GRID_LEN {
-                puzzles[batch_idx * GRID_LEN + cell] = puzzle[cell] as i64;
-                solutions[batch_idx * GRID_LEN + cell] = solution[cell] as i64;
+            if augment && rng.gen_bool(f64::from(self.augment_prob)) {
+                let (puzzle_aug, solution_aug) = augment_pair(&mut rng, puzzle, solution);
+                for cell in 0..GRID_LEN {
+                    puzzles[batch_idx * GRID_LEN + cell] = puzzle_aug[cell] as i64;
+                    solutions[batch_idx * GRID_LEN + cell] = solution_aug[cell] as i64;
+                }
+            } else {
+                for cell in 0..GRID_LEN {
+                    puzzles[batch_idx * GRID_LEN + cell] = puzzle[cell] as i64;
+                    solutions[batch_idx * GRID_LEN + cell] = solution[cell] as i64;
+                }
             }
         }
 
@@ -641,6 +654,64 @@ fn parse_record(puzzle: &str, solution: &str) -> Result<SudokuRecord, anyhow::Er
     Ok(SudokuRecord { puzzle, solution })
 }
 
+fn augment_pair<R: Rng>(rng: &mut R, puzzle: &[u8], solution: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    let digit_map = build_digit_map(rng);
+    let row_perm = build_band_perm(rng);
+    let col_perm = build_band_perm(rng);
+    let transpose = rng.gen_bool(0.5);
+    let puzzle_aug = apply_transform(puzzle, &digit_map, &row_perm, &col_perm, transpose);
+    let solution_aug = apply_transform(solution, &digit_map, &row_perm, &col_perm, transpose);
+    (puzzle_aug, solution_aug)
+}
+
+fn build_digit_map<R: Rng>(rng: &mut R) -> [u8; 10] {
+    let mut digits = [1_u8, 2, 3, 4, 5, 6, 7, 8, 9];
+    digits.shuffle(rng);
+    let mut map = [0_u8; 10];
+    for (idx, value) in digits.iter().enumerate() {
+        map[idx + 1] = *value;
+    }
+    map
+}
+
+fn build_band_perm<R: Rng>(rng: &mut R) -> [usize; 9] {
+    let mut bands = [0_usize, 1, 2];
+    bands.shuffle(rng);
+    let mut out = [0_usize; 9];
+    let mut cursor = 0;
+    for band in bands {
+        let mut rows = [0_usize, 1, 2];
+        rows.shuffle(rng);
+        for row in rows {
+            out[cursor] = band * 3 + row;
+            cursor += 1;
+        }
+    }
+    out
+}
+
+fn apply_transform(
+    grid: &[u8],
+    digit_map: &[u8; 10],
+    row_perm: &[usize; 9],
+    col_perm: &[usize; 9],
+    transpose: bool,
+) -> Vec<u8> {
+    let mut out = vec![0_u8; GRID_LEN];
+    for new_r in 0..9 {
+        for new_c in 0..9 {
+            let mut src_r = row_perm[new_r];
+            let mut src_c = col_perm[new_c];
+            if transpose {
+                std::mem::swap(&mut src_r, &mut src_c);
+            }
+            let value = grid[src_r * 9 + src_c];
+            out[new_r * 9 + new_c] = digit_map[value as usize];
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -669,6 +740,8 @@ mod tests {
         let dataset_cfg = SudokuDatasetConfig {
             cache_dir: dir.path().to_path_buf(),
             train_split_ratio: 0.5,
+            augment: false,
+            augment_prob: 0.0,
             source: SudokuDatasetSourceConfig::Local(cfg),
         };
 

@@ -2549,6 +2549,7 @@ dependencies = [
  "burn_dragon_train",
  "clap 4.5.54",
  "csv",
+ "cubecl",
  "hf-hub",
  "parquet",
  "rand 0.8.5",

@@ -14,6 +14,10 @@ pub struct SudokuDatasetConfig {
     pub cache_dir: PathBuf,
     #[serde(default = "default_train_split_ratio")]
     pub train_split_ratio: f32,
+    #[serde(default)]
+    pub augment: bool,
+    #[serde(default = "default_augment_prob")]
+    pub augment_prob: f32,
     #[serde(flatten)]
     pub source: SudokuDatasetSourceConfig,
 }
@@ -109,6 +113,20 @@ pub enum SudokuRecordFormat {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum SudokuReconLoss {
+    Softmax,
+    Stablemax,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum SudokuLossMask {
+    All,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct SudokuTrainingHyperparameters {
     pub batch_size: usize,
     #[serde(default)]
@@ -116,10 +134,48 @@ pub struct SudokuTrainingHyperparameters {
     pub max_iters: usize,
     pub log_frequency: usize,
     pub rollout_steps: usize,
+    #[serde(default)]
+    pub rollout_backprop_steps: Option<usize>,
     #[serde(default = "default_halt_weight")]
     pub halt_weight: f32,
+    #[serde(default = "default_halt_exploration_prob")]
+    pub halt_exploration_prob: f32,
+    #[serde(default = "default_halt_min_steps")]
+    pub halt_min_steps: usize,
     #[serde(default)]
     pub policy_noise: f32,
+    #[serde(default = "default_teacher_forcing_prob")]
+    pub teacher_forcing_prob: f32,
+    #[serde(default = "default_teacher_forcing_final")]
+    pub teacher_forcing_final: f32,
+    #[serde(default)]
+    pub teacher_forcing_anneal_steps: usize,
+    #[serde(default = "default_policy_temperature")]
+    pub policy_temperature: f32,
+    #[serde(default = "default_policy_temperature_final")]
+    pub policy_temperature_final: f32,
+    #[serde(default)]
+    pub policy_temperature_anneal_steps: usize,
+    #[serde(default = "default_policy_entropy_weight")]
+    pub policy_entropy_weight: f32,
+    #[serde(default = "default_policy_entropy_weight_final")]
+    pub policy_entropy_weight_final: f32,
+    #[serde(default)]
+    pub policy_entropy_anneal_steps: usize,
+    #[serde(default = "default_revisit_min_filled_frac")]
+    pub revisit_min_filled_frac: f32,
+    #[serde(default = "default_revisit_min_filled_final")]
+    pub revisit_min_filled_final: f32,
+    #[serde(default)]
+    pub revisit_min_filled_anneal_steps: usize,
+    #[serde(default = "default_reward_unknown_power")]
+    pub reward_unknown_power: f32,
+    #[serde(default = "default_recon_loss")]
+    pub recon_loss: SudokuReconLoss,
+    #[serde(default = "default_loss_mask")]
+    pub loss_mask: SudokuLossMask,
+    #[serde(default = "default_recon_loss_interval_steps")]
+    pub recon_loss_interval_steps: usize,
     #[serde(default)]
     pub gdpo: GdpoConfig,
 }
@@ -193,8 +249,8 @@ impl SudokuTrainingConfig {
         if self.training.batch_size == 0 {
             return Err(anyhow!("training.batch_size must be > 0"));
         }
-        if self.training.max_iters == 0 {
-            return Err(anyhow!("training.max_iters must be > 0"));
+        if self.training.epochs.is_none() && self.training.max_iters == 0 {
+            return Err(anyhow!("training.max_iters must be > 0 when epochs is not set"));
         }
         if self.training.log_frequency == 0 {
             return Err(anyhow!("training.log_frequency must be > 0"));
@@ -202,8 +258,90 @@ impl SudokuTrainingConfig {
         if self.training.rollout_steps == 0 {
             return Err(anyhow!("training.rollout_steps must be > 0"));
         }
+        if let Some(backprop_steps) = self.training.rollout_backprop_steps
+            && backprop_steps > 0
+            && backprop_steps > self.training.rollout_steps
+        {
+            return Err(anyhow!(
+                "training.rollout_backprop_steps ({}) must be <= rollout_steps ({})",
+                backprop_steps, self.training.rollout_steps
+            ));
+        }
         if self.training.halt_weight < 0.0 {
             return Err(anyhow!("training.halt_weight must be >= 0"));
+        }
+        if !(0.0..=1.0).contains(&self.training.halt_exploration_prob) {
+            return Err(anyhow!(
+                "training.halt_exploration_prob must be in [0, 1] (got {})",
+                self.training.halt_exploration_prob
+            ));
+        }
+        if self.training.halt_min_steps == 0 {
+            return Err(anyhow!("training.halt_min_steps must be > 0"));
+        }
+        if self.training.halt_min_steps > self.training.rollout_steps {
+            return Err(anyhow!(
+                "training.halt_min_steps ({}) must be <= rollout_steps ({})",
+                self.training.halt_min_steps, self.training.rollout_steps
+            ));
+        }
+        if !(0.0..=1.0).contains(&self.training.teacher_forcing_prob) {
+            return Err(anyhow!(
+                "training.teacher_forcing_prob must be in [0, 1] (got {})",
+                self.training.teacher_forcing_prob
+            ));
+        }
+        if !(0.0..=1.0).contains(&self.training.teacher_forcing_final) {
+            return Err(anyhow!(
+                "training.teacher_forcing_final must be in [0, 1] (got {})",
+                self.training.teacher_forcing_final
+            ));
+        }
+        if self.training.policy_temperature <= 0.0 {
+            return Err(anyhow!(
+                "training.policy_temperature must be > 0 (got {})",
+                self.training.policy_temperature
+            ));
+        }
+        if self.training.policy_temperature_final <= 0.0 {
+            return Err(anyhow!(
+                "training.policy_temperature_final must be > 0 (got {})",
+                self.training.policy_temperature_final
+            ));
+        }
+        if !self.training.policy_entropy_weight.is_finite()
+            || self.training.policy_entropy_weight < 0.0
+        {
+            return Err(anyhow!(
+                "training.policy_entropy_weight must be >= 0 (got {})",
+                self.training.policy_entropy_weight
+            ));
+        }
+        if !self.training.policy_entropy_weight_final.is_finite()
+            || self.training.policy_entropy_weight_final < 0.0
+        {
+            return Err(anyhow!(
+                "training.policy_entropy_weight_final must be >= 0 (got {})",
+                self.training.policy_entropy_weight_final
+            ));
+        }
+        if !(0.0..=1.0).contains(&self.training.revisit_min_filled_frac) {
+            return Err(anyhow!(
+                "training.revisit_min_filled_frac must be in [0, 1] (got {})",
+                self.training.revisit_min_filled_frac
+            ));
+        }
+        if !(0.0..=1.0).contains(&self.training.revisit_min_filled_final) {
+            return Err(anyhow!(
+                "training.revisit_min_filled_final must be in [0, 1] (got {})",
+                self.training.revisit_min_filled_final
+            ));
+        }
+        if self.training.reward_unknown_power < 0.0 {
+            return Err(anyhow!(
+                "training.reward_unknown_power must be >= 0 (got {})",
+                self.training.reward_unknown_power
+            ));
         }
         if let Some(epochs) = self.training.epochs && epochs == 0 {
             return Err(anyhow!("training.epochs must be > 0"));
@@ -212,6 +350,12 @@ impl SudokuTrainingConfig {
             return Err(anyhow!(
                 "dataset.train_split_ratio must be in (0, 1] (got {})",
                 self.dataset.train_split_ratio
+            ));
+        }
+        if !(0.0..=1.0).contains(&self.dataset.augment_prob) {
+            return Err(anyhow!(
+                "dataset.augment_prob must be in [0, 1] (got {})",
+                self.dataset.augment_prob
             ));
         }
         if self.training.gdpo.group_size == 0 {
@@ -228,6 +372,18 @@ impl SudokuTrainingConfig {
         }
         if self.training.gdpo.policy_clip_range < 0.0 {
             return Err(anyhow!("training.gdpo.policy_clip_range must be >= 0"));
+        }
+        if self.training.gdpo.advantage_clip < 0.0 {
+            return Err(anyhow!(
+                "training.gdpo.advantage_clip must be >= 0 (got {})",
+                self.training.gdpo.advantage_clip
+            ));
+        }
+        if !(0.0..1.0).contains(&self.training.gdpo.advantage_ema_decay) {
+            return Err(anyhow!(
+                "training.gdpo.advantage_ema_decay must be in [0, 1) (got {})",
+                self.training.gdpo.advantage_ema_decay
+            ));
         }
         if let GdpoHardGate::Percentile { quantile } = self.training.gdpo.hard_gate
             && !(0.0..=1.0).contains(&quantile)
@@ -423,12 +579,72 @@ fn default_artifact_samples() -> usize {
     8
 }
 
+fn default_augment_prob() -> f32 {
+    0.0
+}
+
 fn default_dropout() -> f64 {
     0.1
 }
 
 fn default_halt_weight() -> f32 {
     0.1
+}
+
+fn default_halt_exploration_prob() -> f32 {
+    0.0
+}
+
+fn default_halt_min_steps() -> usize {
+    1
+}
+
+fn default_recon_loss() -> SudokuReconLoss {
+    SudokuReconLoss::Softmax
+}
+
+fn default_loss_mask() -> SudokuLossMask {
+    SudokuLossMask::All
+}
+
+fn default_recon_loss_interval_steps() -> usize {
+    1
+}
+
+fn default_teacher_forcing_prob() -> f32 {
+    0.0
+}
+
+fn default_teacher_forcing_final() -> f32 {
+    0.0
+}
+
+fn default_policy_temperature() -> f32 {
+    1.0
+}
+
+fn default_policy_temperature_final() -> f32 {
+    1.0
+}
+
+fn default_policy_entropy_weight() -> f32 {
+    0.0
+}
+
+fn default_policy_entropy_weight_final() -> f32 {
+    0.0
+}
+
+fn default_revisit_min_filled_frac() -> f32 {
+    0.0
+}
+
+fn default_revisit_min_filled_final() -> f32 {
+    0.0
+}
+
+fn default_reward_unknown_power() -> f32 {
+    0.0
 }
 
 #[cfg(test)]

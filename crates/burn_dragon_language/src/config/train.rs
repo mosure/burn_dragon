@@ -198,6 +198,18 @@ impl TrainingConfig {
             if gdpo.policy_clip_range < 0.0 {
                 return Err(anyhow!("training.gdpo.policy_clip_range must be >= 0"));
             }
+            if gdpo.advantage_clip < 0.0 {
+                return Err(anyhow!(
+                    "training.gdpo.advantage_clip must be >= 0 (got {})",
+                    gdpo.advantage_clip
+                ));
+            }
+            if !(0.0..1.0).contains(&gdpo.advantage_ema_decay) {
+                return Err(anyhow!(
+                    "training.gdpo.advantage_ema_decay must be in [0, 1) (got {})",
+                    gdpo.advantage_ema_decay
+                ));
+            }
             if let GdpoHardGate::Percentile { quantile } = gdpo.hard_gate
                 && !(0.0..=1.0).contains(&quantile)
             {

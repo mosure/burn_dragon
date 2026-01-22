@@ -6,6 +6,8 @@ pub struct SudokuOutput<B: BackendTrait> {
     loss: Tensor<B, 1>,
     recon_loss: Tensor<B, 1>,
     acc: Tensor<B, 1>,
+    exact_acc: Tensor<B, 1>,
+    solve_rate: Tensor<B, 1>,
     policy_loss: Tensor<B, 1>,
     halt_loss: Tensor<B, 1>,
     halt_prob_mean: Tensor<B, 1>,
@@ -24,6 +26,8 @@ impl<B: BackendTrait> SudokuOutput<B> {
         loss: Tensor<B, 1>,
         recon_loss: Tensor<B, 1>,
         acc: Tensor<B, 1>,
+        exact_acc: Tensor<B, 1>,
+        solve_rate: Tensor<B, 1>,
         policy_loss: Tensor<B, 1>,
         halt_loss: Tensor<B, 1>,
         halt_prob_mean: Tensor<B, 1>,
@@ -39,6 +43,8 @@ impl<B: BackendTrait> SudokuOutput<B> {
             loss,
             recon_loss,
             acc,
+            exact_acc,
+            solve_rate,
             policy_loss,
             halt_loss,
             halt_prob_mean,
@@ -90,6 +96,28 @@ pub struct SudokuAccInput<B: BackendTrait> {
 }
 
 impl<B: BackendTrait> SudokuAccInput<B> {
+    pub fn new(value: Tensor<B, 1>) -> Self {
+        Self { value }
+    }
+}
+
+#[derive(Clone)]
+pub struct SudokuExactAccInput<B: BackendTrait> {
+    value: Tensor<B, 1>,
+}
+
+impl<B: BackendTrait> SudokuExactAccInput<B> {
+    pub fn new(value: Tensor<B, 1>) -> Self {
+        Self { value }
+    }
+}
+
+#[derive(Clone)]
+pub struct SudokuSolveRateInput<B: BackendTrait> {
+    value: Tensor<B, 1>,
+}
+
+impl<B: BackendTrait> SudokuSolveRateInput<B> {
     pub fn new(value: Tensor<B, 1>) -> Self {
         Self { value }
     }
@@ -217,6 +245,18 @@ impl<B: BackendTrait> Adaptor<SudokuAccInput<B>> for SudokuOutput<B> {
     }
 }
 
+impl<B: BackendTrait> Adaptor<SudokuExactAccInput<B>> for SudokuOutput<B> {
+    fn adapt(&self) -> SudokuExactAccInput<B> {
+        SudokuExactAccInput::new(self.exact_acc.clone())
+    }
+}
+
+impl<B: BackendTrait> Adaptor<SudokuSolveRateInput<B>> for SudokuOutput<B> {
+    fn adapt(&self) -> SudokuSolveRateInput<B> {
+        SudokuSolveRateInput::new(self.solve_rate.clone())
+    }
+}
+
 impl<B: BackendTrait> Adaptor<SudokuPolicyLossInput<B>> for SudokuOutput<B> {
     fn adapt(&self) -> SudokuPolicyLossInput<B> {
         SudokuPolicyLossInput::new(self.policy_loss.clone())
@@ -281,6 +321,8 @@ pub struct SudokuTrainItem<B: AutodiffBackend> {
     loss: Tensor<B, 1>,
     recon_loss: Tensor<B, 1>,
     acc: Tensor<B, 1>,
+    exact_acc: Tensor<B, 1>,
+    solve_rate: Tensor<B, 1>,
     policy_loss: Tensor<B, 1>,
     halt_loss: Tensor<B, 1>,
     halt_prob_mean: Tensor<B, 1>,
@@ -299,6 +341,8 @@ impl<B: AutodiffBackend> SudokuTrainItem<B> {
         loss: Tensor<B, 1>,
         recon_loss: Tensor<B, 1>,
         acc: Tensor<B, 1>,
+        exact_acc: Tensor<B, 1>,
+        solve_rate: Tensor<B, 1>,
         policy_loss: Tensor<B, 1>,
         halt_loss: Tensor<B, 1>,
         halt_prob_mean: Tensor<B, 1>,
@@ -314,6 +358,8 @@ impl<B: AutodiffBackend> SudokuTrainItem<B> {
             loss: loss.detach(),
             recon_loss: recon_loss.detach(),
             acc: acc.detach(),
+            exact_acc: exact_acc.detach(),
+            solve_rate: solve_rate.detach(),
             policy_loss: policy_loss.detach(),
             halt_loss: halt_loss.detach(),
             halt_prob_mean: halt_prob_mean.detach(),
@@ -336,6 +382,8 @@ impl<B: AutodiffBackend> ItemLazy for SudokuTrainItem<B> {
             self.loss.detach().inner(),
             self.recon_loss.detach().inner(),
             self.acc.detach().inner(),
+            self.exact_acc.detach().inner(),
+            self.solve_rate.detach().inner(),
             self.policy_loss.detach().inner(),
             self.halt_loss.detach().inner(),
             self.halt_prob_mean.detach().inner(),
@@ -357,6 +405,18 @@ impl<B: BackendTrait> ScalarValue<B> for SudokuReconLossInput<B> {
 }
 
 impl<B: BackendTrait> ScalarValue<B> for SudokuAccInput<B> {
+    fn value(&self) -> Tensor<B, 1> {
+        self.value.clone()
+    }
+}
+
+impl<B: BackendTrait> ScalarValue<B> for SudokuExactAccInput<B> {
+    fn value(&self) -> Tensor<B, 1> {
+        self.value.clone()
+    }
+}
+
+impl<B: BackendTrait> ScalarValue<B> for SudokuSolveRateInput<B> {
     fn value(&self) -> Tensor<B, 1> {
         self.value.clone()
     }
@@ -527,3 +587,217 @@ mod loss_trace {
 pub use loss_trace::{len as loss_trace_len, reset as loss_trace_reset, take as loss_trace_take};
 #[cfg(feature = "integration_test")]
 pub use loss_trace::LossTraceMetric;
+
+#[cfg(feature = "integration_test")]
+mod solve_rate_trace {
+    use super::*;
+    use burn_train::metric::{Metric, MetricEntry, MetricMetadata, format_float};
+    use std::sync::{Mutex, OnceLock};
+
+    fn storage() -> &'static Mutex<Vec<f32>> {
+        static TRACE: OnceLock<Mutex<Vec<f32>>> = OnceLock::new();
+        TRACE.get_or_init(|| Mutex::new(Vec::new()))
+    }
+
+    pub fn reset() {
+        if let Ok(mut trace) = storage().lock() {
+            trace.clear();
+        }
+    }
+
+    pub fn take() -> Vec<f32> {
+        if let Ok(mut trace) = storage().lock() {
+            let mut out = Vec::new();
+            std::mem::swap(&mut *trace, &mut out);
+            out
+        } else {
+            Vec::new()
+        }
+    }
+
+    pub fn len() -> usize {
+        if let Ok(trace) = storage().lock() {
+            trace.len()
+        } else {
+            0
+        }
+    }
+
+    #[derive(Clone)]
+    pub struct SolveRateTraceMetric<B: BackendTrait> {
+        name: Arc<String>,
+        every: usize,
+        last: f64,
+        initialized: bool,
+        _marker: std::marker::PhantomData<B>,
+    }
+
+    impl<B: BackendTrait> SolveRateTraceMetric<B> {
+        pub fn new(name: &str, every: usize) -> Self {
+            Self {
+                name: Arc::new(name.to_string()),
+                every: every.max(1),
+                last: 0.0,
+                initialized: false,
+                _marker: std::marker::PhantomData,
+            }
+        }
+    }
+
+    impl<B: BackendTrait> Metric for SolveRateTraceMetric<B> {
+        type Input = SudokuSolveRateInput<B>;
+
+        fn name(&self) -> burn_train::metric::MetricName {
+            Arc::clone(&self.name)
+        }
+
+        fn update(&mut self, item: &Self::Input, metadata: &MetricMetadata) -> MetricEntry {
+            if self.every > 1
+                && !metadata.iteration.is_multiple_of(self.every)
+                && self.initialized
+            {
+                return MetricEntry::new(
+                    Arc::clone(&self.name),
+                    format_float(self.last, 4),
+                    self.last.to_string(),
+                );
+            }
+            let value = item
+                .value()
+                .mean()
+                .into_data()
+                .iter::<f64>()
+                .next()
+                .unwrap_or(0.0);
+            self.last = value;
+            self.initialized = true;
+            if let Ok(mut trace) = storage().lock() {
+                trace.push(value as f32);
+            }
+            MetricEntry::new(
+                Arc::clone(&self.name),
+                format_float(value, 4),
+                value.to_string(),
+            )
+        }
+
+        fn clear(&mut self) {
+            self.last = 0.0;
+            self.initialized = false;
+        }
+    }
+}
+
+#[cfg(feature = "integration_test")]
+pub use solve_rate_trace::{
+    len as solve_rate_trace_len, reset as solve_rate_trace_reset, take as solve_rate_trace_take,
+};
+#[cfg(feature = "integration_test")]
+pub use solve_rate_trace::SolveRateTraceMetric;
+
+#[cfg(feature = "integration_test")]
+mod halt_prob_trace {
+    use super::*;
+    use burn_train::metric::{Metric, MetricEntry, MetricMetadata, format_float};
+    use std::sync::{Mutex, OnceLock};
+
+    fn storage() -> &'static Mutex<Vec<f32>> {
+        static TRACE: OnceLock<Mutex<Vec<f32>>> = OnceLock::new();
+        TRACE.get_or_init(|| Mutex::new(Vec::new()))
+    }
+
+    pub fn reset() {
+        if let Ok(mut trace) = storage().lock() {
+            trace.clear();
+        }
+    }
+
+    pub fn take() -> Vec<f32> {
+        if let Ok(mut trace) = storage().lock() {
+            let mut out = Vec::new();
+            std::mem::swap(&mut *trace, &mut out);
+            out
+        } else {
+            Vec::new()
+        }
+    }
+
+    pub fn len() -> usize {
+        if let Ok(trace) = storage().lock() {
+            trace.len()
+        } else {
+            0
+        }
+    }
+
+    #[derive(Clone)]
+    pub struct HaltProbTraceMetric<B: BackendTrait> {
+        name: Arc<String>,
+        every: usize,
+        last: f64,
+        initialized: bool,
+        _marker: std::marker::PhantomData<B>,
+    }
+
+    impl<B: BackendTrait> HaltProbTraceMetric<B> {
+        pub fn new(name: &str, every: usize) -> Self {
+            Self {
+                name: Arc::new(name.to_string()),
+                every: every.max(1),
+                last: 0.0,
+                initialized: false,
+                _marker: std::marker::PhantomData,
+            }
+        }
+    }
+
+    impl<B: BackendTrait> Metric for HaltProbTraceMetric<B> {
+        type Input = SudokuHaltProbInput<B>;
+
+        fn name(&self) -> burn_train::metric::MetricName {
+            Arc::clone(&self.name)
+        }
+
+        fn update(&mut self, item: &Self::Input, metadata: &MetricMetadata) -> MetricEntry {
+            if self.every > 1
+                && !metadata.iteration.is_multiple_of(self.every)
+                && self.initialized
+            {
+                return MetricEntry::new(
+                    Arc::clone(&self.name),
+                    format_float(self.last, 4),
+                    self.last.to_string(),
+                );
+            }
+            let value = item
+                .value()
+                .mean()
+                .into_data()
+                .iter::<f64>()
+                .next()
+                .unwrap_or(0.0);
+            self.last = value;
+            self.initialized = true;
+            if let Ok(mut trace) = storage().lock() {
+                trace.push(value as f32);
+            }
+            MetricEntry::new(
+                Arc::clone(&self.name),
+                format_float(value, 4),
+                value.to_string(),
+            )
+        }
+
+        fn clear(&mut self) {
+            self.last = 0.0;
+            self.initialized = false;
+        }
+    }
+}
+
+#[cfg(feature = "integration_test")]
+pub use halt_prob_trace::{
+    len as halt_prob_trace_len, reset as halt_prob_trace_reset, take as halt_prob_trace_take,
+};
+#[cfg(feature = "integration_test")]
+pub use halt_prob_trace::HaltProbTraceMetric;

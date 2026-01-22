@@ -15,8 +15,8 @@ max_records = 25000
 [training]
 batch_size = 64
 max_iters = 50000
-log_frequency = 500
-rollout_steps = 128
+log_frequency = 1
+rollout_steps = 256
 rollout_backprop_steps = 4
 halt_weight = 0.5
 halt_exploration_prob = 0.1
@@ -65,4 +65,4 @@ fused_kernels = true
 output = "mp4"
 fps = 8
 max_samples = 8
-overwrite = true
+overwrite = false

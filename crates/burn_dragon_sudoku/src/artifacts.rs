@@ -8,7 +8,7 @@ use burn_dragon_train::VisionArtifactOutputMode;
 use burn_dragon_train::train::artifacts::{ArtifactFrame, write_video};
 
 use crate::config::{SudokuArtifactConfig, SudokuTrainingHyperparameters};
-use crate::dataset::{SudokuDataset, SudokuSplit};
+use crate::dataset::{SudokuBatch, SudokuDataset, SudokuSplit};
 use crate::model::SudokuSaccadeModel;
 use crate::vocab::{GRID_LEN, VOCAB_SIZE};
 
@@ -34,13 +34,26 @@ pub fn write_validation_artifacts<B: BackendTrait>(
     run_dir: &Path,
     device: &B::Device,
 ) -> Result<()> {
-    let output_dir = run_dir.join("artifacts");
-    let output_mode = match config.output {
-        VisionArtifactOutputMode::Images => VisionArtifactOutputMode::Avi,
-        other => other,
-    };
+    if config.max_samples == 0 {
+        return Ok(());
+    }
 
     let batch = dataset.sample_batch::<B>(SudokuSplit::Val, device);
+    write_validation_artifacts_from_batch(model, &batch, config, training, run_dir, 0)
+}
+
+pub fn write_validation_artifacts_from_batch<B: BackendTrait>(
+    model: &SudokuSaccadeModel<B>,
+    batch: &SudokuBatch<B>,
+    config: &SudokuArtifactConfig,
+    training: &SudokuTrainingHyperparameters,
+    run_dir: &Path,
+    epoch: usize,
+) -> Result<()> {
+    if config.max_samples == 0 {
+        return Ok(());
+    }
+    let device = batch.puzzles.device();
     let puzzles = batch
         .puzzles
         .to_data()
@@ -54,7 +67,10 @@ pub fn write_validation_artifacts<B: BackendTrait>(
         .into_vec::<i64>()
         .map_err(|err| anyhow!("solution to vec: {err:?}"))?;
 
-    let batch_size = (puzzles.len() / GRID_LEN).max(1);
+    let batch_size = puzzles.len() / GRID_LEN;
+    if batch_size == 0 {
+        return Ok(());
+    }
     let sample_count = config.max_samples.min(batch_size).max(1);
     let mut puzzle_grids = Vec::with_capacity(sample_count);
     let mut solution_grids = Vec::with_capacity(sample_count);
@@ -68,6 +84,46 @@ pub fn write_validation_artifacts<B: BackendTrait>(
         puzzle_grids.push(grid);
         solution_grids.push(sol);
     }
+
+    write_validation_artifacts_with_grids(
+        model,
+        puzzle_grids,
+        solution_grids,
+        config,
+        training,
+        run_dir,
+        &device,
+        epoch,
+    )
+}
+
+fn write_validation_artifacts_with_grids<B: BackendTrait>(
+    model: &SudokuSaccadeModel<B>,
+    mut puzzle_grids: Vec<Vec<u8>>,
+    mut solution_grids: Vec<Vec<u8>>,
+    config: &SudokuArtifactConfig,
+    training: &SudokuTrainingHyperparameters,
+    run_dir: &Path,
+    device: &B::Device,
+    epoch: usize,
+) -> Result<()> {
+    if config.max_samples == 0 {
+        return Ok(());
+    }
+    if puzzle_grids.is_empty() || solution_grids.is_empty() {
+        return Ok(());
+    }
+
+    let available = puzzle_grids.len().min(solution_grids.len());
+    let sample_count = config.max_samples.min(available).max(1);
+    puzzle_grids.truncate(sample_count);
+    solution_grids.truncate(sample_count);
+
+    let output_dir = run_dir.join("artifacts");
+    let output_mode = match config.output {
+        VisionArtifactOutputMode::Images => VisionArtifactOutputMode::Avi,
+        other => other,
+    };
 
     let frames = generate_rollout_frames(
         model,
@@ -86,7 +142,7 @@ pub fn write_validation_artifacts<B: BackendTrait>(
             &output_dir,
             output_mode,
             config.overwrite,
-            0,
+            epoch,
             sample_idx,
             &sample_frames,
             config.fps,

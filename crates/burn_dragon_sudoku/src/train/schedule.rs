@@ -6,6 +6,7 @@ use crate::train::metrics::{
 };
 use crate::train::prelude::*;
 use crate::train::steps::SudokuTrainer;
+use burn_train::metric::IterationSpeedMetric;
 use burn_train::renderer::tui::TuiMetricsRenderer;
 use std::env;
 use std::io::IsTerminal;
@@ -56,6 +57,7 @@ where
         .num_epochs(env.epochs)
         .learning_strategy(LearningStrategy::SingleDevice(env.device.clone()))
         .with_file_checkpointer(BinFileRecorder::<FullPrecisionSettings>::new())
+        .metric_train_numeric(IterationSpeedMetric::new())
         .metric_train_numeric(
             ScalarMetric::<ValidBackend<B>, LossValue<ValidBackend<B>>>::new_every(
                 "Loss",

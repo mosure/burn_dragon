@@ -135,6 +135,14 @@ pub struct SudokuTrainingHyperparameters {
     pub log_frequency: usize,
     pub rollout_steps: usize,
     #[serde(default)]
+    pub rollout_min_steps: usize,
+    #[serde(default)]
+    pub rollout_max_steps: usize,
+    #[serde(default)]
+    pub rollout_max_steps_warmup_iters: usize,
+    #[serde(default)]
+    pub rollout_max_steps_warmup_cap: usize,
+    #[serde(default)]
     pub rollout_backprop_steps: Option<usize>,
     #[serde(default = "default_halt_weight")]
     pub halt_weight: f32,
@@ -162,6 +170,8 @@ pub struct SudokuTrainingHyperparameters {
     pub policy_entropy_weight_final: f32,
     #[serde(default)]
     pub policy_entropy_anneal_steps: usize,
+    #[serde(default = "default_policy_recon_weight")]
+    pub policy_recon_weight: f32,
     #[serde(default = "default_revisit_min_filled_frac")]
     pub revisit_min_filled_frac: f32,
     #[serde(default = "default_revisit_min_filled_final")]
@@ -170,12 +180,18 @@ pub struct SudokuTrainingHyperparameters {
     pub revisit_min_filled_anneal_steps: usize,
     #[serde(default = "default_reward_unknown_power")]
     pub reward_unknown_power: f32,
+    #[serde(default = "default_saccade_step_cells")]
+    pub saccade_step_cells: usize,
     #[serde(default = "default_recon_loss")]
     pub recon_loss: SudokuReconLoss,
     #[serde(default = "default_loss_mask")]
     pub loss_mask: SudokuLossMask,
     #[serde(default = "default_recon_loss_interval_steps")]
     pub recon_loss_interval_steps: usize,
+    #[serde(default = "default_global_loss_samples")]
+    pub global_loss_samples: usize,
+    #[serde(default = "default_global_loss_weight")]
+    pub global_loss_weight: f32,
     #[serde(default)]
     pub gdpo: GdpoConfig,
 }
@@ -186,6 +202,10 @@ pub struct SudokuModelConfig {
     pub n_embd: usize,
     pub n_head: usize,
     pub mlp_internal_dim_multiplier: usize,
+    #[serde(default = "default_summary_tokens")]
+    pub summary_tokens: usize,
+    #[serde(default = "default_policy_heads")]
+    pub policy_heads: usize,
     #[serde(default = "default_dropout")]
     pub dropout: f64,
     #[serde(default)]
@@ -201,6 +221,8 @@ impl Default for SudokuModelConfig {
             n_embd: 256,
             n_head: 4,
             mlp_internal_dim_multiplier: 4,
+            summary_tokens: default_summary_tokens(),
+            policy_heads: default_policy_heads(),
             dropout: default_dropout(),
             fused_kernels: false,
             relu_threshold: 0.0,
@@ -258,13 +280,49 @@ impl SudokuTrainingConfig {
         if self.training.rollout_steps == 0 {
             return Err(anyhow!("training.rollout_steps must be > 0"));
         }
+        let max_rollout_steps = if self.training.rollout_max_steps > 0 {
+            self.training.rollout_max_steps
+        } else {
+            self.training.rollout_steps
+        };
+        let min_rollout_steps = if self.training.rollout_min_steps > 0 {
+            self.training.rollout_min_steps
+        } else {
+            max_rollout_steps
+        };
+        if min_rollout_steps == 0 || max_rollout_steps == 0 {
+            return Err(anyhow!(
+                "training.rollout_min_steps/rollout_max_steps must be > 0"
+            ));
+        }
+        if min_rollout_steps > max_rollout_steps {
+            return Err(anyhow!(
+                "training.rollout_min_steps ({}) must be <= rollout_max_steps ({})",
+                min_rollout_steps,
+                max_rollout_steps
+            ));
+        }
+        if self.training.rollout_max_steps_warmup_iters > 0 {
+            if self.training.rollout_max_steps_warmup_cap == 0 {
+                return Err(anyhow!(
+                    "training.rollout_max_steps_warmup_cap must be > 0 when warmup is enabled"
+                ));
+            }
+            if self.training.rollout_max_steps_warmup_cap > max_rollout_steps {
+                return Err(anyhow!(
+                    "training.rollout_max_steps_warmup_cap ({}) must be <= rollout_max_steps ({})",
+                    self.training.rollout_max_steps_warmup_cap,
+                    max_rollout_steps
+                ));
+            }
+        }
         if let Some(backprop_steps) = self.training.rollout_backprop_steps
             && backprop_steps > 0
-            && backprop_steps > self.training.rollout_steps
+            && backprop_steps > max_rollout_steps
         {
             return Err(anyhow!(
-                "training.rollout_backprop_steps ({}) must be <= rollout_steps ({})",
-                backprop_steps, self.training.rollout_steps
+                "training.rollout_backprop_steps ({}) must be <= rollout_max_steps ({})",
+                backprop_steps, max_rollout_steps
             ));
         }
         if self.training.halt_weight < 0.0 {
@@ -279,11 +337,14 @@ impl SudokuTrainingConfig {
         if self.training.halt_min_steps == 0 {
             return Err(anyhow!("training.halt_min_steps must be > 0"));
         }
-        if self.training.halt_min_steps > self.training.rollout_steps {
+        if self.training.halt_min_steps > max_rollout_steps {
             return Err(anyhow!(
-                "training.halt_min_steps ({}) must be <= rollout_steps ({})",
-                self.training.halt_min_steps, self.training.rollout_steps
+                "training.halt_min_steps ({}) must be <= rollout_max_steps ({})",
+                self.training.halt_min_steps, max_rollout_steps
             ));
+        }
+        if self.training.saccade_step_cells == 0 {
+            return Err(anyhow!("training.saccade_step_cells must be > 0"));
         }
         if !(0.0..=1.0).contains(&self.training.teacher_forcing_prob) {
             return Err(anyhow!(
@@ -325,6 +386,14 @@ impl SudokuTrainingConfig {
                 self.training.policy_entropy_weight_final
             ));
         }
+        if !self.training.policy_recon_weight.is_finite()
+            || self.training.policy_recon_weight < 0.0
+        {
+            return Err(anyhow!(
+                "training.policy_recon_weight must be >= 0 (got {})",
+                self.training.policy_recon_weight
+            ));
+        }
         if !(0.0..=1.0).contains(&self.training.revisit_min_filled_frac) {
             return Err(anyhow!(
                 "training.revisit_min_filled_frac must be in [0, 1] (got {})",
@@ -341,6 +410,12 @@ impl SudokuTrainingConfig {
             return Err(anyhow!(
                 "training.reward_unknown_power must be >= 0 (got {})",
                 self.training.reward_unknown_power
+            ));
+        }
+        if self.training.global_loss_weight < 0.0 {
+            return Err(anyhow!(
+                "training.global_loss_weight must be >= 0 (got {})",
+                self.training.global_loss_weight
             ));
         }
         if let Some(epochs) = self.training.epochs && epochs == 0 {
@@ -420,6 +495,20 @@ impl SudokuTrainingConfig {
                     return Err(anyhow!("dataset.solution_field must not be empty"));
                 }
             }
+        }
+
+        if self.model.summary_tokens == 0 {
+            return Err(anyhow!("model.summary_tokens must be > 0"));
+        }
+        if self.model.policy_heads == 0 {
+            return Err(anyhow!("model.policy_heads must be > 0"));
+        }
+        if !self.model.n_embd.is_multiple_of(self.model.policy_heads) {
+            return Err(anyhow!(
+                "model.policy_heads ({}) must divide model.n_embd ({})",
+                self.model.policy_heads,
+                self.model.n_embd
+            ));
         }
 
         if let Some(schedule) = &self.optimizer.lr_schedule {
@@ -635,6 +724,10 @@ fn default_policy_entropy_weight_final() -> f32 {
     0.0
 }
 
+fn default_policy_recon_weight() -> f32 {
+    0.05
+}
+
 fn default_revisit_min_filled_frac() -> f32 {
     0.0
 }
@@ -645,6 +738,26 @@ fn default_revisit_min_filled_final() -> f32 {
 
 fn default_reward_unknown_power() -> f32 {
     0.0
+}
+
+fn default_saccade_step_cells() -> usize {
+    1
+}
+
+fn default_summary_tokens() -> usize {
+    1
+}
+
+fn default_policy_heads() -> usize {
+    1
+}
+
+fn default_global_loss_samples() -> usize {
+    16
+}
+
+fn default_global_loss_weight() -> f32 {
+    0.2
 }
 
 #[cfg(test)]

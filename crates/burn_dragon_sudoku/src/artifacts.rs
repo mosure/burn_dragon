@@ -97,6 +97,7 @@ pub fn write_validation_artifacts_from_batch<B: BackendTrait>(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_validation_artifacts_with_grids<B: BackendTrait>(
     model: &SudokuSaccadeModel<B>,
     mut puzzle_grids: Vec<Vec<u8>>,
@@ -125,12 +126,17 @@ fn write_validation_artifacts_with_grids<B: BackendTrait>(
         other => other,
     };
 
+    let rollout_steps = if training.rollout_max_steps > 0 {
+        training.rollout_max_steps
+    } else {
+        training.rollout_steps.max(1)
+    };
     let frames = generate_rollout_frames(
         model,
         puzzle_grids,
         solution_grids,
         training,
-        training.rollout_steps.max(1),
+        rollout_steps,
         device,
     )?;
 
@@ -186,12 +192,33 @@ fn generate_rollout_frames<B: BackendTrait>(
     }
 
     let ones_grid = Tensor::<B, 2>::ones([batch.max(1), GRID_LEN], device);
+    let ones_step = Tensor::<B, 2>::ones([batch.max(1), 1], device);
     let revisit_min_filled = training.revisit_min_filled_final.clamp(0.0, 1.0);
+    let action_index = build_action_index(batch, device);
+    let (row_ids, col_ids) = model.grid_row_col_ids(batch, device);
+    let row_ids_f = row_ids.clone().float();
+    let col_ids_f = col_ids.clone().float();
+
+    let solution_tokens = build_tokens_tensor::<B>(&solutions, device);
+    let init_tokens = build_tokens_tensor::<B>(&puzzles, device);
+    let editable_mask_data: Vec<f32> = editable_masks
+        .iter()
+        .flat_map(|mask| mask.iter().copied())
+        .collect();
+    let editable_mask_tensor = Tensor::<B, 2>::from_data(
+        TensorData::new(editable_mask_data, [batch.max(1), GRID_LEN]),
+        device,
+    );
+    let mut cache =
+        model.cell_embeddings_with_positions(init_tokens.clone(), row_ids.clone(), col_ids.clone());
+    let mut summary_tokens = model.init_summary_tokens(batch);
+    let summary_len = model.summary_token_count();
+    let mut state = model.init_state();
 
     for _step in 0..steps {
         let tokens = build_tokens_tensor::<B>(&puzzles, device);
-        let (hidden, logits) = model.forward_with_hidden(tokens.clone());
-        let policy_logits = model.policy_logits(hidden);
+        let policy_logits =
+            model.policy_logits_from_cache(summary_tokens.clone(), cache.clone());
 
         let (select_mask, selectable_counts) = build_select_mask(
             &unknown_masks,
@@ -209,13 +236,104 @@ fn generate_rollout_frames<B: BackendTrait>(
                 .sub(select_mask.clone())
                 .mul_scalar(POLICY_MASK_PENALTY);
         let actions = masked_logits.argmax(1);
+
+        let tokens_solved_before = tokens
+            .clone()
+            .equal(solution_tokens.clone())
+            .float()
+            .sum_dim(1)
+            .reshape([batch.max(1)])
+            .equal_elem(GRID_LEN as f32)
+            .float()
+            .reshape([batch.max(1), 1]);
+        let selectable_counts_t = select_mask
+            .clone()
+            .sum_dim(1)
+            .reshape([batch.max(1), 1]);
+        let active_mask = selectable_counts_t
+            .greater_elem(0.0)
+            .float()
+            .mul(ones_step.clone().sub(tokens_solved_before.clone()));
+        let mut action_one_hot = build_action_one_hot(&actions, &action_index);
+        let active_mask_grid = active_mask.clone().repeat_dim(1, GRID_LEN);
+        action_one_hot = action_one_hot * active_mask_grid.clone() * select_mask.clone();
+
+        let step_mask = if training.saccade_step_cells > 1 {
+            let selected_row = row_ids_f
+                .clone()
+                .mul(action_one_hot.clone())
+                .sum_dim(1)
+                .reshape([batch.max(1), 1]);
+            let selected_col = col_ids_f
+                .clone()
+                .mul(action_one_hot.clone())
+                .sum_dim(1)
+                .reshape([batch.max(1), 1]);
+            let row_match = row_ids_f
+                .clone()
+                .equal(selected_row.expand([batch.max(1), GRID_LEN]))
+                .float();
+            let col_match = col_ids_f
+                .clone()
+                .equal(selected_col.expand([batch.max(1), GRID_LEN]))
+                .float();
+            (row_match + col_match)
+                .clamp_max(1.0)
+                .mul(active_mask_grid.clone())
+        } else {
+            action_one_hot.clone()
+        };
+        let step_mask_sum = step_mask
+            .clone()
+            .sum_dim(1)
+            .reshape([batch.max(1), 1])
+            .clamp_min(1.0);
+        let [_, _, embd] = cache.shape().dims();
+        let step_emb = cache
+            .clone()
+            .mul(step_mask.unsqueeze_dim::<3>(2))
+            .sum_dim(1)
+            .div(step_mask_sum.clone().reshape([batch.max(1), 1, 1]))
+            .reshape([batch.max(1), 1, embd]);
+        let step_input = Tensor::cat(vec![summary_tokens.clone(), step_emb], 1);
+        let (step_hidden, _step_logits_full) =
+            model.forward_with_hidden_and_state_embedded(step_input, &mut state);
+        let summary_hidden = step_hidden.clone().slice_dim(1, 0..summary_len);
+        let step_hidden = step_hidden.slice_dim(1, summary_len..summary_len + 1);
+        summary_tokens = summary_hidden;
+        let step_logits = model.value_logits_from_hidden(step_hidden.clone());
+
         let action_data = actions
             .to_data()
             .convert::<i64>()
             .into_vec::<i64>()
             .map_err(|err| anyhow!("actions to vec: {err:?}"))?;
-        let preds = logits.argmax(2);
-        let pred_data = preds
+        let pred_values = step_logits.argmax(2).reshape([batch.max(1), 1]);
+        let update_mask_f = action_one_hot
+            .clone()
+            .mul(editable_mask_tensor.clone())
+            .unsqueeze_dim::<3>(2);
+        let selected_row = row_ids_f
+            .clone()
+            .mul(action_one_hot.clone())
+            .sum_dim(1)
+            .reshape([batch.max(1), 1])
+            .int();
+        let selected_col = col_ids_f
+            .clone()
+            .mul(action_one_hot.clone())
+            .sum_dim(1)
+            .reshape([batch.max(1), 1])
+            .int();
+        let update_emb = model.cell_embeddings_with_positions(
+            pred_values.clone(),
+            selected_row,
+            selected_col,
+        );
+        let update_emb = update_emb.expand([batch.max(1), GRID_LEN, embd]);
+        let keep = update_mask_f.clone().mul_scalar(-1.0).add_scalar(1.0);
+        cache = cache * keep + update_emb.mul(update_mask_f);
+        let pred_data = pred_values
             .to_data()
             .convert::<i64>()
             .into_vec::<i64>()
@@ -237,15 +355,21 @@ fn generate_rollout_frames<B: BackendTrait>(
                     .copied()
                     .unwrap_or(0)
                     .clamp(0, (GRID_LEN - 1) as i64) as usize;
-                let pred_idx = sample_idx * GRID_LEN + action;
-                let pred = pred_data
-                    .get(pred_idx)
+                let editable = editable_masks
+                    .get(sample_idx)
+                    .and_then(|mask| mask.get(action))
                     .copied()
-                    .unwrap_or(0)
-                    .clamp(0, (VOCAB_SIZE - 1) as i64) as u8;
-                grid[action] = pred;
-                if let Some(mask) = unknown_masks.get_mut(sample_idx) {
-                    if let Some(entry) = mask.get_mut(action) {
+                    .unwrap_or(0.0);
+                if editable > 0.5 {
+                    let pred = pred_data
+                        .get(sample_idx)
+                        .copied()
+                        .unwrap_or(0)
+                        .clamp(0, (VOCAB_SIZE - 1) as i64) as u8;
+                    grid[action] = pred;
+                    if let Some(mask) = unknown_masks.get_mut(sample_idx)
+                        && let Some(entry) = mask.get_mut(action)
+                    {
                         *entry = 0.0;
                     }
                 }
@@ -257,7 +381,6 @@ fn generate_rollout_frames<B: BackendTrait>(
 
     Ok(frames)
 }
-
 fn build_select_mask(
     unknown_masks: &[Vec<f32>],
     editable_masks: &[Vec<f32>],
@@ -272,11 +395,36 @@ fn build_select_mask(
         let unknown_count = unknown.iter().copied().sum::<f32>();
         let filled_frac = (editable_count - unknown_count) / editable_count;
         let allow_revisit = filled_frac >= revisit_min_filled;
-        let mask = if allow_revisit { editable } else { unknown };
+        let mut mask = Vec::with_capacity(GRID_LEN);
+        for (&unknown_cell, &editable_cell) in unknown.iter().zip(editable.iter()) {
+            let clue = 1.0 - editable_cell;
+            let allowed = if allow_revisit {
+                editable_cell + clue
+            } else {
+                unknown_cell + clue
+            };
+            mask.push(allowed.min(1.0));
+        }
         selectable_counts.push(mask.iter().copied().sum::<f32>());
-        select_mask.extend(mask.iter().copied());
+        select_mask.extend(mask.into_iter());
     }
     (select_mask, selectable_counts)
+}
+
+fn build_action_index<B: BackendTrait>(batch: usize, device: &B::Device) -> Tensor<B, 2, Int> {
+    let batch = batch.max(1);
+    Tensor::<B, 1, Int>::arange(0..GRID_LEN as i64, device)
+        .unsqueeze_dim::<2>(0)
+        .expand([batch, GRID_LEN])
+}
+
+fn build_action_one_hot<B: BackendTrait>(
+    actions: &Tensor<B, 2, Int>,
+    action_index: &Tensor<B, 2, Int>,
+) -> Tensor<B, 2> {
+    let [batch, grid] = action_index.shape().dims::<2>();
+    let expanded = actions.clone().expand([batch, grid]);
+    expanded.equal(action_index.clone()).float()
 }
 
 fn is_grid_solved(grid: &[u8], solution: &[u8]) -> bool {

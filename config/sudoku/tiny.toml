@@ -10,38 +10,46 @@ train_files = ["train_0.parquet"]
 validation_files = ["valid_0.parquet"]
 puzzle_field = "puzzle"
 solution_field = "solution"
-max_records = 25000
+max_records = 10000
 
 [training]
 batch_size = 64
-max_iters = 50000
+max_iters = 5000
 log_frequency = 1
-rollout_steps = 256
+rollout_steps = 512
+rollout_min_steps = 4
+rollout_max_steps = 512
+rollout_max_steps_warmup_iters = 200
+rollout_max_steps_warmup_cap = 64
 rollout_backprop_steps = 4
 halt_weight = 0.5
 halt_exploration_prob = 0.1
 halt_min_steps = 2
 policy_noise = 0.1
-teacher_forcing_prob = 1.0
+teacher_forcing_prob = 0.3
 teacher_forcing_final = 0.0
-teacher_forcing_anneal_steps = 10000
+teacher_forcing_anneal_steps = 2000
 policy_temperature = 1.5
 policy_temperature_final = 1.0
 policy_temperature_anneal_steps = 10000
 policy_entropy_weight = 0.02
 policy_entropy_weight_final = 0.0
 policy_entropy_anneal_steps = 10000
-revisit_min_filled_frac = 1.0
+policy_recon_weight = 0.05
+revisit_min_filled_frac = 0.2
 revisit_min_filled_final = 0.0
-revisit_min_filled_anneal_steps = 10000
+revisit_min_filled_anneal_steps = 2000
 reward_unknown_power = 1.0
+saccade_step_cells = 1
 recon_loss = "stablemax"
-loss_mask = "unknown"
-recon_loss_interval_steps = 8
+loss_mask = "all"
+recon_loss_interval_steps = 1
+global_loss_samples = 16
+global_loss_weight = 0.2
 
 [training.gdpo]
 enabled = true
-group_size = 8
+group_size = 4
 hard_weight = 1.0
 easy_weight = 1.0
 policy_weight = 1.0
@@ -51,13 +59,15 @@ advantage_ema_decay = 0.99
 
 [optimizer]
 learning_rate = 0.0001
-weight_decay = 1.0
+weight_decay = 0.1
 
 [model]
 n_layer = 2
-n_embd = 256
+n_embd = 512
 n_head = 4
 mlp_internal_dim_multiplier = 4
+summary_tokens = 1
+policy_heads = 1
 dropout = 0.0
 fused_kernels = true
 

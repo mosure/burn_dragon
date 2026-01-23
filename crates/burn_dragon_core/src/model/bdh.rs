@@ -174,6 +174,10 @@ impl<B: Backend> BDH<B> {
         (hidden, logits)
     }
 
+    pub fn embed_tokens(&self, tokens: Tensor<B, 2, Int>) -> Tensor<B, 3> {
+        self.embed.forward(tokens)
+    }
+
     pub fn forward_fast(&self, tokens: Tensor<B, 2, Int>) -> Tensor<B, 3> {
         let embedded = self.embed.forward(tokens);
         let [batch, time, embd] = embedded.shape().dims::<3>();
@@ -387,17 +391,25 @@ impl<B: Backend> BDH<B> {
         Tensor::cat(outputs, 2)
     }
 
-    pub fn forward_with_state(
+    fn forward_with_state_impl(
         &self,
         tokens: Tensor<B, 2, Int>,
         state: &mut ModelState<B>,
-    ) -> Tensor<B, 3> {
+    ) -> (Tensor<B, 3>, Tensor<B, 3>) {
+        let embedded = self.embed.forward(tokens);
+        self.forward_with_state_from_embedded(embedded, state)
+    }
+
+    fn forward_with_state_from_embedded(
+        &self,
+        embedded: Tensor<B, 3>,
+        state: &mut ModelState<B>,
+    ) -> (Tensor<B, 3>, Tensor<B, 3>) {
         assert_eq!(
             state.layers.len(),
             self.n_layer,
             "model state layers mismatch"
         );
-        let embedded = self.embed.forward(tokens);
         let [batch, time, embd] = embedded.shape().dims::<3>();
         let mut current = embedded.reshape([batch, 1, time, embd]);
         current = self.layer_norm(current);
@@ -519,10 +531,48 @@ impl<B: Backend> BDH<B> {
         }
 
         let [batch, _, time, dim] = current.shape().dims();
-        state.position = state.position.saturating_add(time);
-        current
+        let hidden = current.reshape([batch, time, dim]);
+        let logits = hidden
+            .clone()
             .reshape([batch * time, dim])
             .matmul(self.lm_head.val())
-            .reshape([batch, time, self.vocab_size])
+            .reshape([batch, time, self.vocab_size]);
+        state.position = state.position.saturating_add(time);
+
+        (hidden, logits)
+    }
+
+    pub fn forward_with_state(
+        &self,
+        tokens: Tensor<B, 2, Int>,
+        state: &mut ModelState<B>,
+    ) -> Tensor<B, 3> {
+        let (_hidden, logits) = self.forward_with_state_impl(tokens, state);
+        logits
+    }
+
+    pub fn forward_with_hidden_and_state(
+        &self,
+        tokens: Tensor<B, 2, Int>,
+        state: &mut ModelState<B>,
+    ) -> (Tensor<B, 3>, Tensor<B, 3>) {
+        self.forward_with_state_impl(tokens, state)
+    }
+
+    pub fn forward_with_state_embedded(
+        &self,
+        embedded: Tensor<B, 3>,
+        state: &mut ModelState<B>,
+    ) -> Tensor<B, 3> {
+        let (_hidden, logits) = self.forward_with_state_from_embedded(embedded, state);
+        logits
+    }
+
+    pub fn forward_with_hidden_and_state_embedded(
+        &self,
+        embedded: Tensor<B, 3>,
+        state: &mut ModelState<B>,
+    ) -> (Tensor<B, 3>, Tensor<B, 3>) {
+        self.forward_with_state_from_embedded(embedded, state)
     }
 }

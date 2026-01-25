@@ -11,8 +11,8 @@ use tempfile::tempdir;
 
 use burn_dragon_sudoku::config::{
     load_training_config, SudokuArtifactConfig, SudokuDatasetConfig, SudokuDatasetSourceConfig,
-    SudokuLocalConfig, SudokuLossMask, SudokuModelConfig, SudokuReconLoss, SudokuRecordFormat,
-    SudokuTrainingConfig, SudokuTrainingHyperparameters,
+    SudokuLocalConfig, SudokuLossMask, SudokuModelConfig, SudokuPolicyHead, SudokuReconLoss,
+    SudokuRecordFormat, SudokuTrainingConfig, SudokuTrainingHyperparameters,
 };
 #[cfg(all(feature = "cuda", feature = "integration_test"))]
 use burn_dragon_sudoku::model::SudokuSaccadeModel;
@@ -94,6 +94,9 @@ fn cpu_sudoku_training_loss_decreases() {
         halt_exploration_prob: 0.0,
         halt_min_steps: 1,
         policy_noise: 0.2,
+        policy_epsilon: 0.0,
+        policy_epsilon_final: 0.0,
+        policy_epsilon_anneal_steps: 0,
         teacher_forcing_prob: 1.0,
         teacher_forcing_final: 1.0,
         teacher_forcing_anneal_steps: 0,
@@ -103,6 +106,13 @@ fn cpu_sudoku_training_loss_decreases() {
         policy_entropy_weight: 0.0,
         policy_entropy_weight_final: 0.0,
         policy_entropy_anneal_steps: 0,
+        policy_entropy_adaptive: false,
+        policy_entropy_target_scale: 1.0,
+        policy_entropy_alpha: 0.0,
+        policy_entropy_alpha_lr: 0.0,
+        policy_visit_penalty: 0.0,
+        policy_revisit_cooldown: 0,
+        policy_revisit_penalty: 0.0,
         policy_recon_weight: 0.0,
         revisit_min_filled_frac: 0.0,
         revisit_min_filled_final: 0.0,
@@ -140,9 +150,12 @@ fn cpu_sudoku_training_loss_decreases() {
             mlp_internal_dim_multiplier: 2,
             summary_tokens: 1,
             policy_heads: 1,
+            policy_head: SudokuPolicyHead::Cache,
+            policy_mlp_hidden_mult: 2,
             dropout: 0.0,
             fused_kernels: false,
             relu_threshold: 0.0,
+                cache_mhc: SudokuCacheMhcConfig::default(),
         },
     };
 
@@ -206,6 +219,9 @@ fn cpu_sudoku_validation_solve_rate_gate() {
         halt_exploration_prob: 0.0,
         halt_min_steps: 1,
         policy_noise: 0.0,
+        policy_epsilon: 0.0,
+        policy_epsilon_final: 0.0,
+        policy_epsilon_anneal_steps: 0,
         teacher_forcing_prob: 1.0,
         teacher_forcing_final: 0.0,
         teacher_forcing_anneal_steps: 10,
@@ -215,6 +231,13 @@ fn cpu_sudoku_validation_solve_rate_gate() {
         policy_entropy_weight: 0.0,
         policy_entropy_weight_final: 0.0,
         policy_entropy_anneal_steps: 0,
+        policy_entropy_adaptive: false,
+        policy_entropy_target_scale: 1.0,
+        policy_entropy_alpha: 0.0,
+        policy_entropy_alpha_lr: 0.0,
+        policy_visit_penalty: 0.0,
+        policy_revisit_cooldown: 0,
+        policy_revisit_penalty: 0.0,
         policy_recon_weight: 0.0,
         revisit_min_filled_frac: 1.0,
         revisit_min_filled_final: 1.0,
@@ -252,9 +275,12 @@ fn cpu_sudoku_validation_solve_rate_gate() {
             mlp_internal_dim_multiplier: 2,
             summary_tokens: 1,
             policy_heads: 1,
+            policy_head: SudokuPolicyHead::Cache,
+            policy_mlp_hidden_mult: 2,
             dropout: 0.0,
             fused_kernels: false,
             relu_threshold: 0.0,
+                cache_mhc: SudokuCacheMhcConfig::default(),
         },
     };
 
@@ -318,9 +344,12 @@ fn run_single_cuda_step(device: &CudaDevice, rollout_steps: usize) -> Option<Mem
             mlp_internal_dim_multiplier: 2,
             summary_tokens: 1,
             policy_heads: 1,
+            policy_head: SudokuPolicyHead::Cache,
+            policy_mlp_hidden_mult: 2,
             dropout: 0.0,
             fused_kernels: false,
             relu_threshold: 0.0,
+                cache_mhc: SudokuCacheMhcConfig::default(),
         },
         device,
     );
@@ -340,6 +369,9 @@ fn run_single_cuda_step(device: &CudaDevice, rollout_steps: usize) -> Option<Mem
         halt_exploration_prob: 0.0,
         halt_min_steps: 1,
         policy_noise: 0.0,
+        policy_epsilon: 0.0,
+        policy_epsilon_final: 0.0,
+        policy_epsilon_anneal_steps: 0,
         teacher_forcing_prob: 0.0,
         teacher_forcing_final: 0.0,
         teacher_forcing_anneal_steps: 0,
@@ -349,6 +381,13 @@ fn run_single_cuda_step(device: &CudaDevice, rollout_steps: usize) -> Option<Mem
         policy_entropy_weight: 0.0,
         policy_entropy_weight_final: 0.0,
         policy_entropy_anneal_steps: 0,
+        policy_entropy_adaptive: false,
+        policy_entropy_target_scale: 1.0,
+        policy_entropy_alpha: 0.0,
+        policy_entropy_alpha_lr: 0.0,
+        policy_visit_penalty: 0.0,
+        policy_revisit_cooldown: 0,
+        policy_revisit_penalty: 0.0,
         policy_recon_weight: 0.0,
         revisit_min_filled_frac: 0.0,
         revisit_min_filled_final: 0.0,
@@ -505,3 +544,4 @@ fn cuda_sudoku_training_tiny_like_smoke() {
         "expected solve rates in [0, 1] from cuda integration run"
     );
 }
+

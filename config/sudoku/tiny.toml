@@ -10,42 +10,81 @@ train_files = ["train_0.parquet"]
 validation_files = ["valid_0.parquet"]
 puzzle_field = "puzzle"
 solution_field = "solution"
-max_records = 10000
+max_records = 50000
 
 [training]
-batch_size = 64
-max_iters = 5000
+batch_size = 128
+max_iters = 50000
 log_frequency = 1
-rollout_steps = 512
-rollout_min_steps = 4
-rollout_max_steps = 512
-rollout_max_steps_warmup_iters = 200
-rollout_max_steps_warmup_cap = 64
-rollout_backprop_steps = 4
-halt_weight = 0.5
-halt_exploration_prob = 0.1
-halt_min_steps = 2
-policy_noise = 0.1
-teacher_forcing_prob = 0.3
-teacher_forcing_final = 0.0
-teacher_forcing_anneal_steps = 2000
-policy_temperature = 1.5
-policy_temperature_final = 1.0
-policy_temperature_anneal_steps = 10000
-policy_entropy_weight = 0.02
-policy_entropy_weight_final = 0.0
-policy_entropy_anneal_steps = 10000
-policy_recon_weight = 0.05
-revisit_min_filled_frac = 0.2
-revisit_min_filled_final = 0.0
-revisit_min_filled_anneal_steps = 2000
-reward_unknown_power = 1.0
+
+[training.rollout]
+steps = 512
+min_steps = 4
+max_steps = 0
+max_steps_warmup_iters = 0
+max_steps_warmup_cap = 0
+backprop_steps = 4
 saccade_step_cells = 1
-recon_loss = "stablemax"
+
+[training.rollout.schedule]
+start_steps = 64
+final_steps = 512
+anneal_iters = 3000
+
+[training.halt]
+weight = 0.5
+exploration_prob = 0.1
+min_steps = 2
+
+[training.policy]
+noise = 0.0
+epsilon = 0.005
+epsilon_final = 0.0
+epsilon_anneal_steps = 5000
+teacher_forcing_prob = 0.6
+teacher_forcing_final = 0.1
+teacher_forcing_anneal_steps = 3000
+temperature = 1.0
+temperature_final = 1.0
+temperature_anneal_steps = 10000
+entropy_weight = 0.0
+entropy_weight_final = 0.0
+entropy_anneal_steps = 0
+entropy_adaptive = true
+entropy_target_scale = 0.9
+entropy_target_ema_decay = 0.99
+entropy_alpha = 0.01
+entropy_alpha_lr = 0.001
+visit_penalty = 0.02
+revisit_cooldown = 4
+revisit_penalty = 1.0e4
+recon_weight = 0.1
+
+[training.revisit]
+min_filled_frac = 0.2
+min_filled_final = 0.0
+min_filled_anneal_steps = 2000
+
+[training.reward]
+unknown_power = 1.0
+
+[training.reward.shaping]
+enabled = true
+metric = "conflict"
+weight = 0.1
+gamma = 0.99
+
+[training.reward.baseline]
+enabled = true
+gamma = 0.99
+lambda = 0.95
+
+[training.recon]
+loss = "stablemax"
 loss_mask = "all"
-recon_loss_interval_steps = 1
+loss_interval_steps = 1
 global_loss_samples = 16
-global_loss_weight = 0.2
+global_loss_weight = 0.4
 
 [training.gdpo]
 enabled = true
@@ -53,9 +92,14 @@ group_size = 4
 hard_weight = 1.0
 easy_weight = 1.0
 policy_weight = 1.0
-policy_clip_range = 0.2
-advantage_clip = 5.0
-advantage_ema_decay = 0.99
+policy_clip_range = 0.1
+advantage_clip = 2.5
+advantage_ema_decay = 0.9
+
+[training.gdpo.hard_gate]
+type = "percentile"
+quantile = 0.7
+
 
 [optimizer]
 learning_rate = 0.0001
@@ -64,10 +108,12 @@ weight_decay = 0.1
 [model]
 n_layer = 2
 n_embd = 512
-n_head = 4
+n_head = 8
 mlp_internal_dim_multiplier = 4
 summary_tokens = 1
 policy_heads = 1
+policy_head = "summary_mlp"
+policy_mlp_hidden_mult = 2
 dropout = 0.0
 fused_kernels = true
 
@@ -76,3 +122,4 @@ output = "mp4"
 fps = 8
 max_samples = 8
 overwrite = false
+sample_policy = false

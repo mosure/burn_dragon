@@ -5,6 +5,8 @@ use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 use toml::Value;
 
+use burn_dragon_core::ManifoldHyperConnectionsConfig;
+
 use burn_dragon_train::{
     GdpoConfig, GdpoHardGate, LearningRateScheduleConfig, OptimizerConfig, WgpuRuntimeConfig,
 };
@@ -126,32 +128,88 @@ pub enum SudokuLossMask {
     Unknown,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SudokuPolicyHead {
+    #[default]
+    Cache,
+    SummaryPos,
+    SummaryMlp,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-pub struct SudokuTrainingHyperparameters {
-    pub batch_size: usize,
+pub struct SudokuRolloutConfig {
+    pub steps: usize,
     #[serde(default)]
-    pub epochs: Option<usize>,
-    pub max_iters: usize,
-    pub log_frequency: usize,
-    pub rollout_steps: usize,
+    pub min_steps: usize,
     #[serde(default)]
-    pub rollout_min_steps: usize,
+    pub max_steps: usize,
     #[serde(default)]
-    pub rollout_max_steps: usize,
+    pub max_steps_warmup_iters: usize,
     #[serde(default)]
-    pub rollout_max_steps_warmup_iters: usize,
+    pub max_steps_warmup_cap: usize,
     #[serde(default)]
-    pub rollout_max_steps_warmup_cap: usize,
+    pub backprop_steps: Option<usize>,
+    #[serde(default = "default_saccade_step_cells")]
+    pub saccade_step_cells: usize,
     #[serde(default)]
-    pub rollout_backprop_steps: Option<usize>,
+    pub schedule: Option<SudokuRolloutSchedule>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default)]
+pub struct SudokuRolloutSchedule {
+    pub start_steps: usize,
+    pub final_steps: usize,
+    #[serde(default)]
+    pub anneal_iters: usize,
+}
+
+
+impl Default for SudokuRolloutConfig {
+    fn default() -> Self {
+        Self {
+            steps: 0,
+            min_steps: 0,
+            max_steps: 0,
+            max_steps_warmup_iters: 0,
+            max_steps_warmup_cap: 0,
+            backprop_steps: None,
+            saccade_step_cells: default_saccade_step_cells(),
+            schedule: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct SudokuHaltConfig {
     #[serde(default = "default_halt_weight")]
-    pub halt_weight: f32,
+    pub weight: f32,
     #[serde(default = "default_halt_exploration_prob")]
-    pub halt_exploration_prob: f32,
+    pub exploration_prob: f32,
     #[serde(default = "default_halt_min_steps")]
-    pub halt_min_steps: usize,
+    pub min_steps: usize,
+}
+
+impl Default for SudokuHaltConfig {
+    fn default() -> Self {
+        Self {
+            weight: default_halt_weight(),
+            exploration_prob: default_halt_exploration_prob(),
+            min_steps: default_halt_min_steps(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct SudokuPolicyConfig {
     #[serde(default)]
-    pub policy_noise: f32,
+    pub noise: f32,
+    #[serde(default = "default_policy_epsilon")]
+    pub epsilon: f32,
+    #[serde(default = "default_policy_epsilon_final")]
+    pub epsilon_final: f32,
+    #[serde(default)]
+    pub epsilon_anneal_steps: usize,
     #[serde(default = "default_teacher_forcing_prob")]
     pub teacher_forcing_prob: f32,
     #[serde(default = "default_teacher_forcing_final")]
@@ -159,43 +217,463 @@ pub struct SudokuTrainingHyperparameters {
     #[serde(default)]
     pub teacher_forcing_anneal_steps: usize,
     #[serde(default = "default_policy_temperature")]
-    pub policy_temperature: f32,
+    pub temperature: f32,
     #[serde(default = "default_policy_temperature_final")]
-    pub policy_temperature_final: f32,
+    pub temperature_final: f32,
     #[serde(default)]
-    pub policy_temperature_anneal_steps: usize,
+    pub temperature_anneal_steps: usize,
     #[serde(default = "default_policy_entropy_weight")]
-    pub policy_entropy_weight: f32,
+    pub entropy_weight: f32,
     #[serde(default = "default_policy_entropy_weight_final")]
-    pub policy_entropy_weight_final: f32,
+    pub entropy_weight_final: f32,
     #[serde(default)]
-    pub policy_entropy_anneal_steps: usize,
+    pub entropy_anneal_steps: usize,
+    #[serde(default = "default_policy_entropy_adaptive")]
+    pub entropy_adaptive: bool,
+    #[serde(default = "default_policy_entropy_target_scale")]
+    pub entropy_target_scale: f32,
+    #[serde(default = "default_policy_entropy_target_ema_decay")]
+    pub entropy_target_ema_decay: f32,
+    #[serde(default = "default_policy_entropy_alpha")]
+    pub entropy_alpha: f32,
+    #[serde(default = "default_policy_entropy_alpha_lr")]
+    pub entropy_alpha_lr: f32,
+    #[serde(default = "default_policy_visit_penalty")]
+    pub visit_penalty: f32,
+    #[serde(default)]
+    pub revisit_cooldown: usize,
+    #[serde(default)]
+    pub revisit_penalty: f32,
     #[serde(default = "default_policy_recon_weight")]
-    pub policy_recon_weight: f32,
+    pub recon_weight: f32,
+}
+
+impl Default for SudokuPolicyConfig {
+    fn default() -> Self {
+        Self {
+            noise: 0.0,
+            epsilon: default_policy_epsilon(),
+            epsilon_final: default_policy_epsilon_final(),
+            epsilon_anneal_steps: 0,
+            teacher_forcing_prob: default_teacher_forcing_prob(),
+            teacher_forcing_final: default_teacher_forcing_final(),
+            teacher_forcing_anneal_steps: 0,
+            temperature: default_policy_temperature(),
+            temperature_final: default_policy_temperature_final(),
+            temperature_anneal_steps: 0,
+            entropy_weight: default_policy_entropy_weight(),
+            entropy_weight_final: default_policy_entropy_weight_final(),
+            entropy_anneal_steps: 0,
+            entropy_adaptive: default_policy_entropy_adaptive(),
+            entropy_target_scale: default_policy_entropy_target_scale(),
+            entropy_target_ema_decay: default_policy_entropy_target_ema_decay(),
+            entropy_alpha: default_policy_entropy_alpha(),
+            entropy_alpha_lr: default_policy_entropy_alpha_lr(),
+            visit_penalty: default_policy_visit_penalty(),
+            revisit_cooldown: 0,
+            revisit_penalty: 0.0,
+            recon_weight: default_policy_recon_weight(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct SudokuRevisitConfig {
     #[serde(default = "default_revisit_min_filled_frac")]
-    pub revisit_min_filled_frac: f32,
+    pub min_filled_frac: f32,
     #[serde(default = "default_revisit_min_filled_final")]
-    pub revisit_min_filled_final: f32,
+    pub min_filled_final: f32,
     #[serde(default)]
-    pub revisit_min_filled_anneal_steps: usize,
+    pub min_filled_anneal_steps: usize,
+}
+
+impl Default for SudokuRevisitConfig {
+    fn default() -> Self {
+        Self {
+            min_filled_frac: default_revisit_min_filled_frac(),
+            min_filled_final: default_revisit_min_filled_final(),
+            min_filled_anneal_steps: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct SudokuRewardConfig {
     #[serde(default = "default_reward_unknown_power")]
-    pub reward_unknown_power: f32,
-    #[serde(default = "default_saccade_step_cells")]
-    pub saccade_step_cells: usize,
+    pub unknown_power: f32,
+    #[serde(default)]
+    pub shaping: SudokuRewardShapingConfig,
+    #[serde(default)]
+    pub baseline: SudokuRewardBaselineConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct SudokuRewardShapingConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub metric: SudokuRewardShapingMetric,
+    #[serde(default = "default_reward_shaping_weight")]
+    pub weight: f32,
+    #[serde(default = "default_reward_shaping_gamma")]
+    pub gamma: f32,
+}
+
+impl Default for SudokuRewardShapingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            metric: SudokuRewardShapingMetric::default(),
+            weight: default_reward_shaping_weight(),
+            gamma: default_reward_shaping_gamma(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SudokuRewardShapingMetric {
+    #[default]
+    Conflict,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct SudokuRewardBaselineConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_reward_baseline_gamma")]
+    pub gamma: f32,
+    #[serde(default = "default_reward_baseline_lambda")]
+    pub lambda: f32,
+}
+
+impl Default for SudokuRewardBaselineConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            gamma: default_reward_baseline_gamma(),
+            lambda: default_reward_baseline_lambda(),
+        }
+    }
+}
+
+impl Default for SudokuRewardConfig {
+    fn default() -> Self {
+        Self {
+            unknown_power: default_reward_unknown_power(),
+            shaping: SudokuRewardShapingConfig::default(),
+            baseline: SudokuRewardBaselineConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct SudokuReconConfig {
     #[serde(default = "default_recon_loss")]
-    pub recon_loss: SudokuReconLoss,
+    pub loss: SudokuReconLoss,
     #[serde(default = "default_loss_mask")]
     pub loss_mask: SudokuLossMask,
     #[serde(default = "default_recon_loss_interval_steps")]
-    pub recon_loss_interval_steps: usize,
+    pub loss_interval_steps: usize,
     #[serde(default = "default_global_loss_samples")]
     pub global_loss_samples: usize,
     #[serde(default = "default_global_loss_weight")]
     pub global_loss_weight: f32,
+}
+
+impl Default for SudokuReconConfig {
+    fn default() -> Self {
+        Self {
+            loss: default_recon_loss(),
+            loss_mask: default_loss_mask(),
+            loss_interval_steps: default_recon_loss_interval_steps(),
+            global_loss_samples: default_global_loss_samples(),
+            global_loss_weight: default_global_loss_weight(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default)]
+#[serde(default)]
+struct SudokuTrainingLegacy {
+    pub rollout_steps: Option<usize>,
+    pub rollout_min_steps: Option<usize>,
+    pub rollout_max_steps: Option<usize>,
+    pub rollout_max_steps_warmup_iters: Option<usize>,
+    pub rollout_max_steps_warmup_cap: Option<usize>,
+    pub rollout_backprop_steps: Option<Option<usize>>,
+    pub halt_weight: Option<f32>,
+    pub halt_exploration_prob: Option<f32>,
+    pub halt_min_steps: Option<usize>,
+    pub policy_noise: Option<f32>,
+    pub policy_epsilon: Option<f32>,
+    pub policy_epsilon_final: Option<f32>,
+    pub policy_epsilon_anneal_steps: Option<usize>,
+    pub teacher_forcing_prob: Option<f32>,
+    pub teacher_forcing_final: Option<f32>,
+    pub teacher_forcing_anneal_steps: Option<usize>,
+    pub policy_temperature: Option<f32>,
+    pub policy_temperature_final: Option<f32>,
+    pub policy_temperature_anneal_steps: Option<usize>,
+    pub policy_entropy_weight: Option<f32>,
+    pub policy_entropy_weight_final: Option<f32>,
+    pub policy_entropy_anneal_steps: Option<usize>,
+    pub policy_entropy_adaptive: Option<bool>,
+    pub policy_entropy_target_scale: Option<f32>,
+    pub policy_entropy_alpha: Option<f32>,
+    pub policy_entropy_alpha_lr: Option<f32>,
+    pub policy_visit_penalty: Option<f32>,
+    pub policy_revisit_cooldown: Option<usize>,
+    pub policy_revisit_penalty: Option<f32>,
+    pub policy_recon_weight: Option<f32>,
+    pub revisit_min_filled_frac: Option<f32>,
+    pub revisit_min_filled_final: Option<f32>,
+    pub revisit_min_filled_anneal_steps: Option<usize>,
+    pub reward_unknown_power: Option<f32>,
+    pub saccade_step_cells: Option<usize>,
+    pub recon_loss: Option<SudokuReconLoss>,
+    pub loss_mask: Option<SudokuLossMask>,
+    pub recon_loss_interval_steps: Option<usize>,
+    pub global_loss_samples: Option<usize>,
+    pub global_loss_weight: Option<f32>,
+    pub gdpo: Option<GdpoConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default)]
+#[serde(default)]
+struct SudokuTrainingHyperparametersRaw {
+    pub batch_size: usize,
+    pub epochs: Option<usize>,
+    pub max_iters: usize,
+    pub log_frequency: usize,
+    pub rollout: Option<SudokuRolloutConfig>,
+    pub halt: Option<SudokuHaltConfig>,
+    pub policy: Option<SudokuPolicyConfig>,
+    pub revisit: Option<SudokuRevisitConfig>,
+    pub reward: Option<SudokuRewardConfig>,
+    pub recon: Option<SudokuReconConfig>,
+    pub gdpo: Option<GdpoConfig>,
+    #[serde(flatten)]
+    pub legacy: SudokuTrainingLegacy,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(from = "SudokuTrainingHyperparametersRaw")]
+pub struct SudokuTrainingHyperparameters {
+    pub batch_size: usize,
     #[serde(default)]
+    pub epochs: Option<usize>,
+    pub max_iters: usize,
+    pub log_frequency: usize,
+    pub rollout: SudokuRolloutConfig,
+    pub halt: SudokuHaltConfig,
+    pub policy: SudokuPolicyConfig,
+    pub revisit: SudokuRevisitConfig,
+    pub reward: SudokuRewardConfig,
+    pub recon: SudokuReconConfig,
     pub gdpo: GdpoConfig,
 }
 
+impl From<SudokuTrainingHyperparametersRaw> for SudokuTrainingHyperparameters {
+    fn from(raw: SudokuTrainingHyperparametersRaw) -> Self {
+        let mut rollout = raw.rollout.unwrap_or_default();
+        let mut halt = raw.halt.unwrap_or_default();
+        let mut policy = raw.policy.unwrap_or_default();
+        let mut revisit = raw.revisit.unwrap_or_default();
+        let mut reward = raw.reward.unwrap_or_default();
+        let mut recon = raw.recon.unwrap_or_default();
+        let mut gdpo = raw.gdpo.unwrap_or_default();
+
+        if let Some(value) = raw.legacy.rollout_steps {
+            rollout.steps = value;
+        }
+        if let Some(value) = raw.legacy.rollout_min_steps {
+            rollout.min_steps = value;
+        }
+        if let Some(value) = raw.legacy.rollout_max_steps {
+            rollout.max_steps = value;
+        }
+        if let Some(value) = raw.legacy.rollout_max_steps_warmup_iters {
+            rollout.max_steps_warmup_iters = value;
+        }
+        if let Some(value) = raw.legacy.rollout_max_steps_warmup_cap {
+            rollout.max_steps_warmup_cap = value;
+        }
+        if let Some(value) = raw.legacy.rollout_backprop_steps {
+            rollout.backprop_steps = value;
+        }
+        if let Some(value) = raw.legacy.saccade_step_cells {
+            rollout.saccade_step_cells = value;
+        }
+
+        if let Some(value) = raw.legacy.halt_weight {
+            halt.weight = value;
+        }
+        if let Some(value) = raw.legacy.halt_exploration_prob {
+            halt.exploration_prob = value;
+        }
+        if let Some(value) = raw.legacy.halt_min_steps {
+            halt.min_steps = value;
+        }
+
+        if let Some(value) = raw.legacy.policy_noise {
+            policy.noise = value;
+        }
+        if let Some(value) = raw.legacy.policy_epsilon {
+            policy.epsilon = value;
+        }
+        if let Some(value) = raw.legacy.policy_epsilon_final {
+            policy.epsilon_final = value;
+        }
+        if let Some(value) = raw.legacy.policy_epsilon_anneal_steps {
+            policy.epsilon_anneal_steps = value;
+        }
+        if let Some(value) = raw.legacy.teacher_forcing_prob {
+            policy.teacher_forcing_prob = value;
+        }
+        if let Some(value) = raw.legacy.teacher_forcing_final {
+            policy.teacher_forcing_final = value;
+        }
+        if let Some(value) = raw.legacy.teacher_forcing_anneal_steps {
+            policy.teacher_forcing_anneal_steps = value;
+        }
+        if let Some(value) = raw.legacy.policy_temperature {
+            policy.temperature = value;
+        }
+        if let Some(value) = raw.legacy.policy_temperature_final {
+            policy.temperature_final = value;
+        }
+        if let Some(value) = raw.legacy.policy_temperature_anneal_steps {
+            policy.temperature_anneal_steps = value;
+        }
+        if let Some(value) = raw.legacy.policy_entropy_weight {
+            policy.entropy_weight = value;
+        }
+        if let Some(value) = raw.legacy.policy_entropy_weight_final {
+            policy.entropy_weight_final = value;
+        }
+        if let Some(value) = raw.legacy.policy_entropy_anneal_steps {
+            policy.entropy_anneal_steps = value;
+        }
+        if let Some(value) = raw.legacy.policy_entropy_adaptive {
+            policy.entropy_adaptive = value;
+        }
+        if let Some(value) = raw.legacy.policy_entropy_target_scale {
+            policy.entropy_target_scale = value;
+        }
+        if let Some(value) = raw.legacy.policy_entropy_alpha {
+            policy.entropy_alpha = value;
+        }
+        if let Some(value) = raw.legacy.policy_entropy_alpha_lr {
+            policy.entropy_alpha_lr = value;
+        }
+        if let Some(value) = raw.legacy.policy_visit_penalty {
+            policy.visit_penalty = value;
+        }
+        if let Some(value) = raw.legacy.policy_revisit_cooldown {
+            policy.revisit_cooldown = value;
+        }
+        if let Some(value) = raw.legacy.policy_revisit_penalty {
+            policy.revisit_penalty = value;
+        }
+        if let Some(value) = raw.legacy.policy_recon_weight {
+            policy.recon_weight = value;
+        }
+
+        if let Some(value) = raw.legacy.revisit_min_filled_frac {
+            revisit.min_filled_frac = value;
+        }
+        if let Some(value) = raw.legacy.revisit_min_filled_final {
+            revisit.min_filled_final = value;
+        }
+        if let Some(value) = raw.legacy.revisit_min_filled_anneal_steps {
+            revisit.min_filled_anneal_steps = value;
+        }
+
+        if let Some(value) = raw.legacy.reward_unknown_power {
+            reward.unknown_power = value;
+        }
+
+        if let Some(value) = raw.legacy.recon_loss {
+            recon.loss = value;
+        }
+        if let Some(value) = raw.legacy.loss_mask {
+            recon.loss_mask = value;
+        }
+        if let Some(value) = raw.legacy.recon_loss_interval_steps {
+            recon.loss_interval_steps = value;
+        }
+        if let Some(value) = raw.legacy.global_loss_samples {
+            recon.global_loss_samples = value;
+        }
+        if let Some(value) = raw.legacy.global_loss_weight {
+            recon.global_loss_weight = value;
+        }
+        if let Some(value) = raw.legacy.gdpo {
+            gdpo = value;
+        }
+
+        Self {
+            batch_size: raw.batch_size,
+            epochs: raw.epochs,
+            max_iters: raw.max_iters,
+            log_frequency: raw.log_frequency,
+            rollout,
+            halt,
+            policy,
+            revisit,
+            reward,
+            recon,
+            gdpo,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct SudokuCacheMhcConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_cache_mhc_num_streams")]
+    pub num_streams: usize,
+    #[serde(default = "default_cache_mhc_num_views")]
+    pub num_views: usize,
+    #[serde(default = "default_cache_mhc_iters")]
+    pub mhc_iters: usize,
+    #[serde(default = "default_cache_mhc_tau")]
+    pub mhc_tau: f32,
+    #[serde(default = "default_cache_mhc_add_branch_out_to_residual")]
+    pub add_branch_out_to_residual: bool,
+    #[serde(default = "default_cache_mhc_dropout")]
+    pub dropout: f64,
+}
+
+impl Default for SudokuCacheMhcConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            num_streams: default_cache_mhc_num_streams(),
+            num_views: default_cache_mhc_num_views(),
+            mhc_iters: default_cache_mhc_iters(),
+            mhc_tau: default_cache_mhc_tau(),
+            add_branch_out_to_residual: default_cache_mhc_add_branch_out_to_residual(),
+            dropout: default_cache_mhc_dropout(),
+        }
+    }
+}
+
+impl SudokuCacheMhcConfig {
+    pub fn to_core(&self) -> ManifoldHyperConnectionsConfig {
+        ManifoldHyperConnectionsConfig {
+            enabled: self.enabled,
+            num_streams: self.num_streams,
+            num_views: self.num_views,
+            mhc_iters: self.mhc_iters,
+            mhc_tau: self.mhc_tau,
+            add_branch_out_to_residual: self.add_branch_out_to_residual,
+            dropout: self.dropout,
+        }
+    }
+}
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct SudokuModelConfig {
     pub n_layer: usize,
@@ -206,12 +684,18 @@ pub struct SudokuModelConfig {
     pub summary_tokens: usize,
     #[serde(default = "default_policy_heads")]
     pub policy_heads: usize,
+    #[serde(default)]
+    pub policy_head: SudokuPolicyHead,
+    #[serde(default = "default_policy_mlp_hidden_mult")]
+    pub policy_mlp_hidden_mult: usize,
     #[serde(default = "default_dropout")]
     pub dropout: f64,
     #[serde(default)]
     pub fused_kernels: bool,
     #[serde(default)]
     pub relu_threshold: f32,
+    #[serde(default)]
+    pub cache_mhc: SudokuCacheMhcConfig,
 }
 
 impl Default for SudokuModelConfig {
@@ -223,9 +707,12 @@ impl Default for SudokuModelConfig {
             mlp_internal_dim_multiplier: 4,
             summary_tokens: default_summary_tokens(),
             policy_heads: default_policy_heads(),
+            policy_head: SudokuPolicyHead::default(),
+            policy_mlp_hidden_mult: default_policy_mlp_hidden_mult(),
             dropout: default_dropout(),
             fused_kernels: false,
             relu_threshold: 0.0,
+            cache_mhc: SudokuCacheMhcConfig::default(),
         }
     }
 }
@@ -238,7 +725,8 @@ pub struct SudokuArtifactConfig {
     pub fps: u32,
     #[serde(default = "default_artifact_samples")]
     pub max_samples: usize,
-    #[serde(default)]
+    #[serde(default = "default_artifact_sample_policy")]
+    pub sample_policy: bool,
     pub overwrite: bool,
 }
 
@@ -248,6 +736,7 @@ impl Default for SudokuArtifactConfig {
             output: burn_dragon_train::VisionArtifactOutputMode::Mp4,
             fps: default_artifact_fps(),
             max_samples: default_artifact_samples(),
+            sample_policy: default_artifact_sample_policy(),
             overwrite: true,
         }
     }
@@ -277,145 +766,262 @@ impl SudokuTrainingConfig {
         if self.training.log_frequency == 0 {
             return Err(anyhow!("training.log_frequency must be > 0"));
         }
-        if self.training.rollout_steps == 0 {
-            return Err(anyhow!("training.rollout_steps must be > 0"));
+        if self.training.rollout.steps == 0 {
+            return Err(anyhow!("training.rollout.steps must be > 0"));
         }
-        let max_rollout_steps = if self.training.rollout_max_steps > 0 {
-            self.training.rollout_max_steps
+        let max_rollout_steps = if self.training.rollout.max_steps > 0 {
+            self.training.rollout.max_steps
         } else {
-            self.training.rollout_steps
+            self.training.rollout.steps
         };
-        let min_rollout_steps = if self.training.rollout_min_steps > 0 {
-            self.training.rollout_min_steps
+        let min_rollout_steps = if self.training.rollout.min_steps > 0 {
+            self.training.rollout.min_steps
         } else {
             max_rollout_steps
         };
         if min_rollout_steps == 0 || max_rollout_steps == 0 {
             return Err(anyhow!(
-                "training.rollout_min_steps/rollout_max_steps must be > 0"
+                "training.rollout.min_steps/rollout_max_steps must be > 0"
             ));
         }
         if min_rollout_steps > max_rollout_steps {
             return Err(anyhow!(
-                "training.rollout_min_steps ({}) must be <= rollout_max_steps ({})",
+                "training.rollout.min_steps ({}) must be <= rollout_max_steps ({})",
                 min_rollout_steps,
                 max_rollout_steps
             ));
         }
-        if self.training.rollout_max_steps_warmup_iters > 0 {
-            if self.training.rollout_max_steps_warmup_cap == 0 {
+        if self.training.rollout.max_steps_warmup_iters > 0 {
+            if self.training.rollout.max_steps_warmup_cap == 0 {
                 return Err(anyhow!(
-                    "training.rollout_max_steps_warmup_cap must be > 0 when warmup is enabled"
+                    "training.rollout.max_steps_warmup_cap must be > 0 when warmup is enabled"
                 ));
             }
-            if self.training.rollout_max_steps_warmup_cap > max_rollout_steps {
+            if self.training.rollout.max_steps_warmup_cap > max_rollout_steps {
                 return Err(anyhow!(
-                    "training.rollout_max_steps_warmup_cap ({}) must be <= rollout_max_steps ({})",
-                    self.training.rollout_max_steps_warmup_cap,
+                    "training.rollout.max_steps_warmup_cap ({}) must be <= rollout_max_steps ({})",
+                    self.training.rollout.max_steps_warmup_cap,
                     max_rollout_steps
                 ));
             }
         }
-        if let Some(backprop_steps) = self.training.rollout_backprop_steps
+        if let Some(backprop_steps) = self.training.rollout.backprop_steps
             && backprop_steps > 0
             && backprop_steps > max_rollout_steps
         {
             return Err(anyhow!(
-                "training.rollout_backprop_steps ({}) must be <= rollout_max_steps ({})",
+                "training.rollout.backprop_steps ({}) must be <= rollout_max_steps ({})",
                 backprop_steps, max_rollout_steps
             ));
         }
-        if self.training.halt_weight < 0.0 {
-            return Err(anyhow!("training.halt_weight must be >= 0"));
+        if self.training.halt.weight < 0.0 {
+            return Err(anyhow!("training.halt.weight must be >= 0"));
         }
-        if !(0.0..=1.0).contains(&self.training.halt_exploration_prob) {
+        if !(0.0..=1.0).contains(&self.training.halt.exploration_prob) {
             return Err(anyhow!(
-                "training.halt_exploration_prob must be in [0, 1] (got {})",
-                self.training.halt_exploration_prob
+                "training.halt.exploration_prob must be in [0, 1] (got {})",
+                self.training.halt.exploration_prob
             ));
         }
-        if self.training.halt_min_steps == 0 {
-            return Err(anyhow!("training.halt_min_steps must be > 0"));
+        if self.training.halt.min_steps == 0 {
+            return Err(anyhow!("training.halt.min_steps must be > 0"));
         }
-        if self.training.halt_min_steps > max_rollout_steps {
+        if self.training.halt.min_steps > max_rollout_steps {
             return Err(anyhow!(
-                "training.halt_min_steps ({}) must be <= rollout_max_steps ({})",
-                self.training.halt_min_steps, max_rollout_steps
+                "training.halt.min_steps ({}) must be <= rollout_max_steps ({})",
+                self.training.halt.min_steps, max_rollout_steps
             ));
         }
-        if self.training.saccade_step_cells == 0 {
-            return Err(anyhow!("training.saccade_step_cells must be > 0"));
+        if self.training.rollout.saccade_step_cells == 0 {
+            return Err(anyhow!("training.rollout.saccade_step_cells must be > 0"));
         }
-        if !(0.0..=1.0).contains(&self.training.teacher_forcing_prob) {
-            return Err(anyhow!(
-                "training.teacher_forcing_prob must be in [0, 1] (got {})",
-                self.training.teacher_forcing_prob
-            ));
-        }
-        if !(0.0..=1.0).contains(&self.training.teacher_forcing_final) {
-            return Err(anyhow!(
-                "training.teacher_forcing_final must be in [0, 1] (got {})",
-                self.training.teacher_forcing_final
-            ));
-        }
-        if self.training.policy_temperature <= 0.0 {
-            return Err(anyhow!(
-                "training.policy_temperature must be > 0 (got {})",
-                self.training.policy_temperature
-            ));
-        }
-        if self.training.policy_temperature_final <= 0.0 {
-            return Err(anyhow!(
-                "training.policy_temperature_final must be > 0 (got {})",
-                self.training.policy_temperature_final
-            ));
-        }
-        if !self.training.policy_entropy_weight.is_finite()
-            || self.training.policy_entropy_weight < 0.0
+        if let Some(schedule) = &self.training.rollout.schedule
+            && (schedule.start_steps == 0 || schedule.final_steps == 0)
         {
             return Err(anyhow!(
-                "training.policy_entropy_weight must be >= 0 (got {})",
-                self.training.policy_entropy_weight
+                "training.rollout.schedule.start_steps/final_steps must be > 0"
             ));
         }
-        if !self.training.policy_entropy_weight_final.is_finite()
-            || self.training.policy_entropy_weight_final < 0.0
+
+        if !(0.0..=1.0).contains(&self.training.policy.teacher_forcing_prob) {
+            return Err(anyhow!(
+                "training.policy.teacher_forcing_prob must be in [0, 1] (got {})",
+                self.training.policy.teacher_forcing_prob
+            ));
+        }
+        if !(0.0..=1.0).contains(&self.training.policy.teacher_forcing_final) {
+            return Err(anyhow!(
+                "training.policy.teacher_forcing_final must be in [0, 1] (got {})",
+                self.training.policy.teacher_forcing_final
+            ));
+        }
+        if !(0.0..=1.0).contains(&self.training.policy.epsilon) {
+            return Err(anyhow!(
+                "training.policy.epsilon must be in [0, 1] (got {})",
+                self.training.policy.epsilon
+            ));
+        }
+        if !(0.0..=1.0).contains(&self.training.policy.epsilon_final) {
+            return Err(anyhow!(
+                "training.policy.epsilon_final must be in [0, 1] (got {})",
+                self.training.policy.epsilon_final
+            ));
+        }
+        if self.training.policy.temperature <= 0.0 {
+            return Err(anyhow!(
+                "training.policy.temperature must be > 0 (got {})",
+                self.training.policy.temperature
+            ));
+        }
+        if self.training.policy.temperature_final <= 0.0 {
+            return Err(anyhow!(
+                "training.policy.temperature_final must be > 0 (got {})",
+                self.training.policy.temperature_final
+            ));
+        }
+        if !self.training.policy.entropy_weight.is_finite()
+            || self.training.policy.entropy_weight < 0.0
         {
             return Err(anyhow!(
-                "training.policy_entropy_weight_final must be >= 0 (got {})",
-                self.training.policy_entropy_weight_final
+                "training.policy.entropy_weight must be >= 0 (got {})",
+                self.training.policy.entropy_weight
             ));
         }
-        if !self.training.policy_recon_weight.is_finite()
-            || self.training.policy_recon_weight < 0.0
+        if !self.training.policy.entropy_weight_final.is_finite()
+            || self.training.policy.entropy_weight_final < 0.0
         {
             return Err(anyhow!(
-                "training.policy_recon_weight must be >= 0 (got {})",
-                self.training.policy_recon_weight
+                "training.policy.entropy_weight_final must be >= 0 (got {})",
+                self.training.policy.entropy_weight_final
             ));
         }
-        if !(0.0..=1.0).contains(&self.training.revisit_min_filled_frac) {
+        if !self.training.policy.entropy_target_scale.is_finite()
+            || self.training.policy.entropy_target_scale < 0.0
+        {
             return Err(anyhow!(
-                "training.revisit_min_filled_frac must be in [0, 1] (got {})",
-                self.training.revisit_min_filled_frac
+                "training.policy.entropy_target_scale must be >= 0 (got {})",
+                self.training.policy.entropy_target_scale
             ));
         }
-        if !(0.0..=1.0).contains(&self.training.revisit_min_filled_final) {
+        if !(0.0..1.0).contains(&self.training.policy.entropy_target_ema_decay) {
             return Err(anyhow!(
-                "training.revisit_min_filled_final must be in [0, 1] (got {})",
-                self.training.revisit_min_filled_final
+                "training.policy.entropy_target_ema_decay must be in [0, 1) (got {})",
+                self.training.policy.entropy_target_ema_decay
             ));
         }
-        if self.training.reward_unknown_power < 0.0 {
+        if !self.training.policy.entropy_alpha.is_finite()
+            || self.training.policy.entropy_alpha < 0.0
+        {
             return Err(anyhow!(
-                "training.reward_unknown_power must be >= 0 (got {})",
-                self.training.reward_unknown_power
+                "training.policy.entropy_alpha must be >= 0 (got {})",
+                self.training.policy.entropy_alpha
             ));
         }
-        if self.training.global_loss_weight < 0.0 {
+        if !self.training.policy.entropy_alpha_lr.is_finite()
+            || self.training.policy.entropy_alpha_lr < 0.0
+        {
             return Err(anyhow!(
-                "training.global_loss_weight must be >= 0 (got {})",
-                self.training.global_loss_weight
+                "training.policy.entropy_alpha_lr must be >= 0 (got {})",
+                self.training.policy.entropy_alpha_lr
+            ));
+        }
+        if !self.training.policy.visit_penalty.is_finite()
+            || self.training.policy.visit_penalty < 0.0
+        {
+            return Err(anyhow!(
+                "training.policy.visit_penalty must be >= 0 (got {})",
+                self.training.policy.visit_penalty
+            ));
+        }
+        if !self.training.policy.revisit_penalty.is_finite()
+            || self.training.policy.revisit_penalty < 0.0
+        {
+            return Err(anyhow!(
+                "training.policy.revisit_penalty must be >= 0 (got {})",
+                self.training.policy.revisit_penalty
+            ));
+        }
+        if !self.training.policy.recon_weight.is_finite()
+            || self.training.policy.recon_weight < 0.0
+        {
+            return Err(anyhow!(
+                "training.policy.recon_weight must be >= 0 (got {})",
+                self.training.policy.recon_weight
+            ));
+        }
+        if !(0.0..=1.0).contains(&self.training.revisit.min_filled_frac) {
+            return Err(anyhow!(
+                "training.revisit.min_filled_frac must be in [0, 1] (got {})",
+                self.training.revisit.min_filled_frac
+            ));
+        }
+        if !(0.0..=1.0).contains(&self.training.revisit.min_filled_final) {
+            return Err(anyhow!(
+                "training.revisit.min_filled_final must be in [0, 1] (got {})",
+                self.training.revisit.min_filled_final
+            ));
+        }
+        if self.training.reward.unknown_power < 0.0 {
+            return Err(anyhow!(
+                "training.reward.unknown_power must be >= 0 (got {})",
+                self.training.reward.unknown_power
+            ));
+        }
+        if self.training.reward.shaping.enabled {
+            if self.training.reward.shaping.weight < 0.0 {
+                return Err(anyhow!(
+                    "training.reward.shaping.weight must be >= 0 (got {})",
+                    self.training.reward.shaping.weight
+                ));
+            }
+            if !(0.0..=1.0).contains(&self.training.reward.shaping.gamma) {
+                return Err(anyhow!(
+                    "training.reward.shaping.gamma must be in [0, 1] (got {})",
+                    self.training.reward.shaping.gamma
+                ));
+            }
+        }
+        if self.training.reward.baseline.enabled {
+            if !(0.0..=1.0).contains(&self.training.reward.baseline.gamma) {
+                return Err(anyhow!(
+                    "training.reward.baseline.gamma must be in [0, 1] (got {})",
+                    self.training.reward.baseline.gamma
+                ));
+            }
+            if !(0.0..=1.0).contains(&self.training.reward.baseline.lambda) {
+                return Err(anyhow!(
+                    "training.reward.baseline.lambda must be in [0, 1] (got {})",
+                    self.training.reward.baseline.lambda
+                ));
+            }
+        }
+        if self.model.cache_mhc.enabled {
+            if self.model.cache_mhc.num_streams == 0 {
+                return Err(anyhow!("model.cache_mhc.num_streams must be > 0"));
+            }
+            if self.model.cache_mhc.num_views == 0 {
+                return Err(anyhow!("model.cache_mhc.num_views must be > 0"));
+            }
+            if self.model.cache_mhc.mhc_iters == 0 {
+                return Err(anyhow!("model.cache_mhc.mhc_iters must be > 0"));
+            }
+            if !self.model.cache_mhc.mhc_tau.is_finite() || self.model.cache_mhc.mhc_tau <= 0.0 {
+                return Err(anyhow!(
+                    "model.cache_mhc.mhc_tau must be > 0 (got {})",
+                    self.model.cache_mhc.mhc_tau
+                ));
+            }
+            if self.model.cache_mhc.dropout < 0.0 {
+                return Err(anyhow!(
+                    "model.cache_mhc.dropout must be >= 0 (got {})",
+                    self.model.cache_mhc.dropout
+                ));
+            }
+        }
+        if self.training.recon.global_loss_weight < 0.0 {
+            return Err(anyhow!(
+                "training.recon.global_loss_weight must be >= 0 (got {})",
+                self.training.recon.global_loss_weight
             ));
         }
         if let Some(epochs) = self.training.epochs && epochs == 0 {
@@ -502,6 +1108,9 @@ impl SudokuTrainingConfig {
         }
         if self.model.policy_heads == 0 {
             return Err(anyhow!("model.policy_heads must be > 0"));
+        }
+        if self.model.policy_mlp_hidden_mult == 0 {
+            return Err(anyhow!("model.policy_mlp_hidden_mult must be > 0"));
         }
         if !self.model.n_embd.is_multiple_of(self.model.policy_heads) {
             return Err(anyhow!(
@@ -664,6 +1273,10 @@ fn default_artifact_fps() -> u32 {
     8
 }
 
+fn default_artifact_sample_policy() -> bool {
+    false
+}
+
 fn default_artifact_samples() -> usize {
     8
 }
@@ -708,6 +1321,14 @@ fn default_teacher_forcing_final() -> f32 {
     0.0
 }
 
+fn default_policy_epsilon() -> f32 {
+    0.0
+}
+
+fn default_policy_epsilon_final() -> f32 {
+    0.0
+}
+
 fn default_policy_temperature() -> f32 {
     1.0
 }
@@ -724,6 +1345,26 @@ fn default_policy_entropy_weight_final() -> f32 {
     0.0
 }
 
+
+fn default_policy_entropy_adaptive() -> bool {
+    false
+}
+
+fn default_policy_entropy_target_scale() -> f32 {
+    1.0
+}
+
+fn default_policy_entropy_alpha() -> f32 {
+    0.01
+}
+
+fn default_policy_entropy_alpha_lr() -> f32 {
+    0.001
+}
+
+fn default_policy_visit_penalty() -> f32 {
+    0.0
+}
 fn default_policy_recon_weight() -> f32 {
     0.05
 }
@@ -740,6 +1381,26 @@ fn default_reward_unknown_power() -> f32 {
     0.0
 }
 
+fn default_reward_shaping_weight() -> f32 {
+    0.1
+}
+
+fn default_reward_shaping_gamma() -> f32 {
+    1.0
+}
+
+fn default_reward_baseline_gamma() -> f32 {
+    0.99
+}
+
+fn default_reward_baseline_lambda() -> f32 {
+    0.95
+}
+
+fn default_policy_entropy_target_ema_decay() -> f32 {
+    0.99
+}
+
 fn default_saccade_step_cells() -> usize {
     1
 }
@@ -750,6 +1411,10 @@ fn default_summary_tokens() -> usize {
 
 fn default_policy_heads() -> usize {
     1
+}
+
+fn default_policy_mlp_hidden_mult() -> usize {
+    2
 }
 
 fn default_global_loss_samples() -> usize {
@@ -794,8 +1459,12 @@ mod tests {
             "batch_size = 8",
             "max_iters = 1000",
             "log_frequency = 50",
-            "rollout_steps = 4",
-            "policy_noise = 0.5",
+            "",
+            "[training.rollout]",
+            "steps = 4",
+            "",
+            "[training.policy]",
+            "noise = 0.5",
             "",
             "[optimizer]",
             "learning_rate = 0.001",
@@ -818,7 +1487,41 @@ mod tests {
 
         assert_eq!(config.training.batch_size, 8);
         assert_eq!(config.training.max_iters, 2000);
-        assert_eq!(config.training.rollout_steps, 4);
+        assert_eq!(config.training.rollout.steps, 4);
         assert!((config.optimizer.learning_rate - 0.0005).abs() < f64::EPSILON);
     }
 }
+
+
+
+
+
+
+
+
+
+fn default_cache_mhc_num_streams() -> usize {
+    1
+}
+
+fn default_cache_mhc_num_views() -> usize {
+    1
+}
+
+fn default_cache_mhc_iters() -> usize {
+    10
+}
+
+fn default_cache_mhc_tau() -> f32 {
+    0.05
+}
+
+fn default_cache_mhc_add_branch_out_to_residual() -> bool {
+    true
+}
+
+fn default_cache_mhc_dropout() -> f64 {
+    0.0
+}
+
+

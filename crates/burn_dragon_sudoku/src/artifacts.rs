@@ -2,7 +2,7 @@ use std::path::Path;
 
 use anyhow::{Result, anyhow};
 use burn::tensor::backend::Backend as BackendTrait;
-use burn::tensor::{Int, Tensor, TensorData};
+use burn::tensor::{Distribution as TensorDistribution, Int, Tensor, TensorData};
 
 use burn_dragon_train::VisionArtifactOutputMode;
 use burn_dragon_train::train::artifacts::{ArtifactFrame, write_video};
@@ -10,6 +10,7 @@ use burn_dragon_train::train::artifacts::{ArtifactFrame, write_video};
 use crate::config::{SudokuArtifactConfig, SudokuTrainingHyperparameters};
 use crate::dataset::{SudokuBatch, SudokuDataset, SudokuSplit};
 use crate::model::SudokuSaccadeModel;
+use crate::train::sample_actions;
 use crate::vocab::{GRID_LEN, VOCAB_SIZE};
 
 const GRID_SIZE: usize = 9;
@@ -126,15 +127,16 @@ fn write_validation_artifacts_with_grids<B: BackendTrait>(
         other => other,
     };
 
-    let rollout_steps = if training.rollout_max_steps > 0 {
-        training.rollout_max_steps
+    let rollout_steps = if training.rollout.max_steps > 0 {
+        training.rollout.max_steps
     } else {
-        training.rollout_steps.max(1)
+        training.rollout.steps.max(1)
     };
     let frames = generate_rollout_frames(
         model,
         puzzle_grids,
         solution_grids,
+        config,
         training,
         rollout_steps,
         device,
@@ -163,6 +165,7 @@ fn generate_rollout_frames<B: BackendTrait>(
     model: &SudokuSaccadeModel<B>,
     mut puzzles: Vec<Vec<u8>>,
     solutions: Vec<Vec<u8>>,
+    config: &SudokuArtifactConfig,
     training: &SudokuTrainingHyperparameters,
     steps: usize,
     device: &B::Device,
@@ -193,7 +196,13 @@ fn generate_rollout_frames<B: BackendTrait>(
 
     let ones_grid = Tensor::<B, 2>::ones([batch.max(1), GRID_LEN], device);
     let ones_step = Tensor::<B, 2>::ones([batch.max(1), 1], device);
-    let revisit_min_filled = training.revisit_min_filled_final.clamp(0.0, 1.0);
+    let revisit_min_filled = training.revisit.min_filled_final.clamp(0.0, 1.0);
+    let revisit_cooldown_steps = training.policy.revisit_cooldown;
+    let revisit_penalty = training.policy.revisit_penalty.max(0.0);
+    let visit_penalty = training.policy.visit_penalty.max(0.0);
+    let policy_temperature = training.policy.temperature_final.max(1e-4);
+    let policy_epsilon = training.policy.epsilon_final.clamp(0.0, 1.0);
+    let policy_noise = training.policy.noise.max(0.0);
     let action_index = build_action_index(batch, device);
     let (row_ids, col_ids) = model.grid_row_col_ids(batch, device);
     let row_ids_f = row_ids.clone().float();
@@ -209,16 +218,34 @@ fn generate_rollout_frames<B: BackendTrait>(
         TensorData::new(editable_mask_data, [batch.max(1), GRID_LEN]),
         device,
     );
-    let mut cache =
+    let input_cache =
         model.cell_embeddings_with_positions(init_tokens.clone(), row_ids.clone(), col_ids.clone());
+    let [_, _, embd] = input_cache.shape().dims();
+    let cache_streams = model.cache_streams();
+    let input_cache = input_cache
+        .unsqueeze_dim::<4>(1)
+        .expand([batch.max(1), cache_streams, GRID_LEN, embd]);
+    let input_cache_read = input_cache
+        .clone()
+        .mean_dim(1)
+        .reshape([batch.max(1), GRID_LEN, embd]);
     let mut summary_tokens = model.init_summary_tokens(batch);
+    let mut cache = input_cache.clone();
     let summary_len = model.summary_token_count();
     let mut state = model.init_state();
+    let mut revisit_cooldown =
+        Tensor::<B, 2>::zeros([batch.max(1), GRID_LEN], device);
+    let mut visit_counts =
+        Tensor::<B, 2>::zeros([batch.max(1), GRID_LEN], device);
 
     for _step in 0..steps {
         let tokens = build_tokens_tensor::<B>(&puzzles, device);
+        let cache_read = cache
+            .clone()
+            .mean_dim(1)
+            .reshape([batch.max(1), GRID_LEN, embd]);
         let policy_logits =
-            model.policy_logits_from_cache(summary_tokens.clone(), cache.clone());
+            model.policy_logits_from_cache(summary_tokens.clone(), cache_read.clone());
 
         let (select_mask, selectable_counts) = build_select_mask(
             &unknown_masks,
@@ -230,12 +257,39 @@ fn generate_rollout_frames<B: BackendTrait>(
             TensorData::new(select_mask, [batch.max(1), GRID_LEN]),
             device,
         );
-        let masked_logits = policy_logits
+        let mut masked_logits = policy_logits
             - ones_grid
                 .clone()
                 .sub(select_mask.clone())
                 .mul_scalar(POLICY_MASK_PENALTY);
-        let actions = masked_logits.argmax(1);
+        if revisit_cooldown_steps > 0 && revisit_penalty > 0.0 {
+            let cooldown_mask = revisit_cooldown.clone().greater_elem(0.0).float();
+            masked_logits = masked_logits - cooldown_mask.mul_scalar(revisit_penalty);
+        }
+        if visit_penalty > 0.0 {
+            let visit_log = visit_counts.clone().add_scalar(1.0).log();
+            masked_logits = masked_logits - visit_log.mul_scalar(visit_penalty);
+        }
+        let actions = if config.sample_policy {
+            let policy_logits = if (policy_temperature - 1.0).abs() > f32::EPSILON {
+                masked_logits.clone().div_scalar(policy_temperature)
+            } else {
+                masked_logits.clone()
+            };
+            let sampled_logits = if policy_noise > 0.0 {
+                let noise = Tensor::<B, 2>::random(
+                    [batch.max(1), GRID_LEN],
+                    TensorDistribution::Normal(0.0, f64::from(policy_noise)),
+                    device,
+                );
+                policy_logits + noise
+            } else {
+                policy_logits
+            };
+            sample_actions(sampled_logits, select_mask.clone(), true, policy_epsilon)
+        } else {
+            masked_logits.argmax(1)
+        };
 
         let tokens_solved_before = tokens
             .clone()
@@ -257,50 +311,34 @@ fn generate_rollout_frames<B: BackendTrait>(
         let mut action_one_hot = build_action_one_hot(&actions, &action_index);
         let active_mask_grid = active_mask.clone().repeat_dim(1, GRID_LEN);
         action_one_hot = action_one_hot * active_mask_grid.clone() * select_mask.clone();
-
-        let step_mask = if training.saccade_step_cells > 1 {
-            let selected_row = row_ids_f
+        if revisit_cooldown_steps > 0 {
+            let decay = revisit_cooldown.clone().sub_scalar(1.0).clamp_min(0.0);
+            let refreshed = action_one_hot
                 .clone()
-                .mul(action_one_hot.clone())
-                .sum_dim(1)
-                .reshape([batch.max(1), 1]);
-            let selected_col = col_ids_f
-                .clone()
-                .mul(action_one_hot.clone())
-                .sum_dim(1)
-                .reshape([batch.max(1), 1]);
-            let row_match = row_ids_f
-                .clone()
-                .equal(selected_row.expand([batch.max(1), GRID_LEN]))
-                .float();
-            let col_match = col_ids_f
-                .clone()
-                .equal(selected_col.expand([batch.max(1), GRID_LEN]))
-                .float();
-            (row_match + col_match)
-                .clamp_max(1.0)
-                .mul(active_mask_grid.clone())
-        } else {
-            action_one_hot.clone()
-        };
-        let step_mask_sum = step_mask
+                .mul_scalar(revisit_cooldown_steps as f32);
+            revisit_cooldown = decay.max_pair(refreshed);
+        }
+        visit_counts = visit_counts + action_one_hot.clone();
+        let [_, _, embd] = cache_read.shape().dims();
+        let step_input_base = input_cache_read
             .clone()
+            .mul(action_one_hot.clone().unsqueeze_dim::<3>(2))
             .sum_dim(1)
-            .reshape([batch.max(1), 1])
-            .clamp_min(1.0);
-        let [_, _, embd] = cache.shape().dims();
-        let step_emb = cache
-            .clone()
-            .mul(step_mask.unsqueeze_dim::<3>(2))
-            .sum_dim(1)
-            .div(step_mask_sum.clone().reshape([batch.max(1), 1, 1]))
             .reshape([batch.max(1), 1, embd]);
-        let step_input = Tensor::cat(vec![summary_tokens.clone(), step_emb], 1);
+        let step_residual = cache_read
+            .clone()
+            .mul(action_one_hot.clone().unsqueeze_dim::<3>(2))
+            .sum_dim(1)
+            .reshape([batch.max(1), 1, embd]);
+        let step_input = model
+            .project_input_tokens(step_input_base)
+            + step_residual;
+        let step_input = Tensor::cat(vec![summary_tokens.clone(), step_input], 1);
         let (step_hidden, _step_logits_full) =
             model.forward_with_hidden_and_state_embedded(step_input, &mut state);
         let summary_hidden = step_hidden.clone().slice_dim(1, 0..summary_len);
         let step_hidden = step_hidden.slice_dim(1, summary_len..summary_len + 1);
-        summary_tokens = summary_hidden;
+        summary_tokens = summary_hidden.clone();
         let step_logits = model.value_logits_from_hidden(step_hidden.clone());
 
         let action_data = actions
@@ -325,14 +363,44 @@ fn generate_rollout_frames<B: BackendTrait>(
             .sum_dim(1)
             .reshape([batch.max(1), 1])
             .int();
-        let update_emb = model.cell_embeddings_with_positions(
+                let action_mask = action_one_hot
+            .clone()
+            .unsqueeze_dim::<3>(2)
+            .unsqueeze_dim::<4>(1);
+        let cache_cell = cache
+            .clone()
+            .mul(action_mask.clone())
+            .sum_dim(2)
+            .reshape([batch.max(1) * cache_streams, 1, embd]);
+        let summary_streams = summary_hidden
+            .clone()
+            .unsqueeze_dim::<4>(1)
+            .expand([batch.max(1), cache_streams, summary_len, embd])
+            .reshape([batch.max(1) * cache_streams, summary_len, embd]);
+        let token_emb = model.cell_embeddings_with_positions(
             pred_values.clone(),
             selected_row,
             selected_col,
         );
-        let update_emb = update_emb.expand([batch.max(1), GRID_LEN, embd]);
-        let keep = update_mask_f.clone().mul_scalar(-1.0).add_scalar(1.0);
-        cache = cache * keep + update_emb.mul(update_mask_f);
+        let token_emb = token_emb
+            .unsqueeze_dim::<4>(1)
+            .expand([batch.max(1), cache_streams, 1, embd])
+            .reshape([batch.max(1) * cache_streams, 1, embd]);
+        let update_emb = model.update_cell_embedding(
+            summary_streams,
+            cache_cell,
+            token_emb,
+        );
+        let update_emb = update_emb
+            .reshape([batch.max(1), cache_streams, 1, embd])
+            .expand([batch.max(1), cache_streams, GRID_LEN, embd]);
+        let update_mask_stream = update_mask_f.clone().unsqueeze_dim::<4>(1);
+        let keep = update_mask_stream.clone().mul_scalar(-1.0).add_scalar(1.0);
+        cache = cache * keep + update_emb.mul(update_mask_stream);
+        if let Some(mhc) = model.cache_mhc.as_ref() {
+            let (branch_input, residuals_out, beta) = mhc.width_connection(cache.clone());
+            cache = mhc.depth_connection(branch_input, residuals_out, beta);
+        }
         let pred_data = pred_values
             .to_data()
             .convert::<i64>()
@@ -679,3 +747,13 @@ const DIGITS: [&[&str; 7]; 10] = [
         "01100",
     ],
 ];
+
+
+
+
+
+
+
+
+
+

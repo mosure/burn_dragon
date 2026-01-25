@@ -2,6 +2,7 @@ use crate::train::metrics::{
     SudokuAccInput, SudokuAdvantageAbsMeanInput, SudokuAdvantageStdInput, SudokuEasyRewardInput,
     SudokuExactAccInput, SudokuHaltLossInput, SudokuHaltProbInput, SudokuHaltTargetInput,
     SudokuHardRewardInput, SudokuLogProbMeanInput, SudokuPolicyEntropyInput,
+    SudokuPolicyEntropyAlphaInput, SudokuPolicyEntropyTargetInput,
     SudokuPolicyLossInput, SudokuReconLossInput, SudokuSolveRateInput,
 };
 use crate::train::prelude::*;
@@ -164,6 +165,22 @@ where
             ValidBackend<B>,
             SudokuPolicyEntropyInput<ValidBackend<B>>,
         >::new_every("sudoku_entropy", metric_every))
+        .metric_train_numeric(ScalarMetric::<
+            ValidBackend<B>,
+            SudokuPolicyEntropyAlphaInput<ValidBackend<B>>,
+        >::new_every("sudoku_entropy_alpha", metric_every))
+        .metric_valid_numeric(ScalarMetric::<
+            ValidBackend<B>,
+            SudokuPolicyEntropyAlphaInput<ValidBackend<B>>,
+        >::new_every("sudoku_entropy_alpha", metric_every))
+        .metric_train_numeric(ScalarMetric::<
+            ValidBackend<B>,
+            SudokuPolicyEntropyTargetInput<ValidBackend<B>>,
+        >::new_every("sudoku_entropy_target", metric_every))
+        .metric_valid_numeric(ScalarMetric::<
+            ValidBackend<B>,
+            SudokuPolicyEntropyTargetInput<ValidBackend<B>>,
+        >::new_every("sudoku_entropy_target", metric_every))
         .metric_train_numeric(ScalarMetric::<
             ValidBackend<B>,
             SudokuHardRewardInput<ValidBackend<B>>,

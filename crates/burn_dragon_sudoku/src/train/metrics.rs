@@ -16,6 +16,8 @@ pub struct SudokuOutput<B: BackendTrait> {
     advantage_std: Tensor<B, 1>,
     log_prob_mean: Tensor<B, 1>,
     policy_entropy: Tensor<B, 1>,
+    policy_entropy_alpha: Tensor<B, 1>,
+    policy_entropy_target: Tensor<B, 1>,
     hard_reward_mean: Tensor<B, 1>,
     easy_reward_mean: Tensor<B, 1>,
 }
@@ -36,6 +38,8 @@ impl<B: BackendTrait> SudokuOutput<B> {
         advantage_std: Tensor<B, 1>,
         log_prob_mean: Tensor<B, 1>,
         policy_entropy: Tensor<B, 1>,
+        policy_entropy_alpha: Tensor<B, 1>,
+        policy_entropy_target: Tensor<B, 1>,
         hard_reward_mean: Tensor<B, 1>,
         easy_reward_mean: Tensor<B, 1>,
     ) -> Self {
@@ -53,6 +57,8 @@ impl<B: BackendTrait> SudokuOutput<B> {
             advantage_std,
             log_prob_mean,
             policy_entropy,
+            policy_entropy_alpha,
+            policy_entropy_target,
             hard_reward_mean,
             easy_reward_mean,
         }
@@ -212,6 +218,28 @@ impl<B: BackendTrait> SudokuPolicyEntropyInput<B> {
 }
 
 #[derive(Clone)]
+pub struct SudokuPolicyEntropyAlphaInput<B: BackendTrait> {
+    value: Tensor<B, 1>,
+}
+
+impl<B: BackendTrait> SudokuPolicyEntropyAlphaInput<B> {
+    pub fn new(value: Tensor<B, 1>) -> Self {
+        Self { value }
+    }
+}
+
+#[derive(Clone)]
+pub struct SudokuPolicyEntropyTargetInput<B: BackendTrait> {
+    value: Tensor<B, 1>,
+}
+
+impl<B: BackendTrait> SudokuPolicyEntropyTargetInput<B> {
+    pub fn new(value: Tensor<B, 1>) -> Self {
+        Self { value }
+    }
+}
+
+#[derive(Clone)]
 pub struct SudokuHardRewardInput<B: BackendTrait> {
     value: Tensor<B, 1>,
 }
@@ -305,6 +333,18 @@ impl<B: BackendTrait> Adaptor<SudokuPolicyEntropyInput<B>> for SudokuOutput<B> {
     }
 }
 
+impl<B: BackendTrait> Adaptor<SudokuPolicyEntropyAlphaInput<B>> for SudokuOutput<B> {
+    fn adapt(&self) -> SudokuPolicyEntropyAlphaInput<B> {
+        SudokuPolicyEntropyAlphaInput::new(self.policy_entropy_alpha.clone())
+    }
+}
+
+impl<B: BackendTrait> Adaptor<SudokuPolicyEntropyTargetInput<B>> for SudokuOutput<B> {
+    fn adapt(&self) -> SudokuPolicyEntropyTargetInput<B> {
+        SudokuPolicyEntropyTargetInput::new(self.policy_entropy_target.clone())
+    }
+}
+
 impl<B: BackendTrait> Adaptor<SudokuHardRewardInput<B>> for SudokuOutput<B> {
     fn adapt(&self) -> SudokuHardRewardInput<B> {
         SudokuHardRewardInput::new(self.hard_reward_mean.clone())
@@ -331,6 +371,8 @@ pub struct SudokuTrainItem<B: AutodiffBackend> {
     advantage_std: Tensor<B, 1>,
     log_prob_mean: Tensor<B, 1>,
     policy_entropy: Tensor<B, 1>,
+    policy_entropy_alpha: Tensor<B, 1>,
+    policy_entropy_target: Tensor<B, 1>,
     hard_reward_mean: Tensor<B, 1>,
     easy_reward_mean: Tensor<B, 1>,
 }
@@ -351,6 +393,8 @@ impl<B: AutodiffBackend> SudokuTrainItem<B> {
         advantage_std: Tensor<B, 1>,
         log_prob_mean: Tensor<B, 1>,
         policy_entropy: Tensor<B, 1>,
+        policy_entropy_alpha: Tensor<B, 1>,
+        policy_entropy_target: Tensor<B, 1>,
         hard_reward_mean: Tensor<B, 1>,
         easy_reward_mean: Tensor<B, 1>,
     ) -> Self {
@@ -368,6 +412,8 @@ impl<B: AutodiffBackend> SudokuTrainItem<B> {
             advantage_std: advantage_std.detach(),
             log_prob_mean: log_prob_mean.detach(),
             policy_entropy: policy_entropy.detach(),
+            policy_entropy_alpha: policy_entropy_alpha.detach(),
+            policy_entropy_target: policy_entropy_target.detach(),
             hard_reward_mean: hard_reward_mean.detach(),
             easy_reward_mean: easy_reward_mean.detach(),
         }
@@ -392,6 +438,8 @@ impl<B: AutodiffBackend> ItemLazy for SudokuTrainItem<B> {
             self.advantage_std.detach().inner(),
             self.log_prob_mean.detach().inner(),
             self.policy_entropy.detach().inner(),
+            self.policy_entropy_alpha.detach().inner(),
+            self.policy_entropy_target.detach().inner(),
             self.hard_reward_mean.detach().inner(),
             self.easy_reward_mean.detach().inner(),
         )
@@ -465,6 +513,18 @@ impl<B: BackendTrait> ScalarValue<B> for SudokuLogProbMeanInput<B> {
 }
 
 impl<B: BackendTrait> ScalarValue<B> for SudokuPolicyEntropyInput<B> {
+    fn value(&self) -> Tensor<B, 1> {
+        self.value.clone()
+    }
+}
+
+impl<B: BackendTrait> ScalarValue<B> for SudokuPolicyEntropyAlphaInput<B> {
+    fn value(&self) -> Tensor<B, 1> {
+        self.value.clone()
+    }
+}
+
+impl<B: BackendTrait> ScalarValue<B> for SudokuPolicyEntropyTargetInput<B> {
     fn value(&self) -> Tensor<B, 1> {
         self.value.clone()
     }

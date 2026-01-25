@@ -55,8 +55,11 @@ pub(crate) use burn_dragon_train::wgpu::{init_runtime, WgpuDevice};
 pub(crate) use serde::Serialize;
 
 pub(crate) use crate::config::{
-    SudokuArtifactConfig, SudokuDatasetConfig, SudokuDatasetSourceConfig, SudokuLossMask,
-    SudokuModelConfig, SudokuReconLoss, SudokuTrainingConfig, SudokuTrainingHyperparameters,
+    SudokuArtifactConfig, SudokuCacheMhcConfig, SudokuDatasetConfig, SudokuDatasetSourceConfig, SudokuHaltConfig,
+    SudokuLossMask, SudokuModelConfig, SudokuPolicyConfig, SudokuPolicyHead, SudokuReconConfig,
+    SudokuReconLoss, SudokuRevisitConfig, SudokuRewardBaselineConfig, SudokuRewardConfig,
+    SudokuRewardShapingConfig, SudokuRewardShapingMetric, SudokuRolloutConfig,
+    SudokuRolloutSchedule, SudokuTrainingConfig, SudokuTrainingHyperparameters,
 };
 pub(crate) use crate::dataset::{SudokuBatch, SudokuDataset, SudokuRandomDataLoader, SudokuSplit};
 pub(crate) use crate::model::SudokuSaccadeModel;
@@ -71,3 +74,4 @@ pub(crate) use burn_dragon_train::train::pipeline::{
     ResolvedLrScheduler, ScheduleSource, TrainSchedule, adamw_config_from_optimizer,
     create_run_dir, write_latest_run,
 };
+

@@ -21,3 +21,4 @@ data/
 output/
 runs/
 sandbox/
+train_logs/

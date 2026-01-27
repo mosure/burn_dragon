@@ -20,6 +20,10 @@ pub struct SudokuOutput<B: BackendTrait> {
     policy_entropy_target: Tensor<B, 1>,
     hard_reward_mean: Tensor<B, 1>,
     easy_reward_mean: Tensor<B, 1>,
+    saccade_revisit_rate: Tensor<B, 1>,
+    saccade_repeat_rate: Tensor<B, 1>,
+    saccade_unknown_frac: Tensor<B, 1>,
+    saccade_unique_frac: Tensor<B, 1>,
 }
 
 impl<B: BackendTrait> SudokuOutput<B> {
@@ -42,6 +46,10 @@ impl<B: BackendTrait> SudokuOutput<B> {
         policy_entropy_target: Tensor<B, 1>,
         hard_reward_mean: Tensor<B, 1>,
         easy_reward_mean: Tensor<B, 1>,
+        saccade_revisit_rate: Tensor<B, 1>,
+        saccade_repeat_rate: Tensor<B, 1>,
+        saccade_unknown_frac: Tensor<B, 1>,
+        saccade_unique_frac: Tensor<B, 1>,
     ) -> Self {
         Self {
             loss,
@@ -61,6 +69,10 @@ impl<B: BackendTrait> SudokuOutput<B> {
             policy_entropy_target,
             hard_reward_mean,
             easy_reward_mean,
+            saccade_revisit_rate,
+            saccade_repeat_rate,
+            saccade_unknown_frac,
+            saccade_unique_frac,
         }
     }
 }
@@ -261,6 +273,50 @@ impl<B: BackendTrait> SudokuEasyRewardInput<B> {
     }
 }
 
+#[derive(Clone)]
+pub struct SudokuSaccadeRevisitRateInput<B: BackendTrait> {
+    value: Tensor<B, 1>,
+}
+
+impl<B: BackendTrait> SudokuSaccadeRevisitRateInput<B> {
+    pub fn new(value: Tensor<B, 1>) -> Self {
+        Self { value }
+    }
+}
+
+#[derive(Clone)]
+pub struct SudokuSaccadeRepeatRateInput<B: BackendTrait> {
+    value: Tensor<B, 1>,
+}
+
+impl<B: BackendTrait> SudokuSaccadeRepeatRateInput<B> {
+    pub fn new(value: Tensor<B, 1>) -> Self {
+        Self { value }
+    }
+}
+
+#[derive(Clone)]
+pub struct SudokuSaccadeUnknownFracInput<B: BackendTrait> {
+    value: Tensor<B, 1>,
+}
+
+impl<B: BackendTrait> SudokuSaccadeUnknownFracInput<B> {
+    pub fn new(value: Tensor<B, 1>) -> Self {
+        Self { value }
+    }
+}
+
+#[derive(Clone)]
+pub struct SudokuSaccadeUniqueFracInput<B: BackendTrait> {
+    value: Tensor<B, 1>,
+}
+
+impl<B: BackendTrait> SudokuSaccadeUniqueFracInput<B> {
+    pub fn new(value: Tensor<B, 1>) -> Self {
+        Self { value }
+    }
+}
+
 impl<B: BackendTrait> Adaptor<SudokuReconLossInput<B>> for SudokuOutput<B> {
     fn adapt(&self) -> SudokuReconLossInput<B> {
         SudokuReconLossInput::new(self.recon_loss.clone())
@@ -357,6 +413,30 @@ impl<B: BackendTrait> Adaptor<SudokuEasyRewardInput<B>> for SudokuOutput<B> {
     }
 }
 
+impl<B: BackendTrait> Adaptor<SudokuSaccadeRevisitRateInput<B>> for SudokuOutput<B> {
+    fn adapt(&self) -> SudokuSaccadeRevisitRateInput<B> {
+        SudokuSaccadeRevisitRateInput::new(self.saccade_revisit_rate.clone())
+    }
+}
+
+impl<B: BackendTrait> Adaptor<SudokuSaccadeRepeatRateInput<B>> for SudokuOutput<B> {
+    fn adapt(&self) -> SudokuSaccadeRepeatRateInput<B> {
+        SudokuSaccadeRepeatRateInput::new(self.saccade_repeat_rate.clone())
+    }
+}
+
+impl<B: BackendTrait> Adaptor<SudokuSaccadeUnknownFracInput<B>> for SudokuOutput<B> {
+    fn adapt(&self) -> SudokuSaccadeUnknownFracInput<B> {
+        SudokuSaccadeUnknownFracInput::new(self.saccade_unknown_frac.clone())
+    }
+}
+
+impl<B: BackendTrait> Adaptor<SudokuSaccadeUniqueFracInput<B>> for SudokuOutput<B> {
+    fn adapt(&self) -> SudokuSaccadeUniqueFracInput<B> {
+        SudokuSaccadeUniqueFracInput::new(self.saccade_unique_frac.clone())
+    }
+}
+
 pub struct SudokuTrainItem<B: AutodiffBackend> {
     loss: Tensor<B, 1>,
     recon_loss: Tensor<B, 1>,
@@ -375,6 +455,10 @@ pub struct SudokuTrainItem<B: AutodiffBackend> {
     policy_entropy_target: Tensor<B, 1>,
     hard_reward_mean: Tensor<B, 1>,
     easy_reward_mean: Tensor<B, 1>,
+    saccade_revisit_rate: Tensor<B, 1>,
+    saccade_repeat_rate: Tensor<B, 1>,
+    saccade_unknown_frac: Tensor<B, 1>,
+    saccade_unique_frac: Tensor<B, 1>,
 }
 
 impl<B: AutodiffBackend> SudokuTrainItem<B> {
@@ -397,6 +481,10 @@ impl<B: AutodiffBackend> SudokuTrainItem<B> {
         policy_entropy_target: Tensor<B, 1>,
         hard_reward_mean: Tensor<B, 1>,
         easy_reward_mean: Tensor<B, 1>,
+        saccade_revisit_rate: Tensor<B, 1>,
+        saccade_repeat_rate: Tensor<B, 1>,
+        saccade_unknown_frac: Tensor<B, 1>,
+        saccade_unique_frac: Tensor<B, 1>,
     ) -> Self {
         Self {
             loss: loss.detach(),
@@ -416,6 +504,10 @@ impl<B: AutodiffBackend> SudokuTrainItem<B> {
             policy_entropy_target: policy_entropy_target.detach(),
             hard_reward_mean: hard_reward_mean.detach(),
             easy_reward_mean: easy_reward_mean.detach(),
+            saccade_revisit_rate: saccade_revisit_rate.detach(),
+            saccade_repeat_rate: saccade_repeat_rate.detach(),
+            saccade_unknown_frac: saccade_unknown_frac.detach(),
+            saccade_unique_frac: saccade_unique_frac.detach(),
         }
     }
 }
@@ -442,6 +534,10 @@ impl<B: AutodiffBackend> ItemLazy for SudokuTrainItem<B> {
             self.policy_entropy_target.detach().inner(),
             self.hard_reward_mean.detach().inner(),
             self.easy_reward_mean.detach().inner(),
+            self.saccade_revisit_rate.detach().inner(),
+            self.saccade_repeat_rate.detach().inner(),
+            self.saccade_unknown_frac.detach().inner(),
+            self.saccade_unique_frac.detach().inner(),
         )
     }
 }
@@ -537,6 +633,30 @@ impl<B: BackendTrait> ScalarValue<B> for SudokuHardRewardInput<B> {
 }
 
 impl<B: BackendTrait> ScalarValue<B> for SudokuEasyRewardInput<B> {
+    fn value(&self) -> Tensor<B, 1> {
+        self.value.clone()
+    }
+}
+
+impl<B: BackendTrait> ScalarValue<B> for SudokuSaccadeRevisitRateInput<B> {
+    fn value(&self) -> Tensor<B, 1> {
+        self.value.clone()
+    }
+}
+
+impl<B: BackendTrait> ScalarValue<B> for SudokuSaccadeRepeatRateInput<B> {
+    fn value(&self) -> Tensor<B, 1> {
+        self.value.clone()
+    }
+}
+
+impl<B: BackendTrait> ScalarValue<B> for SudokuSaccadeUnknownFracInput<B> {
+    fn value(&self) -> Tensor<B, 1> {
+        self.value.clone()
+    }
+}
+
+impl<B: BackendTrait> ScalarValue<B> for SudokuSaccadeUniqueFracInput<B> {
     fn value(&self) -> Tensor<B, 1> {
         self.value.clone()
     }

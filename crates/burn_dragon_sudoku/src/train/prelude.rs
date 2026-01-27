@@ -58,8 +58,9 @@ pub(crate) use crate::config::{
     SudokuArtifactConfig, SudokuCacheMhcConfig, SudokuDatasetConfig, SudokuDatasetSourceConfig, SudokuHaltConfig,
     SudokuLossMask, SudokuModelConfig, SudokuPolicyConfig, SudokuPolicyHead, SudokuReconConfig,
     SudokuReconLoss, SudokuRevisitConfig, SudokuRewardBaselineConfig, SudokuRewardConfig,
-    SudokuRewardShapingConfig, SudokuRewardShapingMetric, SudokuRolloutConfig,
-    SudokuRolloutSchedule, SudokuTrainingConfig, SudokuTrainingHyperparameters,
+    SudokuRewardShapingConfig, SudokuRewardShapingMetric, SudokuEasyRewardMode, SudokuHardRewardMode,
+    SudokuInfoRewardConfig, SudokuRolloutConfig,
+    SudokuRolloutSchedule, SudokuTrainingConfig, SudokuTrainingHyperparameters, SudokuValidationConfig,
 };
 pub(crate) use crate::dataset::{SudokuBatch, SudokuDataset, SudokuRandomDataLoader, SudokuSplit};
 pub(crate) use crate::model::SudokuSaccadeModel;
@@ -74,4 +75,6 @@ pub(crate) use burn_dragon_train::train::pipeline::{
     ResolvedLrScheduler, ScheduleSource, TrainSchedule, adamw_config_from_optimizer,
     create_run_dir, write_latest_run,
 };
+
+
 

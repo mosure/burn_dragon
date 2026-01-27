@@ -10,66 +10,73 @@ train_files = ["train_0.parquet"]
 validation_files = ["valid_0.parquet"]
 puzzle_field = "puzzle"
 solution_field = "solution"
-max_records = 50000
+max_records = 10000
 
 [training]
-batch_size = 128
-max_iters = 50000
+batch_size = 64
+max_iters = 10000
 log_frequency = 1
 
 [training.rollout]
-steps = 512
-min_steps = 4
+steps = 128
+min_steps = 32
 max_steps = 0
 max_steps_warmup_iters = 0
 max_steps_warmup_cap = 0
-backprop_steps = 4
+backprop_steps = 32
 saccade_step_cells = 1
 
 [training.rollout.schedule]
-start_steps = 64
-final_steps = 512
-anneal_iters = 3000
+start_steps = 128
+final_steps = 128
+anneal_iters = 0
 
 [training.halt]
 weight = 0.5
-exploration_prob = 0.1
+exploration_prob = 0.0
 min_steps = 2
 
 [training.policy]
-noise = 0.0
-epsilon = 0.005
+noise = 0.01
+epsilon = 0.0
 epsilon_final = 0.0
-epsilon_anneal_steps = 5000
-teacher_forcing_prob = 0.6
-teacher_forcing_final = 0.1
-teacher_forcing_anneal_steps = 3000
+epsilon_anneal_steps = 0
+teacher_forcing_prob = 0.0
+teacher_forcing_final = 0.0
+teacher_forcing_anneal_steps = 0
 temperature = 1.0
 temperature_final = 1.0
-temperature_anneal_steps = 10000
+temperature_anneal_steps = 0
 entropy_weight = 0.0
 entropy_weight_final = 0.0
 entropy_anneal_steps = 0
-entropy_adaptive = true
-entropy_target_scale = 0.9
+entropy_adaptive = false
+entropy_target_scale = 0.7
 entropy_target_ema_decay = 0.99
-entropy_alpha = 0.01
+entropy_alpha = 0.005
 entropy_alpha_lr = 0.001
-visit_penalty = 0.02
-revisit_cooldown = 4
-revisit_penalty = 1.0e4
-recon_weight = 0.1
+visit_penalty = 0.0
+revisit_penalty = 0.0
+recon_weight = 0.0
+cache_update_clues = true
 
 [training.revisit]
-min_filled_frac = 0.2
+min_filled_frac = 0.0
 min_filled_final = 0.0
-min_filled_anneal_steps = 2000
+min_filled_anneal_steps = 0
 
 [training.reward]
 unknown_power = 1.0
+no_op_penalty = 0.0
+easy_mode = "accuracy_delta"
+hard_mode = "accuracy"
+
+[training.reward.info_reward]
+enabled = false
+stride = 1
 
 [training.reward.shaping]
-enabled = true
+enabled = false
 metric = "conflict"
 weight = 0.1
 gamma = 0.99
@@ -78,27 +85,30 @@ gamma = 0.99
 enabled = true
 gamma = 0.99
 lambda = 0.95
+value_loss_weight = 0.75
 
 [training.recon]
 loss = "stablemax"
 loss_mask = "all"
 loss_interval_steps = 1
-global_loss_samples = 16
-global_loss_weight = 0.4
+global_loss_samples = 81
+global_loss_weight = 1.0
+
+[training.validation]
+sample_policy = true
 
 [training.gdpo]
 enabled = true
 group_size = 4
 hard_weight = 1.0
 easy_weight = 1.0
-policy_weight = 1.0
-policy_clip_range = 0.1
+policy_weight = 2.0
+policy_clip_range = 0.2
 advantage_clip = 2.5
 advantage_ema_decay = 0.9
 
 [training.gdpo.hard_gate]
-type = "percentile"
-quantile = 0.7
+type = "off"
 
 
 [optimizer]
@@ -107,8 +117,8 @@ weight_decay = 0.1
 
 [model]
 n_layer = 2
-n_embd = 512
-n_head = 8
+n_embd = 256
+n_head = 4
 mlp_internal_dim_multiplier = 4
 summary_tokens = 1
 policy_heads = 1
@@ -122,4 +132,5 @@ output = "mp4"
 fps = 8
 max_samples = 8
 overwrite = false
-sample_policy = false
+sample_policy = true
+

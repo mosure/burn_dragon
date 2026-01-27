@@ -290,12 +290,15 @@ impl<B: AutodiffBackend> TrainStep<SudokuBatch<B>, SudokuTrainItem<B>> for Sudok
             step,
         )
         .max(0.0);
-        let policy_entropy_weight = if self.training.policy.entropy_adaptive {
+        let mut policy_entropy_weight = if self.training.policy.entropy_adaptive {
             let entropy_alpha = *self.entropy_alpha.lock().unwrap();
             entropy_alpha.max(0.0)
         } else {
             scheduled_entropy_weight
         };
+        if self.training.gdpo.enabled {
+            policy_entropy_weight = 0.0;
+        }
         let policy_recon_weight = self.training.policy.recon_weight.max(0.0);
         let revisit_min_filled = schedule_linear(
             self.training.revisit.min_filled_frac,
@@ -319,30 +322,38 @@ impl<B: AutodiffBackend> TrainStep<SudokuBatch<B>, SudokuTrainItem<B>> for Sudok
             rollout_steps,
             Some(Arc::clone(&self.gdpo_stats)),
         );
-        let target_value = scalar_from_tensor(&losses.policy_entropy_target);
-        let ema_decay = self.training.policy.entropy_target_ema_decay.clamp(0.0, 0.9999);
-        let mut target_ema = self.entropy_target_ema.lock().unwrap();
-        let ema_value = if ema_decay > 0.0 {
-            if *target_ema <= 0.0 {
-                target_value
+        let mut target_tensor = losses.policy_entropy_target.clone();
+        let update_entropy_stats = !self.training.gdpo.enabled
+            && (self.training.policy.entropy_adaptive
+                || self.training.policy.entropy_target_ema_decay > 0.0);
+        if update_entropy_stats {
+            let target_value = scalar_from_tensor(&losses.policy_entropy_target);
+            let ema_decay = self.training.policy.entropy_target_ema_decay.clamp(0.0, 0.9999);
+            let mut target_ema = self.entropy_target_ema.lock().unwrap();
+            let ema_value = if ema_decay > 0.0 {
+                if *target_ema <= 0.0 {
+                    target_value
+                } else {
+                    ema_decay * *target_ema + (1.0 - ema_decay) * target_value
+                }
             } else {
-                ema_decay * *target_ema + (1.0 - ema_decay) * target_value
+                target_value
+            };
+            *target_ema = ema_value;
+            target_tensor = Tensor::<B, 1>::from_data(
+                TensorData::new(vec![ema_value], [1]),
+                &losses.policy_entropy_target.device(),
+            );
+            if self.training.policy.entropy_adaptive
+                && self.training.policy.entropy_alpha_lr > 0.0
+            {
+                let entropy_value = scalar_from_tensor(&losses.policy_entropy);
+                let mut entropy_alpha = self.entropy_alpha.lock().unwrap();
+                let next = (*entropy_alpha
+                    + self.training.policy.entropy_alpha_lr * (ema_value - entropy_value))
+                    .clamp(1e-4, 10.0);
+                *entropy_alpha = next;
             }
-        } else {
-            target_value
-        };
-        *target_ema = ema_value;
-        let target_tensor = Tensor::<B, 1>::from_data(
-            TensorData::new(vec![ema_value], [1]),
-            &losses.policy_entropy_target.device(),
-        );
-        if self.training.policy.entropy_adaptive && self.training.policy.entropy_alpha_lr > 0.0 {
-            let entropy_value = scalar_from_tensor(&losses.policy_entropy);
-            let mut entropy_alpha = self.entropy_alpha.lock().unwrap();
-            let next = (*entropy_alpha
-                + self.training.policy.entropy_alpha_lr * (ema_value - entropy_value))
-                .clamp(1e-4, 10.0);
-            *entropy_alpha = next;
         }
         let item = SudokuTrainItem::new(
             losses.loss,
@@ -362,6 +373,10 @@ impl<B: AutodiffBackend> TrainStep<SudokuBatch<B>, SudokuTrainItem<B>> for Sudok
             target_tensor,
             losses.hard_reward_mean,
             losses.easy_reward_mean,
+            losses.saccade_revisit_rate,
+            losses.saccade_repeat_rate,
+            losses.saccade_unknown_frac,
+            losses.saccade_unique_frac,
         );
         TrainOutput { grads, item }
     }
@@ -405,6 +420,10 @@ impl<B: BackendTrait> ValidStep<SudokuBatch<B>, SudokuOutput<B>> for SudokuTrain
             target_tensor,
             losses.hard_reward_mean,
             losses.easy_reward_mean,
+            losses.saccade_revisit_rate,
+            losses.saccade_repeat_rate,
+            losses.saccade_unknown_frac,
+            losses.saccade_unique_frac,
         )
     }
 }
@@ -427,6 +446,10 @@ pub struct SudokuLosses<B: BackendTrait> {
     pub policy_entropy_target: Tensor<B, 1>,
     pub hard_reward_mean: Tensor<B, 1>,
     pub easy_reward_mean: Tensor<B, 1>,
+    pub saccade_revisit_rate: Tensor<B, 1>,
+    pub saccade_repeat_rate: Tensor<B, 1>,
+    pub saccade_unknown_frac: Tensor<B, 1>,
+    pub saccade_unique_frac: Tensor<B, 1>,
 }
 
 #[derive(Debug, Default)]
@@ -631,6 +654,38 @@ fn gae_advantage<B: BackendTrait>(
     adv_sum
 }
 
+fn gae_advantages<B: BackendTrait>(
+    rewards: &[Tensor<B, 1>],
+    values: &[Tensor<B, 1>],
+    dones: &[Tensor<B, 1>],
+    next_value: Tensor<B, 1>,
+    gamma: f32,
+    lambda: f32,
+) -> Vec<Tensor<B, 1>> {
+    if rewards.is_empty() || values.is_empty() || dones.is_empty() {
+        return Vec::new();
+    }
+    let device = rewards[0].device();
+    let [batch] = rewards[0].shape().dims();
+    let mut adv = Tensor::<B, 1>::zeros([batch.max(1)], &device);
+    let mut next_value = next_value;
+    let mut advantages_rev: Vec<Tensor<B, 1>> = Vec::with_capacity(rewards.len());
+    for idx in (0..rewards.len()).rev() {
+        let reward = &rewards[idx];
+        let value = &values[idx];
+        let done = &dones[idx];
+        let not_done = done.clone().mul_scalar(-1.0).add_scalar(1.0);
+        let delta = reward.clone()
+            + next_value.clone().mul_scalar(gamma).mul(not_done.clone())
+            - value.clone();
+        adv = delta + adv.mul_scalar(gamma * lambda).mul(not_done);
+        advantages_rev.push(adv.clone());
+        next_value = value.clone();
+    }
+    advantages_rev.reverse();
+    advantages_rev
+}
+
 
 fn ensure_non_empty_mask<B: BackendTrait>(
     mask: Tensor<B, 2>,
@@ -799,6 +854,10 @@ fn rollout_losses<B: AutodiffBackend>(
         policy_entropy_target,
         hard_reward_mean,
         easy_reward_mean,
+        saccade_revisit_rate: rollout.saccade_revisit_rate,
+        saccade_repeat_rate: rollout.saccade_repeat_rate,
+        saccade_unknown_frac: rollout.saccade_unknown_frac,
+        saccade_unique_frac: rollout.saccade_unique_frac,
     }
 }
 
@@ -807,18 +866,40 @@ fn rollout_losses_valid<B: BackendTrait>(
     batch: SudokuBatch<B>,
     training: &SudokuTrainingHyperparameters,
 ) -> SudokuLosses<B> {
+    let sample_policy = training.validation.sample_policy;
+    let policy_noise = if sample_policy {
+        training.policy.noise
+    } else {
+        0.0
+    };
+    let policy_epsilon = if sample_policy {
+        training.policy.epsilon
+    } else {
+        0.0
+    };
+    let policy_temperature = if sample_policy {
+        training.policy.temperature
+    } else {
+        1.0
+    };
+    let teacher_forcing_prob = if sample_policy {
+        training.policy.teacher_forcing_prob
+    } else {
+        0.0
+    };
+
     let rollout = rollout_base(
         model,
         batch,
         training,
-        0.0,
-        0.0,
+        policy_noise,
+        policy_epsilon,
         None,
         false,
+        sample_policy,
         false,
-        false,
-        0.0,
-        1.0,
+        teacher_forcing_prob,
+        policy_temperature,
         training.revisit.min_filled_final,
     );
     let device = rollout.recon_loss.device();
@@ -847,6 +928,10 @@ fn rollout_losses_valid<B: BackendTrait>(
         policy_entropy_target,
         hard_reward_mean: rollout.hard_reward.mean(),
         easy_reward_mean: rollout.easy_reward.mean(),
+        saccade_revisit_rate: rollout.saccade_revisit_rate,
+        saccade_repeat_rate: rollout.saccade_repeat_rate,
+        saccade_unknown_frac: rollout.saccade_unknown_frac,
+        saccade_unique_frac: rollout.saccade_unique_frac,
     }
 }
 
@@ -879,8 +964,6 @@ fn rollout_losses_train<B: AutodiffBackend>(
     let total_halt_steps = rollout_steps.max(1);
     let total_policy_steps = rollout_steps.max(1);
     let global_weight = training.recon.global_loss_weight.max(0.0);
-    let revisit_cooldown_steps = training.policy.revisit_cooldown;
-    let revisit_penalty = training.policy.revisit_penalty.max(0.0);
     let visit_penalty = training.policy.visit_penalty.max(0.0);
 
     let gdpo_group = training.gdpo.group_size.max(1);
@@ -916,28 +999,43 @@ fn rollout_losses_train<B: AutodiffBackend>(
     let mut tokens = puzzles;
     let mut unknown_mask = tokens.clone().equal_elem(0).float();
     let loss_unknown_mask = unknown_mask.clone();
+    let mut tokens_reward = tokens.clone();
     let initial_unknown_counts = unknown_mask
         .clone()
         .sum_dim(1)
         .reshape([batch_size.max(1)]);
     let difficulty_scale =
         difficulty_scale_from_unknowns(initial_unknown_counts.clone(), training.reward.unknown_power);
-    let shaping_enabled = training.reward.shaping.enabled;
+    let easy_mode = training.reward.easy_mode;
+    let hard_mode = training.reward.hard_mode;
+    let info_enabled = training.reward.info_reward.enabled
+        && matches!(hard_mode, SudokuHardRewardMode::InfoReward);
+    let info_stride = training.reward.info_reward.stride.max(1);
+    let shaping_enabled = training.reward.shaping.enabled && !gdpo_active;
     let shaping_metric = training.reward.shaping.metric;
     let shaping_weight = training.reward.shaping.weight.max(0.0);
     let shaping_gamma = training.reward.shaping.gamma.clamp(0.0, 1.0);
     let baseline_enabled = training.reward.baseline.enabled;
     let baseline_gamma = training.reward.baseline.gamma.clamp(0.0, 1.0);
     let baseline_lambda = training.reward.baseline.lambda.clamp(0.0, 1.0);
+    let baseline_value_weight = training.reward.baseline.value_loss_weight.max(0.0);
+    let no_op_penalty = training.reward.no_op_penalty.max(0.0);
     let mut shaping_sum = Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
     let mut conflict_prev = if shaping_enabled {
         shaping_potential(&tokens, shaping_metric)
     } else {
         Tensor::<B, 1>::zeros([batch_size.max(1)], &device)
     };
-    let mut step_rewards: Vec<Tensor<B, 1>> = Vec::new();
-    let mut step_values: Vec<Tensor<B, 1>> = Vec::new();
-
+    let mut chunk_step_rewards: Vec<Tensor<B, 1>> = Vec::new();
+    let mut chunk_step_values: Vec<Tensor<B, 1>> = Vec::new();
+    let mut chunk_step_log_probs: Vec<Tensor<B, 2>> = Vec::new();
+    let mut chunk_step_masks: Vec<Tensor<B, 1>> = Vec::new();
+    let mut chunk_step_dones: Vec<Tensor<B, 1>> = Vec::new();
+    let mut rollout_step_rewards: Vec<Tensor<B, 1>> = Vec::new();
+    let mut rollout_step_values: Vec<Tensor<B, 1>> = Vec::new();
+    let mut rollout_step_log_probs: Vec<Tensor<B, 2>> = Vec::new();
+    let mut rollout_step_masks: Vec<Tensor<B, 1>> = Vec::new();
+    let mut rollout_step_dones: Vec<Tensor<B, 1>> = Vec::new();
 
     let ones_step = Tensor::<B, 2>::ones([batch_size.max(1), 1], &device);
     let mut halted = Tensor::<B, 2>::zeros([batch_size.max(1), 1], &device);
@@ -960,14 +1058,14 @@ fn rollout_losses_train<B: AutodiffBackend>(
     let mut cache = input_cache.clone();
     let mut summary_tokens = trainer.model.init_summary_tokens(batch_size);
     let summary_len = trainer.model.summary_token_count();
-    let (initial_acc_per_sample, initial_acc_mean, initial_exact, _initial_solve) =
-        compute_grid_accuracy(&tokens, &solutions);
-    let initial_acc_per_sample = initial_acc_per_sample.detach();
-    let initial_acc = initial_acc_per_sample.clone();
+    let (reward_initial_acc_per_sample, initial_acc_mean, initial_exact, _initial_solve) =
+        compute_grid_accuracy(&tokens_reward, &solutions);
+    let reward_initial_acc = reward_initial_acc_per_sample.clone();
     let mut last_loss_per_sample = Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
     let mut last_acc = initial_acc_mean.detach();
     let mut last_exact = initial_exact.detach();
-    let mut last_acc_per_sample = initial_acc_per_sample.clone();
+    let mut last_reward_acc_per_sample = reward_initial_acc.clone();
+    let mut prev_reward_acc_per_sample = reward_initial_acc.clone();
 
     let zeros = Tensor::<B, 1>::zeros([1], &device);
     let mut recon_loss_sum_metrics = zeros.clone();
@@ -980,6 +1078,10 @@ fn rollout_losses_train<B: AutodiffBackend>(
     let mut log_prob_sum_metrics =
         Tensor::<B, 2>::zeros([batch_size.max(1), 1], &device);
     let mut policy_recon_sum_metrics = zeros.clone();
+    let mut action_count_sum_metrics = zeros.clone();
+    let mut revisit_count_sum_metrics = zeros.clone();
+    let mut repeat_count_sum_metrics = zeros.clone();
+    let mut unknown_select_sum_metrics = zeros.clone();
 
     let mut chunk_local_loss_sum = zeros.clone();
     let mut chunk_global_loss_sum = zeros.clone();
@@ -990,13 +1092,30 @@ fn rollout_losses_train<B: AutodiffBackend>(
     let mut chunk_log_prob_sum =
         Tensor::<B, 2>::zeros([batch_size.max(1), 1], &device);
     let mut chunk_policy_recon_sum = zeros.clone();
+    let mut chunk_recon_delta_sum =
+        Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
+    let mut chunk_recon_mask_sum =
+        Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
+    let mut rollout_recon_delta_sum =
+        Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
+    let mut rollout_recon_mask_sum =
+        Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
+    let mut chunk_acc_delta_sum =
+        Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
+    let mut chunk_acc_delta_mask_sum =
+        Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
+    let mut rollout_acc_delta_sum =
+        Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
+    let mut rollout_acc_delta_mask_sum =
+        Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
+    let mut info_reward_sum = Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
 
     let mut steps_done = 0usize;
 
     let mut grads_accum = GradientsAccumulator::<SudokuTrainer<B>>::new();
-    let mut revisit_cooldown =
-        Tensor::<B, 2>::zeros([batch_size.max(1), GRID_LEN], &device);
     let mut visit_counts =
+        Tensor::<B, 2>::zeros([batch_size.max(1), GRID_LEN], &device);
+    let mut prev_action_one_hot =
         Tensor::<B, 2>::zeros([batch_size.max(1), GRID_LEN], &device);
     let mut selectable_count_sum = zeros.clone();
     let mut selectable_steps = 0usize;
@@ -1010,6 +1129,17 @@ fn rollout_losses_train<B: AutodiffBackend>(
             trainer
                 .model
                 .policy_logits_from_cache(summary_tokens.clone(), cache_read.clone());
+
+        let step_value = if baseline_enabled {
+            Some(
+                trainer
+                    .model
+                    .value_baseline_from_summary_tokens(summary_tokens.clone())
+                    .reshape([batch_size.max(1)]),
+            )
+        } else {
+            None
+        };
 
         let tokens_solved_before = tokens
             .clone()
@@ -1044,10 +1174,6 @@ fn rollout_losses_train<B: AutodiffBackend>(
                 .clone()
                 .sub(select_mask.clone())
                 .mul_scalar(POLICY_MASK_PENALTY);
-        if revisit_cooldown_steps > 0 && revisit_penalty > 0.0 {
-            let cooldown_mask = revisit_cooldown.clone().greater_elem(0.0).float();
-            masked_logits = masked_logits - cooldown_mask.mul_scalar(revisit_penalty);
-        }
         if visit_penalty > 0.0 {
             let visit_log = visit_counts.clone().add_scalar(1.0).log();
             masked_logits = masked_logits - visit_log.mul_scalar(visit_penalty);
@@ -1084,13 +1210,39 @@ fn rollout_losses_train<B: AutodiffBackend>(
         let mut action_one_hot = build_action_one_hot(&actions, &action_index);
         let active_mask_grid = active_mask.clone().repeat_dim(1, GRID_LEN);
         action_one_hot = action_one_hot * active_mask_grid.clone() * select_mask.clone();
-        if revisit_cooldown_steps > 0 {
-            let decay = revisit_cooldown.clone().sub_scalar(1.0).clamp_min(0.0);
-            let refreshed = action_one_hot
-                .clone()
-                .mul_scalar(revisit_cooldown_steps as f32);
-            revisit_cooldown = decay.max_pair(refreshed);
-        }
+        let first_visit_mask = visit_counts.clone().equal_elem(0.0).float();
+        let selected_first_visit = action_one_hot
+            .clone()
+            .mul(first_visit_mask.clone())
+            .sum_dim(1)
+            .reshape([batch_size.max(1), 1]);
+        let action_any = action_one_hot
+            .clone()
+            .sum_dim(1)
+            .reshape([batch_size.max(1), 1]);
+        let step_revisit = action_any
+            .clone()
+            .sub(selected_first_visit.clone())
+            .clamp_min(0.0);
+        let step_repeat = action_one_hot
+            .clone()
+            .mul(prev_action_one_hot.clone())
+            .sum_dim(1)
+            .reshape([batch_size.max(1), 1]);
+        let step_unknown = unknown_mask
+            .clone()
+            .mul(action_one_hot.clone())
+            .sum_dim(1)
+            .reshape([batch_size.max(1), 1]);
+        action_count_sum_metrics =
+            action_count_sum_metrics + action_any.mean().detach();
+        revisit_count_sum_metrics =
+            revisit_count_sum_metrics + step_revisit.mean().detach();
+        repeat_count_sum_metrics =
+            repeat_count_sum_metrics + step_repeat.mean().detach();
+        unknown_select_sum_metrics =
+            unknown_select_sum_metrics + step_unknown.mean().detach();
+        prev_action_one_hot = action_one_hot.clone();
         visit_counts = visit_counts + action_one_hot.clone();
 
         let log_probs = activation::log_softmax(policy_logits, 1);
@@ -1153,6 +1305,14 @@ fn rollout_losses_train<B: AutodiffBackend>(
             .sum_dim(1)
             .reshape([batch_size.max(1), 1])
             .int();
+        let selected_editable = editable_mask
+            .clone()
+            .mul(action_one_hot.clone())
+            .sum_dim(1)
+            .reshape([batch_size.max(1), 1]);
+        let reward_mask = selected_editable
+            .clone()
+            .reshape([batch_size.max(1)]);
         let mut local_loss_mask = active_mask.clone();
         if matches!(training.recon.loss_mask, SudokuLossMask::Unknown) {
             let selected_unknown = loss_unknown_mask
@@ -1171,6 +1331,23 @@ fn rollout_losses_train<B: AutodiffBackend>(
                 &local_loss_mask,
                 &training.recon.loss,
             );
+
+        let reward_local_mask = active_mask
+            .clone()
+            .mul(selected_editable.clone());
+        let (
+            _reward_local_loss,
+            _reward_local_acc,
+            _reward_local_exact,
+            reward_local_loss_per_sample,
+            ..
+        ) = compute_loss_and_acc(
+            &step_logits,
+            &selected_solution,
+            &selected_solution_one_hot,
+            &reward_local_mask,
+            &training.recon.loss,
+        );
 
         let teacher_force = if teacher_forcing_prob > 0.0 {
             Tensor::<B, 2>::random(
@@ -1192,14 +1369,30 @@ fn rollout_losses_train<B: AutodiffBackend>(
             .clone()
             .mul(editable_mask.clone())
             .greater_equal_elem(0.5);
+        let update_any = update_mask
+            .clone()
+            .float()
+            .sum_dim(1)
+            .reshape([batch_size.max(1), 1])
+            .greater_elem(0.0)
+            .float();
+        let no_update = ones_step.clone().sub(update_any).mul(active_mask.clone());
+        let no_op_penalty_per_sample = no_update
+            .clone()
+            .reshape([batch_size.max(1)])
+            .mul_scalar(no_op_penalty);
         let update_values_grid = update_values.clone().repeat_dim(1, GRID_LEN);
         tokens = tokens.mask_where(update_mask.clone(), update_values_grid);
         unknown_mask = (unknown_mask - action_one_hot.clone()).clamp_min(0.0);
+        let update_values_pred_grid = pred_values.clone().repeat_dim(1, GRID_LEN);
+        tokens_reward = tokens_reward.mask_where(update_mask.clone(), update_values_pred_grid);
 
-        let update_mask_f = action_one_hot
-            .clone()
-            .mul(editable_mask.clone())
-            .unsqueeze_dim::<3>(2);
+        let update_mask_cache = if training.policy.cache_update_clues {
+            action_one_hot.clone()
+        } else {
+            action_one_hot.clone().mul(editable_mask.clone())
+        };
+        let update_mask_f = update_mask_cache.clone().unsqueeze_dim::<3>(2);
         let selected_row = row_ids_f
             .clone()
             .mul(action_one_hot.clone())
@@ -1251,7 +1444,7 @@ fn rollout_losses_train<B: AutodiffBackend>(
             cache = mhc.depth_connection(branch_input, residuals_out, beta);
         }
 
-        let tokens_solved_after = tokens
+        let tokens_solved_after = tokens_reward
             .clone()
             .equal(solutions.clone())
             .float()
@@ -1286,16 +1479,25 @@ fn rollout_losses_train<B: AutodiffBackend>(
         }
         halted = halted.max_pair(step_halt.clone());
 
+        let mut step_done = active_mask.clone().mul_scalar(-1.0).add_scalar(1.0);
+        step_done = step_done.max_pair(tokens_solved_after.clone());
+        step_done = step_done.max_pair(halted.clone());
+        let step_done = step_done.reshape([batch_size.max(1)]);
+
         steps_done += 1;
 
-        let (acc_per_sample, acc, exact_acc, _solve_rate) =
-            compute_grid_accuracy(&tokens, &solutions);
-        last_acc_per_sample = acc_per_sample.detach();
+        let (reward_acc_per_sample, acc, exact_acc, _solve_rate) =
+            compute_grid_accuracy(&tokens_reward, &solutions);
+        let step_acc_delta = reward_acc_per_sample.clone().sub(prev_reward_acc_per_sample.clone());
+        prev_reward_acc_per_sample = reward_acc_per_sample.detach();
+        last_reward_acc_per_sample = prev_reward_acc_per_sample.clone();
         last_acc = acc.detach();
         last_exact = exact_acc.detach();
 
         let mut global_loss = zeros.clone();
         let mut global_loss_per_sample =
+            Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
+        let mut reward_global_loss_per_sample =
             Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
         let mut global_active = false;
         if recon_interval > 0 && (step_idx + 1) % recon_interval == 0 && global_samples > 0 {
@@ -1307,11 +1509,16 @@ fn rollout_losses_train<B: AutodiffBackend>(
                 TensorDistribution::Uniform(0.0, 1.0),
                 &device,
             );
+            let mut reward_global_mask = random.clone().lower_equal_elem(sample_prob).float();
             let mut global_mask = random.lower_equal_elem(sample_prob).float();
             global_mask = (global_mask + action_one_hot.clone()).clamp_max(1.0);
+            reward_global_mask = (reward_global_mask + action_one_hot.clone()).clamp_max(1.0);
             global_mask = global_mask.mul(active_mask_grid.clone());
+            reward_global_mask = reward_global_mask.mul(active_mask_grid.clone());
+            reward_global_mask = reward_global_mask.mul(editable_mask.clone());
             if matches!(training.recon.loss_mask, SudokuLossMask::Unknown) {
                 global_mask = global_mask.mul(loss_unknown_mask.clone());
+                reward_global_mask = reward_global_mask.mul(tokens_reward.clone().equal_elem(0).float());
             }
             global_mask = ensure_non_empty_mask(global_mask, action_one_hot.clone());
             let global_logits = trainer.model.value_logits_from_cache(cache_read.clone());
@@ -1325,30 +1532,99 @@ fn rollout_losses_train<B: AutodiffBackend>(
                 );
             global_loss = step_loss;
             global_loss_per_sample = step_loss_per_sample;
+
+            let (
+                _reward_step_loss,
+                _reward_step_acc,
+                _reward_step_exact,
+                reward_step_loss_per_sample,
+                ..
+            ) = compute_loss_and_acc(
+                &global_logits,
+                &solutions,
+                &solution_one_hot,
+                &reward_global_mask,
+                &training.recon.loss,
+            );
+            reward_global_loss_per_sample = reward_step_loss_per_sample;
         }
 
-        let step_recon_per_sample =
+        let _step_recon_per_sample =
             local_loss_per_sample + global_loss_per_sample.mul_scalar(global_weight);
+        let step_recon_per_sample_reward = reward_local_loss_per_sample
+            + reward_global_loss_per_sample.mul_scalar(global_weight);
+        let step_recon_per_sample_reward_detached =
+            step_recon_per_sample_reward.clone().detach();
+        let mut baseline_loss = last_loss_per_sample.clone();
+        let baseline_mask = baseline_loss.clone().equal_elem(0.0);
+        baseline_loss = baseline_loss.mask_where(
+            baseline_mask,
+            step_recon_per_sample_reward_detached.clone(),
+        );
+        let step_recon_delta = baseline_loss
+            .sub(step_recon_per_sample_reward_detached.clone())
+            .mul(reward_mask.clone());
+        let step_reward_mask = reward_mask
+            .clone()
+            .add(no_update.clone().reshape([batch_size.max(1)]))
+            .clamp_max(1.0);
+        let step_recon_delta_reward = step_recon_delta
+            .clone()
+            .sub(no_op_penalty_per_sample.clone());
+        chunk_recon_delta_sum =
+            chunk_recon_delta_sum + step_recon_delta_reward.clone();
+        chunk_recon_mask_sum = chunk_recon_mask_sum + step_reward_mask.clone();
+        rollout_recon_delta_sum =
+            rollout_recon_delta_sum + step_recon_delta_reward.clone();
+        rollout_recon_mask_sum = rollout_recon_mask_sum + step_reward_mask.clone();
+        let step_active_mask = active_mask.clone().reshape([batch_size.max(1)]);
+        let step_acc_delta_reward = step_acc_delta
+            .clone()
+            .mul(step_active_mask.clone())
+            .sub(no_op_penalty_per_sample.clone());
+        chunk_acc_delta_sum = chunk_acc_delta_sum + step_acc_delta_reward.clone();
+        chunk_acc_delta_mask_sum = chunk_acc_delta_mask_sum + step_active_mask.clone();
+        rollout_acc_delta_sum = rollout_acc_delta_sum + step_acc_delta_reward.clone();
+        rollout_acc_delta_mask_sum = rollout_acc_delta_mask_sum + step_active_mask.clone();
+        if info_enabled && step_idx % info_stride == 0 {
+            info_reward_sum = info_reward_sum + step_recon_delta.clone();
+        }
 
-        let mut step_reward = step_recon_per_sample.clone().mul_scalar(-1.0);
+        let mut step_reward = match easy_mode {
+            SudokuEasyRewardMode::AccuracyDelta => step_acc_delta_reward.clone(),
+            _ => step_recon_delta_reward.clone(),
+        };
         if shaping_enabled {
             let conflict_next = shaping_potential(&tokens, shaping_metric);
-            let shaping_delta = conflict_next.clone().mul_scalar(shaping_gamma) - conflict_prev.clone();
+            let mut shaping_delta =
+                conflict_next.clone().mul_scalar(shaping_gamma) - conflict_prev.clone();
+            shaping_delta = shaping_delta.mul(reward_mask.clone());
             shaping_sum = shaping_sum + shaping_delta.clone();
             step_reward = step_reward + shaping_delta.mul_scalar(shaping_weight);
-            conflict_prev = conflict_next;
+            let keep = Tensor::<B, 1>::ones([batch_size.max(1)], &device)
+                .sub(reward_mask.clone());
+            conflict_prev = conflict_prev.mul(keep) + conflict_next.mul(reward_mask.clone());
         }
-        if baseline_enabled {
-            let value = trainer
-                .model
-                .value_baseline_from_summary_tokens(summary_hidden.clone())
-                .reshape([batch_size.max(1)]);
-            step_rewards.push(step_reward);
-            step_values.push(value);
+        step_reward = step_reward.mul(step_reward_mask.clone());
+        if baseline_enabled && let Some(value) = step_value.clone() {
+            chunk_step_rewards.push(step_reward.clone());
+            chunk_step_values.push(value.clone());
+            chunk_step_log_probs.push(selected_log_prob.clone());
+            chunk_step_masks.push(step_active_mask.clone());
+            chunk_step_dones.push(step_done.clone());
+            rollout_step_rewards.push(step_reward.clone());
+            rollout_step_values.push(value);
+            rollout_step_log_probs.push(selected_log_prob.clone());
+            rollout_step_masks.push(step_active_mask.clone());
+            rollout_step_dones.push(step_done.clone());
         }
 
         if policy_recon_weight > 0.0 {
-            let reward = step_recon_per_sample.clone().mul_scalar(-1.0).detach();
+            let reward = step_recon_per_sample_reward
+                .clone()
+                .mul(reward_mask.clone())
+                .mul_scalar(-1.0)
+                .detach();
             let reward_mean = reward.clone().mean();
             let advantage = reward
                 .sub(reward_mean)
@@ -1364,8 +1640,10 @@ fn rollout_losses_train<B: AutodiffBackend>(
                 policy_recon_sum_metrics + step_policy_recon_detached;
         }
 
-        last_loss_per_sample = step_recon_per_sample.detach();
-
+        let reward_keep = Tensor::<B, 1>::ones([batch_size.max(1)], &device)
+            .sub(reward_mask.clone());
+        last_loss_per_sample = last_loss_per_sample.mul(reward_keep)
+            + step_recon_per_sample_reward_detached.mul(reward_mask.clone());
         let step_recon = local_loss.clone() + global_loss.clone().mul_scalar(global_weight);
         recon_loss_sum_metrics = recon_loss_sum_metrics + step_recon.detach();
         recon_steps_metrics += 1;
@@ -1376,45 +1654,174 @@ fn rollout_losses_train<B: AutodiffBackend>(
 
         let chunk_end = (step_idx + 1) % chunk_steps == 0 || step_idx + 1 == rollout_steps;
         if chunk_end {
-            let hard_reward = last_acc_per_sample.clone().sub(initial_acc.clone());
-            let easy_reward = if baseline_enabled && !step_rewards.is_empty() {
-                gae_advantage(&step_rewards, &step_values, baseline_gamma, baseline_lambda)
-            } else {
-                let mut easy = last_loss_per_sample.clone().mul_scalar(-1.0);
-                if shaping_enabled {
-                    easy = easy + shaping_sum.clone().mul_scalar(shaping_weight);
+            let hard_reward = match hard_mode {
+                SudokuHardRewardMode::InfoReward => info_reward_sum.clone(),
+                SudokuHardRewardMode::Accuracy => {
+                    last_reward_acc_per_sample.clone().sub(reward_initial_acc.clone())
                 }
-                easy
+            };
+            let easy_reward = match easy_mode {
+                SudokuEasyRewardMode::Recon => chunk_recon_delta_sum
+                    .clone()
+                    .div(chunk_recon_mask_sum.clone().clamp_min(1.0)),
+                SudokuEasyRewardMode::AccuracyDelta => chunk_acc_delta_sum
+                    .clone()
+                    .div(chunk_acc_delta_mask_sum.clone().clamp_min(1.0)),
+                SudokuEasyRewardMode::Gae => {
+                    if baseline_enabled && !chunk_step_rewards.is_empty() {
+                        let values_detached: Vec<_> = chunk_step_values
+                            .iter()
+                            .map(|value| value.clone().detach())
+                            .collect();
+                        gae_advantage(
+                            &chunk_step_rewards,
+                            &values_detached,
+                            baseline_gamma,
+                            baseline_lambda,
+                        )
+                    } else {
+                        let mut easy = last_loss_per_sample.clone().mul_scalar(-1.0);
+                        if shaping_enabled {
+                            easy = easy + shaping_sum.clone().mul_scalar(shaping_weight);
+                        }
+                        easy
+                    }
+                }
             };
             let hard_reward = hard_reward.mul(difficulty_scale.clone());
             let easy_reward = easy_reward.mul(difficulty_scale.clone());
 
-            let policy_loss = if gdpo_active {
-                let scene_batch = if gdpo_group == 0 {
-                    batch_size
-                } else {
-                    batch_size / gdpo_group
-                };
-                let hard = hard_reward
-                    .clone()
-                    .detach()
-                    .reshape([scene_batch.max(1), gdpo_group.max(1)]);
-                let easy = easy_reward
-                    .clone()
-                    .detach()
-                    .reshape([scene_batch.max(1), gdpo_group.max(1)]);
-                let advantage = gdpo_advantage_autodiff::<B>(hard, easy, &training.gdpo)
-                    .reshape([batch_size.max(1), 1])
+            let mut advantages: Vec<Tensor<B, 1>> = Vec::new();
+            let mut value_loss = zeros.clone();
+            if baseline_enabled && !chunk_step_rewards.is_empty() {
+                let values_detached: Vec<_> = chunk_step_values
+                    .iter()
+                    .map(|value| value.clone().detach())
+                    .collect();
+                let rewards_detached: Vec<_> = chunk_step_rewards
+                    .iter()
+                    .map(|reward| reward.clone().detach())
+                    .collect();
+                let dones_detached: Vec<_> = chunk_step_dones
+                    .iter()
+                    .map(|done| done.clone().detach())
+                    .collect();
+                let next_value = trainer
+                    .model
+                    .value_baseline_from_summary_tokens(summary_tokens.clone())
+                    .reshape([batch_size.max(1)])
                     .detach();
-                let advantage =
-                    apply_advantage_guardrails(advantage, &training.gdpo, gdpo_stats.as_ref());
-                let log_prob_old = chunk_log_prob_sum.clone().detach();
-                gdpo_policy_loss(
-                    chunk_log_prob_sum.clone(),
-                    log_prob_old,
-                    advantage,
-                    &training.gdpo,
-                )
+                advantages = gae_advantages(
+                    &rewards_detached,
+                    &values_detached,
+                    &dones_detached,
+                    next_value,
+                    baseline_gamma,
+                    baseline_lambda,
+                );
+
+                if baseline_value_weight > 0.0 {
+                    let mut value_loss_sum = zeros.clone();
+                    let mut value_loss_steps = 0usize;
+                    for ((advantage, value), step_mask) in advantages
+                        .iter()
+                        .zip(chunk_step_values.iter())
+                        .zip(chunk_step_masks.iter())
+                    {
+                        let target = advantage.clone().detach() + value.clone().detach();
+                        let diff = value.clone() - target;
+                        let mask_sum = step_mask.clone().sum_dim(0).clamp_min(1.0);
+                        let step_loss = diff
+                            .powf_scalar(2.0)
+                            .mul(step_mask.clone())
+                            .sum_dim(0)
+                            .div(mask_sum)
+                            .reshape([1]);
+                        value_loss_sum = value_loss_sum + step_loss;
+                        value_loss_steps += 1;
+                    }
+                    if value_loss_steps > 0 {
+                        value_loss = value_loss_sum.div_scalar(value_loss_steps as f32);
+                    }
+                }
+            }
+
+            let policy_loss = if gdpo_active {
+                if baseline_enabled && !advantages.is_empty() {
+                    let step_count = advantages.len();
+                    let batch = batch_size.max(1);
+                    let mut adv_stack: Vec<Tensor<B, 2>> = Vec::with_capacity(step_count);
+                    let mut log_prob_stack: Vec<Tensor<B, 3>> = Vec::with_capacity(step_count);
+                    for idx in 0..step_count {
+                        adv_stack.push(
+                            advantages[idx]
+                                .clone()
+                                .mul(chunk_step_masks[idx].clone())
+                                .reshape([1, batch]),
+                        );
+                        log_prob_stack.push(
+                            chunk_step_log_probs[idx]
+                                .clone()
+                                .reshape([1, batch, 1]),
+                        );
+                    }
+                    let mut advantage = Tensor::cat(adv_stack, 0)
+                        .reshape([step_count * batch, 1]);
+                    if gdpo_group > 1 {
+                        let scene_batch = if gdpo_group == 0 {
+                            batch
+                        } else {
+                            batch / gdpo_group
+                        };
+                        let hard = advantage
+                            .clone()
+                            .reshape([step_count * scene_batch.max(1), gdpo_group.max(1)]);
+                        let easy = Tensor::<B, 2>::zeros(
+                            [step_count * scene_batch.max(1), gdpo_group.max(1)],
+                            &device,
+                        );
+                        advantage = gdpo_advantage_autodiff::<B>(hard, easy, &training.gdpo)
+                            .reshape([step_count * batch, 1]);
+                    }
+                    let advantage = apply_advantage_guardrails(
+                        advantage,
+                        &training.gdpo,
+                        gdpo_stats.as_ref(),
+                    );
+                    let log_prob = Tensor::cat(log_prob_stack, 0)
+                        .reshape([step_count * batch, 1]);
+                    let log_prob_old = log_prob.clone().detach();
+                    gdpo_policy_loss(log_prob, log_prob_old, advantage, &training.gdpo)
+                } else {
+                    let scene_batch = if gdpo_group == 0 {
+                        batch_size
+                    } else {
+                        batch_size / gdpo_group
+                    };
+                    let hard = hard_reward
+                        .clone()
+                        .detach()
+                        .reshape([scene_batch.max(1), gdpo_group.max(1)]);
+                    let easy = easy_reward
+                        .clone()
+                        .detach()
+                        .reshape([scene_batch.max(1), gdpo_group.max(1)]);
+                    let advantage = gdpo_advantage_autodiff::<B>(hard, easy, &training.gdpo)
+                        .reshape([batch_size.max(1), 1])
+                        .detach();
+                    let advantage = apply_advantage_guardrails(
+                        advantage,
+                        &training.gdpo,
+                        gdpo_stats.as_ref(),
+                    );
+                    let log_prob_old = chunk_log_prob_sum.clone().detach();
+                    gdpo_policy_loss(
+                        chunk_log_prob_sum.clone(),
+                        log_prob_old,
+                        advantage,
+                        &training.gdpo,
+                    )
+                }
             } else {
                 zeros.clone()
             };
@@ -1458,6 +1865,7 @@ fn rollout_losses_train<B: AutodiffBackend>(
             let chunk_loss = recon_term
                 + policy_loss
                 + policy_recon_term.mul_scalar(policy_recon_weight)
+                + value_loss.mul_scalar(baseline_value_weight)
                 + halt_term.mul_scalar(training.halt.weight)
                 - entropy_bonus;
 
@@ -1472,11 +1880,23 @@ fn rollout_losses_train<B: AutodiffBackend>(
                 Tensor::<B, 2>::zeros([batch_size.max(1), 1], &device);
             chunk_log_prob_sum = Tensor::<B, 2>::zeros([batch_size.max(1), 1], &device);
             chunk_policy_recon_sum = zeros.clone();
+            chunk_recon_delta_sum =
+                Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
+            chunk_recon_mask_sum = Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
+            chunk_acc_delta_sum =
+                Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
+            chunk_acc_delta_mask_sum =
+                Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
+            info_reward_sum = Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
+            chunk_step_rewards.clear();
+            chunk_step_values.clear();
+            chunk_step_log_probs.clear();
+            chunk_step_masks.clear();
+            chunk_step_dones.clear();
 
             detach_state(&mut state);
             summary_tokens = summary_tokens.detach();
             cache = cache.detach();
-            revisit_cooldown = revisit_cooldown.detach();
         }
     }
 
@@ -1535,15 +1955,49 @@ fn rollout_losses_train<B: AutodiffBackend>(
         zeros.clone()
     };
 
-    let hard_reward = last_acc_per_sample.clone().sub(initial_acc);
-    let easy_reward = if baseline_enabled && !step_rewards.is_empty() {
-        gae_advantage(&step_rewards, &step_values, baseline_gamma, baseline_lambda)
-    } else {
-        let mut easy = last_loss_per_sample.clone().mul_scalar(-1.0);
-        if shaping_enabled {
-            easy = easy + shaping_sum.clone().mul_scalar(shaping_weight);
+    let action_count = action_count_sum_metrics.clone().clamp_min(SUDOKU_EPS);
+    let saccade_revisit_rate = revisit_count_sum_metrics.clone().div(action_count.clone());
+    let saccade_repeat_rate = repeat_count_sum_metrics.clone().div(action_count.clone());
+    let saccade_unknown_frac = unknown_select_sum_metrics.clone().div(action_count.clone());
+    let unique_cells = visit_counts.clone().greater_elem(0.0).float().sum_dim(1);
+    let total_visits = visit_counts.clone().sum_dim(1).clamp_min(1.0);
+    let saccade_unique_frac = unique_cells.div(total_visits).mean();
+
+    let hard_reward = match hard_mode {
+        SudokuHardRewardMode::InfoReward => info_reward_sum.clone(),
+        SudokuHardRewardMode::Accuracy => last_reward_acc_per_sample.clone().sub(reward_initial_acc.clone()),
+    };
+    let easy_reward = match easy_mode {
+        SudokuEasyRewardMode::Recon => {
+            rollout_recon_delta_sum
+                .clone()
+                .div(rollout_recon_mask_sum.clone().clamp_min(1.0))
         }
-        easy
+        SudokuEasyRewardMode::AccuracyDelta => {
+            rollout_acc_delta_sum
+                .clone()
+                .div(rollout_acc_delta_mask_sum.clone().clamp_min(1.0))
+        }
+        SudokuEasyRewardMode::Gae => {
+            if baseline_enabled && !rollout_step_rewards.is_empty() {
+                let values_detached: Vec<_> = rollout_step_values
+                    .iter()
+                    .map(|value| value.clone().detach())
+                    .collect();
+                gae_advantage(
+                    &rollout_step_rewards,
+                    &values_detached,
+                    baseline_gamma,
+                    baseline_lambda,
+                )
+            } else {
+                let mut easy = last_loss_per_sample.clone().mul_scalar(-1.0);
+                if shaping_enabled {
+                    easy = easy + shaping_sum.clone().mul_scalar(shaping_weight);
+                }
+                easy
+            }
+        }
     };
     let hard_reward = hard_reward.mul(difficulty_scale.clone());
     let easy_reward = easy_reward.mul(difficulty_scale.clone());
@@ -1552,35 +2006,116 @@ fn rollout_losses_train<B: AutodiffBackend>(
     let easy_reward_mean = easy_reward.clone().mean();
 
     let (policy_loss, advantage_abs_mean, advantage_std) = if gdpo_active {
-        let scene_batch = if gdpo_group == 0 {
-            batch_size
-        } else {
-            batch_size / gdpo_group
-        };
-        let hard = hard_reward
-            .clone()
-            .reshape([scene_batch.max(1), gdpo_group.max(1)]);
-        let easy = easy_reward
-            .clone()
-            .reshape([scene_batch.max(1), gdpo_group.max(1)]);
-        let advantage = gdpo_advantage_autodiff::<B>(hard, easy, &training.gdpo)
-            .reshape([batch_size.max(1), 1])
-            .detach();
-        let advantage = apply_advantage_guardrails(advantage, &training.gdpo, None);
-        let log_prob_old = log_prob_sum_metrics.clone();
-        let policy_loss = gdpo_policy_loss(
-            log_prob_sum_metrics.clone(),
-            log_prob_old,
-            advantage.clone(),
-            &training.gdpo,
-        );
+        if baseline_enabled && !rollout_step_rewards.is_empty() {
+            let values_detached: Vec<_> = rollout_step_values
+                .iter()
+                .map(|value| value.clone().detach())
+                .collect();
+            let rewards_detached: Vec<_> = rollout_step_rewards
+                .iter()
+                .map(|reward| reward.clone().detach())
+                .collect();
+            let dones_detached: Vec<_> = rollout_step_dones
+                .iter()
+                .map(|done| done.clone().detach())
+                .collect();
+            let next_value = trainer
+                .model
+                .value_baseline_from_summary_tokens(summary_tokens.clone())
+                .reshape([batch_size.max(1)])
+                .detach();
+            let advantages = gae_advantages(
+                &rewards_detached,
+                &values_detached,
+                &dones_detached,
+                next_value,
+                baseline_gamma,
+                baseline_lambda,
+            );
 
-        let adv_abs = advantage.clone().abs().mean();
-        let adv_mean = advantage.clone().mean();
-        let adv_sq_mean = advantage.clone().powf_scalar(2.0).mean();
-        let adv_var = adv_sq_mean - adv_mean.clone().powf_scalar(2.0);
-        let adv_std = adv_var.add_scalar(SUDOKU_EPS).sqrt();
-        (policy_loss, adv_abs, adv_std)
+            let step_count = advantages.len();
+            let batch = batch_size.max(1);
+            let mut adv_stack: Vec<Tensor<B, 2>> = Vec::with_capacity(step_count);
+            let mut log_prob_stack: Vec<Tensor<B, 3>> = Vec::with_capacity(step_count);
+            for idx in 0..step_count {
+                adv_stack.push(
+                    advantages[idx]
+                        .clone()
+                        .mul(rollout_step_masks[idx].clone())
+                        .reshape([1, batch]),
+                );
+                log_prob_stack.push(
+                    rollout_step_log_probs[idx]
+                        .clone()
+                        .reshape([1, batch, 1]),
+                );
+            }
+            let mut advantage = Tensor::cat(adv_stack, 0)
+                .reshape([step_count * batch, 1]);
+            if gdpo_group > 1 {
+                let scene_batch = if gdpo_group == 0 {
+                    batch
+                } else {
+                    batch / gdpo_group
+                };
+                let hard = advantage
+                    .clone()
+                    .reshape([step_count * scene_batch.max(1), gdpo_group.max(1)]);
+                let easy = Tensor::<B, 2>::zeros(
+                    [step_count * scene_batch.max(1), gdpo_group.max(1)],
+                    &device,
+                );
+                advantage = gdpo_advantage_autodiff::<B>(hard, easy, &training.gdpo)
+                    .reshape([step_count * batch, 1]);
+            }
+            let advantage = apply_advantage_guardrails(advantage, &training.gdpo, None);
+            let log_prob = Tensor::cat(log_prob_stack, 0)
+                .reshape([step_count * batch, 1]);
+            let log_prob_old = log_prob.clone().detach();
+            let policy_loss = gdpo_policy_loss(
+                log_prob,
+                log_prob_old,
+                advantage.clone(),
+                &training.gdpo,
+            );
+
+            let adv_abs = advantage.clone().abs().mean();
+            let adv_mean = advantage.clone().mean();
+            let adv_sq_mean = advantage.clone().powf_scalar(2.0).mean();
+            let adv_var = adv_sq_mean - adv_mean.clone().powf_scalar(2.0);
+            let adv_std = adv_var.add_scalar(SUDOKU_EPS).sqrt();
+            (policy_loss, adv_abs, adv_std)
+        } else {
+            let scene_batch = if gdpo_group == 0 {
+                batch_size
+            } else {
+                batch_size / gdpo_group
+            };
+            let hard = hard_reward
+                .clone()
+                .reshape([scene_batch.max(1), gdpo_group.max(1)]);
+            let easy = easy_reward
+                .clone()
+                .reshape([scene_batch.max(1), gdpo_group.max(1)]);
+            let advantage = gdpo_advantage_autodiff::<B>(hard, easy, &training.gdpo)
+                .reshape([batch_size.max(1), 1])
+                .detach();
+            let advantage = apply_advantage_guardrails(advantage, &training.gdpo, None);
+            let log_prob_old = log_prob_sum_metrics.clone();
+            let policy_loss = gdpo_policy_loss(
+                log_prob_sum_metrics.clone(),
+                log_prob_old,
+                advantage.clone(),
+                &training.gdpo,
+            );
+
+            let adv_abs = advantage.clone().abs().mean();
+            let adv_mean = advantage.clone().mean();
+            let adv_sq_mean = advantage.clone().powf_scalar(2.0).mean();
+            let adv_var = adv_sq_mean - adv_mean.clone().powf_scalar(2.0);
+            let adv_std = adv_var.add_scalar(SUDOKU_EPS).sqrt();
+            (policy_loss, adv_abs, adv_std)
+        }
     } else {
         (zeros.clone(), zeros.clone(), zeros.clone())
     };
@@ -1623,6 +2158,10 @@ fn rollout_losses_train<B: AutodiffBackend>(
         policy_entropy_target,
         hard_reward_mean,
         easy_reward_mean,
+        saccade_revisit_rate,
+        saccade_repeat_rate,
+        saccade_unknown_frac,
+        saccade_unique_frac,
     };
 
     (losses, grads)
@@ -1636,6 +2175,10 @@ struct RolloutBase<B: BackendTrait> {
     solve_rate: Tensor<B, 1>,
     hard_reward: Tensor<B, 1>,
     easy_reward: Tensor<B, 1>,
+    saccade_revisit_rate: Tensor<B, 1>,
+    saccade_repeat_rate: Tensor<B, 1>,
+    saccade_unknown_frac: Tensor<B, 1>,
+    saccade_unique_frac: Tensor<B, 1>,
     halt_loss: Tensor<B, 1>,
     halt_prob_mean: Tensor<B, 1>,
     halt_target_mean: Tensor<B, 1>,
@@ -1737,9 +2280,8 @@ fn rollout_base_impl<B: BackendTrait>(
     let recon_loss_interval = training.recon.loss_interval_steps;
     let global_weight = training.recon.global_loss_weight.max(0.0);
     let global_samples = training.recon.global_loss_samples.min(GRID_LEN);
-    let revisit_cooldown_steps = training.policy.revisit_cooldown;
-    let revisit_penalty = training.policy.revisit_penalty.max(0.0);
     let visit_penalty = training.policy.visit_penalty.max(0.0);
+    let gdpo_active = training.gdpo.enabled && track_policy;
 
     let mut puzzles = batch.puzzles;
     let mut solutions = batch.solutions;
@@ -1770,28 +2312,35 @@ fn rollout_base_impl<B: BackendTrait>(
     let mut tokens = puzzles;
     let mut unknown_mask = tokens.clone().equal_elem(0).float();
     let loss_unknown_mask = unknown_mask.clone();
+    let mut tokens_reward = tokens.clone();
     let initial_unknown_counts = unknown_mask
         .clone()
         .sum_dim(1)
         .reshape([batch_size.max(1)]);
     let difficulty_scale =
         difficulty_scale_from_unknowns(initial_unknown_counts.clone(), training.reward.unknown_power);
-    let shaping_enabled = training.reward.shaping.enabled;
+    let easy_mode = training.reward.easy_mode;
+    let hard_mode = training.reward.hard_mode;
+    let info_enabled = training.reward.info_reward.enabled
+        && matches!(hard_mode, SudokuHardRewardMode::InfoReward);
+    let info_stride = training.reward.info_reward.stride.max(1);
+    let shaping_enabled = training.reward.shaping.enabled && !gdpo_active;
     let shaping_metric = training.reward.shaping.metric;
     let shaping_weight = training.reward.shaping.weight.max(0.0);
     let shaping_gamma = training.reward.shaping.gamma.clamp(0.0, 1.0);
     let baseline_enabled = training.reward.baseline.enabled;
     let baseline_gamma = training.reward.baseline.gamma.clamp(0.0, 1.0);
     let baseline_lambda = training.reward.baseline.lambda.clamp(0.0, 1.0);
+    let _baseline_value_weight = training.reward.baseline.value_loss_weight.max(0.0);
+    let no_op_penalty = training.reward.no_op_penalty.max(0.0);
     let mut shaping_sum = Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
     let mut conflict_prev = if shaping_enabled {
         shaping_potential(&tokens, shaping_metric)
     } else {
         Tensor::<B, 1>::zeros([batch_size.max(1)], &device)
     };
-    let mut step_rewards: Vec<Tensor<B, 1>> = Vec::new();
-    let mut step_values: Vec<Tensor<B, 1>> = Vec::new();
-
+    let mut rollout_step_rewards: Vec<Tensor<B, 1>> = Vec::new();
+    let mut rollout_step_values: Vec<Tensor<B, 1>> = Vec::new();
 
     let ones_step = Tensor::<B, 2>::ones([batch_size.max(1), 1], &device);
     let mut halted = Tensor::<B, 2>::zeros([batch_size.max(1), 1], &device);
@@ -1814,18 +2363,36 @@ fn rollout_base_impl<B: BackendTrait>(
     let mut cache = input_cache.clone();
     let mut summary_tokens = model.init_summary_tokens(batch_size);
     let summary_len = model.summary_token_count();
-    let (initial_acc_per_sample, initial_acc_mean, initial_exact, initial_solve_rate) =
-        compute_grid_accuracy(&tokens, &solutions);
-    let initial_acc = initial_acc_per_sample.clone();
+    let (reward_initial_acc_per_sample, initial_acc_mean, initial_exact, initial_solve_rate) =
+        compute_grid_accuracy(&tokens_reward, &solutions);
+    let reward_initial_acc = reward_initial_acc_per_sample.clone();
     let mut last_loss_per_sample = Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
     let mut last_acc = initial_acc_mean;
     let mut last_exact = initial_exact;
     let mut last_solve_rate = initial_solve_rate;
-    let mut last_acc_per_sample = initial_acc.clone();
+    let mut last_reward_acc_per_sample = reward_initial_acc.clone();
+    let mut prev_reward_acc_per_sample = reward_initial_acc.clone();
 
     let zeros = Tensor::<B, 1>::zeros([1], &device);
     let mut recon_loss_sum = zeros.clone();
     let mut recon_steps = 0usize;
+    let mut chunk_recon_delta_sum =
+        Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
+    let mut chunk_recon_mask_sum =
+        Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
+    let mut rollout_recon_delta_sum =
+        Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
+    let mut rollout_recon_mask_sum =
+        Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
+    let mut chunk_acc_delta_sum =
+        Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
+    let mut chunk_acc_delta_mask_sum =
+        Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
+    let mut rollout_acc_delta_sum =
+        Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
+    let mut rollout_acc_delta_mask_sum =
+        Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
+    let mut info_reward_sum = Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
     let mut halt_loss_sum = zeros.clone();
     let mut halt_prob_sum = zeros.clone();
     let mut halt_target_sum = zeros.clone();
@@ -1835,9 +2402,13 @@ fn rollout_base_impl<B: BackendTrait>(
     let mut log_prob_sum =
         Tensor::<B, 2>::zeros([batch_size.max(1), 1], &device);
     let mut policy_steps = 0usize;
-    let mut revisit_cooldown =
-        Tensor::<B, 2>::zeros([batch_size.max(1), GRID_LEN], &device);
+    let mut action_count_sum = zeros.clone();
+    let mut revisit_count_sum = zeros.clone();
+    let mut repeat_count_sum = zeros.clone();
+    let mut unknown_select_sum = zeros.clone();
     let mut visit_counts =
+        Tensor::<B, 2>::zeros([batch_size.max(1), GRID_LEN], &device);
+    let mut prev_action_one_hot =
         Tensor::<B, 2>::zeros([batch_size.max(1), GRID_LEN], &device);
     let mut selectable_count_sum = zeros.clone();
     let mut selectable_steps = 0usize;
@@ -1849,6 +2420,16 @@ fn rollout_base_impl<B: BackendTrait>(
             .reshape([batch_size.max(1), GRID_LEN, embd]);
         let policy_logits =
             model.policy_logits_from_cache(summary_tokens.clone(), cache_read.clone());
+
+        let step_value = if baseline_enabled {
+            Some(
+                model
+                    .value_baseline_from_summary_tokens(summary_tokens.clone())
+                    .reshape([batch_size.max(1)]),
+            )
+        } else {
+            None
+        };
 
         let tokens_solved_before = tokens
             .clone()
@@ -1883,10 +2464,6 @@ fn rollout_base_impl<B: BackendTrait>(
                 .clone()
                 .sub(select_mask.clone())
                 .mul_scalar(POLICY_MASK_PENALTY);
-        if revisit_cooldown_steps > 0 && revisit_penalty > 0.0 {
-            let cooldown_mask = revisit_cooldown.clone().greater_elem(0.0).float();
-            masked_logits = masked_logits - cooldown_mask.mul_scalar(revisit_penalty);
-        }
         if visit_penalty > 0.0 {
             let visit_log = visit_counts.clone().add_scalar(1.0).log();
             masked_logits = masked_logits - visit_log.mul_scalar(visit_penalty);
@@ -1925,13 +2502,35 @@ fn rollout_base_impl<B: BackendTrait>(
         let mut action_one_hot = build_action_one_hot(&actions, &action_index);
         let active_mask_grid = active_mask.clone().repeat_dim(1, GRID_LEN);
         action_one_hot = action_one_hot * active_mask_grid.clone() * select_mask.clone();
-        if revisit_cooldown_steps > 0 {
-            let decay = revisit_cooldown.clone().sub_scalar(1.0).clamp_min(0.0);
-            let refreshed = action_one_hot
-                .clone()
-                .mul_scalar(revisit_cooldown_steps as f32);
-            revisit_cooldown = decay.max_pair(refreshed);
-        }
+        let first_visit_mask = visit_counts.clone().equal_elem(0.0).float();
+        let selected_first_visit = action_one_hot
+            .clone()
+            .mul(first_visit_mask.clone())
+            .sum_dim(1)
+            .reshape([batch_size.max(1), 1]);
+        let action_any = action_one_hot
+            .clone()
+            .sum_dim(1)
+            .reshape([batch_size.max(1), 1]);
+        let step_revisit = action_any
+            .clone()
+            .sub(selected_first_visit.clone())
+            .clamp_min(0.0);
+        let step_repeat = action_one_hot
+            .clone()
+            .mul(prev_action_one_hot.clone())
+            .sum_dim(1)
+            .reshape([batch_size.max(1), 1]);
+        let step_unknown = unknown_mask
+            .clone()
+            .mul(action_one_hot.clone())
+            .sum_dim(1)
+            .reshape([batch_size.max(1), 1]);
+        action_count_sum = action_count_sum + action_any.mean().detach();
+        revisit_count_sum = revisit_count_sum + step_revisit.mean().detach();
+        repeat_count_sum = repeat_count_sum + step_repeat.mean().detach();
+        unknown_select_sum = unknown_select_sum + step_unknown.mean().detach();
+        prev_action_one_hot = action_one_hot.clone();
         visit_counts = visit_counts + action_one_hot.clone();
 
         if track_policy {
@@ -1991,6 +2590,14 @@ fn rollout_base_impl<B: BackendTrait>(
             .sum_dim(1)
             .reshape([batch_size.max(1), 1])
             .int();
+        let selected_editable = editable_mask
+            .clone()
+            .mul(action_one_hot.clone())
+            .sum_dim(1)
+            .reshape([batch_size.max(1), 1]);
+        let reward_mask = selected_editable
+            .clone()
+            .reshape([batch_size.max(1)]);
         let mut local_loss_mask = active_mask.clone();
         if matches!(training.recon.loss_mask, SudokuLossMask::Unknown) {
             let selected_unknown = loss_unknown_mask
@@ -2009,6 +2616,23 @@ fn rollout_base_impl<B: BackendTrait>(
                 &local_loss_mask,
                 &training.recon.loss,
             );
+
+        let reward_local_mask = active_mask
+            .clone()
+            .mul(selected_editable.clone());
+        let (
+            _reward_local_loss,
+            _reward_local_acc,
+            _reward_local_exact,
+            reward_local_loss_per_sample,
+            ..
+        ) = compute_loss_and_acc(
+            &step_logits,
+            &selected_solution,
+            &selected_solution_one_hot,
+            &reward_local_mask,
+            &training.recon.loss,
+        );
 
         let teacher_force = if teacher_forcing_prob > 0.0 {
             Tensor::<B, 2>::random(
@@ -2030,14 +2654,30 @@ fn rollout_base_impl<B: BackendTrait>(
             .clone()
             .mul(editable_mask.clone())
             .greater_equal_elem(0.5);
+        let update_any = update_mask
+            .clone()
+            .float()
+            .sum_dim(1)
+            .reshape([batch_size.max(1), 1])
+            .greater_elem(0.0)
+            .float();
+        let no_update = ones_step.clone().sub(update_any).mul(active_mask.clone());
+        let no_op_penalty_per_sample = no_update
+            .clone()
+            .reshape([batch_size.max(1)])
+            .mul_scalar(no_op_penalty);
         let update_values_grid = update_values.clone().repeat_dim(1, GRID_LEN);
         tokens = tokens.mask_where(update_mask.clone(), update_values_grid);
         unknown_mask = (unknown_mask - action_one_hot.clone()).clamp_min(0.0);
+        let update_values_pred_grid = pred_values.clone().repeat_dim(1, GRID_LEN);
+        tokens_reward = tokens_reward.mask_where(update_mask.clone(), update_values_pred_grid);
 
-        let update_mask_f = action_one_hot
-            .clone()
-            .mul(editable_mask.clone())
-            .unsqueeze_dim::<3>(2);
+        let update_mask_cache = if training.policy.cache_update_clues {
+            action_one_hot.clone()
+        } else {
+            action_one_hot.clone().mul(editable_mask.clone())
+        };
+        let update_mask_f = update_mask_cache.clone().unsqueeze_dim::<3>(2);
         let selected_row = row_ids_f
             .clone()
             .mul(action_one_hot.clone())
@@ -2089,7 +2729,7 @@ fn rollout_base_impl<B: BackendTrait>(
             cache = mhc.depth_connection(branch_input, residuals_out, beta);
         }
 
-        let tokens_solved_after = tokens
+        let tokens_solved_after = tokens_reward
             .clone()
             .equal(solutions.clone())
             .float()
@@ -2122,15 +2762,19 @@ fn rollout_base_impl<B: BackendTrait>(
         }
         halted = halted.max_pair(step_halt.clone());
 
-        let (acc_per_sample, acc, exact_acc, solve_rate) =
-            compute_grid_accuracy(&tokens, &solutions);
-        last_acc_per_sample = acc_per_sample;
+        let (reward_acc_per_sample, acc, exact_acc, solve_rate) =
+            compute_grid_accuracy(&tokens_reward, &solutions);
+        let step_acc_delta = reward_acc_per_sample.clone().sub(prev_reward_acc_per_sample.clone());
+        prev_reward_acc_per_sample = reward_acc_per_sample.detach();
+        last_reward_acc_per_sample = prev_reward_acc_per_sample.clone();
         last_acc = acc;
         last_exact = exact_acc;
         last_solve_rate = solve_rate;
 
         let mut global_loss = zeros.clone();
         let mut global_loss_per_sample =
+            Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
+        let mut reward_global_loss_per_sample =
             Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
         if recon_loss_interval > 0
             && (step_idx + 1) % recon_loss_interval == 0
@@ -2143,11 +2787,16 @@ fn rollout_base_impl<B: BackendTrait>(
                 TensorDistribution::Uniform(0.0, 1.0),
                 &device,
             );
+            let mut reward_global_mask = random.clone().lower_equal_elem(sample_prob).float();
             let mut global_mask = random.lower_equal_elem(sample_prob).float();
             global_mask = (global_mask + action_one_hot.clone()).clamp_max(1.0);
+            reward_global_mask = (reward_global_mask + action_one_hot.clone()).clamp_max(1.0);
             global_mask = global_mask.mul(active_mask_grid.clone());
+            reward_global_mask = reward_global_mask.mul(active_mask_grid.clone());
+            reward_global_mask = reward_global_mask.mul(editable_mask.clone());
             if matches!(training.recon.loss_mask, SudokuLossMask::Unknown) {
                 global_mask = global_mask.mul(loss_unknown_mask.clone());
+                reward_global_mask = reward_global_mask.mul(tokens_reward.clone().equal_elem(0).float());
             }
             global_mask = ensure_non_empty_mask(global_mask, action_one_hot.clone());
             let global_logits = model.value_logits_from_cache(cache_read.clone());
@@ -2161,28 +2810,89 @@ fn rollout_base_impl<B: BackendTrait>(
                 );
             global_loss = step_loss;
             global_loss_per_sample = step_loss_per_sample;
+
+            let (
+                _reward_step_loss,
+                _reward_step_acc,
+                _reward_step_exact,
+                reward_step_loss_per_sample,
+                ..
+            ) = compute_loss_and_acc(
+                &global_logits,
+                &solutions,
+                &solution_one_hot,
+                &reward_global_mask,
+                &training.recon.loss,
+            );
+            reward_global_loss_per_sample = reward_step_loss_per_sample;
         }
 
-        let step_recon_per_sample =
+        let _step_recon_per_sample =
             local_loss_per_sample + global_loss_per_sample.mul_scalar(global_weight);
-        let mut step_reward = step_recon_per_sample.clone().mul_scalar(-1.0);
+        let step_recon_per_sample_reward = reward_local_loss_per_sample
+            + reward_global_loss_per_sample.mul_scalar(global_weight);
+        let step_recon_per_sample_reward_detached =
+            step_recon_per_sample_reward.clone().detach();
+        let mut baseline_loss = last_loss_per_sample.clone();
+        let baseline_mask = baseline_loss.clone().equal_elem(0.0);
+        baseline_loss = baseline_loss.mask_where(
+            baseline_mask,
+            step_recon_per_sample_reward_detached.clone(),
+        );
+        let step_recon_delta = baseline_loss
+            .sub(step_recon_per_sample_reward_detached.clone())
+            .mul(reward_mask.clone());
+        let step_reward_mask = reward_mask
+            .clone()
+            .add(no_update.clone().reshape([batch_size.max(1)]))
+            .clamp_max(1.0);
+        let step_recon_delta_reward = step_recon_delta
+            .clone()
+            .sub(no_op_penalty_per_sample.clone());
+        chunk_recon_delta_sum =
+            chunk_recon_delta_sum + step_recon_delta_reward.clone();
+        chunk_recon_mask_sum = chunk_recon_mask_sum + step_reward_mask.clone();
+        rollout_recon_delta_sum =
+            rollout_recon_delta_sum + step_recon_delta_reward.clone();
+        rollout_recon_mask_sum = rollout_recon_mask_sum + step_reward_mask.clone();
+        let step_active_mask = active_mask.clone().reshape([batch_size.max(1)]);
+        let step_acc_delta_reward = step_acc_delta
+            .clone()
+            .mul(step_active_mask.clone())
+            .sub(no_op_penalty_per_sample.clone());
+        chunk_acc_delta_sum = chunk_acc_delta_sum + step_acc_delta_reward.clone();
+        chunk_acc_delta_mask_sum = chunk_acc_delta_mask_sum + step_active_mask.clone();
+        rollout_acc_delta_sum = rollout_acc_delta_sum + step_acc_delta_reward.clone();
+        rollout_acc_delta_mask_sum = rollout_acc_delta_mask_sum + step_active_mask.clone();
+        if info_enabled && step_idx % info_stride == 0 {
+            info_reward_sum = info_reward_sum + step_recon_delta.clone();
+        }
+
+        let mut step_reward = match easy_mode {
+            SudokuEasyRewardMode::AccuracyDelta => step_acc_delta_reward.clone(),
+            _ => step_recon_delta_reward.clone(),
+        };
         if shaping_enabled {
             let conflict_next = shaping_potential(&tokens, shaping_metric);
-            let shaping_delta = conflict_next.clone().mul_scalar(shaping_gamma) - conflict_prev.clone();
+            let mut shaping_delta =
+                conflict_next.clone().mul_scalar(shaping_gamma) - conflict_prev.clone();
+            shaping_delta = shaping_delta.mul(reward_mask.clone());
             shaping_sum = shaping_sum + shaping_delta.clone();
             step_reward = step_reward + shaping_delta.mul_scalar(shaping_weight);
-            conflict_prev = conflict_next;
+            let keep = Tensor::<B, 1>::ones([batch_size.max(1)], &device)
+                .sub(reward_mask.clone());
+            conflict_prev = conflict_prev.mul(keep) + conflict_next.mul(reward_mask.clone());
         }
-        if baseline_enabled {
-            let value = model
-                .value_baseline_from_summary_tokens(summary_hidden.clone())
-                .reshape([batch_size.max(1)]);
-            step_rewards.push(step_reward);
-            step_values.push(value);
+        step_reward = step_reward.mul(step_reward_mask.clone());
+        if baseline_enabled && let Some(value) = step_value.clone() {
+            rollout_step_rewards.push(step_reward.clone());
+            rollout_step_values.push(value);
         }
 
-        last_loss_per_sample = step_recon_per_sample;
-
+        let reward_keep = Tensor::<B, 1>::ones([batch_size.max(1)], &device)
+            .sub(reward_mask.clone());
+        last_loss_per_sample = last_loss_per_sample.mul(reward_keep)
+            + step_recon_per_sample_reward_detached.mul(reward_mask.clone());
         let step_recon = local_loss.clone() + global_loss.clone().mul_scalar(global_weight);
         recon_loss_sum = recon_loss_sum + step_recon;
         recon_steps += 1;
@@ -2211,18 +2921,52 @@ fn rollout_base_impl<B: BackendTrait>(
     };
     let selectable_steps = if track_policy { selectable_steps } else { 0 };
 
-    let hard_reward = last_acc_per_sample.clone().sub(initial_acc);
-    let easy_reward = if baseline_enabled && !step_rewards.is_empty() {
-        gae_advantage(&step_rewards, &step_values, baseline_gamma, baseline_lambda)
-    } else {
-        let mut easy = last_loss_per_sample.clone().mul_scalar(-1.0);
-        if shaping_enabled {
-            easy = easy + shaping_sum.clone().mul_scalar(shaping_weight);
+    let hard_reward = match hard_mode {
+        SudokuHardRewardMode::InfoReward => info_reward_sum.clone(),
+        SudokuHardRewardMode::Accuracy => last_reward_acc_per_sample.clone().sub(reward_initial_acc.clone()),
+    };
+    let easy_reward = match easy_mode {
+        SudokuEasyRewardMode::Recon => {
+            rollout_recon_delta_sum
+                .clone()
+                .div(rollout_recon_mask_sum.clone().clamp_min(1.0))
         }
-        easy
+        SudokuEasyRewardMode::AccuracyDelta => {
+            rollout_acc_delta_sum
+                .clone()
+                .div(rollout_acc_delta_mask_sum.clone().clamp_min(1.0))
+        }
+        SudokuEasyRewardMode::Gae => {
+            if baseline_enabled && !rollout_step_rewards.is_empty() {
+                let values_detached: Vec<_> = rollout_step_values
+                    .iter()
+                    .map(|value| value.clone().detach())
+                    .collect();
+                gae_advantage(
+                    &rollout_step_rewards,
+                    &values_detached,
+                    baseline_gamma,
+                    baseline_lambda,
+                )
+            } else {
+                let mut easy = last_loss_per_sample.clone().mul_scalar(-1.0);
+                if shaping_enabled {
+                    easy = easy + shaping_sum.clone().mul_scalar(shaping_weight);
+                }
+                easy
+            }
+        }
     };
     let hard_reward = hard_reward.mul(difficulty_scale.clone());
     let easy_reward = easy_reward.mul(difficulty_scale.clone());
+
+    let action_count = action_count_sum.clone().clamp_min(SUDOKU_EPS);
+    let saccade_revisit_rate = revisit_count_sum.clone().div(action_count.clone());
+    let saccade_repeat_rate = repeat_count_sum.clone().div(action_count.clone());
+    let saccade_unknown_frac = unknown_select_sum.clone().div(action_count.clone());
+    let unique_cells = visit_counts.clone().greater_elem(0.0).float().sum_dim(1);
+    let total_visits = visit_counts.clone().sum_dim(1).clamp_min(1.0);
+    let saccade_unique_frac = unique_cells.div(total_visits).mean();
 
     RolloutBase {
         recon_loss,
@@ -2231,6 +2975,10 @@ fn rollout_base_impl<B: BackendTrait>(
         solve_rate: last_solve_rate,
         hard_reward,
         easy_reward,
+        saccade_revisit_rate,
+        saccade_repeat_rate,
+        saccade_unknown_frac,
+        saccade_unique_frac,
         halt_loss,
         halt_prob_mean,
         halt_target_mean,
@@ -2605,9 +3353,9 @@ mod tests {
                 entropy_alpha: 0.0,
                 entropy_alpha_lr: 0.0,
                 visit_penalty: 0.0,
-                revisit_cooldown: 0,
                 revisit_penalty: 0.0,
                 recon_weight: 0.0,
+                cache_update_clues: false,
             },
             revisit: SudokuRevisitConfig {
                 min_filled_frac: 0.0,
@@ -2625,6 +3373,7 @@ mod tests {
                 global_loss_samples: 8,
                 global_loss_weight: 0.2,
             },
+            validation: SudokuValidationConfig::default(),
             gdpo: GdpoConfig {
                 enabled: false,
                 group_size: 1,
@@ -2723,9 +3472,9 @@ mod tests {
                 entropy_alpha: 0.0,
                 entropy_alpha_lr: 0.0,
                 visit_penalty: 0.0,
-                revisit_cooldown: 0,
                 revisit_penalty: 0.0,
                 recon_weight: 0.0,
+                cache_update_clues: false,
             },
             revisit: SudokuRevisitConfig {
                 min_filled_frac: 0.0,
@@ -2743,6 +3492,7 @@ mod tests {
                 global_loss_samples: 8,
                 global_loss_weight: 0.2,
             },
+            validation: SudokuValidationConfig::default(),
             gdpo: GdpoConfig {
                 enabled: false,
                 group_size: 1,
@@ -2806,6 +3556,26 @@ mod tests {
         );
     }
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

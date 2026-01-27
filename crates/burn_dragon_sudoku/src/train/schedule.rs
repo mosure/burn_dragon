@@ -4,6 +4,8 @@ use crate::train::metrics::{
     SudokuHardRewardInput, SudokuLogProbMeanInput, SudokuPolicyEntropyInput,
     SudokuPolicyEntropyAlphaInput, SudokuPolicyEntropyTargetInput,
     SudokuPolicyLossInput, SudokuReconLossInput, SudokuSolveRateInput,
+    SudokuSaccadeRevisitRateInput, SudokuSaccadeRepeatRateInput,
+    SudokuSaccadeUnknownFracInput, SudokuSaccadeUniqueFracInput,
 };
 use crate::train::prelude::*;
 use crate::train::steps::SudokuTrainer;
@@ -52,8 +54,12 @@ where
     S: LrScheduler + 'static,
 {
     fs::create_dir_all(env.run_dir)?;
-
     let metric_every = env.training.log_frequency.max(1);
+    let gdpo_active = env.training.gdpo.enabled;
+    let entropy_active =
+        env.training.policy.entropy_adaptive || env.training.policy.entropy_weight > 0.0;
+    let halt_active = env.training.halt.weight > 0.0;
+
     let mut builder = LearnerBuilder::new(env.run_dir)
         .num_epochs(env.epochs)
         .learning_strategy(LearningStrategy::SingleDevice(env.device.clone()))
@@ -65,7 +71,7 @@ where
                 metric_every,
             ),
         )
-        .metric_valid_numeric(LossMetric::<ValidBackend<B>>::new())
+        .metric_valid_numeric(ScalarMetric::<ValidBackend<B>, LossValue<ValidBackend<B>>>::new_every("Loss", metric_every))
         .metric_train_numeric(LearningRateMetric::new())
         .metric_train(DeviceMetric::new("device", env.backend_name))
         .metric_valid(DeviceMetric::new("device", env.backend_name))
@@ -103,101 +109,108 @@ where
         >::new_every("sudoku_solve_rate", metric_every))
         .metric_train_numeric(ScalarMetric::<
             ValidBackend<B>,
-            SudokuPolicyLossInput<ValidBackend<B>>,
-        >::new_every("sudoku_policy_loss", metric_every))
+            SudokuSaccadeRevisitRateInput<ValidBackend<B>>,
+        >::new_every("sudoku_saccade_revisit_rate", metric_every))
         .metric_valid_numeric(ScalarMetric::<
             ValidBackend<B>,
-            SudokuPolicyLossInput<ValidBackend<B>>,
-        >::new_every("sudoku_policy_loss", metric_every))
+            SudokuSaccadeRevisitRateInput<ValidBackend<B>>,
+        >::new_every("sudoku_saccade_revisit_rate", metric_every))
         .metric_train_numeric(ScalarMetric::<
             ValidBackend<B>,
-            SudokuHaltLossInput<ValidBackend<B>>,
-        >::new_every("sudoku_halt_loss", metric_every))
+            SudokuSaccadeRepeatRateInput<ValidBackend<B>>,
+        >::new_every("sudoku_saccade_repeat_rate", metric_every))
         .metric_valid_numeric(ScalarMetric::<
             ValidBackend<B>,
-            SudokuHaltLossInput<ValidBackend<B>>,
-        >::new_every("sudoku_halt_loss", metric_every))
+            SudokuSaccadeRepeatRateInput<ValidBackend<B>>,
+        >::new_every("sudoku_saccade_repeat_rate", metric_every))
         .metric_train_numeric(ScalarMetric::<
             ValidBackend<B>,
-            SudokuHaltProbInput<ValidBackend<B>>,
-        >::new_every("sudoku_halt_prob", metric_every))
+            SudokuSaccadeUnknownFracInput<ValidBackend<B>>,
+        >::new_every("sudoku_saccade_unknown_frac", metric_every))
         .metric_valid_numeric(ScalarMetric::<
             ValidBackend<B>,
-            SudokuHaltProbInput<ValidBackend<B>>,
-        >::new_every("sudoku_halt_prob", metric_every))
+            SudokuSaccadeUnknownFracInput<ValidBackend<B>>,
+        >::new_every("sudoku_saccade_unknown_frac", metric_every))
         .metric_train_numeric(ScalarMetric::<
             ValidBackend<B>,
-            SudokuHaltTargetInput<ValidBackend<B>>,
-        >::new_every("sudoku_halt_target", metric_every))
+            SudokuSaccadeUniqueFracInput<ValidBackend<B>>,
+        >::new_every("sudoku_saccade_unique_frac", metric_every))
         .metric_valid_numeric(ScalarMetric::<
             ValidBackend<B>,
-            SudokuHaltTargetInput<ValidBackend<B>>,
-        >::new_every("sudoku_halt_target", metric_every))
-        .metric_train_numeric(ScalarMetric::<
-            ValidBackend<B>,
-            SudokuAdvantageAbsMeanInput<ValidBackend<B>>,
-        >::new_every("sudoku_adv_abs_mean", metric_every))
-        .metric_valid_numeric(ScalarMetric::<
-            ValidBackend<B>,
-            SudokuAdvantageAbsMeanInput<ValidBackend<B>>,
-        >::new_every("sudoku_adv_abs_mean", metric_every))
-        .metric_train_numeric(ScalarMetric::<
-            ValidBackend<B>,
-            SudokuAdvantageStdInput<ValidBackend<B>>,
-        >::new_every("sudoku_adv_std", metric_every))
-        .metric_valid_numeric(ScalarMetric::<
-            ValidBackend<B>,
-            SudokuAdvantageStdInput<ValidBackend<B>>,
-        >::new_every("sudoku_adv_std", metric_every))
-        .metric_train_numeric(ScalarMetric::<
-            ValidBackend<B>,
-            SudokuLogProbMeanInput<ValidBackend<B>>,
-        >::new_every("sudoku_log_prob_mean", metric_every))
-        .metric_valid_numeric(ScalarMetric::<
-            ValidBackend<B>,
-            SudokuLogProbMeanInput<ValidBackend<B>>,
-        >::new_every("sudoku_log_prob_mean", metric_every))
-        .metric_train_numeric(ScalarMetric::<
-            ValidBackend<B>,
-            SudokuPolicyEntropyInput<ValidBackend<B>>,
-        >::new_every("sudoku_entropy", metric_every))
-        .metric_valid_numeric(ScalarMetric::<
-            ValidBackend<B>,
-            SudokuPolicyEntropyInput<ValidBackend<B>>,
-        >::new_every("sudoku_entropy", metric_every))
-        .metric_train_numeric(ScalarMetric::<
-            ValidBackend<B>,
-            SudokuPolicyEntropyAlphaInput<ValidBackend<B>>,
-        >::new_every("sudoku_entropy_alpha", metric_every))
-        .metric_valid_numeric(ScalarMetric::<
-            ValidBackend<B>,
-            SudokuPolicyEntropyAlphaInput<ValidBackend<B>>,
-        >::new_every("sudoku_entropy_alpha", metric_every))
-        .metric_train_numeric(ScalarMetric::<
-            ValidBackend<B>,
-            SudokuPolicyEntropyTargetInput<ValidBackend<B>>,
-        >::new_every("sudoku_entropy_target", metric_every))
-        .metric_valid_numeric(ScalarMetric::<
-            ValidBackend<B>,
-            SudokuPolicyEntropyTargetInput<ValidBackend<B>>,
-        >::new_every("sudoku_entropy_target", metric_every))
-        .metric_train_numeric(ScalarMetric::<
-            ValidBackend<B>,
-            SudokuHardRewardInput<ValidBackend<B>>,
-        >::new_every("sudoku_hard_reward", metric_every))
-        .metric_valid_numeric(ScalarMetric::<
-            ValidBackend<B>,
-            SudokuHardRewardInput<ValidBackend<B>>,
-        >::new_every("sudoku_hard_reward", metric_every))
-        .metric_train_numeric(ScalarMetric::<
-            ValidBackend<B>,
-            SudokuEasyRewardInput<ValidBackend<B>>,
-        >::new_every("sudoku_easy_reward", metric_every))
-        .metric_valid_numeric(ScalarMetric::<
-            ValidBackend<B>,
-            SudokuEasyRewardInput<ValidBackend<B>>,
-        >::new_every("sudoku_easy_reward", metric_every))
-        ;
+            SudokuSaccadeUniqueFracInput<ValidBackend<B>>,
+        >::new_every("sudoku_saccade_unique_frac", metric_every));
+
+    if gdpo_active {
+        builder = builder
+            .metric_train_numeric(ScalarMetric::<
+                ValidBackend<B>,
+                SudokuPolicyLossInput<ValidBackend<B>>,
+            >::new_every("sudoku_policy_loss", metric_every))
+            .metric_train_numeric(ScalarMetric::<
+                ValidBackend<B>,
+                SudokuAdvantageAbsMeanInput<ValidBackend<B>>,
+            >::new_every("sudoku_adv_abs_mean", metric_every))
+            .metric_train_numeric(ScalarMetric::<
+                ValidBackend<B>,
+                SudokuAdvantageStdInput<ValidBackend<B>>,
+            >::new_every("sudoku_adv_std", metric_every))
+            .metric_train_numeric(ScalarMetric::<
+                ValidBackend<B>,
+                SudokuLogProbMeanInput<ValidBackend<B>>,
+            >::new_every("sudoku_log_prob_mean", metric_every))
+            .metric_train_numeric(ScalarMetric::<
+                ValidBackend<B>,
+                SudokuHardRewardInput<ValidBackend<B>>,
+            >::new_every("sudoku_hard_reward", metric_every))
+            .metric_train_numeric(ScalarMetric::<
+                ValidBackend<B>,
+                SudokuEasyRewardInput<ValidBackend<B>>,
+            >::new_every("sudoku_easy_reward", metric_every));
+    }
+
+    if halt_active {
+        builder = builder
+            .metric_train_numeric(ScalarMetric::<
+                ValidBackend<B>,
+                SudokuHaltLossInput<ValidBackend<B>>,
+            >::new_every("sudoku_halt_loss", metric_every))
+            .metric_valid_numeric(ScalarMetric::<
+                ValidBackend<B>,
+                SudokuHaltLossInput<ValidBackend<B>>,
+            >::new_every("sudoku_halt_loss", metric_every))
+            .metric_train_numeric(ScalarMetric::<
+                ValidBackend<B>,
+                SudokuHaltProbInput<ValidBackend<B>>,
+            >::new_every("sudoku_halt_prob", metric_every))
+            .metric_valid_numeric(ScalarMetric::<
+                ValidBackend<B>,
+                SudokuHaltProbInput<ValidBackend<B>>,
+            >::new_every("sudoku_halt_prob", metric_every))
+            .metric_train_numeric(ScalarMetric::<
+                ValidBackend<B>,
+                SudokuHaltTargetInput<ValidBackend<B>>,
+            >::new_every("sudoku_halt_target", metric_every))
+            .metric_valid_numeric(ScalarMetric::<
+                ValidBackend<B>,
+                SudokuHaltTargetInput<ValidBackend<B>>,
+            >::new_every("sudoku_halt_target", metric_every));
+    }
+
+    if entropy_active {
+        builder = builder
+            .metric_train_numeric(ScalarMetric::<
+                ValidBackend<B>,
+                SudokuPolicyEntropyInput<ValidBackend<B>>,
+            >::new_every("sudoku_entropy", metric_every))
+            .metric_train_numeric(ScalarMetric::<
+                ValidBackend<B>,
+                SudokuPolicyEntropyAlphaInput<ValidBackend<B>>,
+            >::new_every("sudoku_entropy_alpha", metric_every))
+            .metric_train_numeric(ScalarMetric::<
+                ValidBackend<B>,
+                SudokuPolicyEntropyTargetInput<ValidBackend<B>>,
+            >::new_every("sudoku_entropy_target", metric_every));
+    }
 
     let force_tui = env_flag("BURN_TUI").unwrap_or(false);
     if force_tui {
@@ -359,3 +372,4 @@ pub fn resolve_train_schedule(
         }
     }
 }
+

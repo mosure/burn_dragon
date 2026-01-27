@@ -241,11 +241,11 @@ pub struct SudokuPolicyConfig {
     #[serde(default = "default_policy_visit_penalty")]
     pub visit_penalty: f32,
     #[serde(default)]
-    pub revisit_cooldown: usize,
-    #[serde(default)]
     pub revisit_penalty: f32,
     #[serde(default = "default_policy_recon_weight")]
     pub recon_weight: f32,
+    #[serde(default)]
+    pub cache_update_clues: bool,
 }
 
 impl Default for SudokuPolicyConfig {
@@ -270,9 +270,9 @@ impl Default for SudokuPolicyConfig {
             entropy_alpha: default_policy_entropy_alpha(),
             entropy_alpha_lr: default_policy_entropy_alpha_lr(),
             visit_penalty: default_policy_visit_penalty(),
-            revisit_cooldown: 0,
             revisit_penalty: 0.0,
             recon_weight: default_policy_recon_weight(),
+            cache_update_clues: false,
         }
     }
 }
@@ -297,10 +297,52 @@ impl Default for SudokuRevisitConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SudokuEasyRewardMode {
+    #[default]
+    Recon,
+    AccuracyDelta,
+    Gae,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SudokuHardRewardMode {
+    #[default]
+    InfoReward,
+    Accuracy,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct SudokuInfoRewardConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_info_reward_stride")]
+    pub stride: usize,
+}
+
+impl Default for SudokuInfoRewardConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            stride: default_info_reward_stride(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct SudokuRewardConfig {
     #[serde(default = "default_reward_unknown_power")]
     pub unknown_power: f32,
+    #[serde(default = "default_reward_no_op_penalty")]
+    pub no_op_penalty: f32,
+    #[serde(default)]
+    pub easy_mode: SudokuEasyRewardMode,
+    #[serde(default)]
+    pub hard_mode: SudokuHardRewardMode,
+    #[serde(default)]
+    pub info_reward: SudokuInfoRewardConfig,
     #[serde(default)]
     pub shaping: SudokuRewardShapingConfig,
     #[serde(default)]
@@ -345,6 +387,8 @@ pub struct SudokuRewardBaselineConfig {
     pub gamma: f32,
     #[serde(default = "default_reward_baseline_lambda")]
     pub lambda: f32,
+    #[serde(default = "default_reward_baseline_value_loss_weight")]
+    pub value_loss_weight: f32,
 }
 
 impl Default for SudokuRewardBaselineConfig {
@@ -353,6 +397,7 @@ impl Default for SudokuRewardBaselineConfig {
             enabled: false,
             gamma: default_reward_baseline_gamma(),
             lambda: default_reward_baseline_lambda(),
+            value_loss_weight: default_reward_baseline_value_loss_weight(),
         }
     }
 }
@@ -361,6 +406,10 @@ impl Default for SudokuRewardConfig {
     fn default() -> Self {
         Self {
             unknown_power: default_reward_unknown_power(),
+            no_op_penalty: default_reward_no_op_penalty(),
+            easy_mode: SudokuEasyRewardMode::default(),
+            hard_mode: SudokuHardRewardMode::default(),
+            info_reward: SudokuInfoRewardConfig::default(),
             shaping: SudokuRewardShapingConfig::default(),
             baseline: SudokuRewardBaselineConfig::default(),
         }
@@ -389,6 +438,20 @@ impl Default for SudokuReconConfig {
             loss_interval_steps: default_recon_loss_interval_steps(),
             global_loss_samples: default_global_loss_samples(),
             global_loss_weight: default_global_loss_weight(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct SudokuValidationConfig {
+    #[serde(default = "default_validation_sample_policy")]
+    pub sample_policy: bool,
+}
+
+impl Default for SudokuValidationConfig {
+    fn default() -> Self {
+        Self {
+            sample_policy: default_validation_sample_policy(),
         }
     }
 }
@@ -423,7 +486,6 @@ struct SudokuTrainingLegacy {
     pub policy_entropy_alpha: Option<f32>,
     pub policy_entropy_alpha_lr: Option<f32>,
     pub policy_visit_penalty: Option<f32>,
-    pub policy_revisit_cooldown: Option<usize>,
     pub policy_revisit_penalty: Option<f32>,
     pub policy_recon_weight: Option<f32>,
     pub revisit_min_filled_frac: Option<f32>,
@@ -452,6 +514,7 @@ struct SudokuTrainingHyperparametersRaw {
     pub revisit: Option<SudokuRevisitConfig>,
     pub reward: Option<SudokuRewardConfig>,
     pub recon: Option<SudokuReconConfig>,
+    pub validation: Option<SudokuValidationConfig>,
     pub gdpo: Option<GdpoConfig>,
     #[serde(flatten)]
     pub legacy: SudokuTrainingLegacy,
@@ -471,6 +534,7 @@ pub struct SudokuTrainingHyperparameters {
     pub revisit: SudokuRevisitConfig,
     pub reward: SudokuRewardConfig,
     pub recon: SudokuReconConfig,
+    pub validation: SudokuValidationConfig,
     pub gdpo: GdpoConfig,
 }
 
@@ -482,6 +546,7 @@ impl From<SudokuTrainingHyperparametersRaw> for SudokuTrainingHyperparameters {
         let mut revisit = raw.revisit.unwrap_or_default();
         let mut reward = raw.reward.unwrap_or_default();
         let mut recon = raw.recon.unwrap_or_default();
+        let validation = raw.validation.unwrap_or_default();
         let mut gdpo = raw.gdpo.unwrap_or_default();
 
         if let Some(value) = raw.legacy.rollout_steps {
@@ -570,9 +635,6 @@ impl From<SudokuTrainingHyperparametersRaw> for SudokuTrainingHyperparameters {
         if let Some(value) = raw.legacy.policy_visit_penalty {
             policy.visit_penalty = value;
         }
-        if let Some(value) = raw.legacy.policy_revisit_cooldown {
-            policy.revisit_cooldown = value;
-        }
         if let Some(value) = raw.legacy.policy_revisit_penalty {
             policy.revisit_penalty = value;
         }
@@ -624,6 +686,7 @@ impl From<SudokuTrainingHyperparametersRaw> for SudokuTrainingHyperparameters {
             revisit,
             reward,
             recon,
+            validation,
             gdpo,
         }
     }
@@ -967,6 +1030,12 @@ impl SudokuTrainingConfig {
                 self.training.reward.unknown_power
             ));
         }
+        if self.training.reward.no_op_penalty < 0.0 {
+            return Err(anyhow!(
+                "training.reward.no_op_penalty must be >= 0 (got {})",
+                self.training.reward.no_op_penalty
+            ));
+        }
         if self.training.reward.shaping.enabled {
             if self.training.reward.shaping.weight < 0.0 {
                 return Err(anyhow!(
@@ -992,6 +1061,45 @@ impl SudokuTrainingConfig {
                 return Err(anyhow!(
                     "training.reward.baseline.lambda must be in [0, 1] (got {})",
                     self.training.reward.baseline.lambda
+                ));
+            }
+            if self.training.reward.baseline.value_loss_weight < 0.0 {
+                return Err(anyhow!(
+                    "training.reward.baseline.value_loss_weight must be >= 0 (got {})",
+                    self.training.reward.baseline.value_loss_weight
+                ));
+            }
+        }
+        if self.training.reward.info_reward.enabled && self.training.reward.info_reward.stride == 0 {
+            return Err(anyhow!(
+                "training.reward.info_reward.stride must be > 0 (got 0)"
+            ));
+        }
+        if self.training.gdpo.enabled {
+            if !self.training.policy.noise.is_finite() || self.training.policy.noise <= 0.0 {
+                return Err(anyhow!(
+                    "training.policy.noise must be > 0 when GDPO is enabled (got {})",
+                    self.training.policy.noise
+                ));
+            }
+            if !matches!(
+                self.training.reward.easy_mode,
+                SudokuEasyRewardMode::Recon | SudokuEasyRewardMode::AccuracyDelta
+            ) {
+                return Err(anyhow!(
+                    "training.reward.easy_mode must be recon or accuracy_delta when GDPO is enabled"
+                ));
+            }
+            if self.training.reward.hard_mode != SudokuHardRewardMode::InfoReward
+                && self.training.reward.hard_mode != SudokuHardRewardMode::Accuracy
+            {
+                return Err(anyhow!(
+                    "training.reward.hard_mode must be info_reward or accuracy when GDPO is enabled"
+                ));
+            }
+            if self.training.reward.shaping.enabled {
+                return Err(anyhow!(
+                    "training.reward.shaping must be disabled when GDPO is enabled"
                 ));
             }
         }
@@ -1313,6 +1421,10 @@ fn default_recon_loss_interval_steps() -> usize {
     1
 }
 
+fn default_validation_sample_policy() -> bool {
+    false
+}
+
 fn default_teacher_forcing_prob() -> f32 {
     0.0
 }
@@ -1381,6 +1493,10 @@ fn default_reward_unknown_power() -> f32 {
     0.0
 }
 
+fn default_reward_no_op_penalty() -> f32 {
+    0.0
+}
+
 fn default_reward_shaping_weight() -> f32 {
     0.1
 }
@@ -1395,6 +1511,14 @@ fn default_reward_baseline_gamma() -> f32 {
 
 fn default_reward_baseline_lambda() -> f32 {
     0.95
+}
+
+fn default_reward_baseline_value_loss_weight() -> f32 {
+    0.5
+}
+
+fn default_info_reward_stride() -> usize {
+    1
 }
 
 fn default_policy_entropy_target_ema_decay() -> f32 {
@@ -1523,5 +1647,10 @@ fn default_cache_mhc_add_branch_out_to_residual() -> bool {
 fn default_cache_mhc_dropout() -> f64 {
     0.0
 }
+
+
+
+
+
 
 

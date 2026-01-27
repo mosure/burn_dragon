@@ -197,8 +197,6 @@ fn generate_rollout_frames<B: BackendTrait>(
     let ones_grid = Tensor::<B, 2>::ones([batch.max(1), GRID_LEN], device);
     let ones_step = Tensor::<B, 2>::ones([batch.max(1), 1], device);
     let revisit_min_filled = training.revisit.min_filled_final.clamp(0.0, 1.0);
-    let revisit_cooldown_steps = training.policy.revisit_cooldown;
-    let revisit_penalty = training.policy.revisit_penalty.max(0.0);
     let visit_penalty = training.policy.visit_penalty.max(0.0);
     let policy_temperature = training.policy.temperature_final.max(1e-4);
     let policy_epsilon = training.policy.epsilon_final.clamp(0.0, 1.0);
@@ -233,8 +231,6 @@ fn generate_rollout_frames<B: BackendTrait>(
     let mut cache = input_cache.clone();
     let summary_len = model.summary_token_count();
     let mut state = model.init_state();
-    let mut revisit_cooldown =
-        Tensor::<B, 2>::zeros([batch.max(1), GRID_LEN], device);
     let mut visit_counts =
         Tensor::<B, 2>::zeros([batch.max(1), GRID_LEN], device);
 
@@ -262,10 +258,6 @@ fn generate_rollout_frames<B: BackendTrait>(
                 .clone()
                 .sub(select_mask.clone())
                 .mul_scalar(POLICY_MASK_PENALTY);
-        if revisit_cooldown_steps > 0 && revisit_penalty > 0.0 {
-            let cooldown_mask = revisit_cooldown.clone().greater_elem(0.0).float();
-            masked_logits = masked_logits - cooldown_mask.mul_scalar(revisit_penalty);
-        }
         if visit_penalty > 0.0 {
             let visit_log = visit_counts.clone().add_scalar(1.0).log();
             masked_logits = masked_logits - visit_log.mul_scalar(visit_penalty);
@@ -311,13 +303,6 @@ fn generate_rollout_frames<B: BackendTrait>(
         let mut action_one_hot = build_action_one_hot(&actions, &action_index);
         let active_mask_grid = active_mask.clone().repeat_dim(1, GRID_LEN);
         action_one_hot = action_one_hot * active_mask_grid.clone() * select_mask.clone();
-        if revisit_cooldown_steps > 0 {
-            let decay = revisit_cooldown.clone().sub_scalar(1.0).clamp_min(0.0);
-            let refreshed = action_one_hot
-                .clone()
-                .mul_scalar(revisit_cooldown_steps as f32);
-            revisit_cooldown = decay.max_pair(refreshed);
-        }
         visit_counts = visit_counts + action_one_hot.clone();
         let [_, _, embd] = cache_read.shape().dims();
         let step_input_base = input_cache_read
@@ -747,6 +732,9 @@ const DIGITS: [&[&str; 7]; 10] = [
         "01100",
     ],
 ];
+
+
+
 
 
 

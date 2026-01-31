@@ -1,0 +1,148 @@
+[dataset]
+cache_dir = "data/sudoku"
+train_split_ratio = 0.9
+augment = true
+augment_prob = 1.0
+type = "hugging_face"
+repo_id = "Ritvik19/Sudoku-Dataset"
+format = "parquet"
+train_files = ["train_0.parquet"]
+validation_files = ["valid_0.parquet"]
+puzzle_field = "puzzle"
+solution_field = "solution"
+max_records = 10000
+
+[training]
+batch_size = 16
+max_iters = 10000
+log_frequency = 1
+
+[training.rollout]
+steps = 162
+min_steps = 162
+max_steps = 162
+max_steps_warmup_iters = 0
+max_steps_warmup_cap = 0
+backprop_steps = 81
+traversal = "l2r_t2b"
+trm_mode = "chunk"
+trm_chunk_size = 81
+saccade_step_cells = 1
+pre_steps_min = 0
+pre_steps_max = 1296
+
+[training.halt]
+weight = 0.0
+exploration_prob = 0.0
+min_steps = 81
+
+[training.policy]
+noise = 0.0
+epsilon = 0.0
+epsilon_final = 0.0
+epsilon_anneal_steps = 0
+teacher_forcing_prob = 0.0
+teacher_forcing_final = 0.0
+teacher_forcing_anneal_steps = 0
+temperature = 1.0
+temperature_final = 1.0
+temperature_anneal_steps = 0
+entropy_weight = 0.0
+entropy_weight_final = 0.0
+entropy_anneal_steps = 0
+entropy_adaptive = false
+entropy_target_scale = 0.7
+entropy_target_ema_decay = 0.99
+entropy_alpha = 0.005
+entropy_alpha_lr = 0.001
+visit_penalty = 0.0
+revisit_penalty = 0.0
+recon_weight = 0.0
+cache_update_clues = true
+
+[training.revisit]
+min_filled_frac = 0.0
+min_filled_final = 0.0
+min_filled_anneal_steps = 0
+
+[training.reward]
+unknown_power = 1.0
+no_op_penalty = 0.0
+easy_mode = "accuracy_delta"
+hard_mode = "accuracy"
+
+[training.reward.info_reward]
+enabled = false
+stride = 1
+
+[training.reward.shaping]
+enabled = false
+metric = "conflict"
+weight = 0.1
+gamma = 0.99
+
+[training.reward.baseline]
+enabled = false
+gamma = 0.99
+lambda = 0.95
+value_loss_weight = 0.75
+
+[training.recon]
+loss = "stablemax"
+loss_mask = "all"
+loss_interval_steps = 81
+global_loss_samples = 81
+global_loss_weight = 1.0
+
+[training.validation]
+rollout_steps = 1296
+sample_policy = false
+
+[training.gdpo]
+enabled = false
+group_size = 1
+hard_weight = 1.0
+easy_weight = 1.0
+policy_weight = 0.0
+policy_clip_range = 0.2
+advantage_clip = 2.5
+advantage_ema_decay = 0.9
+
+[training.gdpo.hard_gate]
+type = "off"
+
+[optimizer]
+learning_rate = 0.0001
+weight_decay = 0.1
+
+[model]
+n_layer = 2
+n_embd = 256
+n_head = 4
+mlp_internal_dim_multiplier = 4
+summary_tokens = 1
+policy_heads = 1
+policy_head = "summary_mlp"
+policy_mlp_hidden_mult = 2
+rotary_embedding = "alibi"
+grid_positional = "rope_2d"
+dropout = 0.0
+fused_kernels = true
+
+[model.cache_update]
+mode = "gated_residual"
+
+[artifacts]
+output = "mp4"
+fps = 24
+max_samples = 16
+overwrite = false
+sample_policy = false
+
+
+
+
+
+
+
+

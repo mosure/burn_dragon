@@ -5,7 +5,13 @@ use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 use toml::Value;
 
-use burn_dragon_core::ManifoldHyperConnectionsConfig;
+use burn::module::{
+    AutodiffModule, Content, Devices, Module, ModuleDisplay, ModuleDisplayDefault, ModuleMapper,
+    ModuleVisitor,
+};
+use burn::tensor::backend::{AutodiffBackend, Backend};
+
+use burn_dragon_core::{ManifoldHyperConnectionsConfig, RotaryEmbedding};
 
 use burn_dragon_train::{
     GdpoConfig, GdpoHardGate, LearningRateScheduleConfig, OptimizerConfig, WgpuRuntimeConfig,
@@ -137,6 +143,95 @@ pub enum SudokuPolicyHead {
     SummaryMlp,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SudokuGridPositional {
+    #[default]
+    Additive,
+    #[serde(rename = "rope_2d")]
+    Rope2d,
+}
+
+impl SudokuGridPositional {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Additive => "additive",
+            Self::Rope2d => "rope_2d",
+        }
+    }
+}
+
+impl std::fmt::Display for SudokuGridPositional {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl<B: Backend> Module<B> for SudokuGridPositional {
+    type Record = ();
+
+    fn collect_devices(&self, devices: Devices<B>) -> Devices<B> {
+        devices
+    }
+
+    fn fork(self, _device: &B::Device) -> Self {
+        self
+    }
+
+    fn to_device(self, _device: &B::Device) -> Self {
+        self
+    }
+
+    fn visit<Visitor: ModuleVisitor<B>>(&self, _visitor: &mut Visitor) {}
+
+    fn map<Mapper: ModuleMapper<B>>(self, _mapper: &mut Mapper) -> Self {
+        self
+    }
+
+    fn load_record(self, _record: Self::Record) -> Self {
+        self
+    }
+
+    fn into_record(self) -> Self::Record {}
+}
+
+impl<B: AutodiffBackend> AutodiffModule<B> for SudokuGridPositional {
+    type InnerModule = SudokuGridPositional;
+
+    fn valid(&self) -> Self::InnerModule {
+        *self
+    }
+}
+
+impl ModuleDisplayDefault for SudokuGridPositional {
+    fn content(&self, content: Content) -> Option<Content> {
+        let summary = format!("grid_positional={self}");
+        content
+            .set_top_level_type("SudokuGridPositional")
+            .add_formatted(&summary)
+            .optional()
+    }
+}
+
+impl ModuleDisplay for SudokuGridPositional {}
+
+
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SudokuTraversal {
+    #[default]
+    Saccade,
+    L2rT2b,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SudokuTrmMode {
+    Recurrent,
+    #[default]
+    Chunk,
+}
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct SudokuRolloutConfig {
     pub steps: usize,
@@ -150,6 +245,16 @@ pub struct SudokuRolloutConfig {
     pub max_steps_warmup_cap: usize,
     #[serde(default)]
     pub backprop_steps: Option<usize>,
+    #[serde(default)]
+    pub traversal: SudokuTraversal,
+    #[serde(default)]
+    pub trm_mode: SudokuTrmMode,
+    #[serde(default = "default_trm_chunk_size")]
+    pub trm_chunk_size: usize,
+    #[serde(default)]
+    pub pre_steps_min: usize,
+    #[serde(default)]
+    pub pre_steps_max: usize,
     #[serde(default = "default_saccade_step_cells")]
     pub saccade_step_cells: usize,
     #[serde(default)]
@@ -174,6 +279,11 @@ impl Default for SudokuRolloutConfig {
             max_steps_warmup_iters: 0,
             max_steps_warmup_cap: 0,
             backprop_steps: None,
+            traversal: SudokuTraversal::default(),
+            trm_mode: SudokuTrmMode::default(),
+            trm_chunk_size: default_trm_chunk_size(),
+            pre_steps_min: 0,
+            pre_steps_max: 0,
             saccade_step_cells: default_saccade_step_cells(),
             schedule: None,
         }
@@ -444,6 +554,8 @@ impl Default for SudokuReconConfig {
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct SudokuValidationConfig {
+    #[serde(default)]
+    pub rollout_steps: Option<usize>,
     #[serde(default = "default_validation_sample_policy")]
     pub sample_policy: bool,
 }
@@ -451,6 +563,7 @@ pub struct SudokuValidationConfig {
 impl Default for SudokuValidationConfig {
     fn default() -> Self {
         Self {
+            rollout_steps: None,
             sample_policy: default_validation_sample_policy(),
         }
     }
@@ -737,6 +850,22 @@ impl SudokuCacheMhcConfig {
         }
     }
 }
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SudokuCacheUpdateMode {
+    #[default]
+    Overwrite,
+    GatedResidual,
+}
+
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default)]
+pub struct SudokuCacheUpdateConfig {
+    #[serde(default)]
+    pub mode: SudokuCacheUpdateMode,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct SudokuModelConfig {
     pub n_layer: usize,
@@ -751,6 +880,12 @@ pub struct SudokuModelConfig {
     pub policy_head: SudokuPolicyHead,
     #[serde(default = "default_policy_mlp_hidden_mult")]
     pub policy_mlp_hidden_mult: usize,
+    #[serde(default)]
+    pub rotary_embedding: RotaryEmbedding,
+    #[serde(default)]
+    pub grid_positional: SudokuGridPositional,
+    #[serde(default = "default_grid_rope_theta")]
+    pub grid_rope_theta: f32,
     #[serde(default = "default_dropout")]
     pub dropout: f64,
     #[serde(default)]
@@ -759,6 +894,8 @@ pub struct SudokuModelConfig {
     pub relu_threshold: f32,
     #[serde(default)]
     pub cache_mhc: SudokuCacheMhcConfig,
+    #[serde(default)]
+    pub cache_update: SudokuCacheUpdateConfig,
 }
 
 impl Default for SudokuModelConfig {
@@ -772,10 +909,14 @@ impl Default for SudokuModelConfig {
             policy_heads: default_policy_heads(),
             policy_head: SudokuPolicyHead::default(),
             policy_mlp_hidden_mult: default_policy_mlp_hidden_mult(),
+            rotary_embedding: RotaryEmbedding::default(),
+            grid_positional: SudokuGridPositional::default(),
+            grid_rope_theta: default_grid_rope_theta(),
             dropout: default_dropout(),
             fused_kernels: false,
             relu_threshold: 0.0,
             cache_mhc: SudokuCacheMhcConfig::default(),
+            cache_update: SudokuCacheUpdateConfig::default(),
         }
     }
 }
@@ -854,6 +995,14 @@ impl SudokuTrainingConfig {
                 max_rollout_steps
             ));
         }
+
+        if self.training.rollout.pre_steps_max < self.training.rollout.pre_steps_min {
+            return Err(anyhow!(
+                "training.rollout.pre_steps_max ({}) must be >= pre_steps_min ({})",
+                self.training.rollout.pre_steps_max,
+                self.training.rollout.pre_steps_min
+            ));
+        }
         if self.training.rollout.max_steps_warmup_iters > 0 {
             if self.training.rollout.max_steps_warmup_cap == 0 {
                 return Err(anyhow!(
@@ -897,6 +1046,21 @@ impl SudokuTrainingConfig {
         }
         if self.training.rollout.saccade_step_cells == 0 {
             return Err(anyhow!("training.rollout.saccade_step_cells must be > 0"));
+        }
+        if matches!(self.training.rollout.traversal, SudokuTraversal::L2rT2b)
+            && matches!(self.training.rollout.trm_mode, SudokuTrmMode::Chunk)
+        {
+            let chunk = self.training.rollout.trm_chunk_size;
+            let max_chunk = default_trm_chunk_size();
+            if chunk == 0 {
+                return Err(anyhow!("training.rollout.trm_chunk_size must be > 0"));
+            }
+            if chunk > max_chunk {
+                return Err(anyhow!(
+                    "training.rollout.trm_chunk_size ({}) must be <= {}",
+                    chunk, max_chunk
+                ));
+            }
         }
         if let Some(schedule) = &self.training.rollout.schedule
             && (schedule.start_steps == 0 || schedule.final_steps == 0)
@@ -1228,6 +1392,18 @@ impl SudokuTrainingConfig {
             ));
         }
 
+        if matches!(self.model.grid_positional, SudokuGridPositional::Rope2d) {
+            if !self.model.n_embd.is_multiple_of(4) {
+                return Err(anyhow!(
+                    "model.n_embd ({}) must be divisible by 4 for model.grid_positional = rope_2d",
+                    self.model.n_embd
+                ));
+            }
+            if self.model.grid_rope_theta <= 0.0 {
+                return Err(anyhow!("model.grid_rope_theta must be > 0 for model.grid_positional = rope_2d"));
+            }
+        }
+
         if let Some(schedule) = &self.optimizer.lr_schedule {
             match schedule {
                 LearningRateScheduleConfig::Constant { initial_lr }
@@ -1529,6 +1705,10 @@ fn default_saccade_step_cells() -> usize {
     1
 }
 
+fn default_trm_chunk_size() -> usize {
+    81
+}
+
 fn default_summary_tokens() -> usize {
     1
 }
@@ -1539,6 +1719,10 @@ fn default_policy_heads() -> usize {
 
 fn default_policy_mlp_hidden_mult() -> usize {
     2
+}
+
+fn default_grid_rope_theta() -> f32 {
+    65_536.0
 }
 
 fn default_global_loss_samples() -> usize {
@@ -1647,6 +1831,22 @@ fn default_cache_mhc_add_branch_out_to_residual() -> bool {
 fn default_cache_mhc_dropout() -> f64 {
     0.0
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

@@ -67,7 +67,7 @@ min_filled_anneal_steps = 0
 
 [training.reward]
 unknown_power = 1.0
-no_op_penalty = 0.0
+no_op_penalty = 0.05
 easy_mode = "accuracy_delta"
 hard_mode = "accuracy"
 
@@ -76,10 +76,12 @@ enabled = false
 stride = 1
 
 [training.reward.shaping]
-enabled = false
+enabled = true
 metric = "conflict"
 weight = 0.1
 gamma = 0.99
+unknown_weight = 0.2
+accuracy_weight = 0.0
 
 [training.reward.baseline]
 enabled = true
@@ -90,6 +92,9 @@ value_loss_weight = 0.75
 [training.recon]
 loss = "stablemax"
 loss_mask = "all"
+loss_weight = 2.0
+loss_weight_final = 0.5
+loss_weight_anneal_steps = 8000
 loss_interval_steps = 1
 global_loss_samples = 81
 global_loss_weight = 1.0

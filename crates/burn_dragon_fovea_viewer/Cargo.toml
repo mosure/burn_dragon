@@ -3,7 +3,11 @@ name = "burn_dragon_fovea_viewer"
 description = "Foveation viewer for burn_dragon vision sampling"
 version = "0.4.0"
 edition = "2024"
+authors = ["mosure <mitchell@mosure.me>"]
 license = "MIT OR Apache-2.0"
+homepage = "https://github.com/mosure/burn_bdh"
+repository = "https://github.com/mosure/burn_bdh"
+readme = "../../README.md"
 
 [features]
 default = []

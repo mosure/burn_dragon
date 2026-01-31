@@ -11,8 +11,8 @@ use tempfile::tempdir;
 
 use burn_dragon_sudoku::config::{
     load_training_config, SudokuArtifactConfig, SudokuDatasetConfig, SudokuDatasetSourceConfig,
-    SudokuLocalConfig, SudokuLossMask, SudokuModelConfig, SudokuPolicyHead, SudokuReconLoss,
-    SudokuRecordFormat, SudokuTrainingConfig, SudokuTrainingHyperparameters,
+    SudokuLocalConfig, SudokuLossMask, SudokuGridPositional, SudokuModelConfig, SudokuPolicyHead, SudokuReconLoss,
+    SudokuRecordFormat, SudokuTrainingConfig, SudokuTrainingHyperparameters, SudokuCacheMhcConfig, SudokuCacheUpdateConfig,
 };
 #[cfg(all(feature = "cuda", feature = "integration_test"))]
 use burn_dragon_sudoku::model::SudokuSaccadeModel;
@@ -110,7 +110,8 @@ fn cpu_sudoku_training_loss_decreases() {
         policy_entropy_target_scale: 1.0,
         policy_entropy_alpha: 0.0,
         policy_entropy_alpha_lr: 0.0,
-        policy_visit_penalty: 0.0,\r\n        policy_revisit_penalty: 0.0,
+        policy_visit_penalty: 0.0,
+        policy_revisit_penalty: 0.0,
         policy_recon_weight: 0.0,
         revisit_min_filled_frac: 0.0,
         revisit_min_filled_final: 0.0,
@@ -150,10 +151,14 @@ fn cpu_sudoku_training_loss_decreases() {
             policy_heads: 1,
             policy_head: SudokuPolicyHead::Cache,
             policy_mlp_hidden_mult: 2,
+            rotary_embedding: Default::default(),
+            grid_positional: SudokuGridPositional::Additive,
+            grid_rope_theta: 65_536.0,
             dropout: 0.0,
             fused_kernels: false,
             relu_threshold: 0.0,
                 cache_mhc: SudokuCacheMhcConfig::default(),
+                cache_update: SudokuCacheUpdateConfig::default(),
         },
     };
 
@@ -233,7 +238,8 @@ fn cpu_sudoku_validation_solve_rate_gate() {
         policy_entropy_target_scale: 1.0,
         policy_entropy_alpha: 0.0,
         policy_entropy_alpha_lr: 0.0,
-        policy_visit_penalty: 0.0,\r\n        policy_revisit_penalty: 0.0,
+        policy_visit_penalty: 0.0,
+        policy_revisit_penalty: 0.0,
         policy_recon_weight: 0.0,
         revisit_min_filled_frac: 1.0,
         revisit_min_filled_final: 1.0,
@@ -273,10 +279,14 @@ fn cpu_sudoku_validation_solve_rate_gate() {
             policy_heads: 1,
             policy_head: SudokuPolicyHead::Cache,
             policy_mlp_hidden_mult: 2,
+            rotary_embedding: Default::default(),
+            grid_positional: SudokuGridPositional::Additive,
+            grid_rope_theta: 65_536.0,
             dropout: 0.0,
             fused_kernels: false,
             relu_threshold: 0.0,
                 cache_mhc: SudokuCacheMhcConfig::default(),
+                cache_update: SudokuCacheUpdateConfig::default(),
         },
     };
 
@@ -342,10 +352,14 @@ fn run_single_cuda_step(device: &CudaDevice, rollout_steps: usize) -> Option<Mem
             policy_heads: 1,
             policy_head: SudokuPolicyHead::Cache,
             policy_mlp_hidden_mult: 2,
+            rotary_embedding: Default::default(),
+            grid_positional: SudokuGridPositional::Additive,
+            grid_rope_theta: 65_536.0,
             dropout: 0.0,
             fused_kernels: false,
             relu_threshold: 0.0,
                 cache_mhc: SudokuCacheMhcConfig::default(),
+                cache_update: SudokuCacheUpdateConfig::default(),
         },
         device,
     );
@@ -381,7 +395,8 @@ fn run_single_cuda_step(device: &CudaDevice, rollout_steps: usize) -> Option<Mem
         policy_entropy_target_scale: 1.0,
         policy_entropy_alpha: 0.0,
         policy_entropy_alpha_lr: 0.0,
-        policy_visit_penalty: 0.0,\r\n        policy_revisit_penalty: 0.0,
+        policy_visit_penalty: 0.0,
+        policy_revisit_penalty: 0.0,
         policy_recon_weight: 0.0,
         revisit_min_filled_frac: 0.0,
         revisit_min_filled_final: 0.0,
@@ -538,5 +553,67 @@ fn cuda_sudoku_training_tiny_like_smoke() {
         "expected solve rates in [0, 1] from cuda integration run"
     );
 }
+
+#[cfg(all(feature = "cuda", feature = "integration_test"))]
+#[test]
+fn cuda_sudoku_training_trm_tiny_smoke() {
+    let dir = tempdir().expect("tempdir");
+    write_dataset(dir.path());
+
+    let config_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("config")
+        .join("sudoku")
+        .join("trm")
+        .join("tiny.toml");
+    let mut config =
+        load_training_config(&[config_path]).expect("load config/sudoku/trm/tiny.toml");
+    let train_split_ratio = config.dataset.train_split_ratio;
+    let augment = config.dataset.augment;
+    let augment_prob = config.dataset.augment_prob;
+    config.dataset = SudokuDatasetConfig {
+        cache_dir: dir.path().to_path_buf(),
+        train_split_ratio,
+        augment,
+        augment_prob,
+        source: SudokuDatasetSourceConfig::Local(SudokuLocalConfig {
+            root: dir.path().to_path_buf(),
+            format: SudokuRecordFormat::Jsonl,
+            train_files: vec!["train.jsonl".to_string()],
+            validation_files: Vec::new(),
+            puzzle_field: "puzzle".to_string(),
+            solution_field: "solution".to_string(),
+            max_records: Some(64),
+        }),
+    };
+    config.training.max_iters = 1;
+    config.training.log_frequency = 1;
+    config.artifacts.max_samples = 0;
+
+    assert_eq!(config.training.rollout.steps, 1296);
+    assert_eq!(config.training.rollout.backprop_steps, Some(81));
+
+    loss_trace_reset();
+    solve_rate_trace_reset();
+    let result = train_backend_for_test::<Autodiff<Cuda<f32>>, _>(&config, "cuda", |_| {});
+    if let Err(err) = result {
+        panic!("training failed: {err}");
+    }
+
+    let losses = loss_trace_take();
+    assert!(
+        !losses.is_empty(),
+        "expected loss trace samples from cuda TRM integration run"
+    );
+    assert!(
+        losses.iter().all(|value| value.is_finite()),
+        "expected finite loss values from cuda TRM integration run"
+    );
+}
+
+
+
+
 
 

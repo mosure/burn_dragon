@@ -2,10 +2,11 @@ use burn::module::{Module, Param};
 use burn::nn::{Embedding, EmbeddingConfig, LayerNorm, LayerNormConfig, Linear, LinearConfig};
 use burn::tensor::backend::Backend;
 use burn::tensor::{activation, Distribution as TensorDistribution, Int, Tensor, TensorData};
+use std::f32::consts::PI;
 
 use burn_dragon_core::{BDH, BDHConfig, FusedKernelConfig, HaltHead, ManifoldHyperConnections, ModelState};
 
-use crate::config::{SudokuModelConfig, SudokuPolicyHead};
+use crate::config::{SudokuCacheUpdateMode, SudokuGridPositional, SudokuModelConfig, SudokuPolicyHead};
 use crate::vocab::{GRID_LEN, VOCAB_SIZE};
 
 const GRID_SIDE: usize = 9;
@@ -43,16 +44,31 @@ pub struct SudokuSaccadeModel<B: Backend> {
     #[module(ignore)]
     policy_mlp_hidden: usize,
     #[module(ignore)]
+    grid_positional: SudokuGridPositional,
+    #[module(ignore)]
+    grid_rope_theta: f32,
+    #[module(ignore)]
+    grid_rope_freqs: Option<Tensor<B, 2>>,
+    #[module(ignore)]
+    grid_rope_row_cos: Option<Tensor<B, 3>>,
+    #[module(ignore)]
+    grid_rope_row_sin: Option<Tensor<B, 3>>,
+    #[module(ignore)]
+    grid_rope_col_cos: Option<Tensor<B, 3>>,
+    #[module(ignore)]
+    grid_rope_col_sin: Option<Tensor<B, 3>>,
+    #[module(ignore)]
     cache_streams: usize,
 }
 
 impl SudokuModelConfig {
     pub fn to_bdh_config(&self) -> BDHConfig {
-        let fused = FusedKernelConfig {
+        let mut fused = FusedKernelConfig {
             enabled: self.fused_kernels,
             relu_threshold: self.relu_threshold,
             ..Default::default()
         };
+        fused.set_rotary_embedding(self.rotary_embedding);
 
         BDHConfig {
             n_layer: self.n_layer,
@@ -91,8 +107,13 @@ impl<B: Backend> SudokuSaccadeModel<B> {
         let value_baseline = LinearConfig::new(model_config.n_embd, 1).init(device);
         let update_mlp_fc1 =
             LinearConfig::new(model_config.n_embd * 3, model_config.n_embd * 2).init(device);
+        let cache_update_mode = config.cache_update.mode.clone();
+        let update_out = match cache_update_mode {
+            SudokuCacheUpdateMode::Overwrite => model_config.n_embd,
+            SudokuCacheUpdateMode::GatedResidual => model_config.n_embd * 2,
+        };
         let update_mlp_fc2 =
-            LinearConfig::new(model_config.n_embd * 2, model_config.n_embd).init(device);
+            LinearConfig::new(model_config.n_embd * 2, update_out).init(device);
         let cache_streams = if config.cache_mhc.enabled {
             config.cache_mhc.num_streams.max(1)
         } else {
@@ -112,6 +133,26 @@ impl<B: Backend> SudokuSaccadeModel<B> {
         let halt_head = HaltHead::new(model_config.n_embd, device);
         let policy_heads = config.policy_heads.max(1);
         let policy_head_dim = model_config.n_embd / policy_heads;
+        let grid_positional = config.grid_positional;
+        let grid_rope_theta = config.grid_rope_theta;
+        let (grid_rope_freqs, grid_rope_row_cos, grid_rope_row_sin, grid_rope_col_cos, grid_rope_col_sin) =
+            if matches!(grid_positional, SudokuGridPositional::Rope2d) {
+                let half = model_config.n_embd / 2;
+                let freqs = Self::build_rope_freqs(half, grid_rope_theta, device);
+                let freqs_3 = freqs.clone().reshape([1, 1, half]);
+                let (row_ids, col_ids) = Self::build_grid_row_col_ids(1, device);
+                let (row_cos, row_sin) = Self::rope_cos_sin(row_ids, freqs_3.clone());
+                let (col_cos, col_sin) = Self::rope_cos_sin(col_ids, freqs_3);
+                (
+                    Some(freqs),
+                    Some(row_cos),
+                    Some(row_sin),
+                    Some(col_cos),
+                    Some(col_sin),
+                )
+            } else {
+                (None, None, None, None, None)
+            };
         let policy_head_kind = match config.policy_head {
             SudokuPolicyHead::Cache => POLICY_HEAD_CACHE,
             SudokuPolicyHead::SummaryPos => POLICY_HEAD_SUMMARY_POS,
@@ -140,11 +181,21 @@ impl<B: Backend> SudokuSaccadeModel<B> {
             policy_head_dim,
             policy_head_kind,
             policy_mlp_hidden,
+            grid_positional,
+            grid_rope_theta,
+            grid_rope_freqs,
+            grid_rope_row_cos,
+            grid_rope_row_sin,
+            grid_rope_col_cos,
+            grid_rope_col_sin,
             cache_streams,
         }
     }
 
-    pub fn grid_row_col_ids(&self, batch: usize, device: &B::Device) -> (Tensor<B, 2, Int>, Tensor<B, 2, Int>) {
+    fn build_grid_row_col_ids(
+        batch: usize,
+        device: &B::Device,
+    ) -> (Tensor<B, 2, Int>, Tensor<B, 2, Int>) {
         let mut rows = Vec::with_capacity(GRID_LEN);
         let mut cols = Vec::with_capacity(GRID_LEN);
         for idx in 0..GRID_LEN {
@@ -160,6 +211,108 @@ impl<B: Backend> SudokuSaccadeModel<B> {
         (row_ids, col_ids)
     }
 
+    pub fn grid_row_col_ids(&self, batch: usize, device: &B::Device) -> (Tensor<B, 2, Int>, Tensor<B, 2, Int>) {
+        Self::build_grid_row_col_ids(batch, device)
+    }
+
+    fn build_rope_freqs(dim: usize, theta: f32, device: &B::Device) -> Tensor<B, 2> {
+        if dim == 0 {
+            return Tensor::<B, 2>::zeros([1, 1], device);
+        }
+        let mut data = Vec::with_capacity(dim);
+        for idx in 0..dim {
+            let exponent = ((idx as f32 / 2.0).floor() * 2.0) / dim as f32;
+            let value = 1.0 / theta.powf(exponent) / (2.0 * PI);
+            data.push(value);
+        }
+        Tensor::<B, 1>::from_floats(data.as_slice(), device).reshape([1, dim])
+    }
+
+    fn rope_cos_sin(
+        positions: Tensor<B, 2, Int>,
+        freqs: Tensor<B, 3>,
+    ) -> (Tensor<B, 3>, Tensor<B, 3>) {
+        let [batch, time] = positions.shape().dims();
+        let pos = positions.float().reshape([batch, time, 1]);
+        let raw = pos * freqs;
+        let phases = (raw.clone() - raw.clone().detach().floor()) * (2.0 * PI);
+        let cos = phases.clone().cos();
+        let sin = phases.sin();
+        (cos, sin)
+    }
+
+    fn rope_apply(values: Tensor<B, 3>, cos: Tensor<B, 3>, sin: Tensor<B, 3>) -> Tensor<B, 3> {
+        let [batch, time, dim] = values.shape().dims();
+        if dim == 0 || dim % 2 != 0 {
+            return values;
+        }
+        let pairs = values.clone().reshape([batch, time, dim / 2, 2]);
+        let even = pairs.clone().slice_dim(3, 0..1).squeeze_dim::<3>(3);
+        let odd = pairs.slice_dim(3, 1..2).squeeze_dim::<3>(3);
+        let rotated = Tensor::stack::<4>(vec![odd.clone().neg(), even], 3)
+            .reshape([batch, time, dim]);
+        values * cos + rotated * sin
+    }
+
+    fn rope_with_positions(
+        &self,
+        values: Tensor<B, 3>,
+        positions: Tensor<B, 2, Int>,
+        freqs: Tensor<B, 3>,
+    ) -> Tensor<B, 3> {
+        let [_batch, _time, dim] = values.shape().dims();
+        if dim == 0 || dim % 2 != 0 {
+            return values;
+        }
+        let (cos, sin) = Self::rope_cos_sin(positions, freqs);
+        Self::rope_apply(values, cos, sin)
+    }
+
+    fn apply_rope_2d(
+        &self,
+        token_emb: Tensor<B, 3>,
+        row_ids: Tensor<B, 2, Int>,
+        col_ids: Tensor<B, 2, Int>,
+    ) -> Tensor<B, 3> {
+        let [batch, time, dim] = token_emb.shape().dims();
+        if dim == 0 {
+            return token_emb;
+        }
+        let half = dim / 2;
+        if half == 0 || half * 2 != dim || half % 2 != 0 {
+            return token_emb;
+        }
+        if time == GRID_LEN
+            && let (Some(row_cos), Some(row_sin), Some(col_cos), Some(col_sin)) = (
+                self.grid_rope_row_cos.as_ref(),
+                self.grid_rope_row_sin.as_ref(),
+                self.grid_rope_col_cos.as_ref(),
+                self.grid_rope_col_sin.as_ref(),
+            )
+        {
+            let row_cos = row_cos.clone().expand([batch, time, half]);
+            let row_sin = row_sin.clone().expand([batch, time, half]);
+            let col_cos = col_cos.clone().expand([batch, time, half]);
+            let col_sin = col_sin.clone().expand([batch, time, half]);
+            let row_part = token_emb.clone().slice_dim(2, 0..half);
+            let col_part = token_emb.clone().slice_dim(2, half..(half * 2));
+            let row_rot = Self::rope_apply(row_part, row_cos, row_sin);
+            let col_rot = Self::rope_apply(col_part, col_cos, col_sin);
+            return Tensor::cat(vec![row_rot, col_rot], 2);
+        }
+        let device = token_emb.device();
+        let freqs = self
+            .grid_rope_freqs
+            .clone()
+            .unwrap_or_else(|| Self::build_rope_freqs(half, self.grid_rope_theta, &device))
+            .reshape([1, 1, half]);
+        let row_part = token_emb.clone().slice_dim(2, 0..half);
+        let col_part = token_emb.clone().slice_dim(2, half..(half * 2));
+        let row_rot = self.rope_with_positions(row_part, row_ids, freqs.clone());
+        let col_rot = self.rope_with_positions(col_part, col_ids, freqs);
+        Tensor::cat(vec![row_rot, col_rot], 2)
+    }
+
     pub fn cell_embeddings_with_positions(
         &self,
         tokens: Tensor<B, 2, Int>,
@@ -167,9 +320,14 @@ impl<B: Backend> SudokuSaccadeModel<B> {
         col_ids: Tensor<B, 2, Int>,
     ) -> Tensor<B, 3> {
         let token_emb = self.core.embed_tokens(tokens);
-        let row_emb = self.row_embed.forward(row_ids);
-        let col_emb = self.col_embed.forward(col_ids);
-        token_emb + row_emb + col_emb
+        match self.grid_positional {
+            SudokuGridPositional::Additive => {
+                let row_emb = self.row_embed.forward(row_ids);
+                let col_emb = self.col_embed.forward(col_ids);
+                token_emb + row_emb + col_emb
+            }
+            SudokuGridPositional::Rope2d => self.apply_rope_2d(token_emb, row_ids, col_ids),
+        }
     }
 
     pub fn project_input_tokens(&self, embedded: Tensor<B, 3>) -> Tensor<B, 3> {
@@ -293,11 +451,20 @@ impl<B: Backend> SudokuSaccadeModel<B> {
             return Tensor::<B, 3>::zeros([batch.max(1), 1, dim.max(1)], &summary_tokens.device());
         }
         let summary = summary_tokens.mean_dim(1).reshape([batch, 1, dim]);
-        let stacked = Tensor::cat(vec![summary, cache_cell, token_emb], 2);
+        let stacked = Tensor::cat(vec![summary, cache_cell.clone(), token_emb], 2);
         let flat = stacked.reshape([batch, dim * 3]);
         let hidden = activation::gelu(self.update_mlp_fc1.forward(flat));
         let updated = self.update_mlp_fc2.forward(hidden);
-        updated.reshape([batch, 1, dim])
+        let [_, out_dim] = updated.shape().dims();
+        let updated = updated.reshape([batch, 1, out_dim]);
+        if out_dim > dim {
+            let split = out_dim / 2;
+            let delta = updated.clone().slice_dim(2, 0..split);
+            let gate = activation::sigmoid(updated.slice_dim(2, split..out_dim));
+            cache_cell + delta.mul(gate)
+        } else {
+            updated
+        }
     }
     pub fn value_logits_from_hidden(&self, hidden: Tensor<B, 3>) -> Tensor<B, 3> {
         let [batch, time, dim] = hidden.shape().dims();
@@ -355,7 +522,7 @@ impl<B: Backend> SudokuSaccadeModel<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::SudokuCacheMhcConfig;
+    use crate::config::{SudokuCacheMhcConfig, SudokuCacheUpdateConfig};
     use burn::tensor::backend::Backend as BackendTrait;
     use burn_ndarray::NdArray;
 
@@ -378,10 +545,14 @@ mod tests {
                 policy_heads: 1,
                 policy_head: head,
                 policy_mlp_hidden_mult: 2,
+                rotary_embedding: Default::default(),
+                grid_positional: SudokuGridPositional::Additive,
+                grid_rope_theta: 65_536.0,
                 dropout: 0.0,
                 fused_kernels: false,
                 relu_threshold: 0.0,
                 cache_mhc: SudokuCacheMhcConfig::default(),
+                cache_update: SudokuCacheUpdateConfig::default(),
             };
             let model = SudokuSaccadeModel::new(&config, &device);
             let batch = 2;
@@ -394,6 +565,28 @@ mod tests {
         }
     }
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

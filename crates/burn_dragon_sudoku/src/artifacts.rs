@@ -10,7 +10,7 @@ use burn_dragon_train::train::artifacts::{ArtifactFrame, write_video};
 use crate::config::{SudokuArtifactConfig, SudokuTrainingHyperparameters};
 use crate::dataset::{SudokuBatch, SudokuDataset, SudokuSplit};
 use crate::model::SudokuSaccadeModel;
-use crate::train::sample_actions;
+use crate::train::{sample_actions, static_traversal_actions};
 use crate::vocab::{GRID_LEN, VOCAB_SIZE};
 
 const GRID_SIZE: usize = 9;
@@ -234,7 +234,7 @@ fn generate_rollout_frames<B: BackendTrait>(
     let mut visit_counts =
         Tensor::<B, 2>::zeros([batch.max(1), GRID_LEN], device);
 
-    for _step in 0..steps {
+    for step_idx in 0..steps {
         let tokens = build_tokens_tensor::<B>(&puzzles, device);
         let cache_read = cache
             .clone()
@@ -262,25 +262,32 @@ fn generate_rollout_frames<B: BackendTrait>(
             let visit_log = visit_counts.clone().add_scalar(1.0).log();
             masked_logits = masked_logits - visit_log.mul_scalar(visit_penalty);
         }
-        let actions = if config.sample_policy {
-            let policy_logits = if (policy_temperature - 1.0).abs() > f32::EPSILON {
-                masked_logits.clone().div_scalar(policy_temperature)
-            } else {
-                masked_logits.clone()
-            };
-            let sampled_logits = if policy_noise > 0.0 {
-                let noise = Tensor::<B, 2>::random(
-                    [batch.max(1), GRID_LEN],
-                    TensorDistribution::Normal(0.0, f64::from(policy_noise)),
-                    device,
-                );
-                policy_logits + noise
-            } else {
-                policy_logits
-            };
-            sample_actions(sampled_logits, select_mask.clone(), true, policy_epsilon)
-        } else {
-            masked_logits.argmax(1)
+        let actions = match training.rollout.traversal {
+            crate::config::SudokuTraversal::Saccade => {
+                if config.sample_policy {
+                    let policy_logits = if (policy_temperature - 1.0).abs() > f32::EPSILON {
+                        masked_logits.clone().div_scalar(policy_temperature)
+                    } else {
+                        masked_logits.clone()
+                    };
+                    let sampled_logits = if policy_noise > 0.0 {
+                        let noise = Tensor::<B, 2>::random(
+                            [batch.max(1), GRID_LEN],
+                            TensorDistribution::Normal(0.0, f64::from(policy_noise)),
+                            device,
+                        );
+                        policy_logits + noise
+                    } else {
+                        policy_logits
+                    };
+                    sample_actions(sampled_logits, select_mask.clone(), true, policy_epsilon)
+                } else {
+                    masked_logits.argmax(1)
+                }
+            }
+            crate::config::SudokuTraversal::L2rT2b => {
+                static_traversal_actions(batch, step_idx, device)
+            }
         };
 
         let tokens_solved_before = tokens

@@ -37,8 +37,8 @@ exploration_prob = 0.0
 min_steps = 2
 
 [training.policy]
-noise = 0.01
-epsilon = 0.0
+noise = 0.02
+epsilon = 0.01
 epsilon_final = 0.0
 epsilon_anneal_steps = 0
 teacher_forcing_prob = 0.0
@@ -102,7 +102,7 @@ enabled = true
 group_size = 4
 hard_weight = 1.0
 easy_weight = 1.0
-policy_weight = 2.0
+policy_weight = 4.0
 policy_clip_range = 0.2
 advantage_clip = 2.5
 advantage_ema_decay = 0.9
@@ -127,10 +127,14 @@ policy_mlp_hidden_mult = 2
 dropout = 0.0
 fused_kernels = true
 
+[model.cache_update]
+mode = "gated_residual"
+
 [artifacts]
 output = "mp4"
 fps = 8
 max_samples = 8
 overwrite = false
 sample_policy = true
+
 

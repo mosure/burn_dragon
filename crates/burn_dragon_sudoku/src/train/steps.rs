@@ -320,6 +320,13 @@ impl<B: AutodiffBackend> TrainStep<SudokuBatch<B>, SudokuTrainItem<B>> for Sudok
             policy_entropy_weight = 0.0;
         }
         let policy_recon_weight = self.training.policy.recon_weight.max(0.0);
+        let recon_loss_weight = schedule_linear(
+            self.training.recon.loss_weight,
+            self.training.recon.loss_weight_final,
+            self.training.recon.loss_weight_anneal_steps,
+            step,
+        )
+        .max(0.0);
         let revisit_min_filled = schedule_linear(
             self.training.revisit.min_filled_frac,
             self.training.revisit.min_filled_final,
@@ -338,6 +345,7 @@ impl<B: AutodiffBackend> TrainStep<SudokuBatch<B>, SudokuTrainItem<B>> for Sudok
             policy_temperature,
             policy_entropy_weight,
             policy_recon_weight,
+            recon_loss_weight,
             revisit_min_filled,
             rollout_steps,
             Some(Arc::clone(&self.gdpo_stats)),
@@ -656,6 +664,17 @@ fn shaping_potential<B: BackendTrait>(
 
 fn conflict_potential<B: BackendTrait>(tokens: &Tensor<B, 2, Int>) -> Tensor<B, 1> {
     conflict_count(tokens).mul_scalar(-1.0)
+}
+
+fn unknown_potential<B: BackendTrait>(tokens: &Tensor<B, 2, Int>) -> Tensor<B, 1> {
+    let [batch, _] = tokens.shape().dims();
+    tokens
+        .clone()
+        .equal_elem(0)
+        .float()
+        .sum_dim(1)
+        .reshape([batch.max(1)])
+        .mul_scalar(-1.0)
 }
 
 fn gae_advantage<B: BackendTrait>(
@@ -980,13 +999,20 @@ fn rollout_losses_train<B: AutodiffBackend>(
     policy_temperature: f32,
     policy_entropy_weight: f32,
     policy_recon_weight: f32,
+    recon_loss_weight: f32,
     revisit_min_filled: f32,
     rollout_steps: usize,
     gdpo_stats: Option<Arc<Mutex<GdpoAdvantageStats<B>>>>,
 ) -> (SudokuLosses<B>, GradientsParams) {
     let training = &trainer.training;
     if use_trm_chunk(training) {
-        return rollout_losses_train_trm_chunk(trainer, batch, teacher_forcing_prob, rollout_steps);
+        return rollout_losses_train_trm_chunk(
+            trainer,
+            batch,
+            teacher_forcing_prob,
+            recon_loss_weight,
+            rollout_steps,
+        );
     }
     let rollout_steps = rollout_steps.max(1);
     let backprop_steps_cfg = training.rollout.backprop_steps.unwrap_or(rollout_steps);
@@ -1048,18 +1074,33 @@ fn rollout_losses_train<B: AutodiffBackend>(
     let info_enabled = training.reward.info_reward.enabled
         && matches!(hard_mode, SudokuHardRewardMode::InfoReward);
     let info_stride = training.reward.info_reward.stride.max(1);
-    let shaping_enabled = training.reward.shaping.enabled && !gdpo_active;
+    let conflict_weight = training.reward.shaping.weight.max(0.0);
+    let unknown_weight = training.reward.shaping.unknown_weight.max(0.0);
+    let accuracy_weight = training.reward.shaping.accuracy_weight.max(0.0);
+    let shaping_enabled = training.reward.shaping.enabled
+        && (conflict_weight > 0.0 || unknown_weight > 0.0 || accuracy_weight > 0.0);
     let shaping_metric = training.reward.shaping.metric;
-    let shaping_weight = training.reward.shaping.weight.max(0.0);
     let shaping_gamma = training.reward.shaping.gamma.clamp(0.0, 1.0);
     let baseline_enabled = training.reward.baseline.enabled;
     let baseline_gamma = training.reward.baseline.gamma.clamp(0.0, 1.0);
     let baseline_lambda = training.reward.baseline.lambda.clamp(0.0, 1.0);
     let baseline_value_weight = training.reward.baseline.value_loss_weight.max(0.0);
     let no_op_penalty = training.reward.no_op_penalty.max(0.0);
-    let mut shaping_sum = Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
-    let mut conflict_prev = if shaping_enabled {
+    let mut chunk_shaping_sum =
+        Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
+    let mut chunk_shaping_mask_sum =
+        Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
+    let mut rollout_shaping_sum =
+        Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
+    let mut rollout_shaping_mask_sum =
+        Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
+    let mut conflict_prev = if shaping_enabled && conflict_weight > 0.0 {
         shaping_potential(&tokens, shaping_metric)
+    } else {
+        Tensor::<B, 1>::zeros([batch_size.max(1)], &device)
+    };
+    let mut unknown_prev = if shaping_enabled && unknown_weight > 0.0 {
+        unknown_potential(&tokens)
     } else {
         Tensor::<B, 1>::zeros([batch_size.max(1)], &device)
     };
@@ -1785,15 +1826,35 @@ fn rollout_losses_train<B: AutodiffBackend>(
             _ => step_recon_delta_reward.clone(),
         };
         if shaping_enabled {
-            let conflict_next = shaping_potential(&tokens, shaping_metric);
-            let mut shaping_delta =
-                conflict_next.clone().mul_scalar(shaping_gamma) - conflict_prev.clone();
-            shaping_delta = shaping_delta.mul(reward_mask.clone());
-            shaping_sum = shaping_sum + shaping_delta.clone();
-            step_reward = step_reward + shaping_delta.mul_scalar(shaping_weight);
+            let mut shaping_step = Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
             let keep = Tensor::<B, 1>::ones([batch_size.max(1)], &device)
                 .sub(reward_mask.clone());
-            conflict_prev = conflict_prev.mul(keep) + conflict_next.mul(reward_mask.clone());
+            if conflict_weight > 0.0 {
+                let conflict_next = shaping_potential(&tokens, shaping_metric);
+                let mut shaping_delta =
+                    conflict_next.clone().mul_scalar(shaping_gamma) - conflict_prev.clone();
+                shaping_delta = shaping_delta.mul(reward_mask.clone());
+                shaping_step = shaping_step + shaping_delta.mul_scalar(conflict_weight);
+                conflict_prev = conflict_prev.mul(keep.clone()) + conflict_next.mul(reward_mask.clone());
+            }
+            if unknown_weight > 0.0 {
+                let unknown_next = unknown_potential(&tokens);
+                let mut shaping_delta =
+                    unknown_next.clone().mul_scalar(shaping_gamma) - unknown_prev.clone();
+                shaping_delta = shaping_delta.mul(reward_mask.clone());
+                shaping_step = shaping_step + shaping_delta.mul_scalar(unknown_weight);
+                unknown_prev = unknown_prev.mul(keep.clone()) + unknown_next.mul(reward_mask.clone());
+            }
+            if accuracy_weight > 0.0 {
+                let acc_delta = step_acc_delta.clone().mul(step_active_mask.clone());
+                shaping_step = shaping_step + acc_delta.mul_scalar(accuracy_weight);
+            }
+            let shaping_step_masked = shaping_step.clone().mul(step_reward_mask.clone());
+            chunk_shaping_sum = chunk_shaping_sum + shaping_step_masked.clone();
+            chunk_shaping_mask_sum = chunk_shaping_mask_sum + step_reward_mask.clone();
+            rollout_shaping_sum = rollout_shaping_sum + shaping_step_masked.clone();
+            rollout_shaping_mask_sum = rollout_shaping_mask_sum + step_reward_mask.clone();
+            step_reward = step_reward + shaping_step;
         }
         step_reward = step_reward.mul(step_reward_mask.clone());
         if baseline_enabled && let Some(value) = step_value.clone() {
@@ -1850,7 +1911,14 @@ fn rollout_losses_train<B: AutodiffBackend>(
                     last_reward_acc_per_sample.clone().sub(reward_initial_acc.clone())
                 }
             };
-            let easy_reward = match easy_mode {
+            let chunk_shaping_mean = if shaping_enabled {
+                chunk_shaping_sum
+                    .clone()
+                    .div(chunk_shaping_mask_sum.clone().clamp_min(1.0))
+            } else {
+                Tensor::<B, 1>::zeros([batch_size.max(1)], &device)
+            };
+            let mut easy_reward = match easy_mode {
                 SudokuEasyRewardMode::Recon => chunk_recon_delta_sum
                     .clone()
                     .div(chunk_recon_mask_sum.clone().clamp_min(1.0)),
@@ -1872,12 +1940,20 @@ fn rollout_losses_train<B: AutodiffBackend>(
                     } else {
                         let mut easy = last_loss_per_sample.clone().mul_scalar(-1.0);
                         if shaping_enabled {
-                            easy = easy + shaping_sum.clone().mul_scalar(shaping_weight);
+                            easy = easy + chunk_shaping_sum.clone();
                         }
                         easy
                     }
                 }
             };
+            if shaping_enabled
+                && matches!(
+                    easy_mode,
+                    SudokuEasyRewardMode::Recon | SudokuEasyRewardMode::AccuracyDelta
+                )
+            {
+                easy_reward = easy_reward + chunk_shaping_mean.clone();
+            }
             let hard_reward = hard_reward.mul(difficulty_scale.clone());
             let easy_reward = easy_reward.mul(difficulty_scale.clone());
 
@@ -2044,6 +2120,7 @@ fn rollout_losses_train<B: AutodiffBackend>(
                 zeros.clone()
             };
             let recon_term = local_term + global_term.mul_scalar(global_weight);
+            let recon_term = recon_term.mul_scalar(recon_loss_weight);
             let halt_term = if chunk_halt_steps > 0 {
                 chunk_halt_loss_sum
                     .clone()
@@ -2073,6 +2150,8 @@ fn rollout_losses_train<B: AutodiffBackend>(
             chunk_recon_delta_sum =
                 Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
             chunk_recon_mask_sum = Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
+            chunk_shaping_sum = Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
+            chunk_shaping_mask_sum = Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
             chunk_acc_delta_sum =
                 Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
             chunk_acc_delta_mask_sum =
@@ -2157,7 +2236,14 @@ fn rollout_losses_train<B: AutodiffBackend>(
         SudokuHardRewardMode::InfoReward => info_reward_sum.clone(),
         SudokuHardRewardMode::Accuracy => last_reward_acc_per_sample.clone().sub(reward_initial_acc.clone()),
     };
-    let easy_reward = match easy_mode {
+    let rollout_shaping_mean = if shaping_enabled {
+        rollout_shaping_sum
+            .clone()
+            .div(rollout_shaping_mask_sum.clone().clamp_min(1.0))
+    } else {
+        Tensor::<B, 1>::zeros([batch_size.max(1)], &device)
+    };
+    let mut easy_reward = match easy_mode {
         SudokuEasyRewardMode::Recon => {
             rollout_recon_delta_sum
                 .clone()
@@ -2183,12 +2269,20 @@ fn rollout_losses_train<B: AutodiffBackend>(
             } else {
                 let mut easy = last_loss_per_sample.clone().mul_scalar(-1.0);
                 if shaping_enabled {
-                    easy = easy + shaping_sum.clone().mul_scalar(shaping_weight);
+                    easy = easy + rollout_shaping_sum.clone();
                 }
                 easy
             }
         }
     };
+    if shaping_enabled
+        && matches!(
+            easy_mode,
+            SudokuEasyRewardMode::Recon | SudokuEasyRewardMode::AccuracyDelta
+        )
+    {
+        easy_reward = easy_reward + rollout_shaping_mean.clone();
+    }
     let hard_reward = hard_reward.mul(difficulty_scale.clone());
     let easy_reward = easy_reward.mul(difficulty_scale.clone());
 
@@ -2315,7 +2409,7 @@ fn rollout_losses_train<B: AutodiffBackend>(
     } else {
         zeros.clone()
     };
-    let loss = recon_loss.clone()
+    let loss = recon_loss.clone().mul_scalar(recon_loss_weight)
         + policy_loss.clone()
         + policy_recon_term.mul_scalar(policy_recon_weight)
         + halt_loss.clone().mul_scalar(training.halt.weight)
@@ -2470,8 +2564,6 @@ fn rollout_base_impl<B: BackendTrait>(
     let global_weight = training.recon.global_loss_weight.max(0.0);
     let global_samples = training.recon.global_loss_samples.min(GRID_LEN);
     let visit_penalty = training.policy.visit_penalty.max(0.0);
-    let gdpo_active = training.gdpo.enabled && track_policy;
-
     let mut puzzles = batch.puzzles;
     let mut solutions = batch.solutions;
     let device = puzzles.device();
@@ -2513,18 +2605,29 @@ fn rollout_base_impl<B: BackendTrait>(
     let info_enabled = training.reward.info_reward.enabled
         && matches!(hard_mode, SudokuHardRewardMode::InfoReward);
     let info_stride = training.reward.info_reward.stride.max(1);
-    let shaping_enabled = training.reward.shaping.enabled && !gdpo_active;
+    let conflict_weight = training.reward.shaping.weight.max(0.0);
+    let unknown_weight = training.reward.shaping.unknown_weight.max(0.0);
+    let accuracy_weight = training.reward.shaping.accuracy_weight.max(0.0);
+    let shaping_enabled = training.reward.shaping.enabled
+        && (conflict_weight > 0.0 || unknown_weight > 0.0 || accuracy_weight > 0.0);
     let shaping_metric = training.reward.shaping.metric;
-    let shaping_weight = training.reward.shaping.weight.max(0.0);
     let shaping_gamma = training.reward.shaping.gamma.clamp(0.0, 1.0);
     let baseline_enabled = training.reward.baseline.enabled;
     let baseline_gamma = training.reward.baseline.gamma.clamp(0.0, 1.0);
     let baseline_lambda = training.reward.baseline.lambda.clamp(0.0, 1.0);
     let _baseline_value_weight = training.reward.baseline.value_loss_weight.max(0.0);
     let no_op_penalty = training.reward.no_op_penalty.max(0.0);
-    let mut shaping_sum = Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
-    let mut conflict_prev = if shaping_enabled {
+    let mut rollout_shaping_sum =
+        Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
+    let mut rollout_shaping_mask_sum =
+        Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
+    let mut conflict_prev = if shaping_enabled && conflict_weight > 0.0 {
         shaping_potential(&tokens, shaping_metric)
+    } else {
+        Tensor::<B, 1>::zeros([batch_size.max(1)], &device)
+    };
+    let mut unknown_prev = if shaping_enabled && unknown_weight > 0.0 {
+        unknown_potential(&tokens)
     } else {
         Tensor::<B, 1>::zeros([batch_size.max(1)], &device)
     };
@@ -3202,15 +3305,33 @@ fn rollout_base_impl<B: BackendTrait>(
             _ => step_recon_delta_reward.clone(),
         };
         if shaping_enabled {
-            let conflict_next = shaping_potential(&tokens, shaping_metric);
-            let mut shaping_delta =
-                conflict_next.clone().mul_scalar(shaping_gamma) - conflict_prev.clone();
-            shaping_delta = shaping_delta.mul(reward_mask.clone());
-            shaping_sum = shaping_sum + shaping_delta.clone();
-            step_reward = step_reward + shaping_delta.mul_scalar(shaping_weight);
+            let mut shaping_step = Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
             let keep = Tensor::<B, 1>::ones([batch_size.max(1)], &device)
                 .sub(reward_mask.clone());
-            conflict_prev = conflict_prev.mul(keep) + conflict_next.mul(reward_mask.clone());
+            if conflict_weight > 0.0 {
+                let conflict_next = shaping_potential(&tokens, shaping_metric);
+                let mut shaping_delta =
+                    conflict_next.clone().mul_scalar(shaping_gamma) - conflict_prev.clone();
+                shaping_delta = shaping_delta.mul(reward_mask.clone());
+                shaping_step = shaping_step + shaping_delta.mul_scalar(conflict_weight);
+                conflict_prev = conflict_prev.mul(keep.clone()) + conflict_next.mul(reward_mask.clone());
+            }
+            if unknown_weight > 0.0 {
+                let unknown_next = unknown_potential(&tokens);
+                let mut shaping_delta =
+                    unknown_next.clone().mul_scalar(shaping_gamma) - unknown_prev.clone();
+                shaping_delta = shaping_delta.mul(reward_mask.clone());
+                shaping_step = shaping_step + shaping_delta.mul_scalar(unknown_weight);
+                unknown_prev = unknown_prev.mul(keep.clone()) + unknown_next.mul(reward_mask.clone());
+            }
+            if accuracy_weight > 0.0 {
+                let acc_delta = step_acc_delta.clone().mul(step_active_mask.clone());
+                shaping_step = shaping_step + acc_delta.mul_scalar(accuracy_weight);
+            }
+            let shaping_step_masked = shaping_step.clone().mul(step_reward_mask.clone());
+            rollout_shaping_sum = rollout_shaping_sum + shaping_step_masked;
+            rollout_shaping_mask_sum = rollout_shaping_mask_sum + step_reward_mask.clone();
+            step_reward = step_reward + shaping_step;
         }
         step_reward = step_reward.mul(step_reward_mask.clone());
         if baseline_enabled && let Some(value) = step_value.clone() {
@@ -3254,7 +3375,14 @@ fn rollout_base_impl<B: BackendTrait>(
         SudokuHardRewardMode::InfoReward => info_reward_sum.clone(),
         SudokuHardRewardMode::Accuracy => last_reward_acc_per_sample.clone().sub(reward_initial_acc.clone()),
     };
-    let easy_reward = match easy_mode {
+    let rollout_shaping_mean = if shaping_enabled {
+        rollout_shaping_sum
+            .clone()
+            .div(rollout_shaping_mask_sum.clone().clamp_min(1.0))
+    } else {
+        Tensor::<B, 1>::zeros([batch_size.max(1)], &device)
+    };
+    let mut easy_reward = match easy_mode {
         SudokuEasyRewardMode::Recon => {
             rollout_recon_delta_sum
                 .clone()
@@ -3280,12 +3408,20 @@ fn rollout_base_impl<B: BackendTrait>(
             } else {
                 let mut easy = last_loss_per_sample.clone().mul_scalar(-1.0);
                 if shaping_enabled {
-                    easy = easy + shaping_sum.clone().mul_scalar(shaping_weight);
+                    easy = easy + rollout_shaping_sum.clone();
                 }
                 easy
             }
         }
     };
+    if shaping_enabled
+        && matches!(
+            easy_mode,
+            SudokuEasyRewardMode::Recon | SudokuEasyRewardMode::AccuracyDelta
+        )
+    {
+        easy_reward = easy_reward + rollout_shaping_mean.clone();
+    }
     let hard_reward = hard_reward.mul(difficulty_scale.clone());
     let easy_reward = easy_reward.mul(difficulty_scale.clone());
 
@@ -3705,6 +3841,7 @@ mod tests {
                 loss_interval_steps: 1,
                 global_loss_samples: 8,
                 global_loss_weight: 0.2,
+                ..SudokuReconConfig::default()
             },
             validation: SudokuValidationConfig::default(),
             gdpo: GdpoConfig {
@@ -3747,6 +3884,163 @@ mod tests {
             "expected zero policy loss when gdpo disabled, got {}",
             policy_loss
         );
+    }
+
+    #[test]
+    fn recon_weight_scales_loss() {
+        type B = Autodiff<NdArray<f32>>;
+        let device = <B as BackendTrait>::Device::default();
+        let model = SudokuSaccadeModel::new(
+            &SudokuModelConfig {
+                n_layer: 1,
+                n_embd: 32,
+                n_head: 1,
+                mlp_internal_dim_multiplier: 2,
+                summary_tokens: 1,
+                policy_heads: 1,
+                policy_head: SudokuPolicyHead::Cache,
+                policy_mlp_hidden_mult: 2,
+                dropout: 0.0,
+                fused_kernels: false,
+                relu_threshold: 0.0,
+                cache_mhc: SudokuCacheMhcConfig::default(),
+                cache_update: SudokuCacheUpdateConfig::default(),
+                ..SudokuModelConfig::default()
+            },
+            &device,
+        );
+
+        let recon_weight = 2.5;
+        let training = SudokuTrainingHyperparameters {
+            batch_size: 1,
+            epochs: None,
+            max_iters: 1,
+            log_frequency: 1,
+            rollout: SudokuRolloutConfig {
+                steps: 1,
+                ..SudokuRolloutConfig::default()
+            },
+            halt: SudokuHaltConfig {
+                weight: 0.0,
+                exploration_prob: 0.0,
+                min_steps: 1,
+            },
+            policy: SudokuPolicyConfig {
+                noise: 0.0,
+                epsilon: 0.0,
+                epsilon_final: 0.0,
+                epsilon_anneal_steps: 0,
+                teacher_forcing_prob: 1.0,
+                teacher_forcing_final: 1.0,
+                teacher_forcing_anneal_steps: 0,
+                temperature: 1.0,
+                temperature_final: 1.0,
+                temperature_anneal_steps: 0,
+                entropy_weight: 0.0,
+                entropy_weight_final: 0.0,
+                entropy_anneal_steps: 0,
+                entropy_adaptive: false,
+                entropy_target_scale: 1.0,
+                entropy_target_ema_decay: 0.0,
+                entropy_alpha: 0.0,
+                entropy_alpha_lr: 0.0,
+                visit_penalty: 0.0,
+                revisit_penalty: 0.0,
+                recon_weight: 0.0,
+                cache_update_clues: false,
+            },
+            revisit: SudokuRevisitConfig {
+                min_filled_frac: 0.0,
+                min_filled_final: 0.0,
+                min_filled_anneal_steps: 0,
+            },
+            reward: SudokuRewardConfig {
+                unknown_power: 0.0,
+                ..SudokuRewardConfig::default()
+            },
+            recon: SudokuReconConfig {
+                loss: SudokuReconLoss::Softmax,
+                loss_mask: SudokuLossMask::All,
+                loss_weight: recon_weight,
+                loss_weight_final: recon_weight,
+                loss_weight_anneal_steps: 0,
+                loss_interval_steps: 1,
+                global_loss_samples: 0,
+                global_loss_weight: 0.0,
+                ..SudokuReconConfig::default()
+            },
+            validation: SudokuValidationConfig::default(),
+            gdpo: GdpoConfig {
+                enabled: false,
+                group_size: 1,
+                ..GdpoConfig::default()
+            },
+        };
+
+        let trainer = SudokuTrainer::new(model, training, 1);
+        let puzzles = Tensor::<B, 2, Int>::zeros([1, GRID_LEN], &device);
+        let solutions = Tensor::<B, 2, Int>::from_data(
+            TensorData::new(vec![1i64; GRID_LEN], [1, GRID_LEN]),
+            &device,
+        );
+        let batch = SudokuBatch::new(puzzles, solutions);
+
+        let (losses, _grads) = rollout_losses_train(
+            &trainer,
+            batch,
+            0.0,
+            0.0,
+            false,
+            1.0,
+            1.0,
+            0.0,
+            0.0,
+            recon_weight,
+            0.0,
+            1,
+            None,
+        );
+
+        let loss = losses
+            .loss
+            .into_data()
+            .iter::<f32>()
+            .next()
+            .unwrap_or(0.0);
+        let recon = losses
+            .recon_loss
+            .into_data()
+            .iter::<f32>()
+            .next()
+            .unwrap_or(0.0);
+
+        assert!(
+            (loss - recon * recon_weight).abs() < 1e-4,
+            "expected loss to scale with recon weight (loss={}, recon={}, weight={})",
+            loss,
+            recon,
+            recon_weight
+        );
+    }
+
+    #[test]
+    fn unknown_potential_matches_unknown_count() {
+        type B = NdArray<f32>;
+        let device = <B as BackendTrait>::Device::default();
+        let tokens = Tensor::<B, 2, Int>::from_data(
+            TensorData::new(vec![0i64, 3, 0, 5, 1, 0], [2, 3]),
+            &device,
+        );
+        let potential = unknown_potential(&tokens);
+        let values = potential
+            .into_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .unwrap_or_default();
+
+        assert_eq!(values.len(), 2, "expected one potential per batch");
+        assert!((values[0] + 2.0).abs() < 1e-6, "expected -2, got {}", values[0]);
+        assert!((values[1] + 1.0).abs() < 1e-6, "expected -1, got {}", values[1]);
     }
 
     #[test]
@@ -3826,6 +4120,7 @@ mod tests {
                 loss_interval_steps: 1,
                 global_loss_samples: 8,
                 global_loss_weight: 0.2,
+                ..SudokuReconConfig::default()
             },
             validation: SudokuValidationConfig::default(),
             gdpo: GdpoConfig {
@@ -4046,6 +4341,7 @@ fn rollout_losses_train_trm_chunk<B: AutodiffBackend>(
     trainer: &SudokuTrainer<B>,
     batch: SudokuBatch<B>,
     teacher_forcing_prob: f32,
+    recon_loss_weight: f32,
     rollout_steps: usize,
 ) -> (SudokuLosses<B>, GradientsParams) {
     let training = &trainer.training;
@@ -4403,6 +4699,7 @@ fn rollout_losses_train_trm_chunk<B: AutodiffBackend>(
                 zeros.clone()
             };
             let recon_term = local_term + global_term.mul_scalar(global_weight);
+            let recon_term = recon_term.mul_scalar(recon_loss_weight);
             let chunk_loss = recon_term;
             let grads = GradientsParams::from_grads(chunk_loss.backward(), trainer);
             grads_accum.accumulate(trainer, grads);
@@ -4428,7 +4725,7 @@ fn rollout_losses_train_trm_chunk<B: AutodiffBackend>(
         compute_grid_accuracy(&tokens_reward, &solutions);
 
     let zeros = Tensor::<B, 1>::zeros([1], &device);
-    let loss = recon_loss.clone();
+    let loss = recon_loss.clone().mul_scalar(recon_loss_weight);
     let policy_entropy_alpha = zeros.clone();
     let policy_entropy_target = zeros.clone();
 

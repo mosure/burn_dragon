@@ -469,6 +469,10 @@ pub struct SudokuRewardShapingConfig {
     pub weight: f32,
     #[serde(default = "default_reward_shaping_gamma")]
     pub gamma: f32,
+    #[serde(default = "default_reward_shaping_unknown_weight")]
+    pub unknown_weight: f32,
+    #[serde(default = "default_reward_shaping_accuracy_weight")]
+    pub accuracy_weight: f32,
 }
 
 impl Default for SudokuRewardShapingConfig {
@@ -478,6 +482,8 @@ impl Default for SudokuRewardShapingConfig {
             metric: SudokuRewardShapingMetric::default(),
             weight: default_reward_shaping_weight(),
             gamma: default_reward_shaping_gamma(),
+            unknown_weight: default_reward_shaping_unknown_weight(),
+            accuracy_weight: default_reward_shaping_accuracy_weight(),
         }
     }
 }
@@ -532,6 +538,12 @@ pub struct SudokuReconConfig {
     pub loss: SudokuReconLoss,
     #[serde(default = "default_loss_mask")]
     pub loss_mask: SudokuLossMask,
+    #[serde(default = "default_recon_loss_weight")]
+    pub loss_weight: f32,
+    #[serde(default = "default_recon_loss_weight_final")]
+    pub loss_weight_final: f32,
+    #[serde(default = "default_recon_loss_weight_anneal_steps")]
+    pub loss_weight_anneal_steps: usize,
     #[serde(default = "default_recon_loss_interval_steps")]
     pub loss_interval_steps: usize,
     #[serde(default = "default_global_loss_samples")]
@@ -545,6 +557,9 @@ impl Default for SudokuReconConfig {
         Self {
             loss: default_recon_loss(),
             loss_mask: default_loss_mask(),
+            loss_weight: default_recon_loss_weight(),
+            loss_weight_final: default_recon_loss_weight_final(),
+            loss_weight_anneal_steps: default_recon_loss_weight_anneal_steps(),
             loss_interval_steps: default_recon_loss_interval_steps(),
             global_loss_samples: default_global_loss_samples(),
             global_loss_weight: default_global_loss_weight(),
@@ -1213,6 +1228,18 @@ impl SudokuTrainingConfig {
                     self.training.reward.shaping.gamma
                 ));
             }
+            if self.training.reward.shaping.unknown_weight < 0.0 {
+                return Err(anyhow!(
+                    "training.reward.shaping.unknown_weight must be >= 0 (got {})",
+                    self.training.reward.shaping.unknown_weight
+                ));
+            }
+            if self.training.reward.shaping.accuracy_weight < 0.0 {
+                return Err(anyhow!(
+                    "training.reward.shaping.accuracy_weight must be >= 0 (got {})",
+                    self.training.reward.shaping.accuracy_weight
+                ));
+            }
         }
         if self.training.reward.baseline.enabled {
             if !(0.0..=1.0).contains(&self.training.reward.baseline.gamma) {
@@ -1261,11 +1288,6 @@ impl SudokuTrainingConfig {
                     "training.reward.hard_mode must be info_reward or accuracy when GDPO is enabled"
                 ));
             }
-            if self.training.reward.shaping.enabled {
-                return Err(anyhow!(
-                    "training.reward.shaping must be disabled when GDPO is enabled"
-                ));
-            }
         }
         if self.model.cache_mhc.enabled {
             if self.model.cache_mhc.num_streams == 0 {
@@ -1294,6 +1316,18 @@ impl SudokuTrainingConfig {
             return Err(anyhow!(
                 "training.recon.global_loss_weight must be >= 0 (got {})",
                 self.training.recon.global_loss_weight
+            ));
+        }
+        if self.training.recon.loss_weight < 0.0 {
+            return Err(anyhow!(
+                "training.recon.loss_weight must be >= 0 (got {})",
+                self.training.recon.loss_weight
+            ));
+        }
+        if self.training.recon.loss_weight_final < 0.0 {
+            return Err(anyhow!(
+                "training.recon.loss_weight_final must be >= 0 (got {})",
+                self.training.recon.loss_weight_final
             ));
         }
         if let Some(epochs) = self.training.epochs && epochs == 0 {
@@ -1597,6 +1631,18 @@ fn default_recon_loss_interval_steps() -> usize {
     1
 }
 
+fn default_recon_loss_weight() -> f32 {
+    1.0
+}
+
+fn default_recon_loss_weight_final() -> f32 {
+    default_recon_loss_weight()
+}
+
+fn default_recon_loss_weight_anneal_steps() -> usize {
+    0
+}
+
 fn default_validation_sample_policy() -> bool {
     false
 }
@@ -1679,6 +1725,14 @@ fn default_reward_shaping_weight() -> f32 {
 
 fn default_reward_shaping_gamma() -> f32 {
     1.0
+}
+
+fn default_reward_shaping_unknown_weight() -> f32 {
+    0.0
+}
+
+fn default_reward_shaping_accuracy_weight() -> f32 {
+    0.0
 }
 
 fn default_reward_baseline_gamma() -> f32 {

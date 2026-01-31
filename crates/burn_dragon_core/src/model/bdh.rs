@@ -6,10 +6,9 @@ use rand::distributions::{Distribution, WeightedIndex};
 use rand::prelude::*;
 use std::cmp::Ordering;
 
-use crate::kernel::{BlockPattern1d, relu_lowrank};
-
 use super::attention::Attention;
 use super::config::{BDHConfig, FusedKernelConfig};
+use super::residual_stream::lowrank_residual_step;
 #[cfg(feature = "viz")]
 use super::state::LayerVizState;
 use super::state::{LayerState, ModelState};
@@ -111,56 +110,24 @@ impl<B: Backend> BDH<B> {
         let encoder_v = encoder_v_raw.reshape([1, heads_v, embd_v, latent_v]);
         let decoder = self.decoder.val();
         let fused = self.kernel.enabled;
-        let latent_pattern: &BlockPattern1d = &self.kernel.block_sparse.latent;
+        let latent_pattern = &self.kernel.block_sparse.latent;
 
         for _ in 0..self.n_layer {
-            let x_sparse = if fused {
-                relu_lowrank::fused_forward(
-                    current.clone(),
-                    encoder.clone(),
-                    None,
-                    self.kernel.relu_threshold,
-                    latent_pattern,
-                )
-            } else {
-                let mut x_latent = current.clone().matmul(encoder.clone());
-                if self.kernel.relu_threshold != 0.0 {
-                    x_latent = x_latent.sub_scalar(self.kernel.relu_threshold);
-                }
-                activation::relu(x_latent)
-            };
-
-            let attn = self.attention.forward(x_sparse.clone(), current.clone());
-            let attn = self.layer_norm(attn);
-
-            let y_sparse = if fused {
-                relu_lowrank::fused_forward(
-                    attn.clone(),
-                    encoder_v.clone(),
-                    None,
-                    self.kernel.relu_threshold,
-                    latent_pattern,
-                )
-            } else {
-                let mut y_latent = attn.matmul(encoder_v.clone());
-                if self.kernel.relu_threshold != 0.0 {
-                    y_latent = y_latent.sub_scalar(self.kernel.relu_threshold);
-                }
-                activation::relu(y_latent)
-            };
-
-            let xy_sparse = x_sparse.clone() * y_sparse;
-            let xy_sparse = self.dropout.forward(xy_sparse);
-
-            let mixed = xy_sparse.clone().swap_dims(1, 2);
-            let [batch, time, heads, latent] = mixed.shape().dims();
-
-            let mixed_flat = mixed.reshape([batch * time, heads * latent]);
-
-            let mlp_flat = mixed_flat.matmul(decoder.clone());
-            let mlp_out = mlp_flat.reshape([batch, 1, time, self.n_embd]);
-            let mlp_out = self.layer_norm(mlp_out);
-            current = self.layer_norm(current + mlp_out);
+            let output = lowrank_residual_step(
+                current,
+                encoder.clone(),
+                encoder_v.clone(),
+                decoder.clone(),
+                &self.dropout,
+                fused,
+                self.kernel.relu_threshold,
+                true,
+                latent_pattern,
+                |query, value| self.attention.forward(query, value),
+                |values| activation::relu(values),
+                |values| self.layer_norm(values),
+            );
+            current = output.next;
         }
 
         let [batch, _, time, dim] = current.shape().dims();
@@ -193,56 +160,24 @@ impl<B: Backend> BDH<B> {
         let encoder_v = encoder_v_raw.reshape([1, heads_v, embd_v, latent_v]);
         let decoder = self.decoder.val();
         let fused = self.kernel.enabled;
-        let latent_pattern: &BlockPattern1d = &self.kernel.block_sparse.latent;
+        let latent_pattern = &self.kernel.block_sparse.latent;
 
         for _ in 0..self.n_layer {
-            let x_sparse = if fused {
-                relu_lowrank::fused_forward(
-                    current.clone(),
-                    encoder.clone(),
-                    None,
-                    self.kernel.relu_threshold,
-                    latent_pattern,
-                )
-            } else {
-                let mut x_latent = current.clone().matmul(encoder.clone());
-                if self.kernel.relu_threshold != 0.0 {
-                    x_latent = x_latent.sub_scalar(self.kernel.relu_threshold);
-                }
-                activation::relu(x_latent)
-            };
-
-            let attn = self.attention.forward(x_sparse.clone(), current.clone());
-            let attn = self.layer_norm(attn);
-
-            let y_sparse = if fused {
-                relu_lowrank::fused_forward(
-                    attn.clone(),
-                    encoder_v.clone(),
-                    None,
-                    self.kernel.relu_threshold,
-                    latent_pattern,
-                )
-            } else {
-                let mut y_latent = attn.matmul(encoder_v.clone());
-                if self.kernel.relu_threshold != 0.0 {
-                    y_latent = y_latent.sub_scalar(self.kernel.relu_threshold);
-                }
-                activation::relu(y_latent)
-            };
-
-            let xy_sparse = x_sparse.clone() * y_sparse;
-            let xy_sparse = self.dropout.forward(xy_sparse);
-
-            let mixed = xy_sparse.clone().swap_dims(1, 2);
-            let [batch, time, heads, latent] = mixed.shape().dims();
-
-            let mixed_flat = mixed.reshape([batch * time, heads * latent]);
-
-            let mlp_flat = mixed_flat.matmul(decoder.clone());
-            let mlp_out = mlp_flat.reshape([batch, 1, time, self.n_embd]);
-            let mlp_out = self.layer_norm(mlp_out);
-            current = self.layer_norm(current + mlp_out);
+            let output = lowrank_residual_step(
+                current,
+                encoder.clone(),
+                encoder_v.clone(),
+                decoder.clone(),
+                &self.dropout,
+                fused,
+                self.kernel.relu_threshold,
+                true,
+                latent_pattern,
+                |query, value| self.attention.forward(query, value),
+                |values| activation::relu(values),
+                |values| self.layer_norm(values),
+            );
+            current = output.next;
         }
 
         let [batch, _, time, dim] = current.shape().dims();
@@ -423,71 +358,49 @@ impl<B: Backend> BDH<B> {
         let encoder_v = encoder_v_raw.reshape([1, heads_v, embd_v, latent_v]);
         let decoder = self.decoder.val();
         let fused = self.kernel.enabled;
-        let latent_pattern: &BlockPattern1d = &self.kernel.block_sparse.latent;
+        let latent_pattern = &self.kernel.block_sparse.latent;
         let start_pos = state.position;
 
         for layer_state in &mut state.layers {
-            let x_sparse = if fused {
-                relu_lowrank::fused_forward(
-                    current.clone(),
-                    encoder.clone(),
-                    None,
-                    self.kernel.relu_threshold,
-                    latent_pattern,
-                )
-            } else {
-                let mut x_latent = current.clone().matmul(encoder.clone());
-                if self.kernel.relu_threshold != 0.0 {
-                    x_latent = x_latent.sub_scalar(self.kernel.relu_threshold);
-                }
-                activation::relu(x_latent)
-            };
-
-            let attn =
-                self.recurrent_attention(x_sparse.clone(), current.clone(), layer_state, start_pos);
-            let attn = self.layer_norm(attn);
-
-            let y_sparse = if fused {
-                relu_lowrank::fused_forward(
-                    attn.clone(),
-                    encoder_v.clone(),
-                    None,
-                    self.kernel.relu_threshold,
-                    latent_pattern,
-                )
-            } else {
-                let mut y_latent = attn.matmul(encoder_v.clone());
-                if self.kernel.relu_threshold != 0.0 {
-                    y_latent = y_latent.sub_scalar(self.kernel.relu_threshold);
-                }
-                activation::relu(y_latent)
-            };
+            let output = lowrank_residual_step(
+                current,
+                encoder.clone(),
+                encoder_v.clone(),
+                decoder.clone(),
+                &self.dropout,
+                fused,
+                self.kernel.relu_threshold,
+                true,
+                latent_pattern,
+                |query, value| self.recurrent_attention(query, value, layer_state, start_pos),
+                |values| activation::relu(values),
+                |values| self.layer_norm(values),
+            );
 
             #[cfg(feature = "viz")]
-            let xy_sparse = x_sparse.clone() * y_sparse.clone();
-            #[cfg(not(feature = "viz"))]
-            let xy_sparse = x_sparse * y_sparse;
-            let xy_sparse = self.dropout.forward(xy_sparse);
-
-            let mixed = xy_sparse.clone().swap_dims(1, 2);
+            let mixed = output.xy_sparse.clone().swap_dims(1, 2);
+            #[cfg(feature = "viz")]
             let [batch, time, heads, latent] = mixed.shape().dims();
 
             #[cfg(feature = "viz")]
             if time > 0 {
                 let last = time - 1;
-                let x_last = x_sparse
+                let x_last = output
+                    .x_sparse
                     .clone()
                     .slice_dim(2, last..time)
                     .reshape([batch, heads, latent])
                     .slice_dim(0, 0..1)
                     .reshape([heads, latent]);
-                let y_last = y_sparse
+                let y_last = output
+                    .y_sparse
                     .clone()
                     .slice_dim(2, last..time)
                     .reshape([batch, heads, latent])
                     .slice_dim(0, 0..1)
                     .reshape([heads, latent]);
-                let xy_last = xy_sparse
+                let xy_last = output
+                    .xy_sparse
                     .clone()
                     .slice_dim(2, last..time)
                     .reshape([batch, heads, latent])
@@ -522,12 +435,7 @@ impl<B: Backend> BDH<B> {
                 });
             }
 
-            let mixed_flat = mixed.reshape([batch * time, heads * latent]);
-
-            let mlp_flat = mixed_flat.matmul(decoder.clone());
-            let mlp_out = mlp_flat.reshape([batch, 1, time, self.n_embd]);
-            let mlp_out = self.layer_norm(mlp_out);
-            current = self.layer_norm(current + mlp_out);
+            current = output.next;
         }
 
         let [batch, _, time, dim] = current.shape().dims();

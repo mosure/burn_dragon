@@ -4,6 +4,7 @@ use anyhow::{Result, anyhow};
 use burn::tensor::backend::Backend as BackendTrait;
 use burn::tensor::{Distribution as TensorDistribution, Int, Tensor, TensorData};
 
+use burn_dragon_core::mhc_passthrough;
 use burn_dragon_train::VisionArtifactOutputMode;
 use burn_dragon_train::train::artifacts::{ArtifactFrame, write_video};
 
@@ -389,10 +390,7 @@ fn generate_rollout_frames<B: BackendTrait>(
         let update_mask_stream = update_mask_f.clone().unsqueeze_dim::<4>(1);
         let keep = update_mask_stream.clone().mul_scalar(-1.0).add_scalar(1.0);
         cache = cache * keep + update_emb.mul(update_mask_stream);
-        if let Some(mhc) = model.cache_mhc.as_ref() {
-            let (branch_input, residuals_out, beta) = mhc.width_connection(cache.clone());
-            cache = mhc.depth_connection(branch_input, residuals_out, beta);
-        }
+        cache = mhc_passthrough(model.cache_mhc.as_ref(), cache);
         let pred_data = pred_values
             .to_data()
             .convert::<i64>()

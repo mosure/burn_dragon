@@ -10,8 +10,10 @@ use burn::tensor::backend::{AutodiffBackend, Backend};
 use burn::tensor::{Distribution as TensorDistribution, Tensor, TensorData, activation, Int};
 use serde::{Deserialize, Serialize};
 
-use burn_dragon_core::kernel::{BlockPattern1d, relu_lowrank};
-use burn_dragon_core::{FusedKernelConfig, ManifoldHyperConnections, ManifoldHyperConnectionsConfig};
+use burn_dragon_core::{
+    FusedKernelConfig, ManifoldHyperConnections, ManifoldHyperConnectionsConfig,
+    lowrank_residual_step, mhc_merge, mhc_split,
+};
 
 const ROW_NORM_EPS: f32 = 1e-6;
 
@@ -1201,58 +1203,25 @@ impl<B: Backend> VisionDragon<B> {
         let decoder = self.decoder.val();
         let fused =
             self.kernel.enabled && matches!(self.latent_activation, VisionLatentActivation::Relu);
-        let latent_pattern: &BlockPattern1d = &self.kernel.block_sparse.latent;
+        let apply_threshold = matches!(self.latent_activation, VisionLatentActivation::Relu);
+        let latent_pattern = &self.kernel.block_sparse.latent;
 
         for step_idx in 0..steps {
-            let x_sparse = if fused {
-                relu_lowrank::fused_forward(
-                    current.clone(),
-                    encoder.clone(),
-                    None,
-                    self.kernel.relu_threshold,
-                    latent_pattern,
-                )
-            } else {
-                let mut x_latent = current.clone().matmul(encoder.clone());
-                if self.kernel.relu_threshold != 0.0
-                    && matches!(self.latent_activation, VisionLatentActivation::Relu)
-                {
-                    x_latent = x_latent.sub_scalar(self.kernel.relu_threshold);
-                }
-                self.apply_latent_activation(x_latent)
-            };
-
-            let attn = self.full_attention(x_sparse.clone(), current.clone());
-            let attn = self.apply_token_norm(attn);
-
-            let y_sparse = if fused {
-                relu_lowrank::fused_forward(
-                    attn.clone(),
-                    encoder_v.clone(),
-                    None,
-                    self.kernel.relu_threshold,
-                    latent_pattern,
-                )
-            } else {
-                let mut y_latent = attn.matmul(encoder_v.clone());
-                if self.kernel.relu_threshold != 0.0
-                    && matches!(self.latent_activation, VisionLatentActivation::Relu)
-                {
-                    y_latent = y_latent.sub_scalar(self.kernel.relu_threshold);
-                }
-                self.apply_latent_activation(y_latent)
-            };
-
-            let xy_sparse = x_sparse * y_sparse;
-            let xy_sparse = self.dropout.forward(xy_sparse);
-
-            let mixed = xy_sparse.clone().swap_dims(1, 2);
-            let [batch, time, heads, latent] = mixed.shape().dims();
-            let mixed_flat = mixed.reshape([batch * time, heads * latent]);
-            let mlp_flat = mixed_flat.matmul(decoder.clone());
-            let mlp_out = mlp_flat.reshape([batch, 1, time, self.embed_dim]);
-            let mlp_out = self.apply_token_norm(mlp_out);
-            current = self.apply_token_norm(current + mlp_out);
+            let output = lowrank_residual_step(
+                current,
+                encoder.clone(),
+                encoder_v.clone(),
+                decoder.clone(),
+                &self.dropout,
+                fused,
+                self.kernel.relu_threshold,
+                apply_threshold,
+                latent_pattern,
+                |query, value| self.full_attention(query, value),
+                |values| self.apply_latent_activation(values),
+                |values| self.apply_token_norm(values),
+            );
+            current = output.next;
             if step_idx < detach_until {
                 current = current.detach();
             }
@@ -1303,76 +1272,36 @@ impl<B: Backend> VisionDragon<B> {
         let decoder = self.decoder.val();
         let fused =
             self.kernel.enabled && matches!(self.latent_activation, VisionLatentActivation::Relu);
-        let latent_pattern: &BlockPattern1d = &self.kernel.block_sparse.latent;
+        let apply_threshold = matches!(self.latent_activation, VisionLatentActivation::Relu);
+        let latent_pattern = &self.kernel.block_sparse.latent;
 
         for step_idx in 0..steps {
-            let (branch_input, residuals_base, beta) = if let Some(mhc_layers) = &self.mhc_layers {
-                let mhc = &mhc_layers[step_idx.min(mhc_layers.len().saturating_sub(1))];
-                mhc.width_connection(current.clone())
-            } else {
-                (current.clone(), current.clone(), None)
-            };
+            let mhc = self
+                .mhc_layers
+                .as_ref()
+                .map(|layers| &layers[step_idx.min(layers.len().saturating_sub(1))]);
+            let (branch_input, residuals_base, beta) = mhc_split(mhc, current);
 
             let [batch, views, time, dim] = branch_input.shape().dims::<4>();
-            let mut branch_flat = branch_input.reshape([batch * views, 1, time, dim]);
+            let branch_flat = branch_input.reshape([batch * views, 1, time, dim]);
 
-            let x_sparse = if fused {
-                relu_lowrank::fused_forward(
-                    branch_flat.clone(),
-                    encoder.clone(),
-                    None,
-                    self.kernel.relu_threshold,
-                    latent_pattern,
-                )
-            } else {
-                let mut x_latent = branch_flat.clone().matmul(encoder.clone());
-                if self.kernel.relu_threshold != 0.0
-                    && matches!(self.latent_activation, VisionLatentActivation::Relu)
-                {
-                    x_latent = x_latent.sub_scalar(self.kernel.relu_threshold);
-                }
-                self.apply_latent_activation(x_latent)
-            };
+            let output = lowrank_residual_step(
+                branch_flat,
+                encoder.clone(),
+                encoder_v.clone(),
+                decoder.clone(),
+                &self.dropout,
+                fused,
+                self.kernel.relu_threshold,
+                apply_threshold,
+                latent_pattern,
+                |query, value| self.full_attention(query, value),
+                |values| self.apply_latent_activation(values),
+                |values| self.apply_token_norm(values),
+            );
 
-            let attn = self.full_attention(x_sparse.clone(), branch_flat.clone());
-            let attn = self.apply_token_norm(attn);
-
-            let y_sparse = if fused {
-                relu_lowrank::fused_forward(
-                    attn.clone(),
-                    encoder_v.clone(),
-                    None,
-                    self.kernel.relu_threshold,
-                    latent_pattern,
-                )
-            } else {
-                let mut y_latent = attn.matmul(encoder_v.clone());
-                if self.kernel.relu_threshold != 0.0
-                    && matches!(self.latent_activation, VisionLatentActivation::Relu)
-                {
-                    y_latent = y_latent.sub_scalar(self.kernel.relu_threshold);
-                }
-                self.apply_latent_activation(y_latent)
-            };
-
-            let xy_sparse = x_sparse * y_sparse;
-            let xy_sparse = self.dropout.forward(xy_sparse);
-
-            let mixed = xy_sparse.clone().swap_dims(1, 2);
-            let [batch_flat, time_flat, heads, latent] = mixed.shape().dims();
-            let mixed_flat = mixed.reshape([batch_flat * time_flat, heads * latent]);
-            let mlp_flat = mixed_flat.matmul(decoder.clone());
-            let mlp_out = mlp_flat.reshape([batch_flat, 1, time_flat, self.embed_dim]);
-            let mlp_out = self.apply_token_norm(mlp_out);
-            branch_flat = self.apply_token_norm(branch_flat + mlp_out);
-
-            let branch_out = branch_flat.reshape([batch, views, time, dim]);
-            let next = if let Some(mhc_layers) = &self.mhc_layers {
-                let mhc = &mhc_layers[step_idx.min(mhc_layers.len().saturating_sub(1))];
-                mhc.depth_connection(branch_out, residuals_base, beta)
-            } else {
-                branch_out
-            };
+            let branch_out = output.next.reshape([batch, views, time, dim]);
+            let next = mhc_merge(mhc, branch_out, residuals_base, beta);
 
             current = self.sync_cls_tokens_multi(self.apply_token_norm(next));
             if step_idx < detach_until {

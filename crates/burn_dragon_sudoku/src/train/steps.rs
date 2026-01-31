@@ -2,7 +2,7 @@ use crate::artifacts::write_validation_artifacts_from_batch;
 use crate::train::metrics::{SudokuOutput, SudokuTrainItem};
 use crate::train::prelude::*;
 use crate::vocab::{GRID_LEN, VOCAB_SIZE};
-use burn_dragon_core::ModelState;
+use burn_dragon_core::{ModelState, mhc_passthrough};
 use burn_dragon_train::train::gdpo::{gdpo_advantage_autodiff, gdpo_policy_loss};
 use std::sync::Mutex;
 use tracing::warn;
@@ -1285,10 +1285,7 @@ fn rollout_losses_train<B: AutodiffBackend>(
             let update_mask_stream = update_mask_f.clone().unsqueeze_dim::<4>(1);
             let keep = update_mask_stream.clone().mul_scalar(-1.0).add_scalar(1.0);
             cache = cache * keep + update_emb.mul(update_mask_stream);
-            if let Some(mhc) = trainer.model.cache_mhc.as_ref() {
-                let (branch_input, residuals_out, beta) = mhc.width_connection(cache.clone());
-                cache = mhc.depth_connection(branch_input, residuals_out, beta);
-            }
+            cache = mhc_passthrough(trainer.model.cache_mhc.as_ref(), cache);
 
             summary_tokens = summary_tokens.detach();
             cache = cache.detach();
@@ -1635,10 +1632,7 @@ fn rollout_losses_train<B: AutodiffBackend>(
         let update_mask_stream = update_mask_f.clone().unsqueeze_dim::<4>(1);
         let keep = update_mask_stream.clone().mul_scalar(-1.0).add_scalar(1.0);
         cache = cache * keep + update_emb.mul(update_mask_stream);
-        if let Some(mhc) = trainer.model.cache_mhc.as_ref() {
-            let (branch_input, residuals_out, beta) = mhc.width_connection(cache.clone());
-            cache = mhc.depth_connection(branch_input, residuals_out, beta);
-        }
+        cache = mhc_passthrough(trainer.model.cache_mhc.as_ref(), cache);
 
         let tokens_solved_after = tokens_reward
             .clone()
@@ -2731,10 +2725,7 @@ fn rollout_base_impl<B: BackendTrait>(
             let update_mask_stream = update_mask_f.clone().unsqueeze_dim::<4>(1);
             let keep = update_mask_stream.clone().mul_scalar(-1.0).add_scalar(1.0);
             cache = cache * keep + update_emb.mul(update_mask_stream);
-            if let Some(mhc) = model.cache_mhc.as_ref() {
-                let (branch_input, residuals_out, beta) = mhc.width_connection(cache.clone());
-                cache = mhc.depth_connection(branch_input, residuals_out, beta);
-            }
+            cache = mhc_passthrough(model.cache_mhc.as_ref(), cache);
         }
     }
 
@@ -3065,10 +3056,7 @@ fn rollout_base_impl<B: BackendTrait>(
         let update_mask_stream = update_mask_f.clone().unsqueeze_dim::<4>(1);
         let keep = update_mask_stream.clone().mul_scalar(-1.0).add_scalar(1.0);
         cache = cache * keep + update_emb.mul(update_mask_stream);
-        if let Some(mhc) = model.cache_mhc.as_ref() {
-            let (branch_input, residuals_out, beta) = mhc.width_connection(cache.clone());
-            cache = mhc.depth_connection(branch_input, residuals_out, beta);
-        }
+        cache = mhc_passthrough(model.cache_mhc.as_ref(), cache);
 
         let tokens_solved_after = tokens_reward
             .clone()
@@ -3780,6 +3768,7 @@ mod tests {
                 relu_threshold: 0.0,
                 cache_mhc: SudokuCacheMhcConfig::default(),
                 cache_update: SudokuCacheUpdateConfig::default(),
+                ..SudokuModelConfig::default()
             },
             &device,
         );
@@ -4223,10 +4212,7 @@ fn rollout_losses_train_trm_chunk<B: AutodiffBackend>(
             let keep = update_mask_stream.clone().mul_scalar(-1.0).add_scalar(1.0);
             let cache_chunk = cache_chunk * keep + update_emb.mul(update_mask_stream);
             cache = replace_grid_4d(&cache, grid_start, cache_chunk);
-            if let Some(mhc) = trainer.model.cache_mhc.as_ref() {
-                let (branch_input, residuals_out, beta) = mhc.width_connection(cache.clone());
-                cache = mhc.depth_connection(branch_input, residuals_out, beta);
-            }
+            cache = mhc_passthrough(trainer.model.cache_mhc.as_ref(), cache);
 
             summary_tokens = summary_tokens.detach();
             cache = cache.detach();
@@ -4361,10 +4347,7 @@ fn rollout_losses_train_trm_chunk<B: AutodiffBackend>(
         let keep = update_mask_stream.clone().mul_scalar(-1.0).add_scalar(1.0);
         let cache_chunk = cache_chunk * keep + update_emb.mul(update_mask_stream);
         cache = replace_grid_4d(&cache, grid_start, cache_chunk);
-        if let Some(mhc) = trainer.model.cache_mhc.as_ref() {
-            let (branch_input, residuals_out, beta) = mhc.width_connection(cache.clone());
-            cache = mhc.depth_connection(branch_input, residuals_out, beta);
-        }
+        cache = mhc_passthrough(trainer.model.cache_mhc.as_ref(), cache);
 
         if recon_interval > 0 && global_samples > 0 {
             let chunk_idx = steps_done / trm_chunk_size;
@@ -4631,10 +4614,7 @@ fn rollout_losses_valid_trm_chunk<B: BackendTrait>(
             let keep = update_mask_stream.clone().mul_scalar(-1.0).add_scalar(1.0);
             let cache_chunk = cache_chunk * keep + update_emb.mul(update_mask_stream);
             cache = replace_grid_4d(&cache, grid_start, cache_chunk);
-            if let Some(mhc) = model.cache_mhc.as_ref() {
-                let (branch_input, residuals_out, beta) = mhc.width_connection(cache.clone());
-                cache = mhc.depth_connection(branch_input, residuals_out, beta);
-            }
+            cache = mhc_passthrough(model.cache_mhc.as_ref(), cache);
 
             pre_done += chunk_len;
         }
@@ -4737,10 +4717,7 @@ fn rollout_losses_valid_trm_chunk<B: BackendTrait>(
         let keep = update_mask_stream.clone().mul_scalar(-1.0).add_scalar(1.0);
         let cache_chunk = cache_chunk * keep + update_emb.mul(update_mask_stream);
         cache = replace_grid_4d(&cache, grid_start, cache_chunk);
-        if let Some(mhc) = model.cache_mhc.as_ref() {
-            let (branch_input, residuals_out, beta) = mhc.width_connection(cache.clone());
-            cache = mhc.depth_connection(branch_input, residuals_out, beta);
-        }
+        cache = mhc_passthrough(model.cache_mhc.as_ref(), cache);
 
         if recon_interval > 0 && global_samples > 0 {
             let chunk_idx = steps_done / trm_chunk_size;

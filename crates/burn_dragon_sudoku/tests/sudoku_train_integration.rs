@@ -82,6 +82,8 @@ fn cpu_sudoku_training_loss_decreases() {
             validation_files: Vec::new(),
             puzzle_field: "puzzle".to_string(),
             solution_field: "solution".to_string(),
+            train_max_records: None,
+            validation_max_records: None,
             max_records: Some(64),
         }),
     };
@@ -228,6 +230,8 @@ fn cpu_sudoku_validation_solve_rate_gate() {
             validation_files: vec!["valid.jsonl".to_string()],
             puzzle_field: "puzzle".to_string(),
             solution_field: "solution".to_string(),
+            train_max_records: None,
+            validation_max_records: None,
             max_records: Some(32),
         }),
     };
@@ -579,6 +583,8 @@ fn cuda_sudoku_training_tiny_like_smoke() {
             validation_files: Vec::new(),
             puzzle_field: "puzzle".to_string(),
             solution_field: "solution".to_string(),
+            train_max_records: None,
+            validation_max_records: None,
             max_records: Some(64),
         }),
     };
@@ -645,6 +651,8 @@ fn cuda_sudoku_training_trm_tiny_smoke() {
             validation_files: Vec::new(),
             puzzle_field: "puzzle".to_string(),
             solution_field: "solution".to_string(),
+            train_max_records: None,
+            validation_max_records: None,
             max_records: Some(64),
         }),
     };

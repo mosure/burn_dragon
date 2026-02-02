@@ -1,0 +1,15 @@
+[training]
+batch_size = 4
+max_iters = 10
+log_frequency = 10
+
+[training.rollout]
+steps = 8
+min_steps = 4
+backprop_steps = 8
+
+[training.recon]
+global_loss_samples = 8
+
+[artifacts]
+max_samples = 0

@@ -61,6 +61,10 @@ pub struct SudokuHuggingFaceConfig {
     #[serde(default = "default_solution_field")]
     pub solution_field: String,
     #[serde(default)]
+    pub train_max_records: Option<usize>,
+    #[serde(default)]
+    pub validation_max_records: Option<usize>,
+    #[serde(default)]
     pub max_records: Option<usize>,
 }
 
@@ -75,6 +79,8 @@ impl Default for SudokuHuggingFaceConfig {
             validation_files: vec!["valid_0.parquet".to_string()],
             puzzle_field: default_puzzle_field(),
             solution_field: default_solution_field(),
+            train_max_records: None,
+            validation_max_records: None,
             max_records: None,
         }
     }
@@ -94,6 +100,10 @@ pub struct SudokuLocalConfig {
     #[serde(default = "default_solution_field")]
     pub solution_field: String,
     #[serde(default)]
+    pub train_max_records: Option<usize>,
+    #[serde(default)]
+    pub validation_max_records: Option<usize>,
+    #[serde(default)]
     pub max_records: Option<usize>,
 }
 
@@ -106,6 +116,8 @@ impl Default for SudokuLocalConfig {
             validation_files: Vec::new(),
             puzzle_field: default_puzzle_field(),
             solution_field: default_solution_field(),
+            train_max_records: None,
+            validation_max_records: None,
             max_records: None,
         }
     }

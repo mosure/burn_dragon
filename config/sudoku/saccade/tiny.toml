@@ -1,6 +1,6 @@
 [dataset]
 cache_dir = "data/sudoku"
-train_split_ratio = 0.9
+train_split_ratio = 0.8
 augment = true
 augment_prob = 1.0
 type = "hugging_face"
@@ -10,11 +10,12 @@ train_files = ["train_0.parquet"]
 validation_files = ["valid_0.parquet"]
 puzzle_field = "puzzle"
 solution_field = "solution"
-max_records = 10000
+train_max_records = 40000
+validation_max_records = 5000
 
 [training]
 batch_size = 64
-max_iters = 10000
+max_iters = 100000
 log_frequency = 1
 
 [training.rollout]
@@ -92,7 +93,7 @@ value_loss_weight = 0.75
 [training.recon]
 loss = "stablemax"
 loss_mask = "all"
-loss_weight = 2.0
+loss_weight = 1.0
 loss_weight_final = 0.5
 loss_weight_anneal_steps = 8000
 loss_interval_steps = 1
@@ -119,6 +120,7 @@ type = "off"
 [optimizer]
 learning_rate = 0.0001
 weight_decay = 0.1
+grad_clip_norm = 1.0
 
 [model]
 n_layer = 2
@@ -141,5 +143,3 @@ fps = 8
 max_samples = 8
 overwrite = false
 sample_policy = true
-
-

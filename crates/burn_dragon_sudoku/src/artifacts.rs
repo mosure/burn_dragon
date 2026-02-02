@@ -331,7 +331,7 @@ fn generate_rollout_frames<B: BackendTrait>(
             model.forward_with_hidden_and_state_embedded(step_input, &mut state);
         let summary_hidden = step_hidden.clone().slice_dim(1, 0..summary_len);
         let step_hidden = step_hidden.slice_dim(1, summary_len..summary_len + 1);
-        summary_tokens = summary_hidden.clone();
+        summary_tokens = model.normalize_summary_tokens(summary_hidden);
         let step_logits = model.value_logits_from_hidden(step_hidden.clone());
 
         let action_data = actions
@@ -365,7 +365,7 @@ fn generate_rollout_frames<B: BackendTrait>(
             .mul(action_mask.clone())
             .sum_dim(2)
             .reshape([batch.max(1) * cache_streams, 1, embd]);
-        let summary_streams = summary_hidden
+        let summary_streams = summary_tokens
             .clone()
             .unsqueeze_dim::<4>(1)
             .expand([batch.max(1), cache_streams, summary_len, embd])

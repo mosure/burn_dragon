@@ -32,6 +32,7 @@ pub struct SudokuSaccadeModel<B: Backend> {
     pub cache_mhc: Option<ManifoldHyperConnections<B>>,
     pub summary_tokens: Param<Tensor<B, 2>>,
     pub summary_norm: LayerNorm<B>,
+    pub cache_norm: LayerNorm<B>,
     pub halt_head: HaltHead<B>,
     #[module(ignore)]
     summary_token_count: usize,
@@ -130,6 +131,7 @@ impl<B: Backend> SudokuSaccadeModel<B> {
             device,
         ));
         let summary_norm = LayerNormConfig::new(model_config.n_embd).init(device);
+        let cache_norm = LayerNormConfig::new(model_config.n_embd).init(device);
         let halt_head = HaltHead::new(model_config.n_embd, device);
         let policy_heads = config.policy_heads.max(1);
         let policy_head_dim = model_config.n_embd / policy_heads;
@@ -175,6 +177,7 @@ impl<B: Backend> SudokuSaccadeModel<B> {
             cache_mhc,
             summary_tokens,
             summary_norm,
+            cache_norm,
             halt_head,
             summary_token_count: config.summary_tokens.max(1),
             policy_heads,
@@ -353,6 +356,10 @@ impl<B: Backend> SudokuSaccadeModel<B> {
         self.summary_norm.forward(summary)
     }
 
+    pub fn normalize_summary_tokens(&self, summary: Tensor<B, 3>) -> Tensor<B, 3> {
+        self.summary_norm.forward(summary)
+    }
+
     pub fn cache_streams(&self) -> usize {
         self.cache_streams.max(1)
     }
@@ -450,21 +457,26 @@ impl<B: Backend> SudokuSaccadeModel<B> {
         if batch == 0 || dim == 0 {
             return Tensor::<B, 3>::zeros([batch.max(1), 1, dim.max(1)], &summary_tokens.device());
         }
-        let summary = summary_tokens.mean_dim(1).reshape([batch, 1, dim]);
+        let summary = self
+            .summary_norm
+            .forward(summary_tokens)
+            .mean_dim(1)
+            .reshape([batch, 1, dim]);
         let stacked = Tensor::cat(vec![summary, cache_cell.clone(), token_emb], 2);
         let flat = stacked.reshape([batch, dim * 3]);
         let hidden = activation::gelu(self.update_mlp_fc1.forward(flat));
         let updated = self.update_mlp_fc2.forward(hidden);
         let [_, out_dim] = updated.shape().dims();
         let updated = updated.reshape([batch, 1, out_dim]);
-        if out_dim > dim {
+        let updated = if out_dim > dim {
             let split = out_dim / 2;
             let delta = updated.clone().slice_dim(2, 0..split);
             let gate = activation::sigmoid(updated.slice_dim(2, split..out_dim));
             cache_cell + delta.mul(gate)
         } else {
             updated
-        }
+        };
+        self.cache_norm.forward(updated)
     }
     pub fn value_logits_from_hidden(&self, hidden: Tensor<B, 3>) -> Tensor<B, 3> {
         let [batch, time, dim] = hidden.shape().dims();

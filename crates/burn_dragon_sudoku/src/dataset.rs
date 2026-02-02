@@ -64,7 +64,7 @@ impl SudokuDataset {
         let cache_dir = &config.cache_dir;
         fs::create_dir_all(cache_dir)?;
 
-        let (train_records, mut val_records) = match &config.source {
+        let (mut train_records, mut val_records) = match &config.source {
             SudokuDatasetSourceConfig::HuggingFace(cfg) => {
                 load_hf_records(cfg, cache_dir)?
             }
@@ -77,21 +77,37 @@ impl SudokuDataset {
             return Err(anyhow::anyhow!("sudoku dataset contains no records"));
         }
 
-        let mut train_records = train_records;
-        let train_len = if val_records.is_empty() {
+        let (train_limit, val_limit) = match &config.source {
+            SudokuDatasetSourceConfig::HuggingFace(cfg) => (
+                cfg.train_max_records.or(cfg.max_records),
+                cfg.validation_max_records.or(cfg.max_records),
+            ),
+            SudokuDatasetSourceConfig::Local(cfg) => (
+                cfg.train_max_records.or(cfg.max_records),
+                cfg.validation_max_records.or(cfg.max_records),
+            ),
+        };
+
+        if val_records.is_empty() {
             let total = train_records.len();
             if total <= 1 {
-                total
+                // no-op
             } else {
                 let mut split = ((total as f32) * config.train_split_ratio) as usize;
                 split = split.clamp(1, total - 1);
                 let tail = train_records.split_off(split);
                 val_records = tail;
-                split
             }
-        } else {
-            train_records.len()
         };
+
+        if let Some(limit) = train_limit {
+            train_records.truncate(limit);
+        }
+        if let Some(limit) = val_limit {
+            val_records.truncate(limit);
+        }
+
+        let train_len = train_records.len();
 
         let mut all_records = Vec::with_capacity(train_records.len() + val_records.len());
         all_records.extend(train_records);
@@ -383,12 +399,17 @@ fn load_hf_records(
     };
     let repo = api.repo(repo);
 
+    let has_validation_files = !cfg.validation_files.is_empty();
+    let train_limit = if has_validation_files {
+        cfg.train_max_records.or(cfg.max_records)
+    } else {
+        cfg.max_records
+    };
+    let val_limit = cfg.validation_max_records.or(cfg.max_records);
+
     let mut train_records = Vec::new();
     for file in &cfg.train_files {
-        if cfg
-            .max_records
-            .is_some_and(|limit| train_records.len() >= limit)
-        {
+        if train_limit.is_some_and(|limit| train_records.len() >= limit) {
             break;
         }
         let path = repo
@@ -399,7 +420,7 @@ fn load_hf_records(
             cfg.format.clone(),
             &cfg.puzzle_field,
             &cfg.solution_field,
-            cfg.max_records,
+            train_limit,
             &mut train_records,
         )?;
     }
@@ -414,7 +435,7 @@ fn load_hf_records(
             cfg.format.clone(),
             &cfg.puzzle_field,
             &cfg.solution_field,
-            cfg.max_records,
+            val_limit,
             &mut val_records,
         )?;
     }
@@ -425,12 +446,17 @@ fn load_hf_records(
 fn load_local_records(
     cfg: &SudokuLocalConfig,
 ) -> Result<(Vec<SudokuRecord>, Vec<SudokuRecord>), anyhow::Error> {
+    let has_validation_files = !cfg.validation_files.is_empty();
+    let train_limit = if has_validation_files {
+        cfg.train_max_records.or(cfg.max_records)
+    } else {
+        cfg.max_records
+    };
+    let val_limit = cfg.validation_max_records.or(cfg.max_records);
+
     let mut train_records = Vec::new();
     for file in &cfg.train_files {
-        if cfg
-            .max_records
-            .is_some_and(|limit| train_records.len() >= limit)
-        {
+        if train_limit.is_some_and(|limit| train_records.len() >= limit) {
             break;
         }
         let path = cfg.root.join(file);
@@ -439,7 +465,7 @@ fn load_local_records(
             cfg.format.clone(),
             &cfg.puzzle_field,
             &cfg.solution_field,
-            cfg.max_records,
+            train_limit,
             &mut train_records,
         )?;
     }
@@ -452,7 +478,7 @@ fn load_local_records(
             cfg.format.clone(),
             &cfg.puzzle_field,
             &cfg.solution_field,
-            cfg.max_records,
+            val_limit,
             &mut val_records,
         )?;
     }
@@ -659,9 +685,13 @@ fn augment_pair<R: Rng>(rng: &mut R, puzzle: &[u8], solution: &[u8]) -> (Vec<u8>
     let row_perm = build_band_perm(rng);
     let col_perm = build_band_perm(rng);
     let transpose = rng.gen_bool(0.5);
+    let rotation = random_rotation(rng);
     let puzzle_aug = apply_transform(puzzle, &digit_map, &row_perm, &col_perm, transpose);
     let solution_aug = apply_transform(solution, &digit_map, &row_perm, &col_perm, transpose);
-    (puzzle_aug, solution_aug)
+    (
+        rotate_grid(&puzzle_aug, rotation),
+        rotate_grid(&solution_aug, rotation),
+    )
 }
 
 fn build_digit_map<R: Rng>(rng: &mut R) -> [u8; 10] {
@@ -712,6 +742,55 @@ fn apply_transform(
     out
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Rotation {
+    Deg0,
+    Deg90,
+    Deg180,
+    Deg270,
+}
+
+fn random_rotation<R: Rng>(rng: &mut R) -> Rotation {
+    match rng.gen_range(0..4) {
+        0 => Rotation::Deg0,
+        1 => Rotation::Deg90,
+        2 => Rotation::Deg180,
+        _ => Rotation::Deg270,
+    }
+}
+
+fn rotate_grid(grid: &[u8], rotation: Rotation) -> Vec<u8> {
+    if rotation == Rotation::Deg0 {
+        return grid.to_vec();
+    }
+    let mut out = vec![0_u8; GRID_LEN];
+    match rotation {
+        Rotation::Deg0 => {}
+        Rotation::Deg90 => {
+            for r in 0..9 {
+                for c in 0..9 {
+                    out[r * 9 + c] = grid[(8 - c) * 9 + r];
+                }
+            }
+        }
+        Rotation::Deg180 => {
+            for r in 0..9 {
+                for c in 0..9 {
+                    out[r * 9 + c] = grid[(8 - r) * 9 + (8 - c)];
+                }
+            }
+        }
+        Rotation::Deg270 => {
+            for r in 0..9 {
+                for c in 0..9 {
+                    out[r * 9 + c] = grid[c * 9 + (8 - r)];
+                }
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -735,6 +814,8 @@ mod tests {
             validation_files: Vec::new(),
             puzzle_field: "puzzle".to_string(),
             solution_field: "solution".to_string(),
+            train_max_records: None,
+            validation_max_records: None,
             max_records: None,
         };
         let dataset_cfg = SudokuDatasetConfig {

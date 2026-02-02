@@ -1239,7 +1239,7 @@ fn rollout_losses_train<B: AutodiffBackend>(
             let step_hidden = step_hidden.detach();
             let summary_hidden = step_hidden.clone().slice_dim(1, 0..summary_len);
             let step_hidden = step_hidden.slice_dim(1, summary_len..summary_len + 1);
-            summary_tokens = summary_hidden.clone();
+            summary_tokens = trainer.model.normalize_summary_tokens(summary_hidden);
             let step_logits = trainer.model.value_logits_from_hidden(step_hidden).detach();
 
             let teacher_force = if teacher_forcing_prob > 0.0 {
@@ -1302,7 +1302,7 @@ fn rollout_losses_train<B: AutodiffBackend>(
                 .mul(action_mask.clone())
                 .sum_dim(2)
                 .reshape([batch_size.max(1) * cache_streams, 1, embd]);
-            let summary_streams = summary_hidden
+            let summary_streams = summary_tokens
                 .clone()
                 .unsqueeze_dim::<4>(1)
                 .expand([batch_size.max(1), cache_streams, summary_len, embd])
@@ -1520,7 +1520,7 @@ fn rollout_losses_train<B: AutodiffBackend>(
             .forward_with_hidden_and_state_embedded(step_input, &mut state);
         let summary_hidden = step_hidden.clone().slice_dim(1, 0..summary_len);
         let step_hidden = step_hidden.slice_dim(1, summary_len..summary_len + 1);
-        summary_tokens = summary_hidden.clone();
+        summary_tokens = trainer.model.normalize_summary_tokens(summary_hidden);
         let step_logits = trainer.model.value_logits_from_hidden(step_hidden.clone());
         let halt_logit = trainer
             .model
@@ -1648,7 +1648,7 @@ fn rollout_losses_train<B: AutodiffBackend>(
             .mul(action_mask.clone())
             .sum_dim(2)
             .reshape([batch_size.max(1) * cache_streams, 1, embd]);
-        let summary_streams = summary_hidden
+        let summary_streams = summary_tokens
             .clone()
             .unsqueeze_dim::<4>(1)
             .expand([batch_size.max(1), cache_streams, summary_len, embd])
@@ -2740,7 +2740,7 @@ fn rollout_base_impl<B: BackendTrait>(
                 .forward_with_hidden_and_state_embedded(step_input, &mut state);
             let summary_hidden = step_hidden.clone().slice_dim(1, 0..summary_len);
             let step_hidden = step_hidden.slice_dim(1, summary_len..summary_len + 1);
-            summary_tokens = summary_hidden.clone();
+            summary_tokens = model.normalize_summary_tokens(summary_hidden);
             let step_logits = model.value_logits_from_hidden(step_hidden);
 
             let teacher_force = if teacher_forcing_prob > 0.0 {
@@ -2803,7 +2803,7 @@ fn rollout_base_impl<B: BackendTrait>(
                 .mul(action_mask.clone())
                 .sum_dim(2)
                 .reshape([batch_size.max(1) * cache_streams, 1, embd]);
-            let summary_streams = summary_hidden
+            let summary_streams = summary_tokens
                 .clone()
                 .unsqueeze_dim::<4>(1)
                 .expand([batch_size.max(1), cache_streams, summary_len, embd])
@@ -3008,7 +3008,7 @@ fn rollout_base_impl<B: BackendTrait>(
             model.forward_with_hidden_and_state_embedded(step_input, &mut state);
         let summary_hidden = step_hidden.clone().slice_dim(1, 0..summary_len);
         let step_hidden = step_hidden.slice_dim(1, summary_len..summary_len + 1);
-        summary_tokens = summary_hidden.clone();
+        summary_tokens = model.normalize_summary_tokens(summary_hidden);
         let step_logits = model.value_logits_from_hidden(step_hidden.clone());
         let halt_logit = model.halt_logit_from_summary_tokens(summary_tokens.clone());
         let halt_prob = activation::sigmoid(halt_logit.clone());
@@ -3134,7 +3134,7 @@ fn rollout_base_impl<B: BackendTrait>(
             .mul(action_mask.clone())
             .sum_dim(2)
             .reshape([batch_size.max(1) * cache_streams, 1, embd]);
-        let summary_streams = summary_hidden
+        let summary_streams = summary_tokens
             .clone()
             .unsqueeze_dim::<4>(1)
             .expand([batch_size.max(1), cache_streams, summary_len, embd])
@@ -4438,7 +4438,7 @@ fn rollout_losses_train_trm_chunk<B: AutodiffBackend>(
                 .forward_with_hidden_and_state_embedded(chunk_input, &mut state);
             let hidden = hidden.detach();
             let summary_hidden = hidden.clone().slice_dim(1, 0..summary_len);
-            summary_tokens = summary_hidden.clone();
+            summary_tokens = trainer.model.normalize_summary_tokens(summary_hidden);
             let step_hidden = hidden.slice_dim(1, summary_len..summary_len + chunk_len);
             let step_logits = trainer.model.value_logits_from_hidden(step_hidden.clone()).detach();
 
@@ -4545,7 +4545,7 @@ fn rollout_losses_train_trm_chunk<B: AutodiffBackend>(
             .model
             .forward_with_hidden_and_state_embedded(chunk_input, &mut state);
         let summary_hidden = hidden.clone().slice_dim(1, 0..summary_len);
-        summary_tokens = summary_hidden.clone();
+        summary_tokens = trainer.model.normalize_summary_tokens(summary_hidden);
         let step_hidden = hidden.slice_dim(1, summary_len..summary_len + chunk_len);
         let step_logits = trainer.model.value_logits_from_hidden(step_hidden.clone());
 
@@ -4844,7 +4844,7 @@ fn rollout_losses_valid_trm_chunk<B: BackendTrait>(
             let (hidden, _logits_full) = model
                 .forward_with_hidden_and_state_embedded(chunk_input, &mut state);
             let summary_hidden = hidden.clone().slice_dim(1, 0..summary_len);
-            summary_tokens = summary_hidden.clone();
+            summary_tokens = model.normalize_summary_tokens(summary_hidden);
             let step_hidden = hidden.slice_dim(1, summary_len..summary_len + chunk_len);
             let step_logits = model.value_logits_from_hidden(step_hidden.clone());
 
@@ -4937,7 +4937,7 @@ fn rollout_losses_valid_trm_chunk<B: BackendTrait>(
         let chunk_input = Tensor::cat(vec![summary_tokens.clone(), step_input], 1);
         let (hidden, _logits_full) = model.forward_with_hidden_and_state_embedded(chunk_input, &mut state);
         let summary_hidden = hidden.clone().slice_dim(1, 0..summary_len);
-        summary_tokens = summary_hidden.clone();
+        summary_tokens = model.normalize_summary_tokens(summary_hidden);
         let step_hidden = hidden.slice_dim(1, summary_len..summary_len + chunk_len);
         let step_logits = model.value_logits_from_hidden(step_hidden.clone());
 

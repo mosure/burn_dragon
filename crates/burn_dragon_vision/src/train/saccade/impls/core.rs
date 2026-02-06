@@ -745,6 +745,7 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
         backprop_steps: usize,
         randomize_mask: bool,
         capture_artifacts: bool,
+        is_validation: bool,
     ) -> VisionSaccadeLosses<B> {
         let gdpo = &self.config.policy.gdpo;
         self.forward_losses_with_policy(
@@ -753,6 +754,7 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
             backprop_steps,
             randomize_mask,
             capture_artifacts,
+            is_validation,
             |inputs| {
                 self.build_gdpo_policy_loss(gdpo, inputs, |hard, easy, gdpo| {
                     gdpo::gdpo_advantage(hard, easy, gdpo)
@@ -768,6 +770,7 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
         backprop_steps: usize,
         randomize_mask: bool,
         capture_artifacts: bool,
+        is_validation: bool,
         mut policy_loss_fn: F,
     ) -> VisionSaccadeLosses<B>
     where
@@ -783,6 +786,11 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
         let gdpo = &self.config.policy.gdpo;
         let gdpo_group = gdpo.group_size.max(1);
         let gdpo_active = gdpo.enabled && !capture_artifacts;
+        let loss_on_all_patches = self
+            .config
+            .loss
+            .recon
+            .loss_on_all_patches_for(is_validation);
         let (images, labels) = if gdpo_active && gdpo_group > 1 {
             (
                 images.repeat_dim(0, gdpo_group),
@@ -799,6 +807,7 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
             backprop_steps,
             randomize_mask,
             capture_artifacts,
+            loss_on_all_patches,
         );
         let sigreg = if gdpo_active && gdpo_group > 1 {
             sigreg.mul_scalar(1.0 / gdpo_group as f32)
@@ -945,6 +954,7 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
                 &views,
                 frames,
                 Some(residual),
+                None,
                 None,
                 Some(labels),
                 Some(legend),
@@ -1761,6 +1771,7 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
         backprop_steps: usize,
         randomize_mask: bool,
         capture_artifacts: bool,
+        loss_on_all_patches: bool,
     ) -> SaccadeReconLossOutput<B> {
         let device = images.device();
         let [batch, channels, height, width] = images.shape().dims::<4>();
@@ -1823,7 +1834,6 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
         } else {
             0
         };
-        let loss_on_all_patches = self.config.loss.recon.loss_on_all_patches;
         let mask_ratio = if cross_view {
             self.config.loss.recon.mask_ratio
         } else {

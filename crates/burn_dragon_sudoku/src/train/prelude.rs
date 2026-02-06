@@ -61,6 +61,7 @@ pub(crate) use crate::config::{
     SudokuRewardShapingConfig, SudokuRewardShapingMetric, SudokuEasyRewardMode, SudokuHardRewardMode,
     SudokuInfoRewardConfig, SudokuRolloutConfig, SudokuTraversal, SudokuTrmMode,
     SudokuRolloutSchedule, SudokuTrainingConfig, SudokuTrainingHyperparameters, SudokuValidationConfig,
+    SudokuWriteGateMode,
 };
 pub(crate) use crate::dataset::{SudokuBatch, SudokuDataset, SudokuRandomDataLoader, SudokuSplit};
 pub(crate) use crate::model::SudokuSaccadeModel;

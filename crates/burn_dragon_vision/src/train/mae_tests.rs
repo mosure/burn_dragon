@@ -11,7 +11,7 @@ use crate::{
 use crate::config::{VisionTrainingModeConfig, load_vision_training_config};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::train::pipeline::resolve_vision_rollout;
-use crate::config::{VisionMaeCrossViewConfig, VisionMaeLossConfig, VisionReconLossConfig};
+use crate::config::{VisionAugmentationConfig, VisionMaeCrossViewConfig, VisionMaeLossConfig, VisionReconLossConfig};
 use burn_ndarray::NdArray;
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
@@ -46,10 +46,13 @@ fn mae_pyramid_recon_loss_is_finite() {
         use_alibi: true,
         fused_kernels: FusedKernelConfig::default(),
         mhc: ManifoldHyperConnectionsConfig::default(),
+        trm_graph: Default::default(),
     };
-    let recon_patch_dim =
-        vision_config.patch_size * vision_config.patch_size * vision_config.in_channels;
+    let patch_size = vision_config.patch_size;
+    let in_channels = vision_config.in_channels;
+    let recon_patch_dim = patch_size * patch_size * in_channels;
     let num_eyes = vision_config.num_eyes;
+    let normalize_std = VisionAugmentationConfig::default().normalize_std;
     let mae_config = VisionMaeConfig {
         loss: VisionMaeLossConfig {
             recon: VisionReconLossConfig {
@@ -75,11 +78,14 @@ fn mae_pyramid_recon_loss_is_finite() {
         8,
         rollout,
         recon_patch_dim,
+        normalize_std,
+        patch_size,
+        in_channels,
         &device,
     );
 
     let images = Tensor::<Backend, 4>::random([1, 3, 8, 8], Distribution::Default, &device);
-    let (loss_sum, mask_sum, _) = mae.recon_loss(images, 1, 1, false, false);
+    let (loss_sum, mask_sum, _, _, _, _) = mae.recon_loss(images, 1, 1, false, false, false);
     let loss = loss_sum / mask_sum.add_scalar(LEJEPA_EPS);
     let value = loss
         .to_data()
@@ -124,10 +130,13 @@ fn mae_cross_view_forward_is_finite() {
             num_views: 2,
             ..ManifoldHyperConnectionsConfig::default()
         },
+        trm_graph: Default::default(),
     };
-    let recon_patch_dim =
-        vision_config.patch_size * vision_config.patch_size * vision_config.in_channels;
+    let patch_size = vision_config.patch_size;
+    let in_channels = vision_config.in_channels;
+    let recon_patch_dim = patch_size * patch_size * in_channels;
     let num_eyes = vision_config.num_eyes;
+    let normalize_std = VisionAugmentationConfig::default().normalize_std;
     let mae_config = VisionMaeConfig {
         loss: VisionMaeLossConfig {
             recon: VisionReconLossConfig {
@@ -164,6 +173,9 @@ fn mae_cross_view_forward_is_finite() {
         16,
         rollout,
         recon_patch_dim,
+        normalize_std,
+        patch_size,
+        in_channels,
         &device,
     );
 
@@ -182,7 +194,7 @@ fn mae_cross_view_forward_is_finite() {
     let labels = Tensor::<Backend, 1, Int>::zeros([batch_size], &device);
     let batch = ImageNetBatch::new(images, None, Some(views), None, None, None, labels, None, None);
 
-    let losses = mae.forward_losses(batch, 1, 1, false, false);
+    let losses = mae.forward_losses(batch, 1, 1, false, false, false);
     let value = losses
         .recon
         .to_data()
@@ -303,6 +315,7 @@ fn mae_config_smoke_from_env() {
     let recon_patch_dim =
         vision_cfg.patch_size * vision_cfg.patch_size * vision_cfg.in_channels;
     let model = VisionDragon::<Backend>::new(vision_cfg.clone(), &device);
+    let normalize_std = config.augment.normalize_std;
     let mae = VisionMaeModel::new(
         model,
         mae_cfg,
@@ -310,6 +323,9 @@ fn mae_config_smoke_from_env() {
         vision_cfg.embed_dim,
         rollout,
         recon_patch_dim,
+        normalize_std,
+        vision_cfg.patch_size,
+        vision_cfg.in_channels,
         &device,
     );
 
@@ -331,7 +347,7 @@ fn mae_config_smoke_from_env() {
         ImageNetBatch::new(images, None, None, None, None, None, labels, None, None)
     };
 
-    let losses = mae.forward_losses(batch, 1, 1, false, false);
+    let losses = mae.forward_losses(batch, 1, 1, false, false, false);
     let value = losses
         .recon
         .to_data()
@@ -374,6 +390,7 @@ fn mae_recon_psnr_improves_on_toy_batch() {
         use_alibi: true,
         fused_kernels: FusedKernelConfig::default(),
         mhc: ManifoldHyperConnectionsConfig::default(),
+        trm_graph: Default::default(),
     };
     let mae_config = VisionMaeConfig {
         loss: VisionMaeLossConfig {
@@ -398,6 +415,7 @@ fn mae_recon_psnr_improves_on_toy_batch() {
     let recon_patch_dim =
         vision_config.patch_size * vision_config.patch_size * vision_config.in_channels;
     let model = VisionDragon::<Backend>::new(vision_config.clone(), &device);
+    let normalize_std = VisionAugmentationConfig::default().normalize_std;
     let mut mae = VisionMaeModel::new(
         model,
         mae_config,
@@ -405,6 +423,9 @@ fn mae_recon_psnr_improves_on_toy_batch() {
         vision_config.embed_dim,
         rollout,
         recon_patch_dim,
+        normalize_std,
+        vision_config.patch_size,
+        vision_config.in_channels,
         &device,
     );
 
@@ -416,8 +437,8 @@ fn mae_recon_psnr_improves_on_toy_batch() {
     let backprop_steps = 1;
 
     let initial_psnr = mae
-        .forward_losses(batch.clone(), steps, backprop_steps, false, false)
-        .recon_psnr
+        .forward_losses(batch.clone(), steps, backprop_steps, false, false, false)
+        .recon_psnr_full
         .to_data()
         .convert::<f32>()
         .into_vec::<f32>()
@@ -428,14 +449,14 @@ fn mae_recon_psnr_improves_on_toy_batch() {
         .init::<Backend, VisionMaeModel<Backend>>();
     let lr = 0.02;
     for _ in 0..40 {
-        let losses = mae.forward_losses(batch.clone(), steps, backprop_steps, false, false);
+        let losses = mae.forward_losses(batch.clone(), steps, backprop_steps, false, false, false);
         let grads = GradientsParams::from_grads(losses.total.clone().backward(), &mae);
         mae = optimizer.step(lr, mae, grads);
     }
 
     let final_psnr = mae
-        .forward_losses(batch, steps, backprop_steps, false, false)
-        .recon_psnr
+        .forward_losses(batch, steps, backprop_steps, false, false, false)
+        .recon_psnr_full
         .to_data()
         .convert::<f32>()
         .into_vec::<f32>()
@@ -466,6 +487,7 @@ fn identity_config_recon_loss_decreases() {
         .saturating_mul(vision_config.patch_size)
         .saturating_mul(vision_config.in_channels);
     let model = VisionDragon::<Backend>::new(vision_config.clone(), &device);
+    let normalize_std = config.augment.normalize_std;
     let mut mae = VisionMaeModel::new(
         model,
         mae_config,
@@ -473,6 +495,9 @@ fn identity_config_recon_loss_decreases() {
         vision_config.embed_dim,
         rollout,
         recon_patch_dim,
+        normalize_std,
+        vision_config.patch_size,
+        vision_config.in_channels,
         &device,
     );
 
@@ -490,7 +515,7 @@ fn identity_config_recon_loss_decreases() {
     let backprop_steps = rollout.backprop_steps.max(1);
 
     let initial_recon = mae
-        .forward_losses(batch.clone(), steps, backprop_steps, false, false)
+        .forward_losses(batch.clone(), steps, backprop_steps, false, false, false)
         .recon
         .to_data()
         .convert::<f32>()
@@ -502,13 +527,13 @@ fn identity_config_recon_loss_decreases() {
         .init::<Backend, VisionMaeModel<Backend>>();
     let lr = config.optimizer.learning_rate;
     for _ in 0..30 {
-        let losses = mae.forward_losses(batch.clone(), steps, backprop_steps, false, false);
+        let losses = mae.forward_losses(batch.clone(), steps, backprop_steps, false, false, false);
         let grads = GradientsParams::from_grads(losses.total.clone().backward(), &mae);
         mae = optimizer.step(lr, mae, grads);
     }
 
     let final_recon = mae
-        .forward_losses(batch, steps, backprop_steps, false, false)
+        .forward_losses(batch, steps, backprop_steps, false, false, false)
         .recon
         .to_data()
         .convert::<f32>()

@@ -78,7 +78,7 @@ pub(crate) use crate::train::metrics::{
     ActionClampRateInput, AdvantageAbsMeanInput, AdvantageStdInput, DeviceMemoryMetric,
     DeviceMetric, InvLossInput, LogProbMeanInput, LossValue, MemoryCleanupMetric,
     PolicyEntropyInput, PolicyLossInput, ProbeAccInput, ProbeLossInput, ReconLossInput,
-    ReconPsnrInput, ScalarMetric, SigRegLossInput, VisionArtifactInput, VisionArtifactMetric,
-    VisionOutput, VisionTrainItem,
+    ReconPsnrFullInput, ReconPsnrMaskedInput, ScalarMetric, SigRegLossInput,
+    VisionArtifactInput, VisionArtifactMetric, VisionOutput, VisionTrainItem,
 };
 

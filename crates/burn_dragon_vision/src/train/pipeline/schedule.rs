@@ -1,4 +1,5 @@
 use crate::train::prelude::*;
+use burn_train::metric::IterationSpeedMetric;
 
 pub enum ResolvedLrScheduler {
     Constant(LearningRate),
@@ -126,6 +127,7 @@ where
         builder = builder.with_file_checkpointer(BinFileRecorder::<FullPrecisionSettings>::new());
     }
     builder = builder
+        .metric_train_numeric(IterationSpeedMetric::new())
         .metric_train_numeric(
             ScalarMetric::<ValidBackend<B>, LossValue<ValidBackend<B>>>::new_every(
                 "Loss", loss_every,
@@ -223,7 +225,8 @@ where
         }
         if diagnostics.recon {
             let name = format!("{prefix}_recon_loss");
-            let psnr = format!("{prefix}_recon_psnr");
+            let psnr_masked = format!("{prefix}_recon_psnr_masked");
+            let psnr_full = format!("{prefix}_recon_psnr_full");
             builder = builder
                 .metric_train_numeric(ScalarMetric::<
                     ValidBackend<B>,
@@ -236,12 +239,21 @@ where
             builder = builder
                 .metric_train_numeric(ScalarMetric::<
                     ValidBackend<B>,
-                    ReconPsnrInput<ValidBackend<B>>,
-                >::new_every(psnr.as_str(), metric_every))
+                    ReconPsnrMaskedInput<ValidBackend<B>>,
+                >::new_every(psnr_masked.as_str(), metric_every))
                 .metric_valid_numeric(ScalarMetric::<
                     ValidBackend<B>,
-                    ReconPsnrInput<ValidBackend<B>>,
-                >::new_every(psnr.as_str(), metric_every));
+                    ReconPsnrMaskedInput<ValidBackend<B>>,
+                >::new_every(psnr_masked.as_str(), metric_every));
+            builder = builder
+                .metric_train_numeric(ScalarMetric::<
+                    ValidBackend<B>,
+                    ReconPsnrFullInput<ValidBackend<B>>,
+                >::new_every(psnr_full.as_str(), metric_every))
+                .metric_valid_numeric(ScalarMetric::<
+                    ValidBackend<B>,
+                    ReconPsnrFullInput<ValidBackend<B>>,
+                >::new_every(psnr_full.as_str(), metric_every));
         }
         if diagnostics.policy {
             let name = format!("{prefix}_policy_loss");

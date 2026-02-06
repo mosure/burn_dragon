@@ -13,6 +13,7 @@ const GRID_SIDE: usize = 9;
 const POLICY_HEAD_CACHE: u8 = 0;
 const POLICY_HEAD_SUMMARY_POS: u8 = 1;
 const POLICY_HEAD_SUMMARY_MLP: u8 = 2;
+const WRITE_GATE_INIT: f32 = -6.0;
 
 #[derive(Module, Debug)]
 pub struct SudokuSaccadeModel<B: Backend> {
@@ -29,6 +30,12 @@ pub struct SudokuSaccadeModel<B: Backend> {
     pub value_baseline: Linear<B>,
     pub update_mlp_fc1: Linear<B>,
     pub update_mlp_fc2: Linear<B>,
+    pub ca_q: Linear<B>,
+    pub ca_k: Linear<B>,
+    pub ca_v: Linear<B>,
+    pub ca_update_fc1: Linear<B>,
+    pub ca_update_fc2: Linear<B>,
+    pub ca_norm: LayerNorm<B>,
     pub cache_mhc: Option<ManifoldHyperConnections<B>>,
     pub summary_tokens: Param<Tensor<B, 2>>,
     pub summary_norm: LayerNorm<B>,
@@ -44,6 +51,10 @@ pub struct SudokuSaccadeModel<B: Backend> {
     policy_head_kind: u8,
     #[module(ignore)]
     policy_mlp_hidden: usize,
+    #[module(ignore)]
+    ca_heads: usize,
+    #[module(ignore)]
+    ca_head_dim: usize,
     #[module(ignore)]
     grid_positional: SudokuGridPositional,
     #[module(ignore)]
@@ -113,13 +124,40 @@ impl<B: Backend> SudokuSaccadeModel<B> {
             SudokuCacheUpdateMode::Overwrite => model_config.n_embd,
             SudokuCacheUpdateMode::GatedResidual => model_config.n_embd * 2,
         };
-        let update_mlp_fc2 =
+        let mut update_mlp_fc2 =
             LinearConfig::new(model_config.n_embd * 2, update_out).init(device);
+        if matches!(cache_update_mode, SudokuCacheUpdateMode::GatedResidual)
+            && let Some(bias) = update_mlp_fc2.bias.take()
+        {
+            let bias = bias.map(|tensor| {
+                let device = tensor.device();
+                let [out_dim] = tensor.shape().dims();
+                if out_dim <= 1 {
+                    return tensor;
+                }
+                let split = out_dim / 2;
+                let delta_bias = tensor.clone().slice_dim(0, 0..split);
+                let gate_bias = Tensor::<B, 1>::zeros([out_dim - split], &device)
+                    .add_scalar(WRITE_GATE_INIT);
+                Tensor::cat(vec![delta_bias, gate_bias], 0)
+            });
+            update_mlp_fc2.bias = Some(bias);
+        }
         let cache_streams = if config.cache_mhc.enabled {
             config.cache_mhc.num_streams.max(1)
         } else {
             1
         };
+        let ca_heads = model_config.n_head.max(1);
+        let ca_head_dim = (model_config.n_embd / ca_heads).max(1);
+        let ca_q = LinearConfig::new(model_config.n_embd, model_config.n_embd).init(device);
+        let ca_k = LinearConfig::new(model_config.n_embd, model_config.n_embd).init(device);
+        let ca_v = LinearConfig::new(model_config.n_embd, model_config.n_embd).init(device);
+        let ca_update_fc1 =
+            LinearConfig::new(model_config.n_embd * 2 + 1, model_config.n_embd * 2).init(device);
+        let ca_update_fc2 =
+            LinearConfig::new(model_config.n_embd * 2, model_config.n_embd).init(device);
+        let ca_norm = LayerNormConfig::new(model_config.n_embd).init(device);
         let cache_mhc = if config.cache_mhc.enabled {
             Some(ManifoldHyperConnections::new(&config.cache_mhc.to_core(), 0, device))
         } else {
@@ -184,6 +222,8 @@ impl<B: Backend> SudokuSaccadeModel<B> {
             policy_head_dim,
             policy_head_kind,
             policy_mlp_hidden,
+            ca_heads,
+            ca_head_dim,
             grid_positional,
             grid_rope_theta,
             grid_rope_freqs,
@@ -192,6 +232,12 @@ impl<B: Backend> SudokuSaccadeModel<B> {
             grid_rope_col_cos,
             grid_rope_col_sin,
             cache_streams,
+            ca_q,
+            ca_k,
+            ca_v,
+            ca_update_fc1,
+            ca_update_fc2,
+            ca_norm,
         }
     }
 
@@ -366,6 +412,12 @@ impl<B: Backend> SudokuSaccadeModel<B> {
     pub fn summary_token_count(&self) -> usize {
         self.summary_token_count
     }
+    pub fn ca_heads(&self) -> usize {
+        self.ca_heads.max(1)
+    }
+    pub fn ca_head_dim(&self) -> usize {
+        self.ca_head_dim.max(1)
+    }
 
     pub fn policy_logits_from_cache(
         &self,
@@ -453,9 +505,132 @@ impl<B: Backend> SudokuSaccadeModel<B> {
         cache_cell: Tensor<B, 3>,
         token_emb: Tensor<B, 3>,
     ) -> Tensor<B, 3> {
+        self.update_cell_embedding_with_gate(summary_tokens, cache_cell, token_emb).0
+    }
+
+    fn fast_weight_group_update(
+        q: Tensor<B, 5>,
+        k: Tensor<B, 5>,
+        v: Tensor<B, 5>,
+        mem: Tensor<B, 5>,
+        decay: f32,
+    ) -> (Tensor<B, 5>, Tensor<B, 5>) {
+        let [batch, heads, groups, len, dim] = q.shape().dims();
+        let device = q.device();
+        if batch == 0 || heads == 0 || groups == 0 || len == 0 || dim == 0 {
+            let zeros = Tensor::<B, 5>::zeros([batch.max(1), heads.max(1), groups.max(1), len.max(1), dim.max(1)], &device);
+            return (zeros, mem);
+        }
+        let flat_groups = batch * heads * groups;
+        let q_flat = q.reshape([flat_groups, len, dim]);
+        let k_flat = k.reshape([flat_groups, len, dim]);
+        let v_flat = v.reshape([flat_groups, len, dim]);
+        let mem_flat = mem.reshape([flat_groups, dim, dim]);
+        let k_exp = k_flat.unsqueeze_dim::<4>(3);
+        let v_exp = v_flat.unsqueeze_dim::<4>(2);
+        let delta = k_exp.mul(v_exp).sum_dims_squeeze::<3, usize>(&[1]);
+        let mem_flat = mem_flat.mul_scalar(decay).add(delta);
+        let q_exp = q_flat.unsqueeze_dim::<4>(3);
+        let mem_exp = mem_flat.clone().unsqueeze_dim::<4>(1);
+        let msg_flat = q_exp.mul(mem_exp).sum_dims_squeeze::<3, usize>(&[2]);
+        let msg = msg_flat.reshape([batch, heads, groups, len, dim]);
+        let mem = mem_flat.reshape([batch, heads, groups, dim, dim]);
+        (msg, mem)
+    }
+
+    pub fn constraint_ca_step(
+        &self,
+        cell_state: Tensor<B, 3>,
+        clue_mask: Tensor<B, 2>,
+        mem_row: Tensor<B, 5>,
+        mem_col: Tensor<B, 5>,
+        mem_box: Tensor<B, 5>,
+        decay: f32,
+    ) -> (Tensor<B, 3>, Tensor<B, 5>, Tensor<B, 5>, Tensor<B, 5>) {
+        let [batch, time, dim] = cell_state.shape().dims();
+        if batch == 0 || time == 0 || dim == 0 || time != GRID_LEN {
+            return (cell_state, mem_row, mem_col, mem_box);
+        }
+        let heads = self.ca_heads.max(1);
+        let head_dim = self.ca_head_dim.max(1);
+        if heads * head_dim != dim {
+            return (cell_state, mem_row, mem_col, mem_box);
+        }
+        let decay = decay.clamp(0.0, 1.0);
+        let flat = cell_state.clone().reshape([batch * time, dim]);
+        let q = self.ca_q.forward(flat.clone()).reshape([batch, time, dim]);
+        let k = self.ca_k.forward(flat.clone()).reshape([batch, time, dim]);
+        let v = self.ca_v.forward(flat).reshape([batch, time, dim]);
+        let q = q.reshape([batch, time, heads, head_dim]).swap_dims(1, 2);
+        let k = k.reshape([batch, time, heads, head_dim]).swap_dims(1, 2);
+        let v = v.reshape([batch, time, heads, head_dim]).swap_dims(1, 2);
+
+        let q_grid = q.reshape([batch, heads, GRID_SIDE, GRID_SIDE, head_dim]);
+        let k_grid = k.reshape([batch, heads, GRID_SIDE, GRID_SIDE, head_dim]);
+        let v_grid = v.reshape([batch, heads, GRID_SIDE, GRID_SIDE, head_dim]);
+
+        let (msg_row, mem_row) =
+            Self::fast_weight_group_update(q_grid.clone(), k_grid.clone(), v_grid.clone(), mem_row, decay);
+
+        let q_col = q_grid.clone().swap_dims(2, 3);
+        let k_col = k_grid.clone().swap_dims(2, 3);
+        let v_col = v_grid.clone().swap_dims(2, 3);
+        let (msg_col, mem_col) = Self::fast_weight_group_update(q_col, k_col, v_col, mem_col, decay);
+        let msg_col = msg_col.swap_dims(2, 3);
+
+        let q_box = q_grid
+            .clone()
+            .reshape([batch, heads, 3, 3, 3, 3, head_dim])
+            .swap_dims(3, 4)
+            .reshape([batch, heads, GRID_SIDE, GRID_SIDE, head_dim]);
+        let k_box = k_grid
+            .clone()
+            .reshape([batch, heads, 3, 3, 3, 3, head_dim])
+            .swap_dims(3, 4)
+            .reshape([batch, heads, GRID_SIDE, GRID_SIDE, head_dim]);
+        let v_box = v_grid
+            .clone()
+            .reshape([batch, heads, 3, 3, 3, 3, head_dim])
+            .swap_dims(3, 4)
+            .reshape([batch, heads, GRID_SIDE, GRID_SIDE, head_dim]);
+        let (msg_box, mem_box) = Self::fast_weight_group_update(q_box, k_box, v_box, mem_box, decay);
+        let msg_box = msg_box
+            .reshape([batch, heads, 3, 3, 3, 3, head_dim])
+            .swap_dims(3, 4)
+            .reshape([batch, heads, GRID_SIDE, GRID_SIDE, head_dim]);
+
+        let mut msg = msg_row + msg_col + msg_box;
+        msg = msg.div_scalar(3.0);
+        let msg = msg
+            .reshape([batch, heads, GRID_LEN, head_dim])
+            .swap_dims(1, 2)
+            .reshape([batch, GRID_LEN, dim]);
+
+        let givens = clue_mask.reshape([batch, GRID_LEN, 1]);
+        let update_input = Tensor::cat(vec![cell_state.clone(), msg, givens], 2);
+        let update_flat = update_input.reshape([batch * GRID_LEN, dim * 2 + 1]);
+        let hidden = activation::gelu(self.ca_update_fc1.forward(update_flat));
+        let delta = self
+            .ca_update_fc2
+            .forward(hidden)
+            .reshape([batch, GRID_LEN, dim]);
+        let next = self.ca_norm.forward(cell_state + delta);
+        (next, mem_row, mem_col, mem_box)
+    }
+
+    pub fn update_cell_embedding_with_gate(
+        &self,
+        summary_tokens: Tensor<B, 3>,
+        cache_cell: Tensor<B, 3>,
+        token_emb: Tensor<B, 3>,
+    ) -> (Tensor<B, 3>, Tensor<B, 2>) {
         let [batch, _, dim] = summary_tokens.shape().dims();
+        let device = summary_tokens.device();
         if batch == 0 || dim == 0 {
-            return Tensor::<B, 3>::zeros([batch.max(1), 1, dim.max(1)], &summary_tokens.device());
+            let zeros =
+                Tensor::<B, 3>::zeros([batch.max(1), 1, dim.max(1)], &device);
+            let write_gate = Tensor::<B, 2>::zeros([batch.max(1), 1], &device);
+            return (zeros, write_gate);
         }
         let summary = self
             .summary_norm
@@ -468,15 +643,17 @@ impl<B: Backend> SudokuSaccadeModel<B> {
         let updated = self.update_mlp_fc2.forward(hidden);
         let [_, out_dim] = updated.shape().dims();
         let updated = updated.reshape([batch, 1, out_dim]);
-        let updated = if out_dim > dim {
+        let (updated, write_gate) = if out_dim > dim {
             let split = out_dim / 2;
             let delta = updated.clone().slice_dim(2, 0..split);
             let gate = activation::sigmoid(updated.slice_dim(2, split..out_dim));
-            cache_cell + delta.mul(gate)
+            let write_gate = gate.clone().mean_dim(2).reshape([batch, 1]);
+            (cache_cell + delta.mul(gate), write_gate)
         } else {
-            updated
+            let write_gate = Tensor::<B, 2>::ones([batch.max(1), 1], &device);
+            (updated, write_gate)
         };
-        self.cache_norm.forward(updated)
+        (self.cache_norm.forward(updated), write_gate)
     }
     pub fn value_logits_from_hidden(&self, hidden: Tensor<B, 3>) -> Tensor<B, 3> {
         let [batch, time, dim] = hidden.shape().dims();

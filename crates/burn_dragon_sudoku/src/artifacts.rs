@@ -21,11 +21,17 @@ const LINE_THIN: usize = 1;
 const LINE_THICK: usize = 3;
 const DIGIT_SCALE: usize = 4;
 const DIGIT_PAD: usize = 4;
+const HUD_SCALE: usize = 2;
 
 const COLOR_BG: [u8; 3] = [245, 242, 235];
+const COLOR_CLUE_BG: [u8; 3] = [220, 230, 242];
 const COLOR_LINE: [u8; 3] = [30, 30, 30];
 const COLOR_DIGIT: [u8; 3] = [25, 25, 25];
 const COLOR_HIGHLIGHT: [u8; 3] = [255, 187, 0];
+const COLOR_WRITE_BG: [u8; 3] = [210, 210, 210];
+const COLOR_WRITE_FILL: [u8; 3] = [78, 158, 105];
+const WRITE_BAR_HEIGHT: usize = 6;
+const ARTIFACT_EPS_FLOOR: f32 = 0.05;
 const POLICY_MASK_PENALTY: f32 = 1e9;
 
 pub fn write_validation_artifacts<B: BackendTrait>(
@@ -181,26 +187,34 @@ fn generate_rollout_frames<B: BackendTrait>(
     let mut unknown_masks = Vec::with_capacity(batch);
     let mut editable_masks = Vec::with_capacity(batch);
     let mut editable_counts = Vec::with_capacity(batch);
+    let mut clue_masks = Vec::with_capacity(batch);
     for grid in puzzles.iter() {
         let mut unknown = Vec::with_capacity(GRID_LEN);
         let mut editable = Vec::with_capacity(GRID_LEN);
+        let mut clue = Vec::with_capacity(GRID_LEN);
         for &value in grid.iter().take(GRID_LEN) {
-            let clue = value > 0;
-            editable.push(if clue { 0.0 } else { 1.0 });
+            let is_clue = value > 0;
+            editable.push(if is_clue { 0.0 } else { 1.0 });
             unknown.push(if value == 0 { 1.0 } else { 0.0 });
+            clue.push(if is_clue { 1 } else { 0 });
         }
         let editable_count = editable.iter().copied().sum::<f32>().max(1.0);
         unknown_masks.push(unknown);
         editable_masks.push(editable);
         editable_counts.push(editable_count);
+        clue_masks.push(clue);
     }
 
     let ones_grid = Tensor::<B, 2>::ones([batch.max(1), GRID_LEN], device);
     let ones_step = Tensor::<B, 2>::ones([batch.max(1), 1], device);
     let revisit_min_filled = training.revisit.min_filled_final.clamp(0.0, 1.0);
     let visit_penalty = training.policy.visit_penalty.max(0.0);
-    let policy_temperature = training.policy.temperature_final.max(1e-4);
-    let policy_epsilon = training.policy.epsilon_final.clamp(0.0, 1.0);
+    let policy_temperature = training.policy.temperature.max(1e-4);
+    let policy_epsilon = training
+        .policy
+        .epsilon
+        .clamp(0.0, 1.0)
+        .max(ARTIFACT_EPS_FLOOR);
     let policy_noise = training.policy.noise.max(0.0);
     let action_index = build_action_index(batch, device);
     let (row_ids, col_ids) = model.grid_row_col_ids(batch, device);
@@ -379,11 +393,31 @@ fn generate_rollout_frames<B: BackendTrait>(
             .unsqueeze_dim::<4>(1)
             .expand([batch.max(1), cache_streams, 1, embd])
             .reshape([batch.max(1) * cache_streams, 1, embd]);
-        let update_emb = model.update_cell_embedding(
+        let (update_emb, write_gate) = model.update_cell_embedding_with_gate(
             summary_streams,
             cache_cell,
             token_emb,
         );
+        let write_gate = write_gate
+            .reshape([batch.max(1), cache_streams.max(1), 1])
+            .mean_dim(1)
+            .reshape([batch.max(1), 1])
+            .clamp_min(0.0)
+            .clamp_max(1.0);
+        let write_mask = if matches!(training.policy.write_gate_mode, crate::config::SudokuWriteGateMode::Bernoulli)
+            && config.sample_policy
+        {
+            Tensor::<B, 2>::random(
+                [batch.max(1), 1],
+                TensorDistribution::Uniform(0.0, 1.0),
+                device,
+            )
+            .sub(write_gate.clone())
+            .lower_equal_elem(0.0)
+            .float()
+        } else {
+            write_gate.clone().greater_equal_elem(0.5).float()
+        };
         let update_emb = update_emb
             .reshape([batch.max(1), cache_streams, 1, embd])
             .expand([batch.max(1), cache_streams, GRID_LEN, embd]);
@@ -391,6 +425,16 @@ fn generate_rollout_frames<B: BackendTrait>(
         let keep = update_mask_stream.clone().mul_scalar(-1.0).add_scalar(1.0);
         cache = cache * keep + update_emb.mul(update_mask_stream);
         cache = mhc_passthrough(model.cache_mhc.as_ref(), cache);
+        let write_gate_data = write_gate
+            .to_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .map_err(|err| anyhow!("write gate to vec: {err:?}"))?;
+        let write_mask_data = write_mask
+            .to_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .map_err(|err| anyhow!("write mask to vec: {err:?}"))?;
         let pred_data = pred_values
             .to_data()
             .convert::<i64>()
@@ -418,7 +462,11 @@ fn generate_rollout_frames<B: BackendTrait>(
                     .and_then(|mask| mask.get(action))
                     .copied()
                     .unwrap_or(0.0);
-                if editable > 0.5 {
+                let write_mask = write_mask_data
+                    .get(sample_idx)
+                    .copied()
+                    .unwrap_or(0.0);
+                if editable > 0.5 && write_mask > 0.5 {
                     let pred = pred_data
                         .get(sample_idx)
                         .copied()
@@ -433,7 +481,14 @@ fn generate_rollout_frames<B: BackendTrait>(
                 }
                 focus = Some(action);
             }
-            frames[sample_idx].push(render_sudoku_frame(grid, focus));
+            let clue_mask = clue_masks.get(sample_idx).map(|mask| mask.as_slice());
+            let write_prob = write_gate_data.get(sample_idx).copied();
+            frames[sample_idx].push(render_sudoku_frame(
+                grid,
+                focus,
+                clue_mask,
+                write_prob,
+            ));
         }
     }
 
@@ -506,11 +561,70 @@ fn build_tokens_tensor<B: BackendTrait>(grids: &[Vec<u8>], device: &B::Device) -
     Tensor::<B, 2, Int>::from_data(TensorData::new(data, [batch, GRID_LEN]), device)
 }
 
-fn render_sudoku_frame(grid: &[u8], focus: Option<usize>) -> ArtifactFrame {
+fn render_sudoku_frame(
+    grid: &[u8],
+    focus: Option<usize>,
+    clue_mask: Option<&[u8]>,
+    write_prob: Option<f32>,
+) -> ArtifactFrame {
     let width = GRID_PAD * 2 + CELL_SIZE * GRID_SIZE;
     let height = GRID_PAD * 2 + CELL_SIZE * GRID_SIZE;
     let mut rgb = vec![0u8; width * height * 3];
     fill_rect(&mut rgb, width, 0, 0, width, height, COLOR_BG);
+    if let Some(prob) = write_prob {
+        let prob = prob.clamp(0.0, 1.0);
+        let bar_w = CELL_SIZE * GRID_SIZE;
+        let bar_x = GRID_PAD;
+        let bar_y = GRID_PAD.saturating_sub(WRITE_BAR_HEIGHT + 2);
+        fill_rect(&mut rgb, width, bar_x, bar_y, bar_w, WRITE_BAR_HEIGHT, COLOR_WRITE_BG);
+        let fill_w = ((bar_w as f32) * prob).round() as usize;
+        if fill_w > 0 {
+            fill_rect(
+                &mut rgb,
+                width,
+                bar_x,
+                bar_y,
+                fill_w.min(bar_w),
+                WRITE_BAR_HEIGHT,
+                COLOR_WRITE_FILL,
+            );
+        }
+        let percent = (prob * 100.0).round().clamp(0.0, 100.0) as usize;
+        let digits = if percent >= 100 {
+            3
+        } else if percent >= 10 {
+            2
+        } else {
+            1
+        };
+        let glyph_w = 5 * HUD_SCALE;
+        let glyph_h = 7 * HUD_SCALE;
+        let total_w = digits * glyph_w + digits.saturating_sub(1) * HUD_SCALE;
+        let text_x = GRID_PAD + CELL_SIZE * GRID_SIZE - total_w;
+        let text_y = GRID_PAD + CELL_SIZE * GRID_SIZE + (GRID_PAD - glyph_h) / 2;
+        draw_number_at(
+            &mut rgb,
+            width,
+            text_x,
+            text_y,
+            percent,
+            HUD_SCALE,
+            COLOR_LINE,
+        );
+    }
+
+    if let Some(mask) = clue_mask {
+        for row in 0..GRID_SIZE {
+            for col in 0..GRID_SIZE {
+                let idx = row * GRID_SIZE + col;
+                if mask.get(idx).copied().unwrap_or(0) > 0 {
+                    let cell_x = GRID_PAD + col * CELL_SIZE;
+                    let cell_y = GRID_PAD + row * CELL_SIZE;
+                    fill_rect(&mut rgb, width, cell_x, cell_y, CELL_SIZE, CELL_SIZE, COLOR_CLUE_BG);
+                }
+            }
+        }
+    }
 
     draw_grid_lines(&mut rgb, width, height);
 
@@ -593,6 +707,57 @@ fn draw_digit(
                 let x = offset_x + gx * DIGIT_SCALE + DIGIT_PAD / 2;
                 let y = offset_y + gy * DIGIT_SCALE + DIGIT_PAD / 2;
                 fill_rect(rgb, width, x, y, DIGIT_SCALE, DIGIT_SCALE, color);
+            }
+        }
+    }
+}
+
+fn draw_number_at(
+    rgb: &mut [u8],
+    width: usize,
+    x: usize,
+    y: usize,
+    value: usize,
+    scale: usize,
+    color: [u8; 3],
+) {
+    let value = value.min(100);
+    let digits: Vec<usize> = if value >= 100 {
+        vec![1, 0, 0]
+    } else if value >= 10 {
+        vec![value / 10, value % 10]
+    } else {
+        vec![value]
+    };
+    let mut cursor_x = x;
+    for (idx, digit) in digits.iter().enumerate() {
+        if idx > 0 {
+            cursor_x = cursor_x.saturating_add(scale);
+        }
+        draw_digit_at(rgb, width, cursor_x, y, *digit, scale, color);
+        cursor_x = cursor_x.saturating_add(5 * scale);
+    }
+}
+
+fn draw_digit_at(
+    rgb: &mut [u8],
+    width: usize,
+    x: usize,
+    y: usize,
+    digit: usize,
+    scale: usize,
+    color: [u8; 3],
+) {
+    if digit > 9 || scale == 0 {
+        return;
+    }
+    let glyph = DIGITS[digit];
+    for (gy, row_bits) in glyph.iter().enumerate() {
+        for (gx, bit) in row_bits.as_bytes().iter().enumerate() {
+            if *bit == b'1' {
+                let px = x + gx * scale;
+                let py = y + gy * scale;
+                fill_rect(rgb, width, px, py, scale, scale, color);
             }
         }
     }

@@ -39,6 +39,7 @@ fn make_saccade_model<B: BackendTrait>(
         use_alibi: true,
         fused_kernels: FusedKernelConfig::default(),
         mhc: ManifoldHyperConnectionsConfig::default(),
+        trm_graph: Default::default(),
     };
     let model = VisionDragon::<B>::new(vision_config.clone(), device);
     let mut saccade_config = VisionSaccadeConfig {

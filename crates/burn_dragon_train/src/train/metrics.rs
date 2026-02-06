@@ -87,6 +87,7 @@ pub struct VisionArtifactInput<B: BackendTrait> {
     pub views: Option<Tensor<B, 5>>,
     pub frames: Option<Tensor<B, 5>>,
     pub patch_norms: Option<Tensor<B, 3>>,
+    pub pca_rgb: Option<Tensor<B, 4>>,
     pub probe_logits: Option<Tensor<B, 2>>,
     pub labels: Option<Tensor<B, 1, Int>>,
     pub legend: Option<Vec<String>>,
@@ -98,6 +99,7 @@ impl<B: BackendTrait> VisionArtifactInput<B> {
             views: None,
             frames: None,
             patch_norms: None,
+            pca_rgb: None,
             probe_logits: None,
             labels: None,
             legend: None,
@@ -111,7 +113,8 @@ pub struct VisionOutput<B: BackendTrait> {
     inv_loss: Tensor<B, 1>,
     sigreg_loss: Tensor<B, 1>,
     recon_loss: Tensor<B, 1>,
-    recon_psnr: Tensor<B, 1>,
+    recon_psnr_masked: Tensor<B, 1>,
+    recon_psnr_full: Tensor<B, 1>,
     policy_loss: Tensor<B, 1>,
     policy_advantage_abs_mean: Tensor<B, 1>,
     policy_advantage_std: Tensor<B, 1>,
@@ -130,7 +133,8 @@ impl<B: BackendTrait> VisionOutput<B> {
         inv_loss: Tensor<B, 1>,
         sigreg_loss: Tensor<B, 1>,
         recon_loss: Tensor<B, 1>,
-        recon_psnr: Tensor<B, 1>,
+        recon_psnr_masked: Tensor<B, 1>,
+        recon_psnr_full: Tensor<B, 1>,
         policy_loss: Tensor<B, 1>,
         policy_advantage_abs_mean: Tensor<B, 1>,
         policy_advantage_std: Tensor<B, 1>,
@@ -146,7 +150,8 @@ impl<B: BackendTrait> VisionOutput<B> {
             inv_loss,
             sigreg_loss,
             recon_loss,
-            recon_psnr,
+            recon_psnr_masked,
+            recon_psnr_full,
             policy_loss,
             policy_advantage_abs_mean,
             policy_advantage_std,
@@ -214,11 +219,22 @@ impl<B: BackendTrait> ReconLossInput<B> {
 }
 
 #[derive(Clone)]
-pub struct ReconPsnrInput<B: BackendTrait> {
+pub struct ReconPsnrMaskedInput<B: BackendTrait> {
     value: Tensor<B, 1>,
 }
 
-impl<B: BackendTrait> ReconPsnrInput<B> {
+impl<B: BackendTrait> ReconPsnrMaskedInput<B> {
+    pub fn new(value: Tensor<B, 1>) -> Self {
+        Self { value }
+    }
+}
+
+#[derive(Clone)]
+pub struct ReconPsnrFullInput<B: BackendTrait> {
+    value: Tensor<B, 1>,
+}
+
+impl<B: BackendTrait> ReconPsnrFullInput<B> {
     pub fn new(value: Tensor<B, 1>) -> Self {
         Self { value }
     }
@@ -330,9 +346,15 @@ impl<B: BackendTrait> Adaptor<ReconLossInput<B>> for VisionOutput<B> {
     }
 }
 
-impl<B: BackendTrait> Adaptor<ReconPsnrInput<B>> for VisionOutput<B> {
-    fn adapt(&self) -> ReconPsnrInput<B> {
-        ReconPsnrInput::new(self.recon_psnr.clone())
+impl<B: BackendTrait> Adaptor<ReconPsnrMaskedInput<B>> for VisionOutput<B> {
+    fn adapt(&self) -> ReconPsnrMaskedInput<B> {
+        ReconPsnrMaskedInput::new(self.recon_psnr_masked.clone())
+    }
+}
+
+impl<B: BackendTrait> Adaptor<ReconPsnrFullInput<B>> for VisionOutput<B> {
+    fn adapt(&self) -> ReconPsnrFullInput<B> {
+        ReconPsnrFullInput::new(self.recon_psnr_full.clone())
     }
 }
 
@@ -397,7 +419,8 @@ pub struct VisionTrainItem<B: AutodiffBackend> {
     inv_loss: Tensor<B, 1>,
     sigreg_loss: Tensor<B, 1>,
     recon_loss: Tensor<B, 1>,
-    recon_psnr: Tensor<B, 1>,
+    recon_psnr_masked: Tensor<B, 1>,
+    recon_psnr_full: Tensor<B, 1>,
     policy_loss: Tensor<B, 1>,
     policy_advantage_abs_mean: Tensor<B, 1>,
     policy_advantage_std: Tensor<B, 1>,
@@ -415,7 +438,8 @@ impl<B: AutodiffBackend> VisionTrainItem<B> {
         inv_loss: Tensor<B, 1>,
         sigreg_loss: Tensor<B, 1>,
         recon_loss: Tensor<B, 1>,
-        recon_psnr: Tensor<B, 1>,
+        recon_psnr_masked: Tensor<B, 1>,
+        recon_psnr_full: Tensor<B, 1>,
         policy_loss: Tensor<B, 1>,
         policy_advantage_abs_mean: Tensor<B, 1>,
         policy_advantage_std: Tensor<B, 1>,
@@ -430,7 +454,8 @@ impl<B: AutodiffBackend> VisionTrainItem<B> {
             inv_loss: inv_loss.detach(),
             sigreg_loss: sigreg_loss.detach(),
             recon_loss: recon_loss.detach(),
-            recon_psnr: recon_psnr.detach(),
+            recon_psnr_masked: recon_psnr_masked.detach(),
+            recon_psnr_full: recon_psnr_full.detach(),
             policy_loss: policy_loss.detach(),
             policy_advantage_abs_mean: policy_advantage_abs_mean.detach(),
             policy_advantage_std: policy_advantage_std.detach(),
@@ -452,7 +477,8 @@ impl<B: AutodiffBackend> ItemLazy for VisionTrainItem<B> {
             self.inv_loss.detach().inner(),
             self.sigreg_loss.detach().inner(),
             self.recon_loss.detach().inner(),
-            self.recon_psnr.detach().inner(),
+            self.recon_psnr_masked.detach().inner(),
+            self.recon_psnr_full.detach().inner(),
             self.policy_loss.detach().inner(),
             self.policy_advantage_abs_mean.detach().inner(),
             self.policy_advantage_std.detach().inner(),
@@ -488,7 +514,13 @@ impl<B: BackendTrait> ScalarValue<B> for ReconLossInput<B> {
     }
 }
 
-impl<B: BackendTrait> ScalarValue<B> for ReconPsnrInput<B> {
+impl<B: BackendTrait> ScalarValue<B> for ReconPsnrMaskedInput<B> {
+    fn value(&self) -> Tensor<B, 1> {
+        self.value.clone()
+    }
+}
+
+impl<B: BackendTrait> ScalarValue<B> for ReconPsnrFullInput<B> {
     fn value(&self) -> Tensor<B, 1> {
         self.value.clone()
     }
@@ -1141,7 +1173,8 @@ impl<B: BackendTrait> VisionArtifactMetric<B> {
     fn build_lejepa_frame(
         &self,
         views_vec: &[f32],
-        patch_vec: &[f32],
+        patch_vec: Option<&[f32]>,
+        pca_vec: Option<&[f32]>,
         batch_idx: usize,
         view_count: usize,
         channels: usize,
@@ -1159,7 +1192,17 @@ impl<B: BackendTrait> VisionArtifactMetric<B> {
         if heat_patch_h == 0 || heat_patch_w == 0 {
             return None;
         }
-        let width_total = width * (view_count + 1);
+        let mut extra_cols = 0usize;
+        if patch_vec.is_some() {
+            extra_cols += 1;
+        }
+        if pca_vec.is_some() {
+            extra_cols += 1;
+        }
+        if extra_cols == 0 {
+            return None;
+        }
+        let width_total = width * (view_count + extra_cols);
         let mut canvas = vec![0u8; width_total * height * 3];
 
         for view_idx in 0..view_count {
@@ -1180,26 +1223,51 @@ impl<B: BackendTrait> VisionArtifactMetric<B> {
             }
         }
 
-        let patch_offset = batch_idx * grid_h * grid_w;
-        let patch_slice = &patch_vec[patch_offset..patch_offset + grid_h * grid_w];
-        let mut min_val = f32::INFINITY;
-        let mut max_val = f32::NEG_INFINITY;
-        for value in patch_slice {
-            min_val = min_val.min(*value);
-            max_val = max_val.max(*value);
+        let mut column_idx = view_count;
+        if let Some(patch_vec) = patch_vec {
+            let patch_offset = batch_idx * grid_h * grid_w;
+            let patch_slice = &patch_vec[patch_offset..patch_offset + grid_h * grid_w];
+            let mut min_val = f32::INFINITY;
+            let mut max_val = f32::NEG_INFINITY;
+            for value in patch_slice {
+                min_val = min_val.min(*value);
+                max_val = max_val.max(*value);
+            }
+            let denom = (max_val - min_val).max(LEJEPA_EPS);
+            for gy in 0..grid_h {
+                for gx in 0..grid_w {
+                    let value = (patch_slice[gy * grid_w + gx] - min_val) / denom;
+                    let pix = (value.clamp(0.0, 1.0) * 255.0).round() as u8;
+                    for y in (gy * heat_patch_h)..((gy + 1) * heat_patch_h) {
+                        for x in (gx * heat_patch_w)..((gx + 1) * heat_patch_w) {
+                            let out_x = column_idx * width + x;
+                            let offset = (y * width_total + out_x) * 3;
+                            canvas[offset] = pix;
+                            canvas[offset + 1] = pix;
+                            canvas[offset + 2] = pix;
+                        }
+                    }
+                }
+            }
+            column_idx += 1;
         }
-        let denom = (max_val - min_val).max(LEJEPA_EPS);
-        for gy in 0..grid_h {
-            for gx in 0..grid_w {
-                let value = (patch_slice[gy * grid_w + gx] - min_val) / denom;
-                let pix = (value.clamp(0.0, 1.0) * 255.0).round() as u8;
-                for y in (gy * heat_patch_h)..((gy + 1) * heat_patch_h) {
-                    for x in (gx * heat_patch_w)..((gx + 1) * heat_patch_w) {
-                        let out_x = view_count * width + x;
-                        let offset = (y * width_total + out_x) * 3;
-                        canvas[offset] = pix;
-                        canvas[offset + 1] = pix;
-                        canvas[offset + 2] = pix;
+
+        if let Some(pca_vec) = pca_vec {
+            let pca_offset = batch_idx * 3 * grid_h * grid_w;
+            for gy in 0..grid_h {
+                for gx in 0..grid_w {
+                    let base = pca_offset + gy * grid_w + gx;
+                    let r = (pca_vec[base].clamp(0.0, 1.0) * 255.0).round() as u8;
+                    let g = (pca_vec[base + grid_h * grid_w].clamp(0.0, 1.0) * 255.0).round() as u8;
+                    let b = (pca_vec[base + 2 * grid_h * grid_w].clamp(0.0, 1.0) * 255.0).round() as u8;
+                    for y in (gy * heat_patch_h)..((gy + 1) * heat_patch_h) {
+                        for x in (gx * heat_patch_w)..((gx + 1) * heat_patch_w) {
+                            let out_x = column_idx * width + x;
+                            let offset = (y * width_total + out_x) * 3;
+                            canvas[offset] = r;
+                            canvas[offset + 1] = g;
+                            canvas[offset + 2] = b;
+                        }
                     }
                 }
             }
@@ -1285,7 +1353,8 @@ impl<B: BackendTrait> burn_train::metric::Metric for VisionArtifactMetric<B> {
         }
         if self.output_mode != VisionArtifactOutputMode::Images {
             if item.frames.is_none()
-                && let (Some(views), Some(patch_norms)) = (&item.views, &item.patch_norms)
+                && let Some(views) = &item.views
+                && (item.patch_norms.is_some() || item.pca_rgb.is_some())
             {
                     if let Some(legend) = item.legend.as_ref() {
                         self.write_legend(legend);
@@ -1298,14 +1367,33 @@ impl<B: BackendTrait> burn_train::metric::Metric for VisionArtifactMetric<B> {
                             "0".to_string(),
                         );
                     }
-                    let [norm_batch, grid_h, grid_w] = patch_norms.shape().dims::<3>();
-                    if norm_batch == 0 || grid_h == 0 || grid_w == 0 {
+                    let (grid_h, grid_w, _norm_batch) = if let Some(patch_norms) = &item.patch_norms {
+                        let [norm_batch, grid_h, grid_w] = patch_norms.shape().dims::<3>();
+                        if norm_batch == 0 || grid_h == 0 || grid_w == 0 {
+                            return burn_train::metric::MetricEntry::new(
+                                Arc::clone(&self.name),
+                                "empty_norms".to_string(),
+                                "0".to_string(),
+                            );
+                        }
+                        (grid_h, grid_w, norm_batch)
+                    } else if let Some(pca_rgb) = &item.pca_rgb {
+                        let [pca_batch, pca_channels, grid_h, grid_w] = pca_rgb.shape().dims::<4>();
+                        if pca_batch == 0 || grid_h == 0 || grid_w == 0 || pca_channels < 3 {
+                            return burn_train::metric::MetricEntry::new(
+                                Arc::clone(&self.name),
+                                "empty_pca".to_string(),
+                                "0".to_string(),
+                            );
+                        }
+                        (grid_h, grid_w, pca_batch)
+                    } else {
                         return burn_train::metric::MetricEntry::new(
                             Arc::clone(&self.name),
-                            "empty_norms".to_string(),
+                            "no_patch_data".to_string(),
                             "0".to_string(),
                         );
-                    }
+                    };
                     let views_vec = match views.to_data().convert::<f32>().into_vec::<f32>() {
                         Ok(vec) => vec,
                         Err(_) => {
@@ -1316,16 +1404,50 @@ impl<B: BackendTrait> burn_train::metric::Metric for VisionArtifactMetric<B> {
                             );
                         }
                     };
-                    let patch_vec = match patch_norms.to_data().convert::<f32>().into_vec::<f32>() {
-                        Ok(vec) => vec,
-                        Err(_) => {
-                            return burn_train::metric::MetricEntry::new(
-                                Arc::clone(&self.name),
-                                "patch_copy_failed".to_string(),
-                                "0".to_string(),
-                            );
+                    let patch_vec = if let Some(patch_norms) = &item.patch_norms {
+                        match patch_norms.to_data().convert::<f32>().into_vec::<f32>() {
+                            Ok(vec) => Some(vec),
+                            Err(_) => {
+                                return burn_train::metric::MetricEntry::new(
+                                    Arc::clone(&self.name),
+                                    "patch_copy_failed".to_string(),
+                                    "0".to_string(),
+                                );
+                            }
                         }
+                    } else {
+                        None
                     };
+                    let pca_dims = item
+                        .pca_rgb
+                        .as_ref()
+                        .map(|pca| pca.shape().dims::<4>());
+                    let mut pca_vec = if let Some(pca_rgb) = &item.pca_rgb {
+                        match pca_rgb.to_data().convert::<f32>().into_vec::<f32>() {
+                            Ok(vec) => Some(vec),
+                            Err(_) => {
+                                return burn_train::metric::MetricEntry::new(
+                                    Arc::clone(&self.name),
+                                    "pca_copy_failed".to_string(),
+                                    "0".to_string(),
+                                );
+                            }
+                        }
+                    } else {
+                        None
+                    };
+                    if let (Some([_, pca_channels, pca_h, pca_w]), Some(vec)) =
+                        (pca_dims, pca_vec.as_ref())
+                    {
+                        if pca_channels < 3 || pca_h != grid_h || pca_w != grid_w {
+                            pca_vec = None;
+                        } else {
+                            let expected = batch * 3 * grid_h * grid_w;
+                            if vec.len() < expected {
+                                pca_vec = None;
+                            }
+                        }
+                    }
                     let probe_preds =
                         if let (Some(logits), Some(labels)) = (&item.probe_logits, &item.labels) {
                             let preds = logits
@@ -1355,7 +1477,8 @@ impl<B: BackendTrait> burn_train::metric::Metric for VisionArtifactMetric<B> {
                             .map(|(preds, labels)| (preds.as_slice(), labels.as_slice()));
                         let Some(frame) = self.build_lejepa_frame(
                             &views_vec,
-                            &patch_vec,
+                            patch_vec.as_deref(),
+                            pca_vec.as_deref(),
                             batch_idx,
                             view_count,
                             channels,
@@ -1482,13 +1605,13 @@ impl<B: BackendTrait> burn_train::metric::Metric for VisionArtifactMetric<B> {
                 "0".to_string(),
             );
         };
-        let Some(patch_norms) = &item.patch_norms else {
+        if item.patch_norms.is_none() && item.pca_rgb.is_none() {
             return burn_train::metric::MetricEntry::new(
                 Arc::clone(&self.name),
-                "no_patch_norms".to_string(),
+                "no_patch_data".to_string(),
                 "0".to_string(),
             );
-        };
+        }
         if let Some(legend) = item.legend.as_ref() {
             self.write_legend(legend);
         }
@@ -1502,14 +1625,33 @@ impl<B: BackendTrait> burn_train::metric::Metric for VisionArtifactMetric<B> {
             );
         }
 
-        let [norm_batch, grid_h, grid_w] = patch_norms.shape().dims::<3>();
-        if norm_batch == 0 || grid_h == 0 || grid_w == 0 {
+        let (grid_h, grid_w, _norm_batch) = if let Some(patch_norms) = &item.patch_norms {
+            let [norm_batch, grid_h, grid_w] = patch_norms.shape().dims::<3>();
+            if norm_batch == 0 || grid_h == 0 || grid_w == 0 {
+                return burn_train::metric::MetricEntry::new(
+                    Arc::clone(&self.name),
+                    "empty_norms".to_string(),
+                    "0".to_string(),
+                );
+            }
+            (grid_h, grid_w, norm_batch)
+        } else if let Some(pca_rgb) = &item.pca_rgb {
+            let [pca_batch, pca_channels, grid_h, grid_w] = pca_rgb.shape().dims::<4>();
+            if pca_batch == 0 || grid_h == 0 || grid_w == 0 || pca_channels < 3 {
+                return burn_train::metric::MetricEntry::new(
+                    Arc::clone(&self.name),
+                    "empty_pca".to_string(),
+                    "0".to_string(),
+                );
+            }
+            (grid_h, grid_w, pca_batch)
+        } else {
             return burn_train::metric::MetricEntry::new(
                 Arc::clone(&self.name),
-                "empty_norms".to_string(),
+                "no_patch_data".to_string(),
                 "0".to_string(),
             );
-        }
+        };
 
         let views_vec = match views.to_data().convert::<f32>().into_vec::<f32>() {
             Ok(vec) => vec,
@@ -1521,16 +1663,50 @@ impl<B: BackendTrait> burn_train::metric::Metric for VisionArtifactMetric<B> {
                 );
             }
         };
-        let patch_vec = match patch_norms.to_data().convert::<f32>().into_vec::<f32>() {
-            Ok(vec) => vec,
-            Err(_) => {
-                return burn_train::metric::MetricEntry::new(
-                    Arc::clone(&self.name),
-                    "patch_copy_failed".to_string(),
-                    "0".to_string(),
-                );
+        let patch_vec = if let Some(patch_norms) = &item.patch_norms {
+            match patch_norms.to_data().convert::<f32>().into_vec::<f32>() {
+                Ok(vec) => Some(vec),
+                Err(_) => {
+                    return burn_train::metric::MetricEntry::new(
+                        Arc::clone(&self.name),
+                        "patch_copy_failed".to_string(),
+                        "0".to_string(),
+                    );
+                }
             }
+        } else {
+            None
         };
+        let pca_dims = item
+            .pca_rgb
+            .as_ref()
+            .map(|pca| pca.shape().dims::<4>());
+        let mut pca_vec = if let Some(pca_rgb) = &item.pca_rgb {
+            match pca_rgb.to_data().convert::<f32>().into_vec::<f32>() {
+                Ok(vec) => Some(vec),
+                Err(_) => {
+                    return burn_train::metric::MetricEntry::new(
+                        Arc::clone(&self.name),
+                        "pca_copy_failed".to_string(),
+                        "0".to_string(),
+                    );
+                }
+            }
+        } else {
+            None
+        };
+        if let (Some([_, pca_channels, pca_h, pca_w]), Some(vec)) =
+            (pca_dims, pca_vec.as_ref())
+        {
+            if pca_channels < 3 || pca_h != grid_h || pca_w != grid_w {
+                pca_vec = None;
+            } else {
+                let expected = batch * 3 * grid_h * grid_w;
+                if vec.len() < expected {
+                    pca_vec = None;
+                }
+            }
+        }
         let probe_preds = if let (Some(logits), Some(labels)) = (&item.probe_logits, &item.labels) {
             let preds = logits
                 .clone()
@@ -1577,7 +1753,8 @@ impl<B: BackendTrait> burn_train::metric::Metric for VisionArtifactMetric<B> {
         for batch_idx in 0..batch_limit {
             let Some(frame) = self.build_lejepa_frame(
                 &views_vec,
-                &patch_vec,
+                patch_vec.as_deref(),
+                pca_vec.as_deref(),
                 batch_idx,
                 view_count,
                 channels,
@@ -1730,6 +1907,7 @@ mod tests {
             views: Some(views),
             frames: None,
             patch_norms: Some(patch_norms),
+            pca_rgb: None,
             probe_logits: None,
             labels: None,
             legend: Some(vec!["input".to_string()]),
@@ -1763,6 +1941,7 @@ mod tests {
             views: Some(views),
             frames: None,
             patch_norms: Some(patch_norms),
+            pca_rgb: None,
             probe_logits: None,
             labels: None,
             legend: None,
@@ -1806,6 +1985,7 @@ mod tests {
             views: Some(views),
             frames: None,
             patch_norms: Some(patch_norms),
+            pca_rgb: None,
             probe_logits: None,
             labels: None,
             legend: None,
@@ -1837,6 +2017,7 @@ mod tests {
             views: Some(views),
             frames: None,
             patch_norms: Some(patch_norms),
+            pca_rgb: None,
             probe_logits: None,
             labels: None,
             legend: None,
@@ -1879,6 +2060,7 @@ mod tests {
             views: None,
             frames: Some(frames),
             patch_norms: None,
+            pca_rgb: None,
             probe_logits: None,
             labels: None,
             legend: Some(vec!["frame".to_string()]),
@@ -1923,6 +2105,7 @@ exit /b 0
             views: None,
             frames: Some(frames),
             patch_norms: None,
+            pca_rgb: None,
             probe_logits: None,
             labels: None,
             legend: Some(vec!["frame".to_string()]),

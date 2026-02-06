@@ -3,6 +3,7 @@ use burn::optim::Optimizer;
 use burn::tensor::Distribution;
 use burn_autodiff::Autodiff;
 use burn_dragon_core::{FusedKernelConfig, ManifoldHyperConnectionsConfig};
+use crate::config::VisionAugmentationConfig;
 use crate::{
     SpatialPositionalEncodingKind, VisionAttentionMode, VisionLatentActivation,
     VisionPatchEmbedMode,
@@ -172,6 +173,7 @@ fn lejepa_recon_psnr_improves_on_toy_batch() {
         use_alibi: true,
         fused_kernels: FusedKernelConfig::default(),
         mhc: ManifoldHyperConnectionsConfig::default(),
+        trm_graph: Default::default(),
     };
     let mut lejepa_config = VisionLejepaConfig {
         views: 1,
@@ -194,6 +196,7 @@ fn lejepa_recon_psnr_improves_on_toy_batch() {
     };
     let recon_patch_dim =
         vision_config.patch_size * vision_config.patch_size * vision_config.in_channels;
+    let normalize_std = VisionAugmentationConfig::default().normalize_std;
     let model = VisionDragon::<Backend>::new(vision_config.clone(), &device);
     let mut lejepa = VisionLejepaModel::new(
         model,
@@ -202,6 +205,9 @@ fn lejepa_recon_psnr_improves_on_toy_batch() {
         1,
         rollout,
         recon_patch_dim,
+        normalize_std,
+        vision_config.patch_size,
+        vision_config.in_channels,
         &device,
     );
 
@@ -213,8 +219,8 @@ fn lejepa_recon_psnr_improves_on_toy_batch() {
     let backprop_steps = 1;
 
     let initial_psnr = lejepa
-        .forward_losses(batch.clone(), steps, backprop_steps, false)
-        .recon_psnr
+        .forward_losses(batch.clone(), steps, backprop_steps, false, false, false)
+        .recon_psnr_full
         .to_data()
         .convert::<f32>()
         .into_vec::<f32>()
@@ -225,15 +231,15 @@ fn lejepa_recon_psnr_improves_on_toy_batch() {
         .init::<Backend, VisionLejepaModel<Backend>>();
     let lr = 0.02;
     for _ in 0..40 {
-        let losses = lejepa.forward_losses(batch.clone(), steps, backprop_steps, false);
+        let losses = lejepa.forward_losses(batch.clone(), steps, backprop_steps, false, false, false);
         let total = losses.total.clone() + losses.probe_loss.clone();
         let grads = GradientsParams::from_grads(total.backward(), &lejepa);
         lejepa = optimizer.step(lr, lejepa, grads);
     }
 
     let final_psnr = lejepa
-        .forward_losses(batch, steps, backprop_steps, false)
-        .recon_psnr
+        .forward_losses(batch, steps, backprop_steps, false, false, false)
+        .recon_psnr_full
         .to_data()
         .convert::<f32>()
         .into_vec::<f32>()

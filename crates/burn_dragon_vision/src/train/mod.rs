@@ -38,5 +38,6 @@ pub use burn_dragon_train::train::metrics::{
 #[cfg(feature = "cli")]
 pub use cli::run_cli;
 pub use saccade::SaccadeFoveationSampler;
+pub use vision::train::train_vision_backend;
 #[cfg(feature = "integration_test")]
 pub use vision::train::train_vision_backend_for_test;

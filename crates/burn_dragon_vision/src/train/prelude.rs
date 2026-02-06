@@ -96,7 +96,7 @@ pub(crate) use burn_dragon_train::train::metrics::{
     ActionClampRateInput, AdvantageAbsMeanInput, AdvantageStdInput, DeviceMemoryMetric,
     DeviceMetric, InvLossInput, LanguageModelOutput, LanguageModelTrainItem, LogProbMeanInput,
     LossValue, MemoryCleanupMetric, PolicyEntropyInput, PolicyLossInput, ProbeAccInput,
-    ProbeLossInput, ReconLossInput, ReconPsnrInput, ScalarMetric, SigRegLossInput,
-    VisionArtifactInput, VisionArtifactMetric, VisionOutput, VisionTrainItem,
+    ProbeLossInput, ReconLossInput, ReconPsnrFullInput, ReconPsnrMaskedInput, ScalarMetric,
+    SigRegLossInput, VisionArtifactInput, VisionArtifactMetric, VisionOutput, VisionTrainItem,
 };
 

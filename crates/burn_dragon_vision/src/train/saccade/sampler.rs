@@ -173,6 +173,7 @@ impl<B: AutodiffBackend> TrainStep<ImageNetBatch<B>, VisionTrainItem<B>> for Vis
                 zero.clone(),
                 zero.clone(),
                 zero.clone(),
+                zero.clone(),
                 zero,
             ),
         )
@@ -222,6 +223,7 @@ impl<B: BackendTrait> ValidStep<ImageNetBatch<B>, VisionOutput<B>> for VisionDis
             zero.clone(),
             zero.clone(),
             zero.clone(),
+            zero.clone(),
             zero,
             None,
         )
@@ -232,7 +234,7 @@ impl<B: AutodiffBackend> TrainStep<ImageNetBatch<B>, VisionTrainItem<B>> for Vis
     fn step(&self, batch: ImageNetBatch<B>) -> TrainOutput<VisionTrainItem<B>> {
         let rollout_steps = self.rollout.sample_steps();
         let backprop_steps = self.rollout.backprop_steps(rollout_steps);
-        let losses = self.forward_losses(batch, rollout_steps, backprop_steps, true);
+        let losses = self.forward_losses(batch, rollout_steps, backprop_steps, true, false, false);
         let total_for_backprop = losses.total.clone() + losses.probe_loss.clone();
         let grads = total_for_backprop.backward();
         let zero = Tensor::<B, 1>::zeros([1], &losses.total.device());
@@ -245,7 +247,8 @@ impl<B: AutodiffBackend> TrainStep<ImageNetBatch<B>, VisionTrainItem<B>> for Vis
                 losses.inv,
                 losses.sigreg,
                 losses.recon,
-                losses.recon_psnr,
+                losses.recon_psnr_masked,
+                losses.recon_psnr_full,
                 zero.clone(),
                 zero.clone(),
                 zero.clone(),
@@ -271,7 +274,15 @@ impl<B: AutodiffBackend> TrainStep<ImageNetBatch<B>, VisionTrainItem<B>> for Vis
 impl<B: BackendTrait> ValidStep<ImageNetBatch<B>, VisionOutput<B>> for VisionLejepaModel<B> {
     fn step(&self, batch: ImageNetBatch<B>) -> VisionOutput<B> {
         let backprop_steps = self.rollout.backprop_steps(self.rollout.max_steps);
-        let losses = self.forward_losses(batch, self.rollout.max_steps, backprop_steps, false);
+        let capture_artifacts = self.config.artifact_every > 0;
+        let losses = self.forward_losses(
+            batch,
+            self.rollout.max_steps,
+            backprop_steps,
+            false,
+            capture_artifacts,
+            true,
+        );
         let zero = Tensor::<B, 1>::zeros([1], &losses.total.device());
 
         VisionOutput::new(
@@ -279,7 +290,8 @@ impl<B: BackendTrait> ValidStep<ImageNetBatch<B>, VisionOutput<B>> for VisionLej
             losses.inv,
             losses.sigreg,
             losses.recon,
-            losses.recon_psnr,
+            losses.recon_psnr_masked,
+            losses.recon_psnr_full,
             zero.clone(),
             zero.clone(),
             zero.clone(),
@@ -297,7 +309,7 @@ impl<B: AutodiffBackend> TrainStep<ImageNetBatch<B>, VisionTrainItem<B>> for Vis
     fn step(&self, batch: ImageNetBatch<B>) -> TrainOutput<VisionTrainItem<B>> {
         let rollout_steps = self.rollout.sample_steps();
         let backprop_steps = self.rollout.backprop_steps(rollout_steps);
-        let losses = self.forward_losses(batch, rollout_steps, backprop_steps, true, false);
+        let losses = self.forward_losses(batch, rollout_steps, backprop_steps, true, false, false);
         let grads = losses.total.clone().backward();
         let zero = Tensor::<B, 1>::zeros([1], &losses.total.device());
 
@@ -309,7 +321,8 @@ impl<B: AutodiffBackend> TrainStep<ImageNetBatch<B>, VisionTrainItem<B>> for Vis
                 zero.clone(),
                 zero.clone(),
                 losses.recon,
-                losses.recon_psnr,
+                losses.recon_psnr_masked,
+                losses.recon_psnr_full,
                 zero.clone(),
                 zero.clone(),
                 zero.clone(),
@@ -333,6 +346,7 @@ impl<B: BackendTrait> ValidStep<ImageNetBatch<B>, VisionOutput<B>> for VisionMae
             backprop_steps,
             false,
             capture_artifacts,
+            true,
         );
         let zero = Tensor::<B, 1>::zeros([1], &losses.total.device());
         VisionOutput::new(
@@ -340,7 +354,8 @@ impl<B: BackendTrait> ValidStep<ImageNetBatch<B>, VisionOutput<B>> for VisionMae
             zero.clone(),
             zero.clone(),
             losses.recon,
-            losses.recon_psnr,
+            losses.recon_psnr_masked,
+            losses.recon_psnr_full,
             zero.clone(),
             zero.clone(),
             zero.clone(),
@@ -370,6 +385,7 @@ impl<B: AutodiffBackend> VisionSaccadeModel<B> {
             backprop_steps,
             randomize_mask,
             capture_artifacts,
+            false,
             |inputs| {
                 self.build_gdpo_policy_loss(gdpo, inputs, |hard, easy, gdpo| {
                     gdpo::gdpo_advantage_autodiff::<B>(hard, easy, gdpo)
@@ -397,6 +413,7 @@ impl<B: AutodiffBackend> TrainStep<ImageNetBatch<B>, VisionTrainItem<B>> for Vis
                     losses.inv,
                     losses.sigreg,
                     losses.recon,
+                    losses.recon_psnr.clone(),
                     losses.recon_psnr,
                     losses.policy,
                     losses.policy_advantage_abs_mean,
@@ -517,6 +534,7 @@ impl<B: AutodiffBackend> TrainStep<ImageNetBatch<B>, VisionTrainItem<B>> for Vis
                 inv,
                 sigreg,
                 recon,
+                recon_psnr.clone(),
                 recon_psnr,
                 policy,
                 policy_advantage_abs_mean,
@@ -541,6 +559,7 @@ impl<B: BackendTrait> ValidStep<ImageNetBatch<B>, VisionOutput<B>> for VisionSac
             backprop_steps,
             false,
             capture_artifacts,
+            true,
         );
         let zero = Tensor::<B, 1>::zeros([1], &losses.total.device());
         VisionOutput::new(
@@ -548,6 +567,7 @@ impl<B: BackendTrait> ValidStep<ImageNetBatch<B>, VisionOutput<B>> for VisionSac
             losses.inv,
             losses.sigreg,
             losses.recon,
+            losses.recon_psnr.clone(),
             losses.recon_psnr,
             losses.policy,
             losses.policy_advantage_abs_mean,

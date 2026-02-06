@@ -1,5 +1,6 @@
 use crate::train::gdpo;
 use crate::train::prelude::*;
+use crate::config::VisionAugmentationConfig;
 use burn::optim::{GradientsAccumulator, GradientsParams, Optimizer};
 use burn::tensor::Distribution as TensorDistribution;
 use burn::tensor::backend::{AutodiffBackend, Backend as BackendTrait};
@@ -512,7 +513,10 @@ impl<B: AutodiffBackend> VisionMaeTrainStepBench<B> {
         let rollout = resolve_vision_rollout(training, vision.steps)?;
         let embed_dim = vision.embed_dim;
         let num_eyes = vision.num_eyes;
-        let recon_patch_dim = vision.patch_size * vision.patch_size * vision.in_channels;
+        let patch_size = vision.patch_size;
+        let in_channels = vision.in_channels;
+        let recon_patch_dim = patch_size * patch_size * in_channels;
+        let normalize_std = VisionAugmentationConfig::default().normalize_std;
         let model = VisionDragon::<B>::new(vision, device);
         let mae = VisionMaeModel::new(
             model,
@@ -521,6 +525,9 @@ impl<B: AutodiffBackend> VisionMaeTrainStepBench<B> {
             embed_dim,
             rollout,
             recon_patch_dim,
+            normalize_std,
+            patch_size,
+            in_channels,
             device,
         );
         let rollout_steps = mae.rollout.max_steps;
@@ -539,7 +546,14 @@ impl<B: AutodiffBackend> VisionMaeTrainStepBench<B> {
     pub fn train_step(&mut self, batch: ImageNetBatch<B>) -> Tensor<B, 1> {
         let mut model = self.model.take().expect("mae model");
         let losses =
-            model.forward_losses(batch, self.rollout_steps, self.backprop_steps, true, false);
+            model.forward_losses(
+                batch,
+                self.rollout_steps,
+                self.backprop_steps,
+                true,
+                false,
+                false,
+            );
         let grads = GradientsParams::from_grads(losses.total.clone().backward(), &model);
         let loss = losses.total.detach();
         model = self.optimizer.step(self.lr, model, grads);
@@ -559,7 +573,10 @@ impl<B: AutodiffBackend> VisionLejepaTrainStepBench<B> {
     ) -> Result<Self> {
         let rollout = resolve_vision_rollout(training, vision.steps)?;
         let embed_dim = vision.embed_dim;
-        let recon_patch_dim = vision.patch_size * vision.patch_size * vision.in_channels;
+        let patch_size = vision.patch_size;
+        let in_channels = vision.in_channels;
+        let recon_patch_dim = patch_size * patch_size * in_channels;
+        let normalize_std = VisionAugmentationConfig::default().normalize_std;
         let model = VisionDragon::<B>::new(vision, device);
         let lejepa = VisionLejepaModel::new(
             model,
@@ -568,6 +585,9 @@ impl<B: AutodiffBackend> VisionLejepaTrainStepBench<B> {
             num_classes,
             rollout,
             recon_patch_dim,
+            normalize_std,
+            patch_size,
+            in_channels,
             device,
         );
         let rollout_steps = lejepa.rollout.max_steps;
@@ -586,7 +606,15 @@ impl<B: AutodiffBackend> VisionLejepaTrainStepBench<B> {
 
     pub fn train_step(&mut self, batch: ImageNetBatch<B>) -> Tensor<B, 1> {
         let mut model = self.model.take().expect("lejepa model");
-        let losses = model.forward_losses(batch, self.rollout_steps, self.backprop_steps, true);
+        let losses =
+            model.forward_losses(
+                batch,
+                self.rollout_steps,
+                self.backprop_steps,
+                true,
+                false,
+                false,
+            );
         let grads = GradientsParams::from_grads(losses.total.clone().backward(), &model);
         let loss = losses.total.detach();
         model = self.optimizer.step(self.lr, model, grads);

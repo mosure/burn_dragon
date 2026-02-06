@@ -641,5 +641,6 @@ mod train_tests {
             .expect("loss vec")[0];
         assert!(value.is_finite());
     }
+
 }
 

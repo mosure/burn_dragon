@@ -82,6 +82,7 @@ fn make_saccade_model_with_dims<B: BackendTrait>(
         use_alibi: true,
         fused_kernels: FusedKernelConfig::default(),
         mhc: ManifoldHyperConnectionsConfig::default(),
+        trm_graph: Default::default(),
     };
     let model = VisionDragon::<B>::new(vision_config.clone(), device);
     let saccade_config = VisionSaccadeConfig {
@@ -362,6 +363,7 @@ fn patch_embed_supports_large_patches() {
         use_alibi: true,
         fused_kernels: FusedKernelConfig::default(),
         mhc: ManifoldHyperConnectionsConfig::default(),
+        trm_graph: Default::default(),
     };
     let model = VisionDragon::<Backend>::new(vision_config, &device);
     let images =
@@ -1279,7 +1281,7 @@ fn saccade_recon_loss_smoke() {
     let images = Tensor::<Backend, 4>::random([2, 3, 8, 8], TensorDistribution::Default, &device);
     let labels = Tensor::<Backend, 1, Int>::zeros([2], &device);
     let batch = ImageNetBatch::new(images, None, None, None, None, None, labels, None, None);
-    let losses = saccade.forward_losses(batch, 2, 1, true, false);
+    let losses = saccade.forward_losses(batch, 2, 1, true, false, false);
     let value = losses
         .total
         .to_data()
@@ -1297,7 +1299,7 @@ fn saccade_multi_eye_loss_smoke() {
     let images = Tensor::<Backend, 4>::random([2, 3, 8, 8], TensorDistribution::Default, &device);
     let labels = Tensor::<Backend, 1, Int>::zeros([2], &device);
     let batch = ImageNetBatch::new(images, None, None, None, None, None, labels, None, None);
-    let losses = saccade.forward_losses(batch, 2, 1, true, false);
+    let losses = saccade.forward_losses(batch, 2, 1, true, false, false);
     let value = losses
         .total
         .to_data()
@@ -1441,7 +1443,7 @@ fn saccade_multi_eye_step_produces_finite_grads() {
     let images = Tensor::<Backend, 4>::random([2, 3, 8, 8], TensorDistribution::Default, &device);
     let labels = Tensor::<Backend, 1, Int>::zeros([2], &device);
     let batch = ImageNetBatch::new(images, None, None, None, None, None, labels, None, None);
-    let losses = saccade.forward_losses(batch, 1, 1, true, false);
+    let losses = saccade.forward_losses(batch, 1, 1, true, false, false);
     let grads = GradientsParams::from_grads(losses.total.backward(), &saccade);
 
     let eye_grad = grads
@@ -1468,7 +1470,7 @@ fn saccade_artifact_frames_match_steps() {
     let batch = ImageNetBatch::new(images, None, None, None, None, None, labels, None, None);
 
     let steps = 3;
-    let losses = saccade.forward_losses(batch, steps, 1, false, true);
+    let losses = saccade.forward_losses(batch, steps, 1, false, true, true);
     let artifacts = losses.artifacts.expect("artifacts");
     let frames = artifacts.frames.expect("frames");
     let views = artifacts.views.expect("views");
@@ -1746,7 +1748,7 @@ fn saccade_step_produces_finite_grads() {
     let images = Tensor::<Backend, 4>::random([2, 3, 8, 8], TensorDistribution::Default, &device);
     let labels = Tensor::<Backend, 1, Int>::zeros([2], &device);
     let batch = ImageNetBatch::new(images, None, None, None, None, None, labels, None, None);
-    let losses = saccade.forward_losses(batch, 1, 1, true, false);
+    let losses = saccade.forward_losses(batch, 1, 1, true, false, false);
     let grads = GradientsParams::from_grads(losses.total.backward(), &saccade);
 
     let token_grad = grads

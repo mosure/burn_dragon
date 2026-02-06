@@ -5,7 +5,7 @@ edition = "2024"
 authors = ["mosure <mitchell@mosure.me>"]
 license = "MIT OR Apache-2.0"
 description = "CLI for burn_dragon"
-default-run = "train"
+default-run = "infer"
 
 [features]
 default = ["cli", "cuda"]

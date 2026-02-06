@@ -12,6 +12,59 @@ const POLICY_MASK_PENALTY: f32 = 1e9;
 const HALT_EPS: f32 = 1e-6;
 const STABLEMAX_EPS: f32 = 1e-6;
 const GUMBEL_EPS: f32 = 1e-6;
+const GRID_SIDE: usize = 9;
+
+fn resolve_write_gate<B: BackendTrait>(
+    write_gate: Tensor<B, 2>,
+    gate_mode: SudokuWriteGateMode,
+    action_any: Tensor<B, 2>,
+) -> (Tensor<B, 2>, Option<Tensor<B, 2>>, Option<Tensor<B, 2>>) {
+    let [batch, _] = write_gate.shape().dims();
+    let device = write_gate.device();
+    let gate_mask = action_any.clone().clamp_max(1.0);
+    match gate_mode {
+        SudokuWriteGateMode::StraightThrough => {
+            let write_mask = write_gate.clone().greater_equal_elem(0.5);
+            let write_mask_hard = write_mask.clone().float();
+            let write_mask_f = write_mask_hard
+                .clone()
+                .add(write_gate.clone().sub(write_gate.detach()));
+            (write_mask_f, None, None)
+        }
+        SudokuWriteGateMode::Bernoulli => {
+            let write_prob = write_gate
+                .clone()
+                .clamp_min(SUDOKU_EPS)
+                .clamp_max(1.0 - SUDOKU_EPS);
+            let write_mask_f = Tensor::<B, 2>::random(
+                [batch.max(1), 1],
+                TensorDistribution::Uniform(0.0, 1.0),
+                &device,
+            )
+            .sub(write_prob.clone())
+            .lower_equal_elem(0.0)
+            .float();
+            let ones = Tensor::<B, 2>::ones([batch.max(1), 1], &device);
+            let log_prob = write_mask_f
+                .clone()
+                .mul(write_prob.clone().log())
+                + ones
+                    .clone()
+                    .sub(write_mask_f.clone())
+                    .mul(ones.clone().sub(write_prob.clone()).log());
+            let gate_log_prob = log_prob.mul(gate_mask.clone());
+            let entropy = write_prob
+                .clone()
+                .mul(write_prob.clone().log())
+                + ones
+                    .clone()
+                    .sub(write_prob.clone())
+                    .mul(ones.clone().sub(write_prob.clone()).log());
+            let gate_entropy = entropy.mul_scalar(-1.0).mul(gate_mask);
+            (write_mask_f, Some(gate_log_prob), Some(gate_entropy))
+        }
+    }
+}
 
 fn rollout_scheduled_steps(training: &SudokuTrainingHyperparameters, step: usize) -> usize {
     let mut steps = training.rollout.steps.max(1);
@@ -87,6 +140,20 @@ fn validation_rollout_steps(training: &SudokuTrainingHyperparameters) -> usize {
     match training.validation.rollout_steps {
         Some(steps) if steps > 0 => steps,
         _ => rollout_max_steps(training, 0),
+    }
+}
+
+fn write_gate_floor_for_step(training: &SudokuTrainingHyperparameters, step: usize) -> f32 {
+    if training.policy.write_gate_warmup_steps == 0 {
+        0.0
+    } else {
+        schedule_linear(
+            training.policy.write_gate_warmup_floor,
+            0.0,
+            training.policy.write_gate_warmup_steps,
+            step,
+        )
+        .clamp(0.0, 1.0)
     }
 }
 
@@ -320,6 +387,7 @@ impl<B: AutodiffBackend> TrainStep<SudokuBatch<B>, SudokuTrainItem<B>> for Sudok
             policy_entropy_weight = 0.0;
         }
         let policy_recon_weight = self.training.policy.recon_weight.max(0.0);
+        let write_gate_floor = write_gate_floor_for_step(&self.training, step);
         let recon_loss_weight = schedule_linear(
             self.training.recon.loss_weight,
             self.training.recon.loss_weight_final,
@@ -346,6 +414,7 @@ impl<B: AutodiffBackend> TrainStep<SudokuBatch<B>, SudokuTrainItem<B>> for Sudok
             policy_entropy_weight,
             policy_recon_weight,
             recon_loss_weight,
+            write_gate_floor,
             revisit_min_filled,
             rollout_steps,
             Some(Arc::clone(&self.gdpo_stats)),
@@ -401,10 +470,16 @@ impl<B: AutodiffBackend> TrainStep<SudokuBatch<B>, SudokuTrainItem<B>> for Sudok
             target_tensor,
             losses.hard_reward_mean,
             losses.easy_reward_mean,
+            losses.shaping_conflict_mean,
+            losses.shaping_unknown_mean,
+            losses.shaping_accuracy_mean,
+            losses.shaping_incorrect_mean,
             losses.saccade_revisit_rate,
             losses.saccade_repeat_rate,
             losses.saccade_unknown_frac,
             losses.saccade_unique_frac,
+            losses.write_gate_mean,
+            losses.write_rate,
         );
         TrainOutput { grads, item }
     }
@@ -413,6 +488,7 @@ impl<B: AutodiffBackend> TrainStep<SudokuBatch<B>, SudokuTrainItem<B>> for Sudok
 impl<B: BackendTrait> ValidStep<SudokuBatch<B>, SudokuOutput<B>> for SudokuTrainer<B> {
     fn step(&self, batch: SudokuBatch<B>) -> SudokuOutput<B> {
         let step_idx = self.valid_step_counter.fetch_add(1, Ordering::Relaxed);
+        let train_step = self.step_counter.load(Ordering::Relaxed);
         if step_idx == 0
             && let (Some(artifacts), Some(run_dir)) = (&self.artifacts, &self.artifact_run_dir)
             && artifacts.max_samples > 0
@@ -428,7 +504,8 @@ impl<B: BackendTrait> ValidStep<SudokuBatch<B>, SudokuOutput<B>> for SudokuTrain
             warn!("validation artifacts failed: {err}");
         }
 
-        let losses = rollout_losses_valid::<B>(&self.model, batch, &self.training);
+        let write_gate_floor = write_gate_floor_for_step(&self.training, train_step);
+        let losses = rollout_losses_valid::<B>(&self.model, batch, &self.training, write_gate_floor);
         let target_tensor = losses.policy_entropy_target.clone();
         SudokuOutput::new(
             losses.loss,
@@ -448,10 +525,16 @@ impl<B: BackendTrait> ValidStep<SudokuBatch<B>, SudokuOutput<B>> for SudokuTrain
             target_tensor,
             losses.hard_reward_mean,
             losses.easy_reward_mean,
+            losses.shaping_conflict_mean,
+            losses.shaping_unknown_mean,
+            losses.shaping_accuracy_mean,
+            losses.shaping_incorrect_mean,
             losses.saccade_revisit_rate,
             losses.saccade_repeat_rate,
             losses.saccade_unknown_frac,
             losses.saccade_unique_frac,
+            losses.write_gate_mean,
+            losses.write_rate,
         )
     }
 }
@@ -474,10 +557,16 @@ pub struct SudokuLosses<B: BackendTrait> {
     pub policy_entropy_target: Tensor<B, 1>,
     pub hard_reward_mean: Tensor<B, 1>,
     pub easy_reward_mean: Tensor<B, 1>,
+    pub shaping_conflict_mean: Tensor<B, 1>,
+    pub shaping_unknown_mean: Tensor<B, 1>,
+    pub shaping_accuracy_mean: Tensor<B, 1>,
+    pub shaping_incorrect_mean: Tensor<B, 1>,
     pub saccade_revisit_rate: Tensor<B, 1>,
     pub saccade_repeat_rate: Tensor<B, 1>,
     pub saccade_unknown_frac: Tensor<B, 1>,
     pub saccade_unique_frac: Tensor<B, 1>,
+    pub write_gate_mean: Tensor<B, 1>,
+    pub write_rate: Tensor<B, 1>,
 }
 
 #[derive(Debug, Default)]
@@ -903,10 +992,16 @@ fn rollout_losses<B: AutodiffBackend>(
         policy_entropy_target,
         hard_reward_mean,
         easy_reward_mean,
+        shaping_conflict_mean: zeros.clone(),
+        shaping_unknown_mean: zeros.clone(),
+        shaping_accuracy_mean: zeros.clone(),
+        shaping_incorrect_mean: zeros.clone(),
         saccade_revisit_rate: rollout.saccade_revisit_rate,
         saccade_repeat_rate: rollout.saccade_repeat_rate,
         saccade_unknown_frac: rollout.saccade_unknown_frac,
         saccade_unique_frac: rollout.saccade_unique_frac,
+        write_gate_mean: rollout.write_gate_mean,
+        write_rate: rollout.write_rate,
     }
 }
 
@@ -914,7 +1009,11 @@ fn rollout_losses_valid<B: BackendTrait>(
     model: &SudokuSaccadeModel<B>,
     batch: SudokuBatch<B>,
     training: &SudokuTrainingHyperparameters,
+    write_gate_floor: f32,
 ) -> SudokuLosses<B> {
+    if use_trm_constraint_ca(training) {
+        return rollout_losses_valid_trm_constraint_ca(model, batch, training);
+    }
     if use_trm_chunk(training) {
         return rollout_losses_valid_trm_chunk(model, batch, training);
     }
@@ -952,6 +1051,7 @@ fn rollout_losses_valid<B: BackendTrait>(
         sample_policy,
         teacher_forcing_prob,
         policy_temperature,
+        write_gate_floor,
         training.revisit.min_filled_final,
         rollout_steps,
     );
@@ -981,10 +1081,16 @@ fn rollout_losses_valid<B: BackendTrait>(
         policy_entropy_target,
         hard_reward_mean: rollout.hard_reward.mean(),
         easy_reward_mean: rollout.easy_reward.mean(),
+        shaping_conflict_mean: zeros.clone(),
+        shaping_unknown_mean: zeros.clone(),
+        shaping_accuracy_mean: zeros.clone(),
+        shaping_incorrect_mean: zeros.clone(),
         saccade_revisit_rate: rollout.saccade_revisit_rate,
         saccade_repeat_rate: rollout.saccade_repeat_rate,
         saccade_unknown_frac: rollout.saccade_unknown_frac,
         saccade_unique_frac: rollout.saccade_unique_frac,
+        write_gate_mean: rollout.write_gate_mean,
+        write_rate: rollout.write_rate,
     }
 }
 
@@ -1000,11 +1106,20 @@ fn rollout_losses_train<B: AutodiffBackend>(
     policy_entropy_weight: f32,
     policy_recon_weight: f32,
     recon_loss_weight: f32,
+    write_gate_floor: f32,
     revisit_min_filled: f32,
     rollout_steps: usize,
     gdpo_stats: Option<Arc<Mutex<GdpoAdvantageStats<B>>>>,
 ) -> (SudokuLosses<B>, GradientsParams) {
     let training = &trainer.training;
+    if use_trm_constraint_ca(training) {
+        return rollout_losses_train_trm_constraint_ca(
+            trainer,
+            batch,
+            recon_loss_weight,
+            rollout_steps,
+        );
+    }
     if use_trm_chunk(training) {
         return rollout_losses_train_trm_chunk(
             trainer,
@@ -1028,6 +1143,7 @@ fn rollout_losses_train<B: AutodiffBackend>(
     let total_policy_steps = rollout_steps.max(1);
     let global_weight = training.recon.global_loss_weight.max(0.0);
     let visit_penalty = training.policy.visit_penalty.max(0.0);
+    let revisit_penalty = training.policy.revisit_penalty.max(0.0);
 
     let gdpo_group = training.gdpo.group_size.max(1);
     let repeat_for_gdpo = gdpo_active && gdpo_group > 1;
@@ -1077,8 +1193,12 @@ fn rollout_losses_train<B: AutodiffBackend>(
     let conflict_weight = training.reward.shaping.weight.max(0.0);
     let unknown_weight = training.reward.shaping.unknown_weight.max(0.0);
     let accuracy_weight = training.reward.shaping.accuracy_weight.max(0.0);
+    let incorrect_penalty = training.reward.shaping.incorrect_penalty.max(0.0);
     let shaping_enabled = training.reward.shaping.enabled
-        && (conflict_weight > 0.0 || unknown_weight > 0.0 || accuracy_weight > 0.0);
+        && (conflict_weight > 0.0
+            || unknown_weight > 0.0
+            || accuracy_weight > 0.0
+            || incorrect_penalty > 0.0);
     let shaping_metric = training.reward.shaping.metric;
     let shaping_gamma = training.reward.shaping.gamma.clamp(0.0, 1.0);
     let baseline_enabled = training.reward.baseline.enabled;
@@ -1136,8 +1256,10 @@ fn rollout_losses_train<B: AutodiffBackend>(
     let mut cache = input_cache.clone();
     let mut summary_tokens = trainer.model.init_summary_tokens(batch_size);
     let summary_len = trainer.model.summary_token_count();
-    let (reward_initial_acc_per_sample, initial_acc_mean, initial_exact, _initial_solve) =
+    let (_initial_acc_per_sample, initial_acc_mean, initial_exact, _initial_solve) =
         compute_grid_accuracy(&tokens_reward, &solutions);
+    let (reward_initial_acc_per_sample, _reward_initial_acc_mean) =
+        compute_grid_accuracy_masked(&tokens_reward, &solutions, &editable_mask);
     let reward_initial_acc = reward_initial_acc_per_sample.clone();
     let mut last_loss_per_sample = Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
     let mut last_acc = initial_acc_mean.detach();
@@ -1160,6 +1282,13 @@ fn rollout_losses_train<B: AutodiffBackend>(
     let mut revisit_count_sum_metrics = zeros.clone();
     let mut repeat_count_sum_metrics = zeros.clone();
     let mut unknown_select_sum_metrics = zeros.clone();
+    let mut write_gate_sum_metrics = zeros.clone();
+    let mut write_rate_sum_metrics = zeros.clone();
+    let mut shaping_conflict_sum_metrics = zeros.clone();
+    let mut shaping_unknown_sum_metrics = zeros.clone();
+    let mut shaping_accuracy_sum_metrics = zeros.clone();
+    let mut shaping_incorrect_sum_metrics = zeros.clone();
+    let mut shaping_steps_metrics = 0usize;
 
     let mut chunk_local_loss_sum = zeros.clone();
     let mut chunk_global_loss_sum = zeros.clone();
@@ -1369,7 +1498,8 @@ fn rollout_losses_train<B: AutodiffBackend>(
             .equal_elem(GRID_LEN as f32)
             .float()
             .reshape([batch_size.max(1), 1]);
-        let use_select_mask = revisit_min_filled > 0.0 || visit_penalty > 0.0;
+        let use_select_mask =
+            revisit_min_filled > 0.0 || visit_penalty > 0.0 || revisit_penalty > 0.0;
         let (select_mask, selectable_counts, masked_logits) = if use_select_mask {
             let unknown_counts = unknown_mask
                 .clone()
@@ -1398,6 +1528,10 @@ fn rollout_losses_train<B: AutodiffBackend>(
             if visit_penalty > 0.0 {
                 let visit_log = visit_counts.clone().add_scalar(1.0).log();
                 masked_logits = masked_logits - visit_log.mul_scalar(visit_penalty);
+            }
+            if revisit_penalty > 0.0 {
+                let revisits = visit_counts.clone().greater_elem(0.0).float();
+                masked_logits = masked_logits - revisits.mul_scalar(revisit_penalty);
             }
 
             let selectable_counts = select_mask
@@ -1469,7 +1603,7 @@ fn rollout_losses_train<B: AutodiffBackend>(
             .sum_dim(1)
             .reshape([batch_size.max(1), 1]);
         action_count_sum_metrics =
-            action_count_sum_metrics + action_any.mean().detach();
+            action_count_sum_metrics + action_any.clone().mean().detach();
         revisit_count_sum_metrics =
             revisit_count_sum_metrics + step_revisit.mean().detach();
         repeat_count_sum_metrics =
@@ -1480,7 +1614,7 @@ fn rollout_losses_train<B: AutodiffBackend>(
         visit_counts = visit_counts + action_one_hot.clone();
 
         let log_probs = activation::log_softmax(policy_logits, 1);
-        let selected_log_prob = log_probs
+        let mut selected_log_prob = log_probs
             .clone()
             .mul(action_one_hot.clone())
             .sum_dim(1)
@@ -1544,7 +1678,7 @@ fn rollout_losses_train<B: AutodiffBackend>(
             .mul(action_one_hot.clone())
             .sum_dim(1)
             .reshape([batch_size.max(1), 1]);
-        let reward_mask = selected_editable
+        let mut reward_mask = selected_editable
             .clone()
             .reshape([batch_size.max(1)]);
         let mut local_loss_mask = active_mask.clone();
@@ -1599,34 +1733,6 @@ fn rollout_losses_train<B: AutodiffBackend>(
         let mut update_values = pred_values.clone();
         update_values = update_values.mask_where(teacher_mask, selected_solution.clone());
 
-        let update_mask = action_one_hot
-            .clone()
-            .mul(editable_mask.clone())
-            .greater_equal_elem(0.5);
-        let update_any = update_mask
-            .clone()
-            .float()
-            .sum_dim(1)
-            .reshape([batch_size.max(1), 1])
-            .greater_elem(0.0)
-            .float();
-        let no_update = ones_step.clone().sub(update_any).mul(active_mask.clone());
-        let no_op_penalty_per_sample = no_update
-            .clone()
-            .reshape([batch_size.max(1)])
-            .mul_scalar(no_op_penalty);
-        let update_values_grid = update_values.clone().repeat_dim(1, GRID_LEN);
-        tokens = tokens.mask_where(update_mask.clone(), update_values_grid);
-        unknown_mask = (unknown_mask - action_one_hot.clone()).clamp_min(0.0);
-        let update_values_pred_grid = pred_values.clone().repeat_dim(1, GRID_LEN);
-        tokens_reward = tokens_reward.mask_where(update_mask.clone(), update_values_pred_grid);
-
-        let update_mask_cache = if training.policy.cache_update_clues {
-            action_one_hot.clone()
-        } else {
-            action_one_hot.clone().mul(editable_mask.clone())
-        };
-        let update_mask_f = update_mask_cache.clone().unsqueeze_dim::<3>(2);
         let selected_row = row_ids_f
             .clone()
             .mul(action_one_hot.clone())
@@ -1639,7 +1745,7 @@ fn rollout_losses_train<B: AutodiffBackend>(
             .sum_dim(1)
             .reshape([batch_size.max(1), 1])
             .int();
-                let action_mask = action_one_hot
+        let action_mask = action_one_hot
             .clone()
             .unsqueeze_dim::<3>(2)
             .unsqueeze_dim::<4>(1);
@@ -1662,11 +1768,69 @@ fn rollout_losses_train<B: AutodiffBackend>(
             .unsqueeze_dim::<4>(1)
             .expand([batch_size.max(1), cache_streams, 1, embd])
             .reshape([batch_size.max(1) * cache_streams, 1, embd]);
-        let update_emb = trainer.model.update_cell_embedding(
-            summary_streams,
-            cache_cell,
-            token_emb,
+        let (update_emb, write_gate) = trainer
+            .model
+            .update_cell_embedding_with_gate(summary_streams, cache_cell, token_emb);
+        let write_gate = write_gate
+            .reshape([batch_size.max(1), cache_streams.max(1), 1])
+            .mean_dim(1)
+            .reshape([batch_size.max(1), 1]);
+        let write_gate_floor = write_gate_floor.clamp(0.0, 1.0);
+        let write_gate = if write_gate_floor > 0.0 {
+            write_gate
+                .mul_scalar(1.0 - write_gate_floor)
+                .add_scalar(write_gate_floor)
+        } else {
+            write_gate
+        };
+        let (write_mask_f, gate_log_prob, gate_entropy) = resolve_write_gate(
+            write_gate.clone(),
+            training.policy.write_gate_mode,
+            action_any.clone(),
         );
+        let write_mask_grid = write_mask_f.clone().repeat_dim(1, GRID_LEN);
+        if let Some(gate_log_prob) = gate_log_prob {
+            selected_log_prob = selected_log_prob + gate_log_prob.clone();
+            chunk_log_prob_sum = chunk_log_prob_sum + gate_log_prob.clone();
+            log_prob_sum_metrics = log_prob_sum_metrics + gate_log_prob.detach();
+        }
+        if let Some(gate_entropy) = gate_entropy {
+            chunk_policy_entropy_sum = chunk_policy_entropy_sum + gate_entropy.clone();
+            policy_entropy_sum_metrics = policy_entropy_sum_metrics + gate_entropy.detach();
+        }
+
+        let update_mask_base = action_one_hot.clone().mul(editable_mask.clone());
+        let update_mask = update_mask_base
+            .clone()
+            .mul(write_mask_grid.clone())
+            .greater_equal_elem(0.5);
+        let update_any = update_mask
+            .clone()
+            .float()
+            .sum_dim(1)
+            .reshape([batch_size.max(1), 1])
+            .greater_elem(0.0)
+            .float();
+        let no_update = ones_step.clone().sub(update_any).mul(active_mask.clone());
+        let no_op_penalty_per_sample = no_update
+            .clone()
+            .reshape([batch_size.max(1)])
+            .mul_scalar(no_op_penalty);
+        let update_values_grid = update_values.clone().repeat_dim(1, GRID_LEN);
+        tokens = tokens.mask_where(update_mask.clone(), update_values_grid);
+        unknown_mask = (unknown_mask - update_mask.clone().float()).clamp_min(0.0);
+        let update_values_pred_grid = pred_values.clone().repeat_dim(1, GRID_LEN);
+        tokens_reward = tokens_reward.mask_where(update_mask.clone(), update_values_pred_grid);
+
+        reward_mask = reward_mask
+            .mul(write_mask_f.clone().reshape([batch_size.max(1)]));
+
+        let update_mask_cache = if training.policy.cache_update_clues {
+            action_one_hot.clone()
+        } else {
+            action_one_hot.clone().mul(editable_mask.clone())
+        };
+        let update_mask_f = update_mask_cache.clone().unsqueeze_dim::<3>(2);
         let update_emb = update_emb
             .reshape([batch_size.max(1), cache_streams, 1, embd])
             .expand([batch_size.max(1), cache_streams, GRID_LEN, embd]);
@@ -1717,7 +1881,9 @@ fn rollout_losses_train<B: AutodiffBackend>(
 
         steps_done += 1;
 
-        let (reward_acc_per_sample, acc, exact_acc, _solve_rate) =
+        let (reward_acc_per_sample, _reward_acc_mean) =
+            compute_grid_accuracy_masked(&tokens_reward, &solutions, &editable_mask);
+        let (_acc_per_sample, acc, exact_acc, _solve_rate) =
             compute_grid_accuracy(&tokens_reward, &solutions);
         let step_acc_delta = reward_acc_per_sample.clone().sub(prev_reward_acc_per_sample.clone());
         prev_reward_acc_per_sample = reward_acc_per_sample.detach();
@@ -1809,6 +1975,16 @@ fn rollout_losses_train<B: AutodiffBackend>(
             rollout_recon_delta_sum + step_recon_delta_reward.clone();
         rollout_recon_mask_sum = rollout_recon_mask_sum + step_reward_mask.clone();
         let step_active_mask = active_mask.clone().reshape([batch_size.max(1)]);
+        let write_gate_step = write_gate
+            .clone()
+            .reshape([batch_size.max(1)])
+            .mul(step_active_mask.clone());
+        let write_rate_step = write_mask_f
+            .clone()
+            .reshape([batch_size.max(1)])
+            .mul(step_active_mask.clone());
+        write_gate_sum_metrics = write_gate_sum_metrics + write_gate_step.mean().detach();
+        write_rate_sum_metrics = write_rate_sum_metrics + write_rate_step.mean().detach();
         let step_acc_delta_reward = step_acc_delta
             .clone()
             .mul(step_active_mask.clone())
@@ -1829,25 +2005,54 @@ fn rollout_losses_train<B: AutodiffBackend>(
             let mut shaping_step = Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
             let keep = Tensor::<B, 1>::ones([batch_size.max(1)], &device)
                 .sub(reward_mask.clone());
+            let mut conflict_component =
+                Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
+            let mut unknown_component =
+                Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
+            let mut accuracy_component =
+                Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
+            let mut incorrect_component =
+                Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
+            let step_correct = pred_values
+                .clone()
+                .equal(selected_solution.clone())
+                .float()
+                .reshape([batch_size.max(1)])
+                .mul(reward_mask.clone())
+                .mul(step_active_mask.clone());
             if conflict_weight > 0.0 {
                 let conflict_next = shaping_potential(&tokens, shaping_metric);
                 let mut shaping_delta =
                     conflict_next.clone().mul_scalar(shaping_gamma) - conflict_prev.clone();
                 shaping_delta = shaping_delta.mul(reward_mask.clone());
-                shaping_step = shaping_step + shaping_delta.mul_scalar(conflict_weight);
+                conflict_component = shaping_delta.mul_scalar(conflict_weight);
+                shaping_step = shaping_step + conflict_component.clone();
                 conflict_prev = conflict_prev.mul(keep.clone()) + conflict_next.mul(reward_mask.clone());
             }
             if unknown_weight > 0.0 {
                 let unknown_next = unknown_potential(&tokens);
                 let mut shaping_delta =
                     unknown_next.clone().mul_scalar(shaping_gamma) - unknown_prev.clone();
-                shaping_delta = shaping_delta.mul(reward_mask.clone());
-                shaping_step = shaping_step + shaping_delta.mul_scalar(unknown_weight);
+                shaping_delta = shaping_delta
+                    .mul(reward_mask.clone())
+                    .mul(step_correct.clone());
+                unknown_component = shaping_delta.mul_scalar(unknown_weight);
+                shaping_step = shaping_step + unknown_component.clone();
                 unknown_prev = unknown_prev.mul(keep.clone()) + unknown_next.mul(reward_mask.clone());
             }
             if accuracy_weight > 0.0 {
                 let acc_delta = step_acc_delta.clone().mul(step_active_mask.clone());
-                shaping_step = shaping_step + acc_delta.mul_scalar(accuracy_weight);
+                accuracy_component = acc_delta.mul_scalar(accuracy_weight);
+                shaping_step = shaping_step + accuracy_component.clone();
+            }
+            if incorrect_penalty > 0.0 {
+                let incorrect = reward_mask
+                    .clone()
+                    .mul(step_active_mask.clone())
+                    .sub(step_correct.clone())
+                    .clamp_min(0.0);
+                incorrect_component = incorrect.mul_scalar(-incorrect_penalty);
+                shaping_step = shaping_step + incorrect_component.clone();
             }
             let shaping_step_masked = shaping_step.clone().mul(step_reward_mask.clone());
             chunk_shaping_sum = chunk_shaping_sum + shaping_step_masked.clone();
@@ -1855,6 +2060,42 @@ fn rollout_losses_train<B: AutodiffBackend>(
             rollout_shaping_sum = rollout_shaping_sum + shaping_step_masked.clone();
             rollout_shaping_mask_sum = rollout_shaping_mask_sum + step_reward_mask.clone();
             step_reward = step_reward + shaping_step;
+
+            let metric_mask = step_active_mask.clone();
+            let mask_sum = metric_mask.clone().sum_dim(0).clamp_min(1.0);
+            shaping_conflict_sum_metrics = shaping_conflict_sum_metrics
+                + conflict_component
+                    .clone()
+                    .mul(metric_mask.clone())
+                    .sum_dim(0)
+                    .div(mask_sum.clone())
+                    .reshape([1])
+                    .detach();
+            shaping_unknown_sum_metrics = shaping_unknown_sum_metrics
+                + unknown_component
+                    .clone()
+                    .mul(metric_mask.clone())
+                    .sum_dim(0)
+                    .div(mask_sum.clone())
+                    .reshape([1])
+                    .detach();
+            shaping_accuracy_sum_metrics = shaping_accuracy_sum_metrics
+                + accuracy_component
+                    .clone()
+                    .mul(metric_mask.clone())
+                    .sum_dim(0)
+                    .div(mask_sum.clone())
+                    .reshape([1])
+                    .detach();
+            shaping_incorrect_sum_metrics = shaping_incorrect_sum_metrics
+                + incorrect_component
+                    .clone()
+                    .mul(metric_mask)
+                    .sum_dim(0)
+                    .div(mask_sum)
+                    .reshape([1])
+                    .detach();
+            shaping_steps_metrics += 1;
         }
         step_reward = step_reward.mul(step_reward_mask.clone());
         if baseline_enabled && let Some(value) = step_value.clone() {
@@ -2231,6 +2472,20 @@ fn rollout_losses_train<B: AutodiffBackend>(
     let unique_cells = visit_counts.clone().greater_elem(0.0).float().sum_dim(1);
     let total_visits = visit_counts.clone().sum_dim(1).clamp_min(1.0);
     let saccade_unique_frac = unique_cells.div(total_visits).mean();
+    let write_gate_mean = if steps_done > 0 {
+        write_gate_sum_metrics
+            .clone()
+            .div_scalar(steps_done as f32)
+    } else {
+        zeros.clone()
+    };
+    let write_rate = if steps_done > 0 {
+        write_rate_sum_metrics
+            .clone()
+            .div_scalar(steps_done as f32)
+    } else {
+        zeros.clone()
+    };
 
     let hard_reward = match hard_mode {
         SudokuHardRewardMode::InfoReward => info_reward_sum.clone(),
@@ -2423,6 +2678,26 @@ fn rollout_losses_train<B: AutodiffBackend>(
         .equal_elem(GRID_LEN as f32)
         .float()
         .mean();
+    let shaping_conflict_mean = if shaping_steps_metrics > 0 {
+        shaping_conflict_sum_metrics.div_scalar(shaping_steps_metrics as f32)
+    } else {
+        zeros.clone()
+    };
+    let shaping_unknown_mean = if shaping_steps_metrics > 0 {
+        shaping_unknown_sum_metrics.div_scalar(shaping_steps_metrics as f32)
+    } else {
+        zeros.clone()
+    };
+    let shaping_accuracy_mean = if shaping_steps_metrics > 0 {
+        shaping_accuracy_sum_metrics.div_scalar(shaping_steps_metrics as f32)
+    } else {
+        zeros.clone()
+    };
+    let shaping_incorrect_mean = if shaping_steps_metrics > 0 {
+        shaping_incorrect_sum_metrics.div_scalar(shaping_steps_metrics as f32)
+    } else {
+        zeros.clone()
+    };
 
     let losses = SudokuLosses {
         loss: loss.clone(),
@@ -2442,10 +2717,16 @@ fn rollout_losses_train<B: AutodiffBackend>(
         policy_entropy_target,
         hard_reward_mean,
         easy_reward_mean,
+        shaping_conflict_mean,
+        shaping_unknown_mean,
+        shaping_accuracy_mean,
+        shaping_incorrect_mean,
         saccade_revisit_rate,
         saccade_repeat_rate,
         saccade_unknown_frac,
         saccade_unique_frac,
+        write_gate_mean,
+        write_rate,
     };
 
     (losses, grads)
@@ -2462,6 +2743,8 @@ struct RolloutBase<B: BackendTrait> {
     saccade_repeat_rate: Tensor<B, 1>,
     saccade_unknown_frac: Tensor<B, 1>,
     saccade_unique_frac: Tensor<B, 1>,
+    write_gate_mean: Tensor<B, 1>,
+    write_rate: Tensor<B, 1>,
     halt_loss: Tensor<B, 1>,
     halt_prob_mean: Tensor<B, 1>,
     halt_target_mean: Tensor<B, 1>,
@@ -2506,6 +2789,7 @@ fn rollout_base<B: BackendTrait>(
         train_mode,
         teacher_forcing_prob,
         policy_temperature,
+        write_gate_floor_for_step(training, 0),
         revisit_min_filled,
         rollout_steps,
     )
@@ -2539,6 +2823,7 @@ fn rollout_base_autodiff<B: AutodiffBackend>(
         train_mode,
         teacher_forcing_prob,
         policy_temperature,
+        write_gate_floor_for_step(training, 0),
         revisit_min_filled,
         rollout_steps,
     )
@@ -2556,6 +2841,7 @@ fn rollout_base_impl<B: BackendTrait>(
     train_mode: bool,
     teacher_forcing_prob: f32,
     policy_temperature: f32,
+    write_gate_floor: f32,
     revisit_min_filled: f32,
     rollout_steps: usize,
 ) -> RolloutBase<B> {
@@ -2564,6 +2850,8 @@ fn rollout_base_impl<B: BackendTrait>(
     let global_weight = training.recon.global_loss_weight.max(0.0);
     let global_samples = training.recon.global_loss_samples.min(GRID_LEN);
     let visit_penalty = training.policy.visit_penalty.max(0.0);
+    let revisit_penalty = training.policy.revisit_penalty.max(0.0);
+    let write_gate_floor = write_gate_floor.clamp(0.0, 1.0);
     let mut puzzles = batch.puzzles;
     let mut solutions = batch.solutions;
     let device = puzzles.device();
@@ -2608,8 +2896,12 @@ fn rollout_base_impl<B: BackendTrait>(
     let conflict_weight = training.reward.shaping.weight.max(0.0);
     let unknown_weight = training.reward.shaping.unknown_weight.max(0.0);
     let accuracy_weight = training.reward.shaping.accuracy_weight.max(0.0);
+    let incorrect_penalty = training.reward.shaping.incorrect_penalty.max(0.0);
     let shaping_enabled = training.reward.shaping.enabled
-        && (conflict_weight > 0.0 || unknown_weight > 0.0 || accuracy_weight > 0.0);
+        && (conflict_weight > 0.0
+            || unknown_weight > 0.0
+            || accuracy_weight > 0.0
+            || incorrect_penalty > 0.0);
     let shaping_metric = training.reward.shaping.metric;
     let shaping_gamma = training.reward.shaping.gamma.clamp(0.0, 1.0);
     let baseline_enabled = training.reward.baseline.enabled;
@@ -2655,8 +2947,10 @@ fn rollout_base_impl<B: BackendTrait>(
     let mut cache = input_cache.clone();
     let mut summary_tokens = model.init_summary_tokens(batch_size);
     let summary_len = model.summary_token_count();
-    let (reward_initial_acc_per_sample, initial_acc_mean, initial_exact, initial_solve_rate) =
+    let (_initial_acc_per_sample, initial_acc_mean, initial_exact, initial_solve_rate) =
         compute_grid_accuracy(&tokens_reward, &solutions);
+    let (reward_initial_acc_per_sample, _reward_initial_acc_mean) =
+        compute_grid_accuracy_masked(&tokens_reward, &solutions, &editable_mask);
     let reward_initial_acc = reward_initial_acc_per_sample.clone();
     let mut last_loss_per_sample = Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
     let mut last_acc = initial_acc_mean;
@@ -2698,6 +2992,8 @@ fn rollout_base_impl<B: BackendTrait>(
     let mut revisit_count_sum = zeros.clone();
     let mut repeat_count_sum = zeros.clone();
     let mut unknown_select_sum = zeros.clone();
+    let mut write_gate_sum = zeros.clone();
+    let mut write_rate_sum = zeros.clone();
     let mut visit_counts =
         Tensor::<B, 2>::zeros([batch_size.max(1), GRID_LEN], &device);
     let mut prev_action_one_hot =
@@ -2860,7 +3156,8 @@ fn rollout_base_impl<B: BackendTrait>(
             .equal_elem(GRID_LEN as f32)
             .float()
             .reshape([batch_size.max(1), 1]);
-        let use_select_mask = revisit_min_filled > 0.0 || visit_penalty > 0.0;
+        let use_select_mask =
+            revisit_min_filled > 0.0 || visit_penalty > 0.0 || revisit_penalty > 0.0;
         let (select_mask, selectable_counts, masked_logits) = if use_select_mask {
             let unknown_counts = unknown_mask
                 .clone()
@@ -2889,6 +3186,10 @@ fn rollout_base_impl<B: BackendTrait>(
             if visit_penalty > 0.0 {
                 let visit_log = visit_counts.clone().add_scalar(1.0).log();
                 masked_logits = masked_logits - visit_log.mul_scalar(visit_penalty);
+            }
+            if revisit_penalty > 0.0 {
+                let revisits = visit_counts.clone().greater_elem(0.0).float();
+                masked_logits = masked_logits - revisits.mul_scalar(revisit_penalty);
             }
 
             let selectable_counts = select_mask
@@ -2961,24 +3262,24 @@ fn rollout_base_impl<B: BackendTrait>(
             .mul(action_one_hot.clone())
             .sum_dim(1)
             .reshape([batch_size.max(1), 1]);
-        action_count_sum = action_count_sum + action_any.mean().detach();
+        action_count_sum = action_count_sum + action_any.clone().mean().detach();
         revisit_count_sum = revisit_count_sum + step_revisit.mean().detach();
         repeat_count_sum = repeat_count_sum + step_repeat.mean().detach();
         unknown_select_sum = unknown_select_sum + step_unknown.mean().detach();
         prev_action_one_hot = action_one_hot.clone();
         visit_counts = visit_counts + action_one_hot.clone();
 
+        let mut selected_log_prob = None;
+        let mut step_entropy = None;
         if track_policy {
             let log_probs = activation::log_softmax(policy_logits, 1);
-            let selected_log_prob = log_probs
+            let selected = log_probs
                 .clone()
                 .mul(action_one_hot.clone())
                 .sum_dim(1)
                 .reshape([batch_size.max(1), 1])
                 .mul(active_mask.clone());
-            log_prob_sum = log_prob_sum + selected_log_prob;
-
-            let step_entropy = log_probs
+            let entropy = log_probs
                 .clone()
                 .exp()
                 .mul(log_probs)
@@ -2986,8 +3287,8 @@ fn rollout_base_impl<B: BackendTrait>(
                 .reshape([batch_size.max(1), 1])
                 .mul_scalar(-1.0)
                 .mul(active_mask.clone());
-            policy_entropy_sum = policy_entropy_sum + step_entropy;
-            policy_steps += 1;
+            selected_log_prob = Some(selected);
+            step_entropy = Some(entropy);
         }
         let [_, _, embd] = cache_read.shape().dims();
         let step_input_base = input_cache_read
@@ -3030,7 +3331,7 @@ fn rollout_base_impl<B: BackendTrait>(
             .mul(action_one_hot.clone())
             .sum_dim(1)
             .reshape([batch_size.max(1), 1]);
-        let reward_mask = selected_editable
+        let mut reward_mask = selected_editable
             .clone()
             .reshape([batch_size.max(1)]);
         let mut local_loss_mask = active_mask.clone();
@@ -3085,34 +3386,6 @@ fn rollout_base_impl<B: BackendTrait>(
         let mut update_values = pred_values.clone();
         update_values = update_values.mask_where(teacher_mask, selected_solution.clone());
 
-        let update_mask = action_one_hot
-            .clone()
-            .mul(editable_mask.clone())
-            .greater_equal_elem(0.5);
-        let update_any = update_mask
-            .clone()
-            .float()
-            .sum_dim(1)
-            .reshape([batch_size.max(1), 1])
-            .greater_elem(0.0)
-            .float();
-        let no_update = ones_step.clone().sub(update_any).mul(active_mask.clone());
-        let no_op_penalty_per_sample = no_update
-            .clone()
-            .reshape([batch_size.max(1)])
-            .mul_scalar(no_op_penalty);
-        let update_values_grid = update_values.clone().repeat_dim(1, GRID_LEN);
-        tokens = tokens.mask_where(update_mask.clone(), update_values_grid);
-        unknown_mask = (unknown_mask - action_one_hot.clone()).clamp_min(0.0);
-        let update_values_pred_grid = pred_values.clone().repeat_dim(1, GRID_LEN);
-        tokens_reward = tokens_reward.mask_where(update_mask.clone(), update_values_pred_grid);
-
-        let update_mask_cache = if training.policy.cache_update_clues {
-            action_one_hot.clone()
-        } else {
-            action_one_hot.clone().mul(editable_mask.clone())
-        };
-        let update_mask_f = update_mask_cache.clone().unsqueeze_dim::<3>(2);
         let selected_row = row_ids_f
             .clone()
             .mul(action_one_hot.clone())
@@ -3125,7 +3398,7 @@ fn rollout_base_impl<B: BackendTrait>(
             .sum_dim(1)
             .reshape([batch_size.max(1), 1])
             .int();
-                let action_mask = action_one_hot
+        let action_mask = action_one_hot
             .clone()
             .unsqueeze_dim::<3>(2)
             .unsqueeze_dim::<4>(1);
@@ -3148,11 +3421,71 @@ fn rollout_base_impl<B: BackendTrait>(
             .unsqueeze_dim::<4>(1)
             .expand([batch_size.max(1), cache_streams, 1, embd])
             .reshape([batch_size.max(1) * cache_streams, 1, embd]);
-        let update_emb = model.update_cell_embedding(
-            summary_streams,
-            cache_cell,
-            token_emb,
+        let (update_emb, write_gate) = model
+            .update_cell_embedding_with_gate(summary_streams, cache_cell, token_emb);
+        let write_gate = write_gate
+            .reshape([batch_size.max(1), cache_streams.max(1), 1])
+            .mean_dim(1)
+            .reshape([batch_size.max(1), 1]);
+        let write_gate = if write_gate_floor > 0.0 {
+            write_gate
+                .mul_scalar(1.0 - write_gate_floor)
+                .add_scalar(write_gate_floor)
+        } else {
+            write_gate
+        };
+        let (write_mask_f, gate_log_prob, gate_entropy) = resolve_write_gate(
+            write_gate.clone(),
+            training.policy.write_gate_mode,
+            action_any.clone(),
         );
+        let write_mask_grid = write_mask_f.clone().repeat_dim(1, GRID_LEN);
+        if track_policy {
+            let mut selected_log_prob = selected_log_prob.expect("selected_log_prob");
+            let mut step_entropy = step_entropy.expect("step_entropy");
+            if let Some(gate_log_prob) = gate_log_prob {
+                selected_log_prob = selected_log_prob + gate_log_prob;
+            }
+            if let Some(gate_entropy) = gate_entropy {
+                step_entropy = step_entropy + gate_entropy;
+            }
+            log_prob_sum = log_prob_sum + selected_log_prob;
+            policy_entropy_sum = policy_entropy_sum + step_entropy;
+            policy_steps += 1;
+        }
+
+        let update_mask_base = action_one_hot.clone().mul(editable_mask.clone());
+        let update_mask = update_mask_base
+            .clone()
+            .mul(write_mask_grid.clone())
+            .greater_equal_elem(0.5);
+        let update_any = update_mask
+            .clone()
+            .float()
+            .sum_dim(1)
+            .reshape([batch_size.max(1), 1])
+            .greater_elem(0.0)
+            .float();
+        let no_update = ones_step.clone().sub(update_any).mul(active_mask.clone());
+        let no_op_penalty_per_sample = no_update
+            .clone()
+            .reshape([batch_size.max(1)])
+            .mul_scalar(no_op_penalty);
+        let update_values_grid = update_values.clone().repeat_dim(1, GRID_LEN);
+        tokens = tokens.mask_where(update_mask.clone(), update_values_grid);
+        unknown_mask = (unknown_mask - update_mask.clone().float()).clamp_min(0.0);
+        let update_values_pred_grid = pred_values.clone().repeat_dim(1, GRID_LEN);
+        tokens_reward = tokens_reward.mask_where(update_mask.clone(), update_values_pred_grid);
+
+        reward_mask = reward_mask
+            .mul(write_mask_f.clone().reshape([batch_size.max(1)]));
+
+        let update_mask_cache = if training.policy.cache_update_clues {
+            action_one_hot.clone()
+        } else {
+            action_one_hot.clone().mul(editable_mask.clone())
+        };
+        let update_mask_f = update_mask_cache.clone().unsqueeze_dim::<3>(2);
         let update_emb = update_emb
             .reshape([batch_size.max(1), cache_streams, 1, embd])
             .expand([batch_size.max(1), cache_streams, GRID_LEN, embd]);
@@ -3194,7 +3527,9 @@ fn rollout_base_impl<B: BackendTrait>(
         }
         halted = halted.max_pair(step_halt.clone());
 
-        let (reward_acc_per_sample, acc, exact_acc, solve_rate) =
+        let (reward_acc_per_sample, _reward_acc_mean) =
+            compute_grid_accuracy_masked(&tokens_reward, &solutions, &editable_mask);
+        let (_acc_per_sample, acc, exact_acc, solve_rate) =
             compute_grid_accuracy(&tokens_reward, &solutions);
         let step_acc_delta = reward_acc_per_sample.clone().sub(prev_reward_acc_per_sample.clone());
         prev_reward_acc_per_sample = reward_acc_per_sample.detach();
@@ -3288,6 +3623,16 @@ fn rollout_base_impl<B: BackendTrait>(
             rollout_recon_delta_sum + step_recon_delta_reward.clone();
         rollout_recon_mask_sum = rollout_recon_mask_sum + step_reward_mask.clone();
         let step_active_mask = active_mask.clone().reshape([batch_size.max(1)]);
+        let write_gate_step = write_gate
+            .clone()
+            .reshape([batch_size.max(1)])
+            .mul(step_active_mask.clone());
+        let write_rate_step = write_mask_f
+            .clone()
+            .reshape([batch_size.max(1)])
+            .mul(step_active_mask.clone());
+        write_gate_sum = write_gate_sum + write_gate_step.mean();
+        write_rate_sum = write_rate_sum + write_rate_step.mean();
         let step_acc_delta_reward = step_acc_delta
             .clone()
             .mul(step_active_mask.clone())
@@ -3308,6 +3653,13 @@ fn rollout_base_impl<B: BackendTrait>(
             let mut shaping_step = Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
             let keep = Tensor::<B, 1>::ones([batch_size.max(1)], &device)
                 .sub(reward_mask.clone());
+            let step_correct = pred_values
+                .clone()
+                .equal(selected_solution.clone())
+                .float()
+                .reshape([batch_size.max(1)])
+                .mul(reward_mask.clone())
+                .mul(step_active_mask.clone());
             if conflict_weight > 0.0 {
                 let conflict_next = shaping_potential(&tokens, shaping_metric);
                 let mut shaping_delta =
@@ -3320,13 +3672,23 @@ fn rollout_base_impl<B: BackendTrait>(
                 let unknown_next = unknown_potential(&tokens);
                 let mut shaping_delta =
                     unknown_next.clone().mul_scalar(shaping_gamma) - unknown_prev.clone();
-                shaping_delta = shaping_delta.mul(reward_mask.clone());
+                shaping_delta = shaping_delta
+                    .mul(reward_mask.clone())
+                    .mul(step_correct.clone());
                 shaping_step = shaping_step + shaping_delta.mul_scalar(unknown_weight);
                 unknown_prev = unknown_prev.mul(keep.clone()) + unknown_next.mul(reward_mask.clone());
             }
             if accuracy_weight > 0.0 {
                 let acc_delta = step_acc_delta.clone().mul(step_active_mask.clone());
                 shaping_step = shaping_step + acc_delta.mul_scalar(accuracy_weight);
+            }
+            if incorrect_penalty > 0.0 {
+                let incorrect = reward_mask
+                    .clone()
+                    .mul(step_active_mask.clone())
+                    .sub(step_correct)
+                    .clamp_min(0.0);
+                shaping_step = shaping_step - incorrect.mul_scalar(incorrect_penalty);
             }
             let shaping_step_masked = shaping_step.clone().mul(step_reward_mask.clone());
             rollout_shaping_sum = rollout_shaping_sum + shaping_step_masked;
@@ -3432,6 +3794,16 @@ fn rollout_base_impl<B: BackendTrait>(
     let unique_cells = visit_counts.clone().greater_elem(0.0).float().sum_dim(1);
     let total_visits = visit_counts.clone().sum_dim(1).clamp_min(1.0);
     let saccade_unique_frac = unique_cells.div(total_visits).mean();
+    let write_gate_mean = if rollout_steps > 0 {
+        write_gate_sum.clone().div_scalar(rollout_steps as f32)
+    } else {
+        zeros.clone()
+    };
+    let write_rate = if rollout_steps > 0 {
+        write_rate_sum.clone().div_scalar(rollout_steps as f32)
+    } else {
+        zeros.clone()
+    };
 
     RolloutBase {
         recon_loss,
@@ -3444,6 +3816,8 @@ fn rollout_base_impl<B: BackendTrait>(
         saccade_repeat_rate,
         saccade_unknown_frac,
         saccade_unique_frac,
+        write_gate_mean,
+        write_rate,
         halt_loss,
         halt_prob_mean,
         halt_target_mean,
@@ -3489,6 +3863,34 @@ fn compute_grid_accuracy<B: BackendTrait>(
     let solve_rate = exact_acc.clone();
 
     (acc_per_sample, acc, exact_acc, solve_rate)
+}
+
+fn compute_grid_accuracy_masked<B: BackendTrait>(
+    tokens: &Tensor<B, 2, Int>,
+    solutions: &Tensor<B, 2, Int>,
+    mask: &Tensor<B, 2>,
+) -> (Tensor<B, 1>, Tensor<B, 1>) {
+    let [batch, time] = tokens.shape().dims();
+    let device = tokens.device();
+    if batch == 0 || time == 0 {
+        let zeros = Tensor::<B, 1>::zeros([1], &device);
+        return (zeros.clone(), zeros);
+    }
+
+    let correct = tokens.clone().equal(solutions.clone()).float();
+    let mask_sum = mask
+        .clone()
+        .sum_dim(1)
+        .reshape([batch])
+        .clamp_min(1.0);
+    let acc_per_sample = correct
+        .mul(mask.clone())
+        .sum_dim(1)
+        .reshape([batch])
+        .div(mask_sum);
+    let acc = acc_per_sample.clone().mean();
+
+    (acc_per_sample, acc)
 }
 
 #[allow(clippy::type_complexity)]
@@ -3824,6 +4226,9 @@ mod tests {
                 visit_penalty: 0.0,
                 revisit_penalty: 0.0,
                 recon_weight: 0.0,
+                write_gate_mode: SudokuWriteGateMode::StraightThrough,
+                write_gate_warmup_steps: 0,
+                write_gate_warmup_floor: 0.0,
                 cache_update_clues: false,
             },
             revisit: SudokuRevisitConfig {
@@ -3947,6 +4352,9 @@ mod tests {
                 visit_penalty: 0.0,
                 revisit_penalty: 0.0,
                 recon_weight: 0.0,
+                write_gate_mode: SudokuWriteGateMode::StraightThrough,
+                write_gate_warmup_steps: 0,
+                write_gate_warmup_floor: 0.0,
                 cache_update_clues: false,
             },
             revisit: SudokuRevisitConfig {
@@ -3996,6 +4404,7 @@ mod tests {
             0.0,
             0.0,
             recon_weight,
+            0.0,
             0.0,
             1,
             None,
@@ -4103,6 +4512,9 @@ mod tests {
                 visit_penalty: 0.0,
                 revisit_penalty: 0.0,
                 recon_weight: 0.0,
+                write_gate_mode: SudokuWriteGateMode::StraightThrough,
+                write_gate_warmup_steps: 0,
+                write_gate_warmup_floor: 0.0,
                 cache_update_clues: false,
             },
             revisit: SudokuRevisitConfig {
@@ -4141,7 +4553,8 @@ mod tests {
         );
         let batch = SudokuBatch::new(puzzles, solutions);
 
-        let losses = rollout_losses_valid(&model, batch, &training);
+        let write_gate_floor = write_gate_floor_for_step(&training, 0);
+        let losses = rollout_losses_valid(&model, batch, &training, write_gate_floor);
         let solve_rate = losses
             .solve_rate
             .into_data()
@@ -4190,6 +4603,11 @@ mod tests {
 fn use_trm_chunk(training: &SudokuTrainingHyperparameters) -> bool {
     matches!(training.rollout.traversal, SudokuTraversal::L2rT2b)
         && matches!(training.rollout.trm_mode, SudokuTrmMode::Chunk)
+}
+
+fn use_trm_constraint_ca(training: &SudokuTrainingHyperparameters) -> bool {
+    matches!(training.rollout.traversal, SudokuTraversal::L2rT2b)
+        && matches!(training.rollout.trm_mode, SudokuTrmMode::ConstraintCa)
 }
 
 fn slice_grid_2d<B: BackendTrait>(tensor: &Tensor<B, 2>, start: usize, len: usize) -> Tensor<B, 2> {
@@ -4748,13 +5166,368 @@ fn rollout_losses_train_trm_chunk<B: AutodiffBackend>(
             policy_entropy_target,
             hard_reward_mean: zeros.clone(),
             easy_reward_mean: zeros.clone(),
+            shaping_conflict_mean: zeros.clone(),
+            shaping_unknown_mean: zeros.clone(),
+            shaping_accuracy_mean: zeros.clone(),
+            shaping_incorrect_mean: zeros.clone(),
             saccade_revisit_rate: zeros.clone(),
             saccade_repeat_rate: zeros.clone(),
             saccade_unknown_frac: zeros.clone(),
-            saccade_unique_frac: zeros,
+            saccade_unique_frac: zeros.clone(),
+            write_gate_mean: zeros.clone(),
+            write_rate: zeros,
         },
         grads,
     )
+}
+
+fn rollout_losses_train_trm_constraint_ca<B: AutodiffBackend>(
+    trainer: &SudokuTrainer<B>,
+    batch: SudokuBatch<B>,
+    recon_loss_weight: f32,
+    rollout_steps: usize,
+) -> (SudokuLosses<B>, GradientsParams) {
+    let training = &trainer.training;
+    let rollout_steps = rollout_steps.max(1);
+    let backprop_steps_cfg = training.rollout.backprop_steps.unwrap_or(rollout_steps);
+    let chunk_steps = if backprop_steps_cfg == 0 {
+        rollout_steps
+    } else {
+        backprop_steps_cfg.min(rollout_steps).max(1)
+    };
+    let recon_interval = training.recon.loss_interval_steps;
+    let global_weight = training.recon.global_loss_weight.max(0.0);
+    let global_samples = training.recon.global_loss_samples.min(GRID_LEN);
+
+    let puzzles = batch.puzzles;
+    let solutions = batch.solutions;
+    let device = puzzles.device();
+    let [batch_size, _] = puzzles.shape().dims::<2>();
+    let ones_grid = Tensor::<B, 2>::ones([batch_size.max(1), GRID_LEN], &device);
+    let solution_one_hot = build_solution_one_hot(&solutions, batch_size, &device);
+
+    let clue_mask = puzzles.clone().greater_elem(0.0).float();
+    let loss_unknown_mask = puzzles.clone().equal_elem(0).float();
+
+    let (row_ids, col_ids) = trainer.model.grid_row_col_ids(batch_size, &device);
+    let input_emb = trainer
+        .model
+        .cell_embeddings_with_positions(puzzles, row_ids, col_ids);
+    let mut cell_state = trainer.model.project_input_tokens(input_emb);
+
+    let ca_heads = trainer.model.ca_heads();
+    let ca_head_dim = trainer.model.ca_head_dim();
+    let mut mem_row = Tensor::<B, 5>::zeros(
+        [batch_size.max(1), ca_heads, GRID_SIDE, ca_head_dim, ca_head_dim],
+        &device,
+    );
+    let mut mem_col = Tensor::<B, 5>::zeros(
+        [batch_size.max(1), ca_heads, GRID_SIDE, ca_head_dim, ca_head_dim],
+        &device,
+    );
+    let mut mem_box = Tensor::<B, 5>::zeros(
+        [batch_size.max(1), ca_heads, GRID_SIDE, ca_head_dim, ca_head_dim],
+        &device,
+    );
+
+    let zeros = Tensor::<B, 1>::zeros([1], &device);
+    let mut recon_loss_sum_metrics = zeros.clone();
+    let mut recon_steps_metrics = 0usize;
+    let mut steps_done = 0usize;
+    let mut final_logits = trainer.model.value_logits_from_cache(cell_state.clone());
+
+    let mut grads_accum = GradientsAccumulator::<SudokuTrainer<B>>::new();
+
+    while steps_done < rollout_steps {
+        let remaining = rollout_steps - steps_done;
+        let chunk_len = remaining.min(chunk_steps).max(1);
+        let mut chunk_loss_sum = zeros.clone();
+        let mut chunk_loss_steps = 0usize;
+
+        for _ in 0..chunk_len {
+            let step_idx = steps_done + 1;
+            if recon_interval > 0 && step_idx.is_multiple_of(recon_interval) {
+                let logits = trainer.model.value_logits_from_cache(cell_state.clone());
+                final_logits = logits.clone();
+                let mut loss_mask = ones_grid.clone();
+                if matches!(training.recon.loss_mask, SudokuLossMask::Unknown) {
+                    loss_mask = loss_mask.mul(loss_unknown_mask.clone());
+                }
+                loss_mask = ensure_non_empty_mask(loss_mask, ones_grid.clone());
+                let (local_loss, ..) = compute_loss_and_acc(
+                    &logits,
+                    &solutions,
+                    &solution_one_hot,
+                    &loss_mask,
+                    &training.recon.loss,
+                );
+                let mut step_loss = local_loss;
+                recon_loss_sum_metrics = recon_loss_sum_metrics + step_loss.clone().detach();
+                recon_steps_metrics += 1;
+
+                if global_weight > 0.0 && global_samples > 0 {
+                    let sample_prob =
+                        (global_samples as f32 / GRID_LEN as f32).clamp(0.0, 1.0);
+                    let random = Tensor::<B, 2>::random(
+                        [batch_size.max(1), GRID_LEN],
+                        TensorDistribution::Uniform(0.0, 1.0),
+                        &device,
+                    );
+                    let mut global_mask = random.lower_equal_elem(sample_prob).float();
+                    if matches!(training.recon.loss_mask, SudokuLossMask::Unknown) {
+                        global_mask = global_mask.mul(loss_unknown_mask.clone());
+                    }
+                    global_mask = ensure_non_empty_mask(global_mask, ones_grid.clone());
+                    let (global_loss, ..) = compute_loss_and_acc(
+                        &logits,
+                        &solutions,
+                        &solution_one_hot,
+                        &global_mask,
+                        &training.recon.loss,
+                    );
+                    step_loss = step_loss + global_loss.clone().mul_scalar(global_weight);
+                    recon_loss_sum_metrics =
+                        recon_loss_sum_metrics + global_loss.detach().mul_scalar(global_weight);
+                }
+
+                chunk_loss_sum = chunk_loss_sum + step_loss;
+                chunk_loss_steps += 1;
+            }
+
+            let (next_state, next_row, next_col, next_box) =
+                trainer.model.constraint_ca_step(
+                    cell_state,
+                    clue_mask.clone(),
+                    mem_row,
+                    mem_col,
+                    mem_box,
+                    training.rollout.trm_ca_decay,
+                );
+            cell_state = next_state;
+            mem_row = next_row;
+            mem_col = next_col;
+            mem_box = next_box;
+            steps_done += 1;
+        }
+
+        if chunk_loss_steps > 0 {
+            let chunk_loss = chunk_loss_sum
+                .div_scalar(chunk_loss_steps as f32)
+                .mul_scalar(recon_loss_weight);
+            let grads = GradientsParams::from_grads(chunk_loss.backward(), trainer);
+            grads_accum.accumulate(trainer, grads);
+        }
+
+        cell_state = cell_state.detach();
+        mem_row = mem_row.detach();
+        mem_col = mem_col.detach();
+        mem_box = mem_box.detach();
+    }
+
+    let grads = grads_accum.grads();
+    let recon_loss = if recon_steps_metrics > 0 {
+        recon_loss_sum_metrics.div_scalar(recon_steps_metrics as f32)
+    } else {
+        zeros.clone()
+    };
+    if recon_steps_metrics == 0 {
+        final_logits = trainer.model.value_logits_from_cache(cell_state.clone());
+    }
+    let pred_values = final_logits
+        .argmax(2)
+        .reshape([batch_size.max(1), GRID_LEN]);
+    let (_acc_per_sample, acc, exact_acc, solve_rate) =
+        compute_grid_accuracy(&pred_values, &solutions);
+
+    let loss = recon_loss.clone().mul_scalar(recon_loss_weight);
+    let zeros = Tensor::<B, 1>::zeros([1], &device);
+    let policy_entropy_alpha = zeros.clone();
+    let policy_entropy_target = zeros.clone();
+
+    (
+        SudokuLosses {
+            loss,
+            recon_loss,
+            acc,
+            exact_acc,
+            solve_rate,
+            policy_loss: zeros.clone(),
+            halt_loss: zeros.clone(),
+            halt_prob_mean: zeros.clone(),
+            halt_target_mean: zeros.clone(),
+            advantage_abs_mean: zeros.clone(),
+            advantage_std: zeros.clone(),
+            log_prob_mean: zeros.clone(),
+            policy_entropy: zeros.clone(),
+            policy_entropy_alpha,
+            policy_entropy_target,
+            hard_reward_mean: zeros.clone(),
+            easy_reward_mean: zeros.clone(),
+            shaping_conflict_mean: zeros.clone(),
+            shaping_unknown_mean: zeros.clone(),
+            shaping_accuracy_mean: zeros.clone(),
+            shaping_incorrect_mean: zeros.clone(),
+            saccade_revisit_rate: zeros.clone(),
+            saccade_repeat_rate: zeros.clone(),
+            saccade_unknown_frac: zeros.clone(),
+            saccade_unique_frac: zeros.clone(),
+            write_gate_mean: zeros.clone(),
+            write_rate: zeros,
+        },
+        grads,
+    )
+}
+
+fn rollout_losses_valid_trm_constraint_ca<B: BackendTrait>(
+    model: &SudokuSaccadeModel<B>,
+    batch: SudokuBatch<B>,
+    training: &SudokuTrainingHyperparameters,
+) -> SudokuLosses<B> {
+    let rollout_steps = validation_rollout_steps(training).max(1);
+    let recon_interval = training.recon.loss_interval_steps;
+    let global_weight = training.recon.global_loss_weight.max(0.0);
+    let global_samples = training.recon.global_loss_samples.min(GRID_LEN);
+
+    let puzzles = batch.puzzles;
+    let solutions = batch.solutions;
+    let device = puzzles.device();
+    let [batch_size, _] = puzzles.shape().dims::<2>();
+    let ones_grid = Tensor::<B, 2>::ones([batch_size.max(1), GRID_LEN], &device);
+    let solution_one_hot = build_solution_one_hot(&solutions, batch_size, &device);
+
+    let clue_mask = puzzles.clone().greater_elem(0.0).float();
+    let loss_unknown_mask = puzzles.clone().equal_elem(0).float();
+
+    let (row_ids, col_ids) = model.grid_row_col_ids(batch_size, &device);
+    let input_emb = model.cell_embeddings_with_positions(puzzles, row_ids, col_ids);
+    let mut cell_state = model.project_input_tokens(input_emb);
+
+    let ca_heads = model.ca_heads();
+    let ca_head_dim = model.ca_head_dim();
+    let mut mem_row = Tensor::<B, 5>::zeros(
+        [batch_size.max(1), ca_heads, GRID_SIDE, ca_head_dim, ca_head_dim],
+        &device,
+    );
+    let mut mem_col = Tensor::<B, 5>::zeros(
+        [batch_size.max(1), ca_heads, GRID_SIDE, ca_head_dim, ca_head_dim],
+        &device,
+    );
+    let mut mem_box = Tensor::<B, 5>::zeros(
+        [batch_size.max(1), ca_heads, GRID_SIDE, ca_head_dim, ca_head_dim],
+        &device,
+    );
+
+    let zeros = Tensor::<B, 1>::zeros([1], &device);
+    let mut recon_loss_sum = zeros.clone();
+    let mut recon_steps = 0usize;
+    let mut steps_done = 0usize;
+    let mut final_logits = model.value_logits_from_cache(cell_state.clone());
+
+    while steps_done < rollout_steps {
+        let step_idx = steps_done + 1;
+        if recon_interval > 0 && step_idx.is_multiple_of(recon_interval) {
+            let logits = model.value_logits_from_cache(cell_state.clone());
+            final_logits = logits.clone();
+            let mut loss_mask = ones_grid.clone();
+            if matches!(training.recon.loss_mask, SudokuLossMask::Unknown) {
+                loss_mask = loss_mask.mul(loss_unknown_mask.clone());
+            }
+            loss_mask = ensure_non_empty_mask(loss_mask, ones_grid.clone());
+            let (local_loss, ..) = compute_loss_and_acc(
+                &logits,
+                &solutions,
+                &solution_one_hot,
+                &loss_mask,
+                &training.recon.loss,
+            );
+            let step_loss = local_loss;
+            recon_loss_sum = recon_loss_sum + step_loss.clone();
+            recon_steps += 1;
+
+            if global_weight > 0.0 && global_samples > 0 {
+                let sample_prob = (global_samples as f32 / GRID_LEN as f32).clamp(0.0, 1.0);
+                let random = Tensor::<B, 2>::random(
+                    [batch_size.max(1), GRID_LEN],
+                    TensorDistribution::Uniform(0.0, 1.0),
+                    &device,
+                );
+                let mut global_mask = random.lower_equal_elem(sample_prob).float();
+                if matches!(training.recon.loss_mask, SudokuLossMask::Unknown) {
+                    global_mask = global_mask.mul(loss_unknown_mask.clone());
+                }
+                global_mask = ensure_non_empty_mask(global_mask, ones_grid.clone());
+                let (global_loss, ..) = compute_loss_and_acc(
+                    &logits,
+                    &solutions,
+                    &solution_one_hot,
+                    &global_mask,
+                    &training.recon.loss,
+                );
+                recon_loss_sum = recon_loss_sum + global_loss.mul_scalar(global_weight);
+            }
+        }
+
+        let (next_state, next_row, next_col, next_box) = model.constraint_ca_step(
+            cell_state,
+            clue_mask.clone(),
+            mem_row,
+            mem_col,
+            mem_box,
+            training.rollout.trm_ca_decay,
+        );
+        cell_state = next_state;
+        mem_row = next_row;
+        mem_col = next_col;
+        mem_box = next_box;
+        steps_done += 1;
+    }
+
+    let recon_loss = if recon_steps > 0 {
+        recon_loss_sum.div_scalar(recon_steps as f32)
+    } else {
+        zeros.clone()
+    };
+    if recon_steps == 0 {
+        final_logits = model.value_logits_from_cache(cell_state.clone());
+    }
+    let pred_values = final_logits
+        .argmax(2)
+        .reshape([batch_size.max(1), GRID_LEN]);
+    let (_acc_per_sample, acc, exact_acc, solve_rate) =
+        compute_grid_accuracy(&pred_values, &solutions);
+
+    let loss = recon_loss.clone();
+    let policy_entropy_alpha = zeros.clone();
+    let policy_entropy_target = zeros.clone();
+    SudokuLosses {
+        loss,
+        recon_loss,
+        acc,
+        exact_acc,
+        solve_rate,
+        policy_loss: zeros.clone(),
+        halt_loss: zeros.clone(),
+        halt_prob_mean: zeros.clone(),
+        halt_target_mean: zeros.clone(),
+        advantage_abs_mean: zeros.clone(),
+        advantage_std: zeros.clone(),
+        log_prob_mean: zeros.clone(),
+        policy_entropy: zeros.clone(),
+        policy_entropy_alpha,
+        policy_entropy_target,
+        hard_reward_mean: zeros.clone(),
+        easy_reward_mean: zeros.clone(),
+        shaping_conflict_mean: zeros.clone(),
+        shaping_unknown_mean: zeros.clone(),
+        shaping_accuracy_mean: zeros.clone(),
+        shaping_incorrect_mean: zeros.clone(),
+        saccade_revisit_rate: zeros.clone(),
+        saccade_repeat_rate: zeros.clone(),
+        saccade_unknown_frac: zeros.clone(),
+        saccade_unique_frac: zeros.clone(),
+        write_gate_mean: zeros.clone(),
+        write_rate: zeros,
+    }
 }
 
 fn rollout_losses_valid_trm_chunk<B: BackendTrait>(
@@ -5090,10 +5863,16 @@ fn rollout_losses_valid_trm_chunk<B: BackendTrait>(
         policy_entropy_target: zeros.clone(),
         hard_reward_mean: zeros.clone(),
         easy_reward_mean: zeros.clone(),
+        shaping_conflict_mean: zeros.clone(),
+        shaping_unknown_mean: zeros.clone(),
+        shaping_accuracy_mean: zeros.clone(),
+        shaping_incorrect_mean: zeros.clone(),
         saccade_revisit_rate: zeros.clone(),
         saccade_repeat_rate: zeros.clone(),
         saccade_unknown_frac: zeros.clone(),
-        saccade_unique_frac: zeros,
+        saccade_unique_frac: zeros.clone(),
+        write_gate_mean: zeros.clone(),
+        write_rate: zeros,
     }
 }
 

@@ -252,6 +252,93 @@ impl ModuleDisplay for VisionPatchEmbedMode {}
 
 impl ModuleDisplay for VisionLatentActivation {}
 
+impl ModuleDisplayDefault for VisionTrmGraphConfig {
+    fn content(&self, content: Content) -> Option<Content> {
+        content
+            .add("enabled", &self.enabled)
+            .add("coarse_stride", &self.coarse_stride)
+            .add("hub_count", &self.hub_count)
+            .add("rank", &self.rank)
+            .add("value_dim", &self.value_dim)
+            .add("local_radius", &self.local_radius)
+            .add("local_diagonals", &self.local_diagonals)
+            .add("local_self", &self.local_self)
+            .add("decay", &self.decay)
+            .add("hub_gates", &self.hub_gates)
+            .optional()
+    }
+}
+
+impl ModuleDisplay for VisionTrmGraphConfig {}
+
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct VisionTrmGraphConfig {
+    pub enabled: bool,
+    pub coarse_stride: usize,
+    pub hub_count: usize,
+    pub rank: usize,
+    pub value_dim: usize,
+    pub local_radius: usize,
+    pub local_diagonals: bool,
+    pub local_self: bool,
+    pub decay: f32,
+    pub hub_gates: bool,
+}
+
+impl Default for VisionTrmGraphConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            coarse_stride: 4,
+            hub_count: 1,
+            rank: 4,
+            value_dim: 32,
+            local_radius: 1,
+            local_diagonals: false,
+            local_self: false,
+            decay: 0.9,
+            hub_gates: true,
+        }
+    }
+}
+
+impl<B: Backend> Module<B> for VisionTrmGraphConfig {
+    type Record = ();
+
+    fn collect_devices(&self, devices: Devices<B>) -> Devices<B> {
+        devices
+    }
+
+    fn fork(self, _device: &B::Device) -> Self {
+        self
+    }
+
+    fn to_device(self, _device: &B::Device) -> Self {
+        self
+    }
+
+    fn visit<Visitor: ModuleVisitor<B>>(&self, _visitor: &mut Visitor) {}
+
+    fn map<Mapper: ModuleMapper<B>>(self, _mapper: &mut Mapper) -> Self {
+        self
+    }
+
+    fn load_record(self, _record: Self::Record) -> Self {
+        self
+    }
+
+    fn into_record(self) -> Self::Record {}
+}
+
+impl<B: AutodiffBackend> AutodiffModule<B> for VisionTrmGraphConfig {
+    type InnerModule = VisionTrmGraphConfig;
+
+    fn valid(&self) -> Self::InnerModule {
+        self.clone()
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct VisionDragonConfig {
     pub image_size: usize,
@@ -278,6 +365,7 @@ pub struct VisionDragonConfig {
     pub use_alibi: bool,
     pub fused_kernels: FusedKernelConfig,
     pub mhc: ManifoldHyperConnectionsConfig,
+    pub trm_graph: VisionTrmGraphConfig,
 }
 
 impl Default for VisionDragonConfig {
@@ -310,6 +398,7 @@ impl Default for VisionDragonConfig {
             use_alibi: true,
             fused_kernels: FusedKernelConfig::default(),
             mhc: ManifoldHyperConnectionsConfig::default(),
+            trm_graph: VisionTrmGraphConfig::default(),
         }
     }
 }
@@ -879,6 +968,16 @@ pub struct VisionDragon<B: Backend> {
     alibi_slopes: Option<Tensor<B, 1>>,
     latent_activation: VisionLatentActivation,
     kernel: FusedKernelConfig,
+    #[module(ignore)]
+    trm_graph: VisionTrmGraphConfig,
+    trm_x: Option<Linear<B>>,
+    trm_v: Option<Linear<B>>,
+    trm_y: Option<Linear<B>>,
+    trm_enc: Option<Linear<B>>,
+    trm_norm: Option<LayerNorm<B>>,
+    trm_hub_gate: Option<Linear<B>>,
+    grid_height: usize,
+    grid_width: usize,
     patch_embed: PatchEmbed<B>,
     dropout: Dropout,
     token_norm: Option<LayerNorm<B>>,
@@ -954,6 +1053,30 @@ impl<B: Backend> VisionDragon<B> {
             device,
         );
 
+        let trm_graph = config.trm_graph.clone();
+        let (trm_x, trm_v, trm_y, trm_enc, trm_norm, trm_hub_gate) = if trm_graph.enabled {
+            let trm_x = LinearConfig::new(config.embed_dim, trm_graph.rank.max(1)).init(device);
+            let trm_v = LinearConfig::new(config.embed_dim, trm_graph.value_dim.max(1)).init(device);
+            let trm_y = LinearConfig::new(trm_graph.value_dim.max(1), trm_graph.rank.max(1)).init(device);
+            let trm_enc = LinearConfig::new(trm_graph.rank.max(1), config.embed_dim).init(device);
+            let trm_norm = LayerNormConfig::new(trm_graph.value_dim.max(1)).init(device);
+            let trm_hub_gate = if trm_graph.hub_count > 1 && trm_graph.hub_gates {
+                Some(LinearConfig::new(config.embed_dim, trm_graph.hub_count).init(device))
+            } else {
+                None
+            };
+            (
+                Some(trm_x),
+                Some(trm_v),
+                Some(trm_y),
+                Some(trm_enc),
+                Some(trm_norm),
+                trm_hub_gate,
+            )
+        } else {
+            (None, None, None, None, None, None)
+        };
+
         let (cls_token, cls_pos) = if config.use_cls_token {
             let cls_token = Tensor::<B, 2>::random(
                 [1, config.embed_dim],
@@ -1008,6 +1131,15 @@ impl<B: Backend> VisionDragon<B> {
             cls_pos,
             cls_sync_alpha: config.cls_sync_alpha,
             cross_eye_steps: config.cross_eye_steps,
+            trm_graph,
+            trm_x,
+            trm_v,
+            trm_y,
+            trm_enc,
+            trm_norm,
+            trm_hub_gate,
+            grid_height: config.pos_max_height.max(1),
+            grid_width: config.pos_max_width.max(1),
         }
     }
 
@@ -1182,6 +1314,20 @@ impl<B: Backend> VisionDragon<B> {
         detach_until: usize,
         add_cls: bool,
     ) -> Tensor<B, 3> {
+        if self.trm_graph.enabled {
+            return self.encode_tokens_steps_inner_graph(tokens, steps, detach_until, add_cls);
+        }
+
+        self.encode_tokens_steps_inner_default(tokens, steps, detach_until, add_cls)
+    }
+
+    fn encode_tokens_steps_inner_default(
+        &self,
+        tokens: Tensor<B, 3>,
+        steps: usize,
+        detach_until: usize,
+        add_cls: bool,
+    ) -> Tensor<B, 3> {
         let tokens = if add_cls && self.use_cls_token {
             self.prepend_cls(tokens)
         } else {
@@ -1228,6 +1374,176 @@ impl<B: Backend> VisionDragon<B> {
         }
 
         current.reshape([batch, time, self.embed_dim])
+    }
+
+    fn encode_tokens_steps_inner_graph(
+        &self,
+        tokens: Tensor<B, 3>,
+        steps: usize,
+        detach_until: usize,
+        add_cls: bool,
+    ) -> Tensor<B, 3> {
+        let tokens = if add_cls && self.use_cls_token {
+            self.prepend_cls(tokens)
+        } else {
+            tokens
+        };
+
+        let [batch, time, dim] = tokens.shape().dims::<3>();
+        if batch == 0 || time == 0 || dim == 0 {
+            return tokens;
+        }
+
+        let grid_height = self.grid_height.max(1);
+        let grid_width = self.grid_width.max(1);
+        let patch_count = grid_height * grid_width;
+        let (patch_tokens, has_cls) = if self.use_cls_token && time == patch_count + 1 {
+            let patch = tokens.clone().slice_dim(1, 1..time);
+            (patch, true)
+        } else {
+            (tokens.clone(), false)
+        };
+
+        let patch_len = patch_tokens.shape().dims::<3>()[1];
+        if patch_len != patch_count {
+            return self.encode_tokens_steps_inner_default(tokens, steps, detach_until, false);
+        }
+
+        let trm_x = match &self.trm_x {
+            Some(layer) => layer,
+            None => return self.encode_tokens_steps_inner_default(tokens, steps, detach_until, false),
+        };
+        let trm_v = match &self.trm_v {
+            Some(layer) => layer,
+            None => return self.encode_tokens_steps_inner_default(tokens, steps, detach_until, false),
+        };
+        let trm_y = match &self.trm_y {
+            Some(layer) => layer,
+            None => return self.encode_tokens_steps_inner_default(tokens, steps, detach_until, false),
+        };
+        let trm_enc = match &self.trm_enc {
+            Some(layer) => layer,
+            None => return self.encode_tokens_steps_inner_default(tokens, steps, detach_until, false),
+        };
+        let trm_norm = match &self.trm_norm {
+            Some(layer) => layer,
+            None => return self.encode_tokens_steps_inner_default(tokens, steps, detach_until, false),
+        };
+
+        let device = tokens.device();
+        let rank = self.trm_graph.rank.max(1);
+        let value_dim = self.trm_graph.value_dim.max(1);
+        let hub_count = self.trm_graph.hub_count.max(1);
+        let decay = self.trm_graph.decay.clamp(0.0, 1.0);
+        let coarse_stride = self.trm_graph.coarse_stride.max(1);
+
+        let mut h8 = patch_tokens
+            .reshape([batch, grid_height, grid_width, dim])
+            .swap_dims(1, 3)
+            .swap_dims(2, 3);
+        h8 = self.apply_embed_norm_spatial(h8);
+
+        let h32_height = grid_height / coarse_stride.max(1);
+        let h32_width = grid_width / coarse_stride.max(1);
+        let mut h32 = if coarse_stride > 1 {
+            let pooled = h8
+                .clone()
+                .reshape([
+                    batch,
+                    dim,
+                    h32_height.max(1),
+                    coarse_stride,
+                    h32_width.max(1),
+                    coarse_stride,
+                ])
+                .sum_dims_squeeze::<4, usize>(&[3, 5])
+                .div_scalar((coarse_stride * coarse_stride) as f32);
+            self.apply_embed_norm_spatial(pooled)
+        } else {
+            h8.clone()
+        };
+
+        let mut mem8 =
+            Tensor::<B, 5>::zeros([batch, rank, value_dim, grid_height, grid_width], &device);
+        let mut mem32 = Tensor::<B, 5>::zeros(
+            [
+                batch,
+                rank,
+                value_dim,
+                h32_height.max(1),
+                h32_width.max(1),
+            ],
+            &device,
+        );
+        let mut mem_hub =
+            Tensor::<B, 4>::zeros([batch, hub_count, rank, value_dim], &device);
+
+        for step_idx in 0..steps {
+            let x8 = activation::relu(self.project_spatial(h8.clone(), trm_x));
+            let v8 = self.project_spatial(h8.clone(), trm_v);
+            let x32 = activation::relu(self.project_spatial(h32.clone(), trm_x));
+            let v32 = self.project_spatial(h32.clone(), trm_v);
+
+            let msg8_local = self.trm_local_read(mem8.clone(), x8.clone());
+            let msg32_local = self.trm_local_read(mem32.clone(), x32.clone());
+            let msg8_down = if coarse_stride > 1 {
+                self.trm_cross_scale_read(mem32.clone(), x8.clone(), coarse_stride)
+            } else {
+                self.trm_contract(mem32.clone(), x8.clone())
+            };
+
+            let (hub_w8, hub_w32) = self.trm_hub_weights(h8.clone(), h32.clone(), hub_count);
+            let msg8_hub = self.trm_hub_read(mem_hub.clone(), x8.clone(), hub_w8.clone());
+            let msg32_hub = self.trm_hub_read(mem_hub.clone(), x32.clone(), hub_w32.clone());
+
+            let msg8 = msg8_local + msg8_down + msg8_hub;
+            let msg32 = msg32_local + msg32_hub;
+
+            h8 = self.trm_update_state(h8, x8.clone(), msg8, trm_y, trm_enc, trm_norm);
+            h32 = self.trm_update_state(h32, x32.clone(), msg32, trm_y, trm_enc, trm_norm);
+
+            let u8 = self.trm_outer_product(x8, v8);
+            let u32 = self.trm_outer_product(x32, v32);
+            let u8_pool = if coarse_stride > 1 {
+                self.trm_pool_outer(u8.clone(), coarse_stride)
+            } else {
+                u8.clone()
+            };
+            mem8 = mem8.mul_scalar(decay).add(u8.clone());
+            mem32 = mem32.mul_scalar(decay).add(u32.clone()).add(u8_pool);
+
+            mem_hub = self.trm_update_hub(
+                mem_hub,
+                u8.clone(),
+                u32,
+                hub_w8,
+                hub_w32,
+                hub_count,
+                decay,
+            );
+
+            if step_idx < detach_until {
+                h8 = h8.detach();
+                h32 = h32.detach();
+                mem8 = mem8.detach();
+                mem32 = mem32.detach();
+                mem_hub = mem_hub.detach();
+            }
+        }
+
+        let patch_tokens = h8
+            .swap_dims(1, 3)
+            .swap_dims(1, 2)
+            .reshape([batch, patch_count, dim]);
+        if has_cls {
+            let cls = patch_tokens
+                .clone()
+                .mean_dim(1)
+                .reshape([batch, 1, dim]);
+            Tensor::cat(vec![cls, patch_tokens], 1)
+        } else {
+            patch_tokens
+        }
     }
 
     fn encode_tokens_steps_inner_multi(
@@ -1322,6 +1638,306 @@ impl<B: Backend> VisionDragon<B> {
         }
 
         current.reshape([batch, streams, time, self.embed_dim])
+    }
+
+    fn apply_embed_norm_spatial(&self, input: Tensor<B, 4>) -> Tensor<B, 4> {
+        match &self.token_norm {
+            Some(norm) => {
+                let [batch, dim, height, width] = input.shape().dims::<4>();
+                if batch == 0 || dim == 0 || height == 0 || width == 0 {
+                    return input;
+                }
+                let flat = input.swap_dims(1, 3).swap_dims(1, 2);
+                let flat = norm.forward(flat);
+                flat.swap_dims(1, 2).swap_dims(1, 3)
+            }
+            None => input,
+        }
+    }
+
+    fn apply_value_norm_spatial(&self, norm: &LayerNorm<B>, input: Tensor<B, 4>) -> Tensor<B, 4> {
+        let [batch, dim, height, width] = input.shape().dims::<4>();
+        if batch == 0 || dim == 0 || height == 0 || width == 0 {
+            return input;
+        }
+        let flat = input.swap_dims(1, 3).swap_dims(1, 2);
+        let flat = norm.forward(flat);
+        flat.swap_dims(1, 2).swap_dims(1, 3)
+    }
+
+    fn project_spatial(&self, input: Tensor<B, 4>, layer: &Linear<B>) -> Tensor<B, 4> {
+        let [batch, dim, height, width] = input.shape().dims::<4>();
+        if batch == 0 || dim == 0 || height == 0 || width == 0 {
+            return input;
+        }
+        let flat = input
+            .swap_dims(1, 3)
+            .swap_dims(1, 2)
+            .reshape([batch * height * width, dim]);
+        let flat = layer.forward(flat);
+        let out_dim = flat.shape().dims::<2>()[1];
+        flat.reshape([batch, height, width, out_dim])
+            .swap_dims(1, 3)
+            .swap_dims(2, 3)
+    }
+
+    fn trm_shift(input: Tensor<B, 4>, dy: isize, dx: isize) -> Tensor<B, 4> {
+        let [batch, channels, height, width] = input.shape().dims::<4>();
+        if height == 0 || width == 0 {
+            return input;
+        }
+        let device = input.device();
+        let mut out = input;
+
+        if dy != 0 {
+            let shift = dy.unsigned_abs();
+            if shift >= height {
+                out = Tensor::<B, 4>::zeros([batch, channels, height, width], &device);
+            } else if dy > 0 {
+                let pad = Tensor::<B, 4>::zeros([batch, channels, shift, width], &device);
+                let cropped = out.slice_dim(2, 0..(height - shift));
+                out = Tensor::cat(vec![pad, cropped], 2);
+            } else {
+                let pad = Tensor::<B, 4>::zeros([batch, channels, shift, width], &device);
+                let cropped = out.slice_dim(2, shift..height);
+                out = Tensor::cat(vec![cropped, pad], 2);
+            }
+        }
+
+        if dx != 0 {
+            let shift = dx.unsigned_abs();
+            if shift >= width {
+                out = Tensor::<B, 4>::zeros([batch, channels, height, width], &device);
+            } else if dx > 0 {
+                let pad = Tensor::<B, 4>::zeros([batch, channels, height, shift], &device);
+                let cropped = out.slice_dim(3, 0..(width - shift));
+                out = Tensor::cat(vec![pad, cropped], 3);
+            } else {
+                let pad = Tensor::<B, 4>::zeros([batch, channels, height, shift], &device);
+                let cropped = out.slice_dim(3, shift..width);
+                out = Tensor::cat(vec![cropped, pad], 3);
+            }
+        }
+
+        out
+    }
+
+    fn trm_contract(&self, memory: Tensor<B, 5>, query: Tensor<B, 4>) -> Tensor<B, 4> {
+        let [batch, rank, value_dim, height, width] = memory.shape().dims::<5>();
+        if batch == 0 || rank == 0 || value_dim == 0 || height == 0 || width == 0 {
+            return Tensor::<B, 4>::zeros([batch.max(1), value_dim.max(1), height.max(1), width.max(1)], &memory.device());
+        }
+        let query = query.unsqueeze_dim::<5>(2);
+        memory.mul(query).sum_dims_squeeze::<4, usize>(&[1])
+    }
+
+    fn trm_local_read(&self, memory: Tensor<B, 5>, query: Tensor<B, 4>) -> Tensor<B, 4> {
+        let [batch, _, value_dim, height, width] = memory.shape().dims::<5>();
+        if batch == 0 || value_dim == 0 || height == 0 || width == 0 {
+            return Tensor::<B, 4>::zeros([batch.max(1), value_dim.max(1), height.max(1), width.max(1)], &memory.device());
+        }
+        let mut acc = Tensor::<B, 4>::zeros([batch, value_dim, height, width], &memory.device());
+        let radius = self.trm_graph.local_radius.max(1) as isize;
+        let allow_diagonals = self.trm_graph.local_diagonals;
+        if self.trm_graph.local_self {
+            acc = acc + self.trm_contract(memory.clone(), query.clone());
+        }
+        for dy in -radius..=radius {
+            for dx in -radius..=radius {
+                if dy == 0 && dx == 0 {
+                    continue;
+                }
+                if !allow_diagonals && dy != 0 && dx != 0 {
+                    continue;
+                }
+                let shifted = Self::trm_shift(query.clone(), dy, dx);
+                let msg = self.trm_contract(memory.clone(), shifted);
+                let msg = Self::trm_shift(msg, -dy, -dx);
+                acc = acc + msg;
+            }
+        }
+        acc
+    }
+
+    fn trm_cross_scale_read(
+        &self,
+        memory: Tensor<B, 5>,
+        query: Tensor<B, 4>,
+        scale: usize,
+    ) -> Tensor<B, 4> {
+        let scale = scale.max(1);
+        if scale == 1 {
+            return self.trm_contract(memory, query);
+        }
+        let mut up = memory.repeat_dim(3, scale).repeat_dim(4, scale);
+        let [_, _, height, width] = query.shape().dims::<4>();
+        let [_, _, _, up_h, up_w] = up.shape().dims::<5>();
+        if up_h != height {
+            up = up.slice_dim(3, 0..height.min(up_h));
+        }
+        if up_w != width {
+            up = up.slice_dim(4, 0..width.min(up_w));
+        }
+        self.trm_contract(up, query)
+    }
+
+    fn trm_outer_product(&self, x: Tensor<B, 4>, v: Tensor<B, 4>) -> Tensor<B, 5> {
+        let x = x.unsqueeze_dim::<5>(2);
+        let v = v.unsqueeze_dim::<5>(1);
+        x.mul(v)
+    }
+
+    fn trm_pool_outer(&self, u: Tensor<B, 5>, scale: usize) -> Tensor<B, 5> {
+        let scale = scale.max(1);
+        if scale == 1 {
+            return u;
+        }
+        let [batch, rank, value_dim, height, width] = u.shape().dims::<5>();
+        let pooled_height = height / scale;
+        let pooled_width = width / scale;
+        if pooled_height == 0 || pooled_width == 0 {
+            return Tensor::<B, 5>::zeros(
+                [batch, rank, value_dim, pooled_height.max(1), pooled_width.max(1)],
+                &u.device(),
+            );
+        }
+        u.reshape([
+            batch,
+            rank,
+            value_dim,
+            pooled_height,
+            scale,
+            pooled_width,
+            scale,
+        ])
+        .sum_dims_squeeze::<5, usize>(&[4, 6])
+    }
+
+    fn trm_update_state(
+        &self,
+        state: Tensor<B, 4>,
+        x: Tensor<B, 4>,
+        msg: Tensor<B, 4>,
+        trm_y: &Linear<B>,
+        trm_enc: &Linear<B>,
+        trm_norm: &LayerNorm<B>,
+    ) -> Tensor<B, 4> {
+        let msg = self.apply_value_norm_spatial(trm_norm, msg);
+        let y = activation::relu(self.project_spatial(msg, trm_y));
+        let u = y.mul(x);
+        let delta = self.project_spatial(u, trm_enc);
+        let next = state + delta;
+        self.apply_embed_norm_spatial(next)
+    }
+
+    fn trm_hub_weights(
+        &self,
+        h8: Tensor<B, 4>,
+        h32: Tensor<B, 4>,
+        hub_count: usize,
+    ) -> (Option<Tensor<B, 4>>, Option<Tensor<B, 4>>) {
+        if hub_count <= 1 {
+            return (None, None);
+        }
+        let hub_gate = self.trm_hub_gate.as_ref();
+        let w8 = self.trm_hub_weights_single(h8, hub_count, hub_gate);
+        let w32 = self.trm_hub_weights_single(h32, hub_count, hub_gate);
+        (Some(w8), Some(w32))
+    }
+
+    fn trm_hub_weights_single(
+        &self,
+        h: Tensor<B, 4>,
+        hub_count: usize,
+        hub_gate: Option<&Linear<B>>,
+    ) -> Tensor<B, 4> {
+        let [batch, _, height, width] = h.shape().dims::<4>();
+        let device = h.device();
+        if let Some(gate) = hub_gate {
+            let weights = self.project_spatial(h, gate);
+            let weights = activation::relu(weights);
+            let denom = weights
+                .clone()
+                .sum_dim(1)
+                .add_scalar(ROW_NORM_EPS);
+            weights / denom
+        } else {
+            Tensor::<B, 4>::ones([batch, hub_count, height, width], &device)
+                .div_scalar(hub_count as f32)
+        }
+    }
+
+    fn trm_hub_read(
+        &self,
+        hub: Tensor<B, 4>,
+        query: Tensor<B, 4>,
+        weights: Option<Tensor<B, 4>>,
+    ) -> Tensor<B, 4> {
+        let [batch, hubs, rank, value_dim] = hub.shape().dims::<4>();
+        let [_, _, height, width] = query.shape().dims::<4>();
+        if batch == 0 || hubs == 0 || rank == 0 || value_dim == 0 || height == 0 || width == 0 {
+            return Tensor::<B, 4>::zeros(
+                [batch.max(1), value_dim.max(1), height.max(1), width.max(1)],
+                &hub.device(),
+            );
+        }
+        let hub_exp = hub.unsqueeze_dim::<5>(4).unsqueeze_dim::<6>(5);
+        let query_exp = query.unsqueeze_dim::<5>(1).unsqueeze_dim::<6>(3);
+        let msg = hub_exp.mul(query_exp).sum_dims_squeeze::<5, usize>(&[2]);
+        match weights {
+            Some(w) => {
+                let w = w.unsqueeze_dim::<5>(2);
+                msg.mul(w).sum_dims_squeeze::<4, usize>(&[1])
+            }
+            None => {
+                let mut reduced = msg.sum_dims_squeeze::<4, usize>(&[1]);
+                if hubs > 1 {
+                    reduced = reduced.div_scalar(hubs as f32);
+                }
+                reduced
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn trm_update_hub(
+        &self,
+        hub: Tensor<B, 4>,
+        u8: Tensor<B, 5>,
+        u32: Tensor<B, 5>,
+        hub_w8: Option<Tensor<B, 4>>,
+        hub_w32: Option<Tensor<B, 4>>,
+        hub_count: usize,
+        decay: f32,
+    ) -> Tensor<B, 4> {
+        if hub_count <= 1 {
+            let sum8 = u8.sum_dims_squeeze::<3, usize>(&[3, 4]);
+            let sum32 = u32.sum_dims_squeeze::<3, usize>(&[3, 4]);
+            let delta = (sum8 + sum32).unsqueeze_dim::<4>(1);
+            return hub.mul_scalar(decay).add(delta);
+        }
+
+        let w8 = hub_w8.unwrap_or_else(|| {
+            let [batch, _, _, height, width] = u8.shape().dims::<5>();
+            Tensor::<B, 4>::ones([batch, hub_count, height, width], &u8.device())
+                .div_scalar(hub_count as f32)
+        });
+        let w32 = hub_w32.unwrap_or_else(|| {
+            let [batch, _, _, height, width] = u32.shape().dims::<5>();
+            Tensor::<B, 4>::ones([batch, hub_count, height, width], &u32.device())
+                .div_scalar(hub_count as f32)
+        });
+
+        let delta8 = self.trm_weighted_global_sum(u8, w8);
+        let delta32 = self.trm_weighted_global_sum(u32, w32);
+        let delta = delta8 + delta32;
+        hub.mul_scalar(decay).add(delta)
+    }
+
+    fn trm_weighted_global_sum(&self, u: Tensor<B, 5>, w: Tensor<B, 4>) -> Tensor<B, 4> {
+        let u = u.unsqueeze_dim::<6>(1);
+        let w = w.unsqueeze_dim::<5>(2).unsqueeze_dim::<6>(3);
+        u.mul(w).sum_dims_squeeze::<4, usize>(&[4, 5])
     }
 
     fn apply_token_norm<const D: usize>(&self, tokens: Tensor<B, D>) -> Tensor<B, D> {

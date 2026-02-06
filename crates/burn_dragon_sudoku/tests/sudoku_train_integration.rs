@@ -660,8 +660,8 @@ fn cuda_sudoku_training_trm_tiny_smoke() {
     config.training.log_frequency = 1;
     config.artifacts.max_samples = 0;
 
-    assert_eq!(config.training.rollout.steps, 1296);
-    assert_eq!(config.training.rollout.backprop_steps, Some(81));
+    assert_eq!(config.training.rollout.steps, 64);
+    assert_eq!(config.training.rollout.backprop_steps, Some(32));
 
     loss_trace_reset();
     solve_rate_trace_reset();

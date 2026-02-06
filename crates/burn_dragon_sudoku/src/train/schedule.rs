@@ -6,6 +6,8 @@ use crate::train::metrics::{
     SudokuPolicyLossInput, SudokuReconLossInput, SudokuSolveRateInput,
     SudokuSaccadeRevisitRateInput, SudokuSaccadeRepeatRateInput,
     SudokuSaccadeUnknownFracInput, SudokuSaccadeUniqueFracInput,
+    SudokuShapingAccuracyInput, SudokuShapingConflictInput, SudokuShapingIncorrectInput,
+    SudokuShapingUnknownInput, SudokuWriteGateMeanInput, SudokuWriteRateInput,
 };
 use crate::train::prelude::*;
 use crate::train::steps::SudokuTrainer;
@@ -138,7 +140,23 @@ where
         .metric_valid_numeric(ScalarMetric::<
             ValidBackend<B>,
             SudokuSaccadeUniqueFracInput<ValidBackend<B>>,
-        >::new_every("sudoku_saccade_unique_frac", metric_every));
+        >::new_every("sudoku_saccade_unique_frac", metric_every))
+        .metric_train_numeric(ScalarMetric::<
+            ValidBackend<B>,
+            SudokuWriteGateMeanInput<ValidBackend<B>>,
+        >::new_every("sudoku_write_gate_mean", metric_every))
+        .metric_valid_numeric(ScalarMetric::<
+            ValidBackend<B>,
+            SudokuWriteGateMeanInput<ValidBackend<B>>,
+        >::new_every("sudoku_write_gate_mean", metric_every))
+        .metric_train_numeric(ScalarMetric::<
+            ValidBackend<B>,
+            SudokuWriteRateInput<ValidBackend<B>>,
+        >::new_every("sudoku_write_rate", metric_every))
+        .metric_valid_numeric(ScalarMetric::<
+            ValidBackend<B>,
+            SudokuWriteRateInput<ValidBackend<B>>,
+        >::new_every("sudoku_write_rate", metric_every));
 
     if gdpo_active {
         builder = builder
@@ -166,6 +184,23 @@ where
                 ValidBackend<B>,
                 SudokuEasyRewardInput<ValidBackend<B>>,
             >::new_every("sudoku_easy_reward", metric_every));
+        builder = builder
+            .metric_train_numeric(ScalarMetric::<
+                ValidBackend<B>,
+                SudokuShapingConflictInput<ValidBackend<B>>,
+            >::new_every("sudoku_shaping_conflict", metric_every))
+            .metric_train_numeric(ScalarMetric::<
+                ValidBackend<B>,
+                SudokuShapingUnknownInput<ValidBackend<B>>,
+            >::new_every("sudoku_shaping_unknown", metric_every))
+            .metric_train_numeric(ScalarMetric::<
+                ValidBackend<B>,
+                SudokuShapingAccuracyInput<ValidBackend<B>>,
+            >::new_every("sudoku_shaping_accuracy", metric_every))
+            .metric_train_numeric(ScalarMetric::<
+                ValidBackend<B>,
+                SudokuShapingIncorrectInput<ValidBackend<B>>,
+            >::new_every("sudoku_shaping_incorrect", metric_every));
     }
 
     if halt_active {

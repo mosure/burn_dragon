@@ -9,9 +9,9 @@ use anyhow::{Result, anyhow};
 use clap::Parser;
 
 #[cfg(feature = "cli")]
-use burn_dragon_sudoku::config::load_training_config;
+use burn_dragon_vision::config::load_vision_training_config;
 #[cfg(feature = "cli")]
-use burn_dragon_sudoku::train::train_backend;
+use burn_dragon_vision::train::train_vision_backend;
 
 #[cfg(feature = "cli")]
 use burn_autodiff::Autodiff;
@@ -21,7 +21,7 @@ use burn_ndarray::NdArray;
 use burn_wgpu::Wgpu;
 
 #[cfg(feature = "cli")]
-use burn_dragon_train::wgpu::{init_runtime, WgpuDevice};
+use burn_dragon_train::wgpu::init_runtime;
 
 #[cfg(all(feature = "cuda", feature = "cli"))]
 use burn_cuda::Cuda;
@@ -45,7 +45,7 @@ fn main() -> Result<()> {
         .unwrap_or(64);
     let stack_bytes = stack_mb.max(8) * 1024 * 1024;
     let handle = std::thread::Builder::new()
-        .name("bdh-train".to_string())
+        .name("vision-train".to_string())
         .stack_size(stack_bytes)
         .spawn(move || run(args))
         .map_err(|err| anyhow!("failed to spawn training thread: {err}"))?;
@@ -57,21 +57,28 @@ fn main() -> Result<()> {
 
 #[cfg(feature = "cli")]
 fn run(args: Args) -> Result<()> {
-    let config = load_training_config(&args.config)?;
+    let config = load_vision_training_config(&args.config)?;
 
     match args.backend.as_str() {
         "cpu" | "ndarray" => {
-            train_backend::<Autodiff<NdArray<f32>>, _>(&config, "cpu", |_| {})?;
+            train_vision_backend::<Autodiff<NdArray<f32>>, _>(&config, "cpu", |_| {})?;
         }
         "wgpu" => {
-            let device = WgpuDevice::default();
-            init_runtime(&device, &config.wgpu);
-            train_backend::<Autodiff<Wgpu<f32>>, _>(&config, "wgpu", |_| {})?;
+            train_vision_backend::<Autodiff<Wgpu<f32>>, _>(&config, "wgpu", |device| {
+                init_runtime(device, &config.wgpu)
+            })?;
+        }
+        "wgpu-nofusion" => {
+            use burn_wgpu::{CubeBackend, WgpuRuntime};
+            type WgpuNoFusion = CubeBackend<WgpuRuntime, f32, i32, u32>;
+            train_vision_backend::<Autodiff<WgpuNoFusion>, _>(&config, "wgpu-nofusion", |device| {
+                init_runtime(device, &config.wgpu)
+            })?;
         }
         "cuda" => {
             #[cfg(feature = "cuda")]
             {
-                train_backend::<Autodiff<Cuda<f32>>, _>(&config, "cuda", |_| {})?;
+                train_vision_backend::<Autodiff<Cuda<f32>>, _>(&config, "cuda", |_| {})?;
             }
             #[cfg(not(feature = "cuda"))]
             {
@@ -80,7 +87,7 @@ fn run(args: Args) -> Result<()> {
         }
         other => {
             return Err(anyhow!(
-                "unknown backend `{other}` (expected cpu, wgpu, or cuda)"
+                "unknown backend `{other}` (expected cpu, wgpu, wgpu-nofusion, or cuda)"
             ));
         }
     }
@@ -90,5 +97,5 @@ fn run(args: Args) -> Result<()> {
 
 #[cfg(not(feature = "cli"))]
 fn main() {
-    eprintln!("burn_dragon_sudoku train binary requires the `cli` feature.");
+    eprintln!("burn_dragon_vision train binary requires the `cli` feature.");
 }

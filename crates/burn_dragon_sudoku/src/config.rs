@@ -157,6 +157,14 @@ pub enum SudokuPolicyHead {
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
+pub enum SudokuWriteGateMode {
+    #[default]
+    StraightThrough,
+    Bernoulli,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
 pub enum SudokuGridPositional {
     #[default]
     Additive,
@@ -243,6 +251,7 @@ pub enum SudokuTrmMode {
     Recurrent,
     #[default]
     Chunk,
+    ConstraintCa,
 }
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct SudokuRolloutConfig {
@@ -263,6 +272,8 @@ pub struct SudokuRolloutConfig {
     pub trm_mode: SudokuTrmMode,
     #[serde(default = "default_trm_chunk_size")]
     pub trm_chunk_size: usize,
+    #[serde(default = "default_trm_ca_decay")]
+    pub trm_ca_decay: f32,
     #[serde(default)]
     pub pre_steps_min: usize,
     #[serde(default)]
@@ -294,6 +305,7 @@ impl Default for SudokuRolloutConfig {
             traversal: SudokuTraversal::default(),
             trm_mode: SudokuTrmMode::default(),
             trm_chunk_size: default_trm_chunk_size(),
+            trm_ca_decay: default_trm_ca_decay(),
             pre_steps_min: 0,
             pre_steps_max: 0,
             saccade_step_cells: default_saccade_step_cells(),
@@ -367,6 +379,12 @@ pub struct SudokuPolicyConfig {
     #[serde(default = "default_policy_recon_weight")]
     pub recon_weight: f32,
     #[serde(default)]
+    pub write_gate_mode: SudokuWriteGateMode,
+    #[serde(default)]
+    pub write_gate_warmup_steps: usize,
+    #[serde(default)]
+    pub write_gate_warmup_floor: f32,
+    #[serde(default)]
     pub cache_update_clues: bool,
 }
 
@@ -394,6 +412,9 @@ impl Default for SudokuPolicyConfig {
             visit_penalty: default_policy_visit_penalty(),
             revisit_penalty: 0.0,
             recon_weight: default_policy_recon_weight(),
+            write_gate_mode: SudokuWriteGateMode::default(),
+            write_gate_warmup_steps: 0,
+            write_gate_warmup_floor: 0.0,
             cache_update_clues: false,
         }
     }
@@ -485,6 +506,8 @@ pub struct SudokuRewardShapingConfig {
     pub unknown_weight: f32,
     #[serde(default = "default_reward_shaping_accuracy_weight")]
     pub accuracy_weight: f32,
+    #[serde(default = "default_reward_shaping_incorrect_penalty")]
+    pub incorrect_penalty: f32,
 }
 
 impl Default for SudokuRewardShapingConfig {
@@ -496,6 +519,7 @@ impl Default for SudokuRewardShapingConfig {
             gamma: default_reward_shaping_gamma(),
             unknown_weight: default_reward_shaping_unknown_weight(),
             accuracy_weight: default_reward_shaping_accuracy_weight(),
+            incorrect_penalty: default_reward_shaping_incorrect_penalty(),
         }
     }
 }
@@ -1089,6 +1113,28 @@ impl SudokuTrainingConfig {
                 ));
             }
         }
+        if matches!(self.training.rollout.traversal, SudokuTraversal::L2rT2b)
+            && matches!(self.training.rollout.trm_mode, SudokuTrmMode::ConstraintCa)
+        {
+            if !(0.0..=1.0).contains(&self.training.rollout.trm_ca_decay) {
+                return Err(anyhow!(
+                    "training.rollout.trm_ca_decay must be in [0, 1] (got {})",
+                    self.training.rollout.trm_ca_decay
+                ));
+            }
+            if self.model.n_head == 0 {
+                return Err(anyhow!(
+                    "model.n_head must be > 0 for trm_mode=constraint_ca"
+                ));
+            }
+            if !self.model.n_embd.is_multiple_of(self.model.n_head) {
+                return Err(anyhow!(
+                    "model.n_embd ({}) must be divisible by model.n_head ({}) for trm_mode=constraint_ca",
+                    self.model.n_embd,
+                    self.model.n_head
+                ));
+            }
+        }
         if let Some(schedule) = &self.training.rollout.schedule
             && (schedule.start_steps == 0 || schedule.final_steps == 0)
         {
@@ -1250,6 +1296,12 @@ impl SudokuTrainingConfig {
                 return Err(anyhow!(
                     "training.reward.shaping.accuracy_weight must be >= 0 (got {})",
                     self.training.reward.shaping.accuracy_weight
+                ));
+            }
+            if self.training.reward.shaping.incorrect_penalty < 0.0 {
+                return Err(anyhow!(
+                    "training.reward.shaping.incorrect_penalty must be >= 0 (got {})",
+                    self.training.reward.shaping.incorrect_penalty
                 ));
             }
         }
@@ -1747,6 +1799,10 @@ fn default_reward_shaping_accuracy_weight() -> f32 {
     0.0
 }
 
+fn default_reward_shaping_incorrect_penalty() -> f32 {
+    0.0
+}
+
 fn default_reward_baseline_gamma() -> f32 {
     0.99
 }
@@ -1773,6 +1829,10 @@ fn default_saccade_step_cells() -> usize {
 
 fn default_trm_chunk_size() -> usize {
     81
+}
+
+fn default_trm_ca_decay() -> f32 {
+    0.9
 }
 
 fn default_summary_tokens() -> usize {

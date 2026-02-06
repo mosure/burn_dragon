@@ -1,11 +1,11 @@
-# Tiny JEPA training config (Imagenette auto-download).
+# tiny TRM training config (graph-structured BDH residual stream)
 
 [dataset]
 imagenet_root = "data/imagenette2-160"
 train_dir = "train"
 val_dir = "val"
-prefetch_batches = 2
-prefetch_workers = 4
+prefetch_batches = 8
+prefetch_workers = 6
 prefetch_to_device = true
 cache_decoded = true
 cache_capacity = 512
@@ -16,31 +16,12 @@ type = "imagenette"
 variant = "imagenette2-160"
 
 [training]
-batch_size = 32
-max_iters = 5000
-log_frequency = 20
-batch_repeats = 1
-# run GPU memory cleanup every N epochs (0 disables)
-memory_cleanup_every = 0
-# run GPU memory cleanup every N iterations (0 disables)
-memory_cleanup_iters = 0
-# check device memory usage every N iterations (0 uses log_frequency)
-device_memory_check_every = 0
-# cap device memory usage in MiB (0 disables)
-max_device_memory_mb = 92160
-# disable CUDA allocator cleanup even if memory_cleanup_* is set
-disable_cuda_memory_cleanup = false
-# repeat chunk size for batch_repeats (0 uses auto)
-train_repeat_chunk = 0
-# capture per-iteration loss samples (integration tests only)
-trace_train_loss = false
-trace_train_loss_every = 1
-# optional ffmpeg path for mp4/avi encoding
-# ffmpeg_path = "C:/path/to/ffmpeg"
-rollout_min_steps = 1
-rollout_max_steps = 4
-# backprop through the last N rollout steps (0 = all steps)
-rollout_backprop_steps = 1
+batch_size = 64
+max_iters = 20000
+log_frequency = 200
+rollout_min_steps = 2
+rollout_max_steps = 6
+rollout_backprop_steps = 6
 
 [optimizer]
 learning_rate = 0.0005
@@ -50,38 +31,47 @@ grad_clip_norm = 1.0
 [optimizer.lr_schedule]
 type = "constant"
 
-[wgpu]
-backend = "auto"
-memory = "subslices"
-
 [vision]
-image_size = 160
-patch_size = 16
+image_size = 224
+patch_size = 8
 in_channels = 3
-embed_dim = 128
-steps = 4
+embed_dim = 256
+steps = 6
 n_head = 4
 mlp_internal_dim_multiplier = 4
 dropout = 0.1
-projection_dim = 128
-projection_hidden_dim = 256
+projection_dim = 384
+projection_hidden_dim = 512
 use_cls_token = true
 pos_encoding = "learned2d"
 attention_mode = "row_l1"
 fused_kernels = false
 relu_threshold = 0.0
 
+[vision.trm_graph]
+enabled = true
+coarse_stride = 2
+hub_count = 8
+rank = 8
+value_dim = 64
+local_radius = 1
+local_diagonals = true
+local_self = true
+decay = 0.9
+hub_gates = true
+
 [mode]
 type = "lejepa"
 # total number of views when global_views/local_views are 0
-views = 8
+views = 4
 # enable multi-crop when > 0 (global views use base augmentations)
 global_views = 2
 # local views use local_* crop settings below
-local_views = 6
+local_views = 2
 local_image_size = 96
 local_min_scale = 0.05
 local_max_scale = 0.3
+# enforce some overlap between global views when possible
 min_view_overlap = 0.2
 view_overlap_attempts = 8
 # write artifact images every N validation iterations (0 disables)
@@ -95,7 +85,7 @@ artifact_max_images = 4
 # max views per image (caps number of crops shown)
 artifact_max_views = 3
 # overwrite validation artifacts instead of keeping history
-artifact_overwrite = true
+artifact_overwrite = false
 
 [mode.loss.lejepa]
 enabled = true
@@ -107,27 +97,29 @@ sigreg_proj_dim = 256
 [mode.loss.recon]
 weight = 1.0
 # fraction of patches to mask for the MAE-style reconstruction loss
-mask_ratio = 0.75
+mask_ratio = 0.6
+loss_on_all_patches = false
+recon_head_norm = true
 hidden_dim = 256
 
 [augment]
-image_size = 160
-resize_short = 160
+image_size = 224
+resize_short = 256
 min_scale = 0.08
 max_scale = 1.0
 min_aspect_ratio = 0.75
 max_aspect_ratio = 1.3333334
 flip_prob = 0.5
-color_jitter_prob = 0.8
+color_jitter_prob = 1.0
 brightness = 0.4
 contrast = 0.4
-saturation = 0.2
+saturation = 0.0
 hue = 0.1
-grayscale_prob = 0.2
-blur_prob = 0.5
+grayscale_prob = 0.0
+blur_prob = 0.0
 blur_sigma_min = 0.1
 blur_sigma_max = 2.0
-solarize_prob = 0.2
+solarize_prob = 0.0
 solarize_threshold = 128
 normalize_mean = [0.485, 0.456, 0.406]
 normalize_std = [0.229, 0.224, 0.225]

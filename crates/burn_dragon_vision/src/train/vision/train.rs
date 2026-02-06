@@ -1,6 +1,6 @@
 use crate::train::prelude::*;
 
-pub(crate) fn train_vision_backend<B, Init>(
+pub fn train_vision_backend<B, Init>(
     config: &VisionTrainingConfig,
     backend_name: &str,
     init_backend: Init,
@@ -423,8 +423,8 @@ where
                 teacher: None,
                 views: global_views,
                 local_views,
-                min_view_overlap: 0.0,
-                view_overlap_attempts: 1,
+                min_view_overlap: lejepa.min_view_overlap,
+                view_overlap_attempts: lejepa.view_overlap_attempts,
                 cache_decoded: config.dataset.cache_decoded,
                 cache_capacity: config.dataset.cache_capacity,
                 cache_preprocessed: config.dataset.cache_preprocessed,
@@ -439,8 +439,8 @@ where
                 teacher: None,
                 views: global_views,
                 local_views,
-                min_view_overlap: 0.0,
-                view_overlap_attempts: 1,
+                min_view_overlap: lejepa.min_view_overlap,
+                view_overlap_attempts: lejepa.view_overlap_attempts,
                 cache_decoded: config.dataset.cache_decoded,
                 cache_capacity: config.dataset.cache_capacity,
                 cache_preprocessed: config.dataset.cache_preprocessed,
@@ -803,6 +803,9 @@ where
                 train_dataset.num_classes(),
                 rollout,
                 recon_patch_dim,
+                config.augment.normalize_std,
+                vision_config.patch_size,
+                vision_config.in_channels,
                 &device,
             ));
             let mut optim =
@@ -881,6 +884,9 @@ where
                 vision_config.embed_dim,
                 rollout,
                 recon_patch_dim,
+                config.augment.normalize_std,
+                vision_config.patch_size,
+                vision_config.in_channels,
                 &device,
             ));
             let mut optim =

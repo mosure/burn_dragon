@@ -18,15 +18,16 @@ max_iters = 10000
 log_frequency = 1
 
 [training.rollout]
-steps = 162
-min_steps = 162
-max_steps = 162
+steps = 64
+min_steps = 64
+max_steps = 64
 max_steps_warmup_iters = 0
 max_steps_warmup_cap = 0
-backprop_steps = 81
+backprop_steps = 32
 traversal = "l2r_t2b"
-trm_mode = "chunk"
+trm_mode = "constraint_ca"
 trm_chunk_size = 81
+trm_ca_decay = 0.9
 saccade_step_cells = 1
 pre_steps_min = 0
 pre_steps_max = 1296
@@ -34,7 +35,7 @@ pre_steps_max = 1296
 [training.halt]
 weight = 0.0
 exploration_prob = 0.0
-min_steps = 81
+min_steps = 2
 
 [training.policy]
 noise = 0.0
@@ -90,12 +91,12 @@ value_loss_weight = 0.75
 [training.recon]
 loss = "stablemax"
 loss_mask = "all"
-loss_interval_steps = 81
+loss_interval_steps = 1
 global_loss_samples = 81
 global_loss_weight = 1.0
 
 [training.validation]
-rollout_steps = 1296
+rollout_steps = 64
 sample_policy = false
 
 [training.gdpo]

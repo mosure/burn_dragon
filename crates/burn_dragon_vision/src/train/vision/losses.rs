@@ -240,11 +240,269 @@ pub(crate) fn normalize_artifact_legend(
     Some(legend)
 }
 
+const PCA_HEATMAP_ITERS: usize = 8;
+const PCA_HEATMAP_EPS: f32 = 1e-6;
+
+fn normalize_vec(vec: &mut [f32]) -> f32 {
+    let mut sum = 0.0f32;
+    for value in vec.iter() {
+        sum += value * value;
+    }
+    let norm = sum.sqrt();
+    if norm > 0.0 {
+        let inv = 1.0 / norm;
+        for value in vec.iter_mut() {
+            *value *= inv;
+        }
+    }
+    norm
+}
+
+fn pca_patch_heatmap<B: BackendTrait>(
+    patch: &Tensor<B, 3>,
+    image_count: usize,
+) -> Option<Tensor<B, 3>> {
+    let [batch, tokens, dim] = patch.shape().dims::<3>();
+    if batch == 0 || tokens == 0 || dim == 0 {
+        return None;
+    }
+    let grid = (tokens as f64).sqrt().round() as usize;
+    if grid * grid != tokens {
+        return None;
+    }
+    let images = image_count.min(batch);
+    if images == 0 {
+        return None;
+    }
+    let data = patch
+        .to_data()
+        .convert::<f32>()
+        .into_vec::<f32>()
+        .ok()?;
+
+    let mut out = vec![0.0f32; images * tokens];
+    let mut mean = vec![0.0f32; dim];
+    let mut cov = vec![0.0f32; dim * dim];
+    let mut vec = vec![0.0f32; dim];
+    let mut work = vec![0.0f32; dim];
+    let stride = tokens * dim;
+    let inv_tokens = 1.0 / tokens as f32;
+
+    for image_idx in 0..images {
+        mean.fill(0.0);
+        cov.fill(0.0);
+
+        let base = image_idx * stride;
+        for token_idx in 0..tokens {
+            let offset = base + token_idx * dim;
+            for d in 0..dim {
+                mean[d] += data[offset + d];
+            }
+        }
+        for d in 0..dim {
+            mean[d] *= inv_tokens;
+        }
+
+        for token_idx in 0..tokens {
+            let offset = base + token_idx * dim;
+            for i in 0..dim {
+                let xi = data[offset + i] - mean[i];
+                let row = i * dim;
+                for j in 0..dim {
+                    cov[row + j] += xi * (data[offset + j] - mean[j]);
+                }
+            }
+        }
+        for value in cov.iter_mut() {
+            *value *= inv_tokens;
+        }
+
+        vec.fill(0.0);
+        for d in 0..dim {
+            vec[d] = data[base + d] - mean[d];
+        }
+        if normalize_vec(&mut vec) < PCA_HEATMAP_EPS {
+            vec.fill(0.0);
+            vec[0] = 1.0;
+        }
+
+        for _ in 0..PCA_HEATMAP_ITERS {
+            for i in 0..dim {
+                let row = i * dim;
+                let mut sum = 0.0f32;
+                for j in 0..dim {
+                    sum += cov[row + j] * vec[j];
+                }
+                work[i] = sum;
+            }
+            if normalize_vec(&mut work) < PCA_HEATMAP_EPS {
+                break;
+            }
+            std::mem::swap(&mut vec, &mut work);
+        }
+
+        for token_idx in 0..tokens {
+            let offset = base + token_idx * dim;
+            let mut score = 0.0f32;
+            for d in 0..dim {
+                score += (data[offset + d] - mean[d]) * vec[d];
+            }
+            out[image_idx * tokens + token_idx] = score;
+        }
+    }
+
+    let device = patch.device();
+    Some(Tensor::<B, 3>::from_data(
+        TensorData::new(out, [images, grid, grid]),
+        &device,
+    ))
+}
+
+fn pca_patch_rgb<B: BackendTrait>(
+    patch: &Tensor<B, 3>,
+    image_count: usize,
+) -> Option<Tensor<B, 4>> {
+    let [batch, tokens, dim] = patch.shape().dims::<3>();
+    if batch == 0 || tokens == 0 || dim == 0 {
+        return None;
+    }
+    let grid = (tokens as f64).sqrt().round() as usize;
+    if grid * grid != tokens {
+        return None;
+    }
+    let images = image_count.min(batch);
+    if images == 0 {
+        return None;
+    }
+    let data = patch
+        .to_data()
+        .convert::<f32>()
+        .into_vec::<f32>()
+        .ok()?;
+
+    let mut out = vec![0.0f32; images * 3 * tokens];
+    let mut mean = vec![0.0f32; dim];
+    let mut cov = vec![0.0f32; dim * dim];
+    let mut vec = vec![0.0f32; dim];
+    let mut work = vec![0.0f32; dim];
+    let mut vecs = vec![0.0f32; 3 * dim];
+    let stride = tokens * dim;
+    let inv_tokens = 1.0 / tokens as f32;
+
+    for image_idx in 0..images {
+        mean.fill(0.0);
+        cov.fill(0.0);
+
+        let base = image_idx * stride;
+        for token_idx in 0..tokens {
+            let offset = base + token_idx * dim;
+            for d in 0..dim {
+                mean[d] += data[offset + d];
+            }
+        }
+        for d in 0..dim {
+            mean[d] *= inv_tokens;
+        }
+
+        for token_idx in 0..tokens {
+            let offset = base + token_idx * dim;
+            for i in 0..dim {
+                let xi = data[offset + i] - mean[i];
+                let row = i * dim;
+                for j in 0..dim {
+                    cov[row + j] += xi * (data[offset + j] - mean[j]);
+                }
+            }
+        }
+        for value in cov.iter_mut() {
+            *value *= inv_tokens;
+        }
+
+        for comp in 0..3 {
+            vec.fill(0.0);
+            for d in 0..dim {
+                vec[d] = data[base + d] - mean[d];
+            }
+            if normalize_vec(&mut vec) < PCA_HEATMAP_EPS {
+                vec.fill(0.0);
+                vec[comp.min(dim.saturating_sub(1))] = 1.0;
+            }
+
+            for _ in 0..PCA_HEATMAP_ITERS {
+                for i in 0..dim {
+                    let row = i * dim;
+                    let mut sum = 0.0f32;
+                    for j in 0..dim {
+                        sum += cov[row + j] * vec[j];
+                    }
+                    work[i] = sum;
+                }
+                if normalize_vec(&mut work) < PCA_HEATMAP_EPS {
+                    break;
+                }
+                std::mem::swap(&mut vec, &mut work);
+            }
+
+            let comp_offset = comp * dim;
+            vecs[comp_offset..comp_offset + dim].copy_from_slice(&vec);
+
+            let mut lambda = 0.0f32;
+            for i in 0..dim {
+                let row = i * dim;
+                let mut sum = 0.0f32;
+                for j in 0..dim {
+                    sum += cov[row + j] * vec[j];
+                }
+                lambda += vec[i] * sum;
+            }
+            for i in 0..dim {
+                let row = i * dim;
+                for j in 0..dim {
+                    cov[row + j] -= lambda * vec[i] * vec[j];
+                }
+            }
+        }
+
+        for comp in 0..3 {
+            let comp_offset = comp * dim;
+            let mut min_val = f32::INFINITY;
+            let mut max_val = f32::NEG_INFINITY;
+            for token_idx in 0..tokens {
+                let offset = base + token_idx * dim;
+                let mut score = 0.0f32;
+                for d in 0..dim {
+                    score += (data[offset + d] - mean[d]) * vecs[comp_offset + d];
+                }
+                min_val = min_val.min(score);
+                max_val = max_val.max(score);
+            }
+            let denom = (max_val - min_val).max(PCA_HEATMAP_EPS);
+            for token_idx in 0..tokens {
+                let offset = base + token_idx * dim;
+                let mut score = 0.0f32;
+                for d in 0..dim {
+                    score += (data[offset + d] - mean[d]) * vecs[comp_offset + d];
+                }
+                let value = (score - min_val) / denom;
+                out[((image_idx * 3 + comp) * tokens) + token_idx] =
+                    value.clamp(0.0, 1.0);
+            }
+        }
+    }
+
+    let device = patch.device();
+    Some(Tensor::<B, 4>::from_data(
+        TensorData::new(out, [images, 3, grid, grid]),
+        &device,
+    ))
+}
+
 pub(crate) fn build_lejepa_artifacts<B: BackendTrait>(
     config: &VisionLejepaConfig,
     views: &[Tensor<B, 4>],
     frames: Option<Tensor<B, 5>>,
     first_patch: Option<Tensor<B, 3>>,
+    pca_source: Option<Tensor<B, 3>>,
     probe_logits: Option<Tensor<B, 2>>,
     labels: Option<Tensor<B, 1, Int>>,
     legend: Option<Vec<String>>,
@@ -260,7 +518,6 @@ pub(crate) fn build_lejepa_artifacts<B: BackendTrait>(
         return None;
     }
     let view_count = max_views.min(views.len()).max(1);
-    let legend = normalize_artifact_legend(legend, view_count);
     let mut stacked = Vec::with_capacity(view_count);
     for view in views.iter().take(view_count) {
         let view = view.clone().slice_dim(0, 0..image_count);
@@ -269,6 +526,10 @@ pub(crate) fn build_lejepa_artifacts<B: BackendTrait>(
     let views_tensor = Tensor::cat(stacked, 1);
 
     let patch_norms = first_patch.and_then(|patch| {
+        let pca = pca_patch_heatmap(&patch, image_count);
+        if pca.is_some() {
+            return pca;
+        }
         let [batch, tokens, _] = patch.shape().dims::<3>();
         if batch == 0 || tokens == 0 {
             return None;
@@ -282,6 +543,18 @@ pub(crate) fn build_lejepa_artifacts<B: BackendTrait>(
         Some(norms.slice_dim(0, 0..image_count))
     });
 
+    let pca_rgb = pca_source.and_then(|patch| pca_patch_rgb(&patch, image_count));
+
+    let mut legend = normalize_artifact_legend(legend, view_count);
+    if let Some(ref mut legend) = legend {
+        if patch_norms.is_some() {
+            legend.push("heatmap".to_string());
+        }
+        if pca_rgb.is_some() {
+            legend.push("pca_rgb".to_string());
+        }
+    }
+
     let probe_logits = probe_logits.map(|logits| logits.slice_dim(0, 0..image_count));
     let labels = labels.map(|labels| labels.slice_dim(0, 0..image_count));
     let frames = frames.map(|frames| frames.slice_dim(0, 0..image_count));
@@ -290,6 +563,7 @@ pub(crate) fn build_lejepa_artifacts<B: BackendTrait>(
         views: Some(views_tensor),
         frames,
         patch_norms,
+        pca_rgb,
         probe_logits,
         labels,
         legend,

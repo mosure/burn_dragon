@@ -48,17 +48,20 @@ teacher_forcing_anneal_steps = 0
 temperature = 1.0
 temperature_final = 1.0
 temperature_anneal_steps = 0
-entropy_weight = 0.0
-entropy_weight_final = 0.0
-entropy_anneal_steps = 0
+entropy_weight = 0.01
+entropy_weight_final = 0.001
+entropy_anneal_steps = 10000
 entropy_adaptive = false
 entropy_target_scale = 0.7
 entropy_target_ema_decay = 0.99
 entropy_alpha = 0.005
 entropy_alpha_lr = 0.001
-visit_penalty = 0.0
-revisit_penalty = 0.0
-recon_weight = 0.0
+visit_penalty = 0.01
+revisit_penalty = 0.05
+recon_weight = 0.5
+write_gate_mode = "bernoulli"
+write_gate_warmup_steps = 2000
+write_gate_warmup_floor = 0.2
 cache_update_clues = true
 
 [training.revisit]
@@ -82,7 +85,8 @@ metric = "conflict"
 weight = 0.1
 gamma = 0.99
 unknown_weight = 0.2
-accuracy_weight = 0.0
+accuracy_weight = 0.2
+incorrect_penalty = 0.2
 
 [training.reward.baseline]
 enabled = true

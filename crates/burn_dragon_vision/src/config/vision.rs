@@ -11,7 +11,7 @@ use toml::Value;
 use burn_dragon_core::FusedKernelConfig;
 use crate::{
     SpatialPositionalEncodingKind, VisionAttentionMode, VisionLatentActivation,
-    VisionPatchEmbedMode, VisionDragonConfig,
+    VisionPatchEmbedMode, VisionDragonConfig, VisionTrmGraphConfig,
 };
 use crate::loss::VisionDistillationLossConfig;
 use burn_dragon_train::{
@@ -383,6 +383,7 @@ impl VisionTrainingConfig {
         }
 
         validate_vision_mhc(&self.vision)?;
+        validate_vision_trm_graph(&self.vision)?;
         validate_vision_rollout(&self.training, self.vision.steps)?;
         validate_vision_mode(&self.mode, &self.vision)?;
 
@@ -530,6 +531,9 @@ pub struct VisionReconLossConfig {
     /// When true, compute reconstruction loss on all patches (not only masked ones).
     #[serde(alias = "full_loss")]
     pub loss_on_all_patches: bool,
+    /// When true, force full-patch reconstruction loss during validation only.
+    #[serde(alias = "full_loss_valid_only")]
+    pub loss_on_all_patches_valid_only: bool,
     /// Enable LayerNorm before the reconstruction head.
     #[serde(alias = "norm")]
     pub recon_head_norm: bool,
@@ -543,8 +547,19 @@ impl Default for VisionReconLossConfig {
             weight: 0.0,
             mask_ratio: 0.75,
             loss_on_all_patches: false,
+            loss_on_all_patches_valid_only: false,
             recon_head_norm: true,
             hidden_dim: 256,
+        }
+    }
+}
+
+impl VisionReconLossConfig {
+    pub(crate) fn loss_on_all_patches_for(&self, is_validation: bool) -> bool {
+        if is_validation && self.loss_on_all_patches_valid_only {
+            true
+        } else {
+            self.loss_on_all_patches
         }
     }
 }
@@ -555,6 +570,10 @@ impl ModuleDisplayDefault for VisionReconLossConfig {
             .add("weight", &self.weight)
             .add("mask_ratio", &self.mask_ratio)
             .add("loss_on_all_patches", &self.loss_on_all_patches)
+            .add(
+                "loss_on_all_patches_valid_only",
+                &self.loss_on_all_patches_valid_only,
+            )
             .add("recon_head_norm", &self.recon_head_norm)
             .add("hidden_dim", &self.hidden_dim)
             .optional()
@@ -690,6 +709,8 @@ pub struct VisionLejepaConfig {
     pub local_image_size: usize,
     pub local_min_scale: f32,
     pub local_max_scale: f32,
+    pub min_view_overlap: f32,
+    pub view_overlap_attempts: usize,
     pub artifact_output: VisionArtifactOutputMode,
     pub artifact_fps: u32,
     pub artifact_every: usize,
@@ -708,6 +729,8 @@ impl Default for VisionLejepaConfig {
             local_image_size: 96,
             local_min_scale: 0.05,
             local_max_scale: 0.3,
+            min_view_overlap: 0.0,
+            view_overlap_attempts: 1,
             artifact_output: VisionArtifactOutputMode::Mp4,
             artifact_fps: 4,
             artifact_every: 0,
@@ -764,6 +787,8 @@ impl ModuleDisplayDefault for VisionLejepaConfig {
             .add("local_image_size", &self.local_image_size)
             .add("local_min_scale", &self.local_min_scale)
             .add("local_max_scale", &self.local_max_scale)
+            .add("min_view_overlap", &self.min_view_overlap)
+            .add("view_overlap_attempts", &self.view_overlap_attempts)
             .add("artifact_output", &self.artifact_output)
             .add("artifact_fps", &self.artifact_fps)
             .add("artifact_every", &self.artifact_every)
@@ -1409,6 +1434,7 @@ pub struct VisionModelConfig {
     pub fused_kernels: bool,
     pub relu_threshold: f32,
     pub mhc: VisionManifoldHyperConnectionsConfig,
+    pub trm_graph: VisionTrmGraphConfig,
 }
 
 impl Default for VisionModelConfig {
@@ -1442,6 +1468,7 @@ impl Default for VisionModelConfig {
             fused_kernels: false,
             relu_threshold: 0.0,
             mhc: VisionManifoldHyperConnectionsConfig::default(),
+            trm_graph: VisionTrmGraphConfig::default(),
         }
     }
 }
@@ -1504,6 +1531,7 @@ impl VisionModelConfig {
                 add_branch_out_to_residual: self.mhc.add_branch_out_to_residual,
                 dropout: self.mhc.dropout,
             },
+            trm_graph: self.trm_graph.clone(),
         }
     }
 }
@@ -1646,6 +1674,52 @@ fn validate_vision_mhc(vision: &VisionModelConfig) -> Result<()> {
     Ok(())
 }
 
+fn validate_vision_trm_graph(vision: &VisionModelConfig) -> Result<()> {
+    if !vision.trm_graph.enabled {
+        return Ok(());
+    }
+    if vision.trm_graph.rank == 0 {
+        return Err(anyhow!("vision.trm_graph.rank must be > 0"));
+    }
+    if vision.trm_graph.value_dim == 0 {
+        return Err(anyhow!("vision.trm_graph.value_dim must be > 0"));
+    }
+    if vision.trm_graph.local_radius == 0 {
+        return Err(anyhow!("vision.trm_graph.local_radius must be > 0"));
+    }
+    if vision.trm_graph.hub_count == 0 {
+        return Err(anyhow!("vision.trm_graph.hub_count must be > 0"));
+    }
+    if vision.trm_graph.coarse_stride == 0 {
+        return Err(anyhow!("vision.trm_graph.coarse_stride must be > 0"));
+    }
+    if !(0.0..=1.0).contains(&vision.trm_graph.decay) {
+        return Err(anyhow!(
+            "vision.trm_graph.decay must be in [0, 1] (got {})",
+            vision.trm_graph.decay
+        ));
+    }
+    let patch_size = vision.patch_size.max(1);
+    let grid = vision.image_size.div_ceil(patch_size);
+    let grid_h = vision.pos_max_height.unwrap_or(grid);
+    let grid_w = vision.pos_max_width.unwrap_or(grid);
+    if !grid_h.is_multiple_of(vision.trm_graph.coarse_stride) {
+        return Err(anyhow!(
+            "vision.trm_graph.coarse_stride ({}) must divide grid height ({})",
+            vision.trm_graph.coarse_stride,
+            grid_h
+        ));
+    }
+    if !grid_w.is_multiple_of(vision.trm_graph.coarse_stride) {
+        return Err(anyhow!(
+            "vision.trm_graph.coarse_stride ({}) must divide grid width ({})",
+            vision.trm_graph.coarse_stride,
+            grid_w
+        ));
+    }
+    Ok(())
+}
+
 fn validate_vision_mode(mode: &VisionTrainingModeConfig, vision: &VisionModelConfig) -> Result<()> {
     match mode {
         VisionTrainingModeConfig::Distill(distill) => {
@@ -1700,6 +1774,15 @@ fn validate_vision_mode(mode: &VisionTrainingModeConfig, vision: &VisionModelCon
                     lejepa.local_min_scale,
                     lejepa.local_max_scale
                 ));
+            }
+            if !(0.0..=1.0).contains(&lejepa.min_view_overlap) {
+                return Err(anyhow!(
+                    "mode.min_view_overlap must be in [0, 1] (got {})",
+                    lejepa.min_view_overlap
+                ));
+            }
+            if lejepa.view_overlap_attempts == 0 {
+                return Err(anyhow!("mode.view_overlap_attempts must be > 0"));
             }
             validate_lejepa_loss(&lejepa.loss.lejepa)?;
             validate_recon_loss("mode.loss.recon", &lejepa.loss.recon)?;
@@ -2001,9 +2084,63 @@ fn validate_distill_loss(loss: &VisionDistillationLossConfig) -> Result<()> {
 fn load_value(path: &Path) -> Result<Value> {
     let content = fs::read_to_string(path)
         .with_context(|| format!("failed to read configuration file {}", path.display()))?;
+    let ext = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if ext == "yml" || ext == "yaml" {
+        let value: serde_yaml::Value = serde_yaml::from_str(&content)
+            .with_context(|| format!("failed to parse {} as YAML", path.display()))?;
+        return yaml_to_toml(value)
+            .with_context(|| format!("failed to convert {} from YAML", path.display()));
+    }
     let table: toml::value::Table = toml::from_str(&content)
         .with_context(|| format!("failed to parse {} as TOML", path.display()))?;
     Ok(Value::Table(table))
+}
+
+fn yaml_to_toml(value: serde_yaml::Value) -> Result<Value> {
+    match value {
+        serde_yaml::Value::Null => Err(anyhow!("null values are not supported in config")),
+        serde_yaml::Value::Bool(value) => Ok(Value::Boolean(value)),
+        serde_yaml::Value::Number(value) => {
+            if let Some(value) = value.as_i64() {
+                Ok(Value::Integer(value))
+            } else if let Some(value) = value.as_u64() {
+                Ok(Value::Integer(value as i64))
+            } else if let Some(value) = value.as_f64() {
+                Ok(Value::Float(value))
+            } else {
+                Err(anyhow!("unsupported YAML number"))
+            }
+        }
+        serde_yaml::Value::String(value) => Ok(Value::String(value)),
+        serde_yaml::Value::Sequence(values) => {
+            let mut out = Vec::with_capacity(values.len());
+            for value in values {
+                out.push(yaml_to_toml(value)?);
+            }
+            Ok(Value::Array(out))
+        }
+        serde_yaml::Value::Mapping(values) => {
+            let mut table = toml::value::Table::new();
+            for (key, value) in values {
+                let key = match key {
+                    serde_yaml::Value::String(value) => value,
+                    serde_yaml::Value::Number(value) => value.to_string(),
+                    serde_yaml::Value::Bool(value) => value.to_string(),
+                    serde_yaml::Value::Null => "null".to_string(),
+                    other => format!("{other:?}"),
+                };
+                table.insert(key, yaml_to_toml(value)?);
+            }
+            Ok(Value::Table(table))
+        }
+        serde_yaml::Value::Tagged(tagged) => {
+            Err(anyhow!("tagged YAML values are not supported: {:?}", tagged.tag))
+        }
+    }
 }
 
 fn merge_values(base: &mut Value, overlay: Value) {
@@ -2149,6 +2286,8 @@ mod tests {
             local_image_size = 96
             local_min_scale = 0.05
             local_max_scale = 0.3
+            min_view_overlap = 0.2
+            view_overlap_attempts = 7
             artifact_output = "avi"
             artifact_fps = 6
             artifact_every = 5
@@ -2189,6 +2328,8 @@ mod tests {
                 assert_eq!(lejepa.local_image_size, 96);
                 assert!((lejepa.local_min_scale - 0.05).abs() < f32::EPSILON);
                 assert!((lejepa.local_max_scale - 0.3).abs() < f32::EPSILON);
+                assert!((lejepa.min_view_overlap - 0.2).abs() < f32::EPSILON);
+                assert_eq!(lejepa.view_overlap_attempts, 7);
                 assert_eq!(lejepa.artifact_output, VisionArtifactOutputMode::Avi);
                 assert_eq!(lejepa.artifact_fps, 6);
                 assert_eq!(lejepa.artifact_every, 5);

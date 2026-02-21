@@ -258,7 +258,7 @@ fn normalize_vec(vec: &mut [f32]) -> f32 {
     norm
 }
 
-fn pca_patch_heatmap<B: BackendTrait>(
+pub(crate) fn pca_patch_heatmap<B: BackendTrait>(
     patch: &Tensor<B, 3>,
     image_count: usize,
 ) -> Option<Tensor<B, 3>> {
@@ -274,11 +274,7 @@ fn pca_patch_heatmap<B: BackendTrait>(
     if images == 0 {
         return None;
     }
-    let data = patch
-        .to_data()
-        .convert::<f32>()
-        .into_vec::<f32>()
-        .ok()?;
+    let data = patch.to_data().convert::<f32>().into_vec::<f32>().ok()?;
 
     let mut out = vec![0.0f32; images * tokens];
     let mut mean = vec![0.0f32; dim];
@@ -358,7 +354,7 @@ fn pca_patch_heatmap<B: BackendTrait>(
     ))
 }
 
-fn pca_patch_rgb<B: BackendTrait>(
+pub(crate) fn pca_patch_rgb<B: BackendTrait>(
     patch: &Tensor<B, 3>,
     image_count: usize,
 ) -> Option<Tensor<B, 4>> {
@@ -374,11 +370,7 @@ fn pca_patch_rgb<B: BackendTrait>(
     if images == 0 {
         return None;
     }
-    let data = patch
-        .to_data()
-        .convert::<f32>()
-        .into_vec::<f32>()
-        .ok()?;
+    let data = patch.to_data().convert::<f32>().into_vec::<f32>().ok()?;
 
     let mut out = vec![0.0f32; images * 3 * tokens];
     let mut mean = vec![0.0f32; dim];
@@ -484,8 +476,7 @@ fn pca_patch_rgb<B: BackendTrait>(
                     score += (data[offset + d] - mean[d]) * vecs[comp_offset + d];
                 }
                 let value = (score - min_val) / denom;
-                out[((image_idx * 3 + comp) * tokens) + token_idx] =
-                    value.clamp(0.0, 1.0);
+                out[((image_idx * 3 + comp) * tokens) + token_idx] = value.clamp(0.0, 1.0);
             }
         }
     }
@@ -497,12 +488,35 @@ fn pca_patch_rgb<B: BackendTrait>(
     ))
 }
 
+pub(crate) fn patch_heatmap_or_norm<B: BackendTrait>(
+    patch: Tensor<B, 3>,
+    image_count: usize,
+) -> Option<Tensor<B, 3>> {
+    let pca = pca_patch_heatmap(&patch, image_count);
+    if pca.is_some() {
+        return pca;
+    }
+    let [batch, tokens, _] = patch.shape().dims::<3>();
+    if batch == 0 || tokens == 0 {
+        return None;
+    }
+    let grid = (tokens as f64).sqrt().round() as usize;
+    if grid * grid != tokens {
+        return None;
+    }
+    let norms = patch.powf_scalar(2.0).sum_dim(2).sqrt();
+    let norms = norms.reshape([batch, grid, grid]);
+    Some(norms.slice_dim(0, 0..image_count))
+}
+
 pub(crate) fn build_lejepa_artifacts<B: BackendTrait>(
     config: &VisionLejepaConfig,
     views: &[Tensor<B, 4>],
     frames: Option<Tensor<B, 5>>,
     first_patch: Option<Tensor<B, 3>>,
     pca_source: Option<Tensor<B, 3>>,
+    patch_norms_steps: Option<Tensor<B, 4>>,
+    pca_rgb_steps: Option<Tensor<B, 5>>,
     probe_logits: Option<Tensor<B, 2>>,
     labels: Option<Tensor<B, 1, Int>>,
     legend: Option<Vec<String>>,
@@ -525,23 +539,7 @@ pub(crate) fn build_lejepa_artifacts<B: BackendTrait>(
     }
     let views_tensor = Tensor::cat(stacked, 1);
 
-    let patch_norms = first_patch.and_then(|patch| {
-        let pca = pca_patch_heatmap(&patch, image_count);
-        if pca.is_some() {
-            return pca;
-        }
-        let [batch, tokens, _] = patch.shape().dims::<3>();
-        if batch == 0 || tokens == 0 {
-            return None;
-        }
-        let grid = (tokens as f64).sqrt().round() as usize;
-        if grid * grid != tokens {
-            return None;
-        }
-        let norms = patch.powf_scalar(2.0).sum_dim(2).sqrt();
-        let norms = norms.reshape([batch, grid, grid]);
-        Some(norms.slice_dim(0, 0..image_count))
-    });
+    let patch_norms = first_patch.and_then(|patch| patch_heatmap_or_norm(patch, image_count));
 
     let pca_rgb = pca_source.and_then(|patch| pca_patch_rgb(&patch, image_count));
 
@@ -558,12 +556,16 @@ pub(crate) fn build_lejepa_artifacts<B: BackendTrait>(
     let probe_logits = probe_logits.map(|logits| logits.slice_dim(0, 0..image_count));
     let labels = labels.map(|labels| labels.slice_dim(0, 0..image_count));
     let frames = frames.map(|frames| frames.slice_dim(0, 0..image_count));
+    let patch_norms_steps = patch_norms_steps.map(|maps| maps.slice_dim(0, 0..image_count));
+    let pca_rgb_steps = pca_rgb_steps.map(|maps| maps.slice_dim(0, 0..image_count));
 
     Some(VisionArtifactInput {
         views: Some(views_tensor),
         frames,
         patch_norms,
         pca_rgb,
+        patch_norms_steps,
+        pca_rgb_steps,
         probe_logits,
         labels,
         legend,

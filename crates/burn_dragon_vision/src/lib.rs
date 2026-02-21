@@ -24,7 +24,8 @@ pub use model::{
     ImageNetDatasetConfig, ImageNetSplit, PatchEmbed, PatchEmbedOutput, PatchGrid,
     SpatialPositionalEncodingKind, VisionAttentionMode, VisionDragon, VisionDragonConfig,
     VisionDragonMultiOutput, VisionDragonOutput, VisionLatentActivation, VisionPatchEmbedMode,
-    VisionNormalize, VisionTrmGraphConfig, patchify, pool_patch_tokens, unpatchify,
+    VisionNormalize, VisionTrmGraphConfig, VisionTrmGridMismatchPolicy, patchify,
+    pool_patch_tokens, unpatchify,
 };
 
 #[cfg(feature = "train")]

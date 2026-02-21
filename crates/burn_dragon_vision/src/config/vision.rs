@@ -12,6 +12,7 @@ use burn_dragon_core::FusedKernelConfig;
 use crate::{
     SpatialPositionalEncodingKind, VisionAttentionMode, VisionLatentActivation,
     VisionPatchEmbedMode, VisionDragonConfig, VisionTrmGraphConfig,
+    VisionTrmGridMismatchPolicy,
 };
 use crate::loss::VisionDistillationLossConfig;
 use burn_dragon_train::{
@@ -716,6 +717,12 @@ pub struct VisionLejepaConfig {
     pub artifact_every: usize,
     pub artifact_max_images: usize,
     pub artifact_max_views: usize,
+    /// Optional eval-only rollout depth for artifact generation.
+    /// `0` uses the normal validation rollout depth.
+    pub artifact_rollout_steps: usize,
+    /// Optional cap on artifact trajectory frame count.
+    /// `0` keeps all rollout frames.
+    pub artifact_rollout_frames: usize,
     pub artifact_overwrite: bool,
 }
 
@@ -736,6 +743,8 @@ impl Default for VisionLejepaConfig {
             artifact_every: 0,
             artifact_max_images: 4,
             artifact_max_views: 3,
+            artifact_rollout_steps: 0,
+            artifact_rollout_frames: 0,
             artifact_overwrite: true,
         }
     }
@@ -794,6 +803,8 @@ impl ModuleDisplayDefault for VisionLejepaConfig {
             .add("artifact_every", &self.artifact_every)
             .add("artifact_max_images", &self.artifact_max_images)
             .add("artifact_max_views", &self.artifact_max_views)
+            .add("artifact_rollout_steps", &self.artifact_rollout_steps)
+            .add("artifact_rollout_frames", &self.artifact_rollout_frames)
             .add("artifact_overwrite", &self.artifact_overwrite)
             .optional()
     }
@@ -813,6 +824,12 @@ pub struct VisionMaeConfig {
     pub artifact_every: usize,
     pub artifact_max_images: usize,
     pub artifact_max_views: usize,
+    /// Optional eval-only rollout depth for artifact generation.
+    /// `0` uses the normal validation rollout depth.
+    pub artifact_rollout_steps: usize,
+    /// Optional cap on artifact trajectory frame count.
+    /// `0` keeps all rollout frames.
+    pub artifact_rollout_frames: usize,
     pub artifact_overwrite: bool,
 }
 
@@ -827,6 +844,8 @@ impl Default for VisionMaeConfig {
             artifact_every: 0,
             artifact_max_images: 4,
             artifact_max_views: 3,
+            artifact_rollout_steps: 0,
+            artifact_rollout_frames: 0,
             artifact_overwrite: true,
         }
     }
@@ -879,6 +898,8 @@ impl ModuleDisplayDefault for VisionMaeConfig {
             .add("artifact_every", &self.artifact_every)
             .add("artifact_max_images", &self.artifact_max_images)
             .add("artifact_max_views", &self.artifact_max_views)
+            .add("artifact_rollout_steps", &self.artifact_rollout_steps)
+            .add("artifact_rollout_frames", &self.artifact_rollout_frames)
             .add("artifact_overwrite", &self.artifact_overwrite)
             .optional()
     }
@@ -1784,6 +1805,21 @@ fn validate_vision_mode(mode: &VisionTrainingModeConfig, vision: &VisionModelCon
             if lejepa.view_overlap_attempts == 0 {
                 return Err(anyhow!("mode.view_overlap_attempts must be > 0"));
             }
+            if vision.trm_graph.enabled
+                && vision.trm_graph.grid_mismatch_policy == VisionTrmGridMismatchPolicy::Error
+                && lejepa.local_views > 0
+            {
+                let patch = vision.patch_size.max(1);
+                let global_grid = vision.image_size.div_ceil(patch);
+                let grid_h = vision.pos_max_height.unwrap_or(global_grid);
+                let grid_w = vision.pos_max_width.unwrap_or(global_grid);
+                let local_grid = lejepa.local_image_size.div_ceil(patch);
+                if local_grid != grid_h || local_grid != grid_w {
+                    return Err(anyhow!(
+                        "TRM graph strict mode requires local view grid ({local_grid}x{local_grid}) to match vision grid ({grid_h}x{grid_w}); adjust mode.local_image_size / vision.patch_size / vision.pos_max_*, set mode.local_views=0, or set vision.trm_graph.grid_mismatch_policy = \"fallback_default\""
+                    ));
+                }
+            }
             validate_lejepa_loss(&lejepa.loss.lejepa)?;
             validate_recon_loss("mode.loss.recon", &lejepa.loss.recon)?;
         }
@@ -2293,6 +2329,8 @@ mod tests {
             artifact_every = 5
             artifact_max_images = 3
             artifact_max_views = 2
+            artifact_rollout_steps = 9
+            artifact_rollout_frames = 5
             artifact_overwrite = true
 
             [mode.loss.lejepa]
@@ -2335,6 +2373,8 @@ mod tests {
                 assert_eq!(lejepa.artifact_every, 5);
                 assert_eq!(lejepa.artifact_max_images, 3);
                 assert_eq!(lejepa.artifact_max_views, 2);
+                assert_eq!(lejepa.artifact_rollout_steps, 9);
+                assert_eq!(lejepa.artifact_rollout_frames, 5);
                 assert!(lejepa.artifact_overwrite);
             }
             other => panic!("unexpected mode: {other:?}"),
@@ -2383,6 +2423,8 @@ mod tests {
             artifact_every = 3
             artifact_max_images = 2
             artifact_max_views = 1
+            artifact_rollout_steps = 7
+            artifact_rollout_frames = 4
             artifact_overwrite = true
 
             [mode.loss.recon]
@@ -2403,6 +2445,8 @@ mod tests {
                 assert_eq!(mae.artifact_every, 3);
                 assert_eq!(mae.artifact_max_images, 2);
                 assert_eq!(mae.artifact_max_views, 1);
+                assert_eq!(mae.artifact_rollout_steps, 7);
+                assert_eq!(mae.artifact_rollout_frames, 4);
                 assert!(mae.artifact_overwrite);
             }
             other => panic!("unexpected mode: {other:?}"),
@@ -2503,6 +2547,160 @@ mod tests {
             }
             other => panic!("unexpected mode: {other:?}"),
         }
+    }
+
+    #[test]
+    fn trm_strict_rejects_local_grid_mismatch() {
+        let text = r#"
+            [dataset]
+            imagenet_root = "data/imagenet1k"
+            train_dir = "train"
+            val_dir = "val"
+
+            [training]
+            batch_size = 8
+            max_iters = 10
+            log_frequency = 2
+
+            [optimizer]
+            learning_rate = 0.001
+            weight_decay = 0.1
+
+            [vision]
+            image_size = 224
+            patch_size = 14
+            in_channels = 3
+            embed_dim = 256
+            steps = 4
+            n_head = 4
+            mlp_internal_dim_multiplier = 4
+            dropout = 0.1
+            projection_dim = 384
+            projection_hidden_dim = 512
+            use_cls_token = true
+            pos_encoding = "learned2d"
+            attention_mode = "row_l1"
+            fused_kernels = false
+            relu_threshold = 0.0
+
+            [vision.trm_graph]
+            enabled = true
+            coarse_stride = 1
+            rank = 4
+            value_dim = 32
+            local_radius = 1
+            hub_count = 1
+            local_diagonals = false
+            local_self = false
+            decay = 0.9
+            hub_gates = true
+            grid_mismatch_policy = "error"
+
+            [mode]
+            type = "lejepa"
+            views = 4
+            global_views = 2
+            local_views = 2
+            local_image_size = 96
+            local_min_scale = 0.05
+            local_max_scale = 0.3
+            min_view_overlap = 0.2
+            view_overlap_attempts = 7
+
+            [mode.loss.lejepa]
+            enabled = true
+            lambda = 0.05
+            sigreg_knots = 19
+            sigreg_t_max = 2.5
+            sigreg_proj_dim = 128
+
+            [mode.loss.recon]
+            weight = 0.7
+            mask_ratio = 0.6
+            hidden_dim = 192
+        "#;
+
+        let config: VisionTrainingConfig = toml::from_str(text).expect("parse config");
+        let err = config.validate().expect_err("strict TRM must reject mismatch");
+        let message = format!("{err:#}");
+        assert!(message.contains("TRM graph strict mode requires local view grid"));
+    }
+
+    #[test]
+    fn trm_fallback_allows_local_grid_mismatch() {
+        let text = r#"
+            [dataset]
+            imagenet_root = "data/imagenet1k"
+            train_dir = "train"
+            val_dir = "val"
+
+            [training]
+            batch_size = 8
+            max_iters = 10
+            log_frequency = 2
+
+            [optimizer]
+            learning_rate = 0.001
+            weight_decay = 0.1
+
+            [vision]
+            image_size = 224
+            patch_size = 14
+            in_channels = 3
+            embed_dim = 256
+            steps = 4
+            n_head = 4
+            mlp_internal_dim_multiplier = 4
+            dropout = 0.1
+            projection_dim = 384
+            projection_hidden_dim = 512
+            use_cls_token = true
+            pos_encoding = "learned2d"
+            attention_mode = "row_l1"
+            fused_kernels = false
+            relu_threshold = 0.0
+
+            [vision.trm_graph]
+            enabled = true
+            coarse_stride = 1
+            rank = 4
+            value_dim = 32
+            local_radius = 1
+            hub_count = 1
+            local_diagonals = false
+            local_self = false
+            decay = 0.9
+            hub_gates = true
+            grid_mismatch_policy = "fallback_default"
+
+            [mode]
+            type = "lejepa"
+            views = 4
+            global_views = 2
+            local_views = 2
+            local_image_size = 96
+            local_min_scale = 0.05
+            local_max_scale = 0.3
+            min_view_overlap = 0.2
+            view_overlap_attempts = 7
+
+            [mode.loss.lejepa]
+            enabled = true
+            lambda = 0.05
+            sigreg_knots = 19
+            sigreg_t_max = 2.5
+            sigreg_proj_dim = 128
+
+            [mode.loss.recon]
+            weight = 0.7
+            mask_ratio = 0.6
+            hidden_dim = 192
+        "#;
+
+        let config: VisionTrainingConfig = toml::from_str(text).expect("parse config");
+        config
+            .validate()
+            .expect("explicit fallback should allow mismatch");
     }
 }
 

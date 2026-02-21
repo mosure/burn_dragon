@@ -102,6 +102,14 @@ pub enum VisionLatentActivation {
     Identity,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum VisionTrmGridMismatchPolicy {
+    #[default]
+    Error,
+    FallbackDefault,
+}
+
 impl core::fmt::Display for VisionAttentionMode {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{self:?}")
@@ -115,6 +123,12 @@ impl core::fmt::Display for VisionPatchEmbedMode {
 }
 
 impl core::fmt::Display for VisionLatentActivation {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+
+impl core::fmt::Display for VisionTrmGridMismatchPolicy {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{self:?}")
     }
@@ -204,6 +218,34 @@ impl<B: Backend> Module<B> for VisionLatentActivation {
     fn into_record(self) -> Self::Record {}
 }
 
+impl<B: Backend> Module<B> for VisionTrmGridMismatchPolicy {
+    type Record = ();
+
+    fn collect_devices(&self, devices: Devices<B>) -> Devices<B> {
+        devices
+    }
+
+    fn fork(self, _device: &B::Device) -> Self {
+        self
+    }
+
+    fn to_device(self, _device: &B::Device) -> Self {
+        self
+    }
+
+    fn visit<Visitor: ModuleVisitor<B>>(&self, _visitor: &mut Visitor) {}
+
+    fn map<Mapper: ModuleMapper<B>>(self, _mapper: &mut Mapper) -> Self {
+        self
+    }
+
+    fn load_record(self, _record: Self::Record) -> Self {
+        self
+    }
+
+    fn into_record(self) -> Self::Record {}
+}
+
 impl<B: AutodiffBackend> AutodiffModule<B> for VisionAttentionMode {
     type InnerModule = VisionAttentionMode;
 
@@ -228,6 +270,14 @@ impl<B: AutodiffBackend> AutodiffModule<B> for VisionLatentActivation {
     }
 }
 
+impl<B: AutodiffBackend> AutodiffModule<B> for VisionTrmGridMismatchPolicy {
+    type InnerModule = VisionTrmGridMismatchPolicy;
+
+    fn valid(&self) -> Self::InnerModule {
+        *self
+    }
+}
+
 impl ModuleDisplayDefault for VisionAttentionMode {
     fn content(&self, content: Content) -> Option<Content> {
         content.add_formatted(self).optional()
@@ -246,11 +296,19 @@ impl ModuleDisplayDefault for VisionLatentActivation {
     }
 }
 
+impl ModuleDisplayDefault for VisionTrmGridMismatchPolicy {
+    fn content(&self, content: Content) -> Option<Content> {
+        content.add_formatted(self).optional()
+    }
+}
+
 impl ModuleDisplay for VisionAttentionMode {}
 
 impl ModuleDisplay for VisionPatchEmbedMode {}
 
 impl ModuleDisplay for VisionLatentActivation {}
+
+impl ModuleDisplay for VisionTrmGridMismatchPolicy {}
 
 impl ModuleDisplayDefault for VisionTrmGraphConfig {
     fn content(&self, content: Content) -> Option<Content> {
@@ -265,6 +323,7 @@ impl ModuleDisplayDefault for VisionTrmGraphConfig {
             .add("local_self", &self.local_self)
             .add("decay", &self.decay)
             .add("hub_gates", &self.hub_gates)
+            .add("grid_mismatch_policy", &self.grid_mismatch_policy)
             .optional()
     }
 }
@@ -284,6 +343,7 @@ pub struct VisionTrmGraphConfig {
     pub local_self: bool,
     pub decay: f32,
     pub hub_gates: bool,
+    pub grid_mismatch_policy: VisionTrmGridMismatchPolicy,
 }
 
 impl Default for VisionTrmGraphConfig {
@@ -299,6 +359,7 @@ impl Default for VisionTrmGraphConfig {
             local_self: false,
             decay: 0.9,
             hub_gates: true,
+            grid_mismatch_policy: VisionTrmGridMismatchPolicy::Error,
         }
     }
 }
@@ -1264,6 +1325,18 @@ impl<B: Backend> VisionDragon<B> {
         self.split_output(tokens)
     }
 
+    /// Same as `forward_tokens_embed_steps_rollout`, but does not clamp `steps` to `self.steps`.
+    /// Useful for validation-time extrapolation beyond the training rollout depth.
+    pub fn forward_tokens_embed_steps_rollout_unbounded(
+        &self,
+        tokens: Tensor<B, 3>,
+        steps: usize,
+        backprop_steps: usize,
+    ) -> VisionDragonOutput<B> {
+        let tokens = self.encode_tokens_steps_rollout_unbounded(tokens, steps, backprop_steps);
+        self.split_output(tokens)
+    }
+
     pub fn forward_tokens_embed_steps_rollout_multi(
         &self,
         tokens: Tensor<B, 4>,
@@ -1295,6 +1368,18 @@ impl<B: Backend> VisionDragon<B> {
         self.encode_tokens_steps_inner(tokens, steps, detach_until, true)
     }
 
+    fn encode_tokens_steps_rollout_unbounded(
+        &self,
+        tokens: Tensor<B, 3>,
+        steps: usize,
+        backprop_steps: usize,
+    ) -> Tensor<B, 3> {
+        let steps = steps.max(1);
+        let backprop_steps = backprop_steps.max(1).min(steps);
+        let detach_until = steps.saturating_sub(backprop_steps);
+        self.encode_tokens_steps_inner(tokens, steps, detach_until, true)
+    }
+
     fn encode_tokens_steps_rollout_multi(
         &self,
         tokens: Tensor<B, 4>,
@@ -1319,6 +1404,25 @@ impl<B: Backend> VisionDragon<B> {
         }
 
         self.encode_tokens_steps_inner_default(tokens, steps, detach_until, add_cls)
+    }
+
+    fn trm_graph_fallback(
+        &self,
+        tokens: Tensor<B, 3>,
+        steps: usize,
+        detach_until: usize,
+        reason: &str,
+    ) -> Tensor<B, 3> {
+        match self.trm_graph.grid_mismatch_policy {
+            VisionTrmGridMismatchPolicy::FallbackDefault => {
+                self.encode_tokens_steps_inner_default(tokens, steps, detach_until, false)
+            }
+            VisionTrmGridMismatchPolicy::Error => {
+                panic!(
+                    "TRM graph path unavailable: {reason}. Set `vision.trm_graph.grid_mismatch_policy = \"fallback_default\"` to allow explicit fallback."
+                )
+            }
+        }
     }
 
     fn encode_tokens_steps_inner_default(
@@ -1406,28 +1510,71 @@ impl<B: Backend> VisionDragon<B> {
 
         let patch_len = patch_tokens.shape().dims::<3>()[1];
         if patch_len != patch_count {
-            return self.encode_tokens_steps_inner_default(tokens, steps, detach_until, false);
+            return self.trm_graph_fallback(
+                tokens,
+                steps,
+                detach_until,
+                &format!(
+                    "token count mismatch (got {patch_len}, expected {patch_count} from grid {}x{})",
+                    grid_height, grid_width
+                ),
+            );
         }
 
-        let trm_x = match &self.trm_x {
+        let trm_x = match self.trm_x.as_ref() {
             Some(layer) => layer,
-            None => return self.encode_tokens_steps_inner_default(tokens, steps, detach_until, false),
+            None => {
+                return self.trm_graph_fallback(
+                    tokens,
+                    steps,
+                    detach_until,
+                    "missing TRM graph projection layer `trm_x`",
+                );
+            }
         };
-        let trm_v = match &self.trm_v {
+        let trm_v = match self.trm_v.as_ref() {
             Some(layer) => layer,
-            None => return self.encode_tokens_steps_inner_default(tokens, steps, detach_until, false),
+            None => {
+                return self.trm_graph_fallback(
+                    tokens,
+                    steps,
+                    detach_until,
+                    "missing TRM graph projection layer `trm_v`",
+                );
+            }
         };
-        let trm_y = match &self.trm_y {
+        let trm_y = match self.trm_y.as_ref() {
             Some(layer) => layer,
-            None => return self.encode_tokens_steps_inner_default(tokens, steps, detach_until, false),
+            None => {
+                return self.trm_graph_fallback(
+                    tokens,
+                    steps,
+                    detach_until,
+                    "missing TRM graph projection layer `trm_y`",
+                );
+            }
         };
-        let trm_enc = match &self.trm_enc {
+        let trm_enc = match self.trm_enc.as_ref() {
             Some(layer) => layer,
-            None => return self.encode_tokens_steps_inner_default(tokens, steps, detach_until, false),
+            None => {
+                return self.trm_graph_fallback(
+                    tokens,
+                    steps,
+                    detach_until,
+                    "missing TRM graph projection layer `trm_enc`",
+                );
+            }
         };
-        let trm_norm = match &self.trm_norm {
+        let trm_norm = match self.trm_norm.as_ref() {
             Some(layer) => layer,
-            None => return self.encode_tokens_steps_inner_default(tokens, steps, detach_until, false),
+            None => {
+                return self.trm_graph_fallback(
+                    tokens,
+                    steps,
+                    detach_until,
+                    "missing TRM graph normalization layer `trm_norm`",
+                );
+            }
         };
 
         let device = tokens.device();

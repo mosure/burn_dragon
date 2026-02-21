@@ -956,6 +956,8 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
                 Some(residual),
                 None,
                 None,
+                None,
+                None,
                 Some(labels),
                 Some(legend),
             )

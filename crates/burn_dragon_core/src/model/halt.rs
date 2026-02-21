@@ -1,7 +1,7 @@
 use burn::module::Module;
 use burn::nn::{LayerNorm, LayerNormConfig, Linear, LinearConfig};
-use burn::tensor::backend::Backend;
 use burn::tensor::Tensor;
+use burn::tensor::backend::Backend;
 
 #[derive(Module, Debug)]
 pub struct HaltHead<B: Backend> {

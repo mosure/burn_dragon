@@ -11,36 +11,36 @@ use burn_cuda::{Cuda, CudaDevice};
 use burn_ndarray::NdArray;
 use tempfile::tempdir;
 
+#[cfg(all(feature = "cuda", feature = "integration_test"))]
+use burn::tensor::backend::Backend;
+#[cfg(all(feature = "cuda", feature = "integration_test"))]
+use burn::tensor::{Int, Tensor, TensorData};
+#[cfg(all(feature = "cuda", feature = "integration_test"))]
+use burn_dragon_sudoku::config::load_training_config;
 use burn_dragon_sudoku::config::{
     SudokuArtifactConfig, SudokuCacheMhcConfig, SudokuCacheUpdateConfig, SudokuDatasetConfig,
-    SudokuDatasetSourceConfig, SudokuHaltConfig, SudokuLocalConfig, SudokuLossMask,
-    SudokuGridPositional, SudokuModelConfig, SudokuPolicyConfig, SudokuPolicyHead,
-    SudokuReconConfig, SudokuReconLoss, SudokuRecordFormat, SudokuRevisitConfig,
-    SudokuRewardConfig, SudokuRolloutConfig, SudokuTrainingConfig, SudokuTrainingHyperparameters,
+    SudokuDatasetSourceConfig, SudokuGridPositional, SudokuHaltConfig, SudokuLocalConfig,
+    SudokuLossMask, SudokuModelConfig, SudokuPolicyConfig, SudokuPolicyHead, SudokuReconConfig,
+    SudokuReconLoss, SudokuRecordFormat, SudokuRevisitConfig, SudokuRewardConfig,
+    SudokuRolloutConfig, SudokuTrainingConfig, SudokuTrainingHyperparameters,
     SudokuValidationConfig,
 };
 #[cfg(all(feature = "cuda", feature = "integration_test"))]
-use burn_dragon_sudoku::config::load_training_config;
+use burn_dragon_sudoku::dataset::SudokuBatch;
 #[cfg(all(feature = "cuda", feature = "integration_test"))]
 use burn_dragon_sudoku::model::SudokuSaccadeModel;
 #[cfg(all(feature = "cuda", feature = "integration_test"))]
-use burn_dragon_sudoku::dataset::SudokuBatch;
+use burn_dragon_sudoku::train::SudokuTrainer;
 use burn_dragon_sudoku::train::{
     halt_prob_trace_reset, halt_prob_trace_take, loss_trace_reset, loss_trace_take,
     solve_rate_trace_reset, solve_rate_trace_take, train_backend_for_test,
 };
-#[cfg(all(feature = "cuda", feature = "integration_test"))]
-use burn_dragon_sudoku::train::SudokuTrainer;
 use burn_dragon_sudoku::vocab::GRID_LEN;
 use burn_dragon_train::{GdpoConfig, OptimizerConfig, WgpuRuntimeConfig};
 #[cfg(all(feature = "cuda", feature = "integration_test"))]
-use burn::tensor::{Int, Tensor, TensorData};
-#[cfg(all(feature = "cuda", feature = "integration_test"))]
-use burn::tensor::backend::Backend;
+use burn_train::TrainStep;
 #[cfg(all(feature = "cuda", feature = "integration_test"))]
 use cubecl::Runtime;
-#[cfg(all(feature = "cuda", feature = "integration_test"))]
-use burn_train::TrainStep;
 
 fn write_dataset(root: &Path) {
     let payload = [
@@ -184,8 +184,8 @@ fn cpu_sudoku_training_loss_decreases() {
             dropout: 0.0,
             fused_kernels: false,
             relu_threshold: 0.0,
-                cache_mhc: SudokuCacheMhcConfig::default(),
-                cache_update: SudokuCacheUpdateConfig::default(),
+            cache_mhc: SudokuCacheMhcConfig::default(),
+            cache_update: SudokuCacheUpdateConfig::default(),
         },
     };
 
@@ -332,8 +332,8 @@ fn cpu_sudoku_validation_solve_rate_gate() {
             dropout: 0.0,
             fused_kernels: false,
             relu_threshold: 0.0,
-                cache_mhc: SudokuCacheMhcConfig::default(),
-                cache_update: SudokuCacheUpdateConfig::default(),
+            cache_mhc: SudokuCacheMhcConfig::default(),
+            cache_update: SudokuCacheUpdateConfig::default(),
         },
     };
 
@@ -405,8 +405,8 @@ fn run_single_cuda_step(device: &CudaDevice, rollout_steps: usize) -> Option<Mem
             dropout: 0.0,
             fused_kernels: false,
             relu_threshold: 0.0,
-                cache_mhc: SudokuCacheMhcConfig::default(),
-                cache_update: SudokuCacheUpdateConfig::default(),
+            cache_mhc: SudokuCacheMhcConfig::default(),
+            cache_update: SudokuCacheUpdateConfig::default(),
         },
         device,
     );
@@ -499,8 +499,7 @@ fn run_single_cuda_step(device: &CudaDevice, rollout_steps: usize) -> Option<Mem
 #[cfg(all(feature = "cuda", feature = "integration_test"))]
 #[test]
 fn cuda_vram_constant_across_rollout_steps() {
-    let device = std::panic::catch_unwind(std::panic::AssertUnwindSafe(CudaDevice::default))
-        .ok();
+    let device = std::panic::catch_unwind(std::panic::AssertUnwindSafe(CudaDevice::default)).ok();
     let Some(device) = device else {
         eprintln!("cuda device unavailable; skipping vram scaling test");
         return;
@@ -538,10 +537,7 @@ fn cuda_vram_constant_across_rollout_steps() {
     } else if growth_reserved > max_growth {
         eprintln!(
             "reserved VRAM grew by {} bytes (> {}); set SUDOKU_ASSERT_RESERVED_VRAM=1 to enforce. small={:?} large={:?}",
-            growth_reserved,
-            max_growth,
-            small,
-            large
+            growth_reserved, max_growth, small, large
         );
     }
     assert!(
@@ -566,8 +562,7 @@ fn cuda_sudoku_training_tiny_like_smoke() {
         .join("config")
         .join("sudoku")
         .join("tiny.toml");
-    let mut config =
-        load_training_config(&[config_path]).expect("load config/sudoku/tiny.toml");
+    let mut config = load_training_config(&[config_path]).expect("load config/sudoku/tiny.toml");
     let train_split_ratio = config.dataset.train_split_ratio;
     let augment = config.dataset.augment;
     let augment_prob = config.dataset.augment_prob;
@@ -680,9 +675,3 @@ fn cuda_sudoku_training_trm_tiny_smoke() {
         "expected finite loss values from cuda TRM integration run"
     );
 }
-
-
-
-
-
-

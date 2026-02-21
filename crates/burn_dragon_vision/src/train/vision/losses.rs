@@ -295,8 +295,8 @@ pub(crate) fn pca_patch_heatmap<B: BackendTrait>(
                 mean[d] += data[offset + d];
             }
         }
-        for d in 0..dim {
-            mean[d] *= inv_tokens;
+        for mean_value in mean.iter_mut().take(dim) {
+            *mean_value *= inv_tokens;
         }
 
         for token_idx in 0..tokens {
@@ -323,13 +323,13 @@ pub(crate) fn pca_patch_heatmap<B: BackendTrait>(
         }
 
         for _ in 0..PCA_HEATMAP_ITERS {
-            for i in 0..dim {
+            for (i, work_item) in work.iter_mut().enumerate().take(dim) {
                 let row = i * dim;
                 let mut sum = 0.0f32;
                 for j in 0..dim {
                     sum += cov[row + j] * vec[j];
                 }
-                work[i] = sum;
+                *work_item = sum;
             }
             if normalize_vec(&mut work) < PCA_HEATMAP_EPS {
                 break;
@@ -392,8 +392,8 @@ pub(crate) fn pca_patch_rgb<B: BackendTrait>(
                 mean[d] += data[offset + d];
             }
         }
-        for d in 0..dim {
-            mean[d] *= inv_tokens;
+        for mean_value in mean.iter_mut().take(dim) {
+            *mean_value *= inv_tokens;
         }
 
         for token_idx in 0..tokens {
@@ -421,13 +421,13 @@ pub(crate) fn pca_patch_rgb<B: BackendTrait>(
             }
 
             for _ in 0..PCA_HEATMAP_ITERS {
-                for i in 0..dim {
+                for (i, work_item) in work.iter_mut().enumerate().take(dim) {
                     let row = i * dim;
                     let mut sum = 0.0f32;
                     for j in 0..dim {
                         sum += cov[row + j] * vec[j];
                     }
-                    work[i] = sum;
+                    *work_item = sum;
                 }
                 if normalize_vec(&mut work) < PCA_HEATMAP_EPS {
                     break;
@@ -509,18 +509,32 @@ pub(crate) fn patch_heatmap_or_norm<B: BackendTrait>(
     Some(norms.slice_dim(0, 0..image_count))
 }
 
+pub(crate) struct LejepaArtifactBuildInput<B: BackendTrait> {
+    pub(crate) frames: Option<Tensor<B, 5>>,
+    pub(crate) first_patch: Option<Tensor<B, 3>>,
+    pub(crate) pca_source: Option<Tensor<B, 3>>,
+    pub(crate) patch_norms_steps: Option<Tensor<B, 4>>,
+    pub(crate) pca_rgb_steps: Option<Tensor<B, 5>>,
+    pub(crate) probe_logits: Option<Tensor<B, 2>>,
+    pub(crate) labels: Option<Tensor<B, 1, Int>>,
+    pub(crate) legend: Option<Vec<String>>,
+}
+
 pub(crate) fn build_lejepa_artifacts<B: BackendTrait>(
     config: &VisionLejepaConfig,
     views: &[Tensor<B, 4>],
-    frames: Option<Tensor<B, 5>>,
-    first_patch: Option<Tensor<B, 3>>,
-    pca_source: Option<Tensor<B, 3>>,
-    patch_norms_steps: Option<Tensor<B, 4>>,
-    pca_rgb_steps: Option<Tensor<B, 5>>,
-    probe_logits: Option<Tensor<B, 2>>,
-    labels: Option<Tensor<B, 1, Int>>,
-    legend: Option<Vec<String>>,
+    input: LejepaArtifactBuildInput<B>,
 ) -> Option<VisionArtifactInput<B>> {
+    let LejepaArtifactBuildInput {
+        frames,
+        first_patch,
+        pca_source,
+        patch_norms_steps,
+        pca_rgb_steps,
+        probe_logits,
+        labels,
+        legend,
+    } = input;
     let max_images = config.artifact_max_images;
     let max_views = config.artifact_max_views;
     if max_images == 0 || max_views == 0 || views.is_empty() {

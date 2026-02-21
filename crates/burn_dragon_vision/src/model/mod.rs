@@ -5,7 +5,7 @@ pub use vision::{
     ImageNetAugmentations, ImageNetBatch, ImageNetDataLoader, ImageNetDataset,
     ImageNetDatasetConfig, ImageNetSplit, PatchEmbed, PatchEmbedOutput, PatchGrid,
     SpatialPositionalEncodingKind, VisionAttentionMode, VisionDragon, VisionDragonConfig,
-    VisionDragonMultiOutput, VisionDragonOutput, VisionLatentActivation, VisionPatchEmbedMode,
-    VisionNormalize, VisionTrmGraphConfig, VisionTrmGridMismatchPolicy, patchify,
+    VisionDragonMultiOutput, VisionDragonOutput, VisionLatentActivation, VisionNormalize,
+    VisionPatchEmbedMode, VisionTrmGraphConfig, VisionTrmGridMismatchPolicy, patchify,
     pool_patch_tokens, unpatchify,
 };

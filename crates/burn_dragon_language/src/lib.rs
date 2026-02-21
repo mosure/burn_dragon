@@ -12,7 +12,6 @@ pub mod dataset;
 pub mod train;
 
 pub use config::{ContextStrategyConfig, GenerationConfig, ModelOverrides};
-pub use loss::language_model_loss;
 #[cfg(feature = "train")]
 pub use config::{
     DatasetConfig, DatasetSourceConfig, HuggingFaceDatasetConfig, HuggingFaceRecordFormat,
@@ -23,4 +22,5 @@ pub use generation::{
     resolve_context_strategy, sample_next_token,
 };
 pub use inference::build_model_config;
+pub use loss::language_model_loss;
 pub use tokenizer::char_vocab::CharVocab;

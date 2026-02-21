@@ -1,13 +1,13 @@
-use crate::train::prelude::*;
-use burn::optim::Optimizer;
-use burn::tensor::Distribution;
-use burn_autodiff::Autodiff;
-use burn_dragon_core::{FusedKernelConfig, ManifoldHyperConnectionsConfig};
 use crate::config::VisionAugmentationConfig;
+use crate::train::prelude::*;
 use crate::{
     SpatialPositionalEncodingKind, VisionAttentionMode, VisionLatentActivation,
     VisionPatchEmbedMode,
 };
+use burn::optim::Optimizer;
+use burn::tensor::Distribution;
+use burn_autodiff::Autodiff;
+use burn_dragon_core::{FusedKernelConfig, ManifoldHyperConnectionsConfig};
 use burn_ndarray::NdArray;
 
 #[test]
@@ -201,13 +201,17 @@ fn lejepa_recon_psnr_improves_on_toy_batch() {
     let mut lejepa = VisionLejepaModel::new(
         model,
         lejepa_config,
-        vision_config.embed_dim,
-        1,
-        rollout,
-        recon_patch_dim,
-        normalize_std,
-        vision_config.patch_size,
-        vision_config.in_channels,
+        VisionLejepaInit {
+            embed_dim: vision_config.embed_dim,
+            num_classes: 1,
+            rollout,
+            recon: VisionReconstructionInit {
+                patch_dim: recon_patch_dim,
+                normalize_std,
+                patch_size: vision_config.patch_size,
+                in_channels: vision_config.in_channels,
+            },
+        },
         &device,
     );
 
@@ -231,7 +235,8 @@ fn lejepa_recon_psnr_improves_on_toy_batch() {
         .init::<Backend, VisionLejepaModel<Backend>>();
     let lr = 0.02;
     for _ in 0..40 {
-        let losses = lejepa.forward_losses(batch.clone(), steps, backprop_steps, false, false, false);
+        let losses =
+            lejepa.forward_losses(batch.clone(), steps, backprop_steps, false, false, false);
         let total = losses.total.clone() + losses.probe_loss.clone();
         let grads = GradientsParams::from_grads(total.backward(), &lejepa);
         lejepa = optimizer.step(lr, lejepa, grads);
@@ -249,4 +254,3 @@ fn lejepa_recon_psnr_improves_on_toy_batch() {
     assert!(final_psnr > initial_psnr);
     assert!(final_psnr > 24.0);
 }
-

@@ -1,8 +1,8 @@
 pub mod core;
-#[cfg(feature = "train")]
-pub mod train;
 #[cfg(all(test, feature = "train"))]
 mod tests;
+#[cfg(feature = "train")]
+pub mod train;
 
 pub use core::{ContextStrategyConfig, GenerationConfig, ModelOverrides};
 #[cfg(feature = "train")]

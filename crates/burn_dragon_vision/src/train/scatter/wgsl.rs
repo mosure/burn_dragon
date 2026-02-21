@@ -182,9 +182,7 @@ fn weighted_sum_tokens_wgsl_runtime<R: CubeRuntime>(
     output
 }
 
-fn resolve_fusion_tensor<B, BT>(
-    tensor: &BurnTensor<B, 1>,
-) -> Option<CubeTensor<WgpuRuntime>>
+fn resolve_fusion_tensor<B, BT>(tensor: &BurnTensor<B, 1>) -> Option<CubeTensor<WgpuRuntime>>
 where
     B: BackendTrait,
     B::FloatTensorPrimitive: 'static,

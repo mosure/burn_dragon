@@ -235,9 +235,10 @@ fn generate_rollout_frames<B: BackendTrait>(
         model.cell_embeddings_with_positions(init_tokens.clone(), row_ids.clone(), col_ids.clone());
     let [_, _, embd] = input_cache.shape().dims();
     let cache_streams = model.cache_streams();
-    let input_cache = input_cache
-        .unsqueeze_dim::<4>(1)
-        .expand([batch.max(1), cache_streams, GRID_LEN, embd]);
+    let input_cache =
+        input_cache
+            .unsqueeze_dim::<4>(1)
+            .expand([batch.max(1), cache_streams, GRID_LEN, embd]);
     let input_cache_read = input_cache
         .clone()
         .mean_dim(1)
@@ -246,8 +247,7 @@ fn generate_rollout_frames<B: BackendTrait>(
     let mut cache = input_cache.clone();
     let summary_len = model.summary_token_count();
     let mut state = model.init_state();
-    let mut visit_counts =
-        Tensor::<B, 2>::zeros([batch.max(1), GRID_LEN], device);
+    let mut visit_counts = Tensor::<B, 2>::zeros([batch.max(1), GRID_LEN], device);
 
     for step_idx in 0..steps {
         let tokens = build_tokens_tensor::<B>(&puzzles, device);
@@ -314,10 +314,7 @@ fn generate_rollout_frames<B: BackendTrait>(
             .equal_elem(GRID_LEN as f32)
             .float()
             .reshape([batch.max(1), 1]);
-        let selectable_counts_t = select_mask
-            .clone()
-            .sum_dim(1)
-            .reshape([batch.max(1), 1]);
+        let selectable_counts_t = select_mask.clone().sum_dim(1).reshape([batch.max(1), 1]);
         let active_mask = selectable_counts_t
             .greater_elem(0.0)
             .float()
@@ -337,9 +334,7 @@ fn generate_rollout_frames<B: BackendTrait>(
             .mul(action_one_hot.clone().unsqueeze_dim::<3>(2))
             .sum_dim(1)
             .reshape([batch.max(1), 1, embd]);
-        let step_input = model
-            .project_input_tokens(step_input_base)
-            + step_residual;
+        let step_input = model.project_input_tokens(step_input_base) + step_residual;
         let step_input = Tensor::cat(vec![summary_tokens.clone(), step_input], 1);
         let (step_hidden, _step_logits_full) =
             model.forward_with_hidden_and_state_embedded(step_input, &mut state);
@@ -370,42 +365,38 @@ fn generate_rollout_frames<B: BackendTrait>(
             .sum_dim(1)
             .reshape([batch.max(1), 1])
             .int();
-                let action_mask = action_one_hot
+        let action_mask = action_one_hot
             .clone()
             .unsqueeze_dim::<3>(2)
             .unsqueeze_dim::<4>(1);
-        let cache_cell = cache
-            .clone()
-            .mul(action_mask.clone())
-            .sum_dim(2)
-            .reshape([batch.max(1) * cache_streams, 1, embd]);
+        let cache_cell = cache.clone().mul(action_mask.clone()).sum_dim(2).reshape([
+            batch.max(1) * cache_streams,
+            1,
+            embd,
+        ]);
         let summary_streams = summary_tokens
             .clone()
             .unsqueeze_dim::<4>(1)
             .expand([batch.max(1), cache_streams, summary_len, embd])
             .reshape([batch.max(1) * cache_streams, summary_len, embd]);
-        let token_emb = model.cell_embeddings_with_positions(
-            pred_values.clone(),
-            selected_row,
-            selected_col,
-        );
+        let token_emb =
+            model.cell_embeddings_with_positions(pred_values.clone(), selected_row, selected_col);
         let token_emb = token_emb
             .unsqueeze_dim::<4>(1)
             .expand([batch.max(1), cache_streams, 1, embd])
             .reshape([batch.max(1) * cache_streams, 1, embd]);
-        let (update_emb, write_gate) = model.update_cell_embedding_with_gate(
-            summary_streams,
-            cache_cell,
-            token_emb,
-        );
+        let (update_emb, write_gate) =
+            model.update_cell_embedding_with_gate(summary_streams, cache_cell, token_emb);
         let write_gate = write_gate
             .reshape([batch.max(1), cache_streams.max(1), 1])
             .mean_dim(1)
             .reshape([batch.max(1), 1])
             .clamp_min(0.0)
             .clamp_max(1.0);
-        let write_mask = if matches!(training.policy.write_gate_mode, crate::config::SudokuWriteGateMode::Bernoulli)
-            && config.sample_policy
+        let write_mask = if matches!(
+            training.policy.write_gate_mode,
+            crate::config::SudokuWriteGateMode::Bernoulli
+        ) && config.sample_policy
         {
             Tensor::<B, 2>::random(
                 [batch.max(1), 1],
@@ -443,11 +434,7 @@ fn generate_rollout_frames<B: BackendTrait>(
 
         for (sample_idx, grid) in puzzles.iter_mut().enumerate() {
             let mut focus = None;
-            let selectable = selectable_counts
-                .get(sample_idx)
-                .copied()
-                .unwrap_or(0.0)
-                > 0.0;
+            let selectable = selectable_counts.get(sample_idx).copied().unwrap_or(0.0) > 0.0;
             let solved = solutions
                 .get(sample_idx)
                 .is_some_and(|sol| is_grid_solved(grid, sol));
@@ -462,10 +449,7 @@ fn generate_rollout_frames<B: BackendTrait>(
                     .and_then(|mask| mask.get(action))
                     .copied()
                     .unwrap_or(0.0);
-                let write_mask = write_mask_data
-                    .get(sample_idx)
-                    .copied()
-                    .unwrap_or(0.0);
+                let write_mask = write_mask_data.get(sample_idx).copied().unwrap_or(0.0);
                 if editable > 0.5 && write_mask > 0.5 {
                     let pred = pred_data
                         .get(sample_idx)
@@ -483,12 +467,7 @@ fn generate_rollout_frames<B: BackendTrait>(
             }
             let clue_mask = clue_masks.get(sample_idx).map(|mask| mask.as_slice());
             let write_prob = write_gate_data.get(sample_idx).copied();
-            frames[sample_idx].push(render_sudoku_frame(
-                grid,
-                focus,
-                clue_mask,
-                write_prob,
-            ));
+            frames[sample_idx].push(render_sudoku_frame(grid, focus, clue_mask, write_prob));
         }
     }
 
@@ -550,7 +529,10 @@ fn is_grid_solved(grid: &[u8], solution: &[u8]) -> bool {
         .all(|(a, b)| a == b)
 }
 
-fn build_tokens_tensor<B: BackendTrait>(grids: &[Vec<u8>], device: &B::Device) -> Tensor<B, 2, Int> {
+fn build_tokens_tensor<B: BackendTrait>(
+    grids: &[Vec<u8>],
+    device: &B::Device,
+) -> Tensor<B, 2, Int> {
     let batch = grids.len().max(1);
     let mut data = Vec::with_capacity(batch * GRID_LEN);
     for grid in grids {
@@ -576,7 +558,15 @@ fn render_sudoku_frame(
         let bar_w = CELL_SIZE * GRID_SIZE;
         let bar_x = GRID_PAD;
         let bar_y = GRID_PAD.saturating_sub(WRITE_BAR_HEIGHT + 2);
-        fill_rect(&mut rgb, width, bar_x, bar_y, bar_w, WRITE_BAR_HEIGHT, COLOR_WRITE_BG);
+        fill_rect(
+            &mut rgb,
+            width,
+            bar_x,
+            bar_y,
+            bar_w,
+            WRITE_BAR_HEIGHT,
+            COLOR_WRITE_BG,
+        );
         let fill_w = ((bar_w as f32) * prob).round() as usize;
         if fill_w > 0 {
             fill_rect(
@@ -603,13 +593,7 @@ fn render_sudoku_frame(
         let text_x = GRID_PAD + CELL_SIZE * GRID_SIZE - total_w;
         let text_y = GRID_PAD + CELL_SIZE * GRID_SIZE + (GRID_PAD - glyph_h) / 2;
         draw_number_at(
-            &mut rgb,
-            width,
-            text_x,
-            text_y,
-            percent,
-            HUD_SCALE,
-            COLOR_LINE,
+            &mut rgb, width, text_x, text_y, percent, HUD_SCALE, COLOR_LINE,
         );
     }
 
@@ -620,7 +604,15 @@ fn render_sudoku_frame(
                 if mask.get(idx).copied().unwrap_or(0) > 0 {
                     let cell_x = GRID_PAD + col * CELL_SIZE;
                     let cell_y = GRID_PAD + row * CELL_SIZE;
-                    fill_rect(&mut rgb, width, cell_x, cell_y, CELL_SIZE, CELL_SIZE, COLOR_CLUE_BG);
+                    fill_rect(
+                        &mut rgb,
+                        width,
+                        cell_x,
+                        cell_y,
+                        CELL_SIZE,
+                        CELL_SIZE,
+                        COLOR_CLUE_BG,
+                    );
                 }
             }
         }
@@ -633,14 +625,7 @@ fn render_sudoku_frame(
             let idx = row * GRID_SIZE + col;
             let value = grid.get(idx).copied().unwrap_or(0);
             if value > 0 {
-                draw_digit(
-                    &mut rgb,
-                    width,
-                    row,
-                    col,
-                    value as usize,
-                    COLOR_DIGIT,
-                );
+                draw_digit(&mut rgb, width, row, col, value as usize, COLOR_DIGIT);
             }
         }
     }
@@ -682,14 +667,7 @@ fn draw_grid_lines(rgb: &mut [u8], width: usize, height: usize) {
     let _ = height;
 }
 
-fn draw_digit(
-    rgb: &mut [u8],
-    width: usize,
-    row: usize,
-    col: usize,
-    digit: usize,
-    color: [u8; 3],
-) {
+fn draw_digit(rgb: &mut [u8], width: usize, row: usize, col: usize, digit: usize, color: [u8; 3]) {
     if digit == 0 || digit > 9 {
         return;
     }
@@ -767,7 +745,15 @@ fn highlight_cell(rgb: &mut [u8], width: usize, row: usize, col: usize) {
     let cell_x = GRID_PAD + col * CELL_SIZE;
     let cell_y = GRID_PAD + row * CELL_SIZE;
     let border = LINE_THICK.max(2);
-    fill_rect(rgb, width, cell_x, cell_y, CELL_SIZE, border, COLOR_HIGHLIGHT);
+    fill_rect(
+        rgb,
+        width,
+        cell_x,
+        cell_y,
+        CELL_SIZE,
+        border,
+        COLOR_HIGHLIGHT,
+    );
     fill_rect(
         rgb,
         width,
@@ -777,7 +763,15 @@ fn highlight_cell(rgb: &mut [u8], width: usize, row: usize, col: usize) {
         border,
         COLOR_HIGHLIGHT,
     );
-    fill_rect(rgb, width, cell_x, cell_y, border, CELL_SIZE, COLOR_HIGHLIGHT);
+    fill_rect(
+        rgb,
+        width,
+        cell_x,
+        cell_y,
+        border,
+        CELL_SIZE,
+        COLOR_HIGHLIGHT,
+    );
     fill_rect(
         rgb,
         width,
@@ -789,15 +783,7 @@ fn highlight_cell(rgb: &mut [u8], width: usize, row: usize, col: usize) {
     );
 }
 
-fn fill_rect(
-    rgb: &mut [u8],
-    width: usize,
-    x: usize,
-    y: usize,
-    w: usize,
-    h: usize,
-    color: [u8; 3],
-) {
+fn fill_rect(rgb: &mut [u8], width: usize, x: usize, y: usize, w: usize, h: usize, color: [u8; 3]) {
     for yy in y..(y + h) {
         for xx in x..(x + w) {
             let idx = (yy * width + xx) * 3;
@@ -812,106 +798,33 @@ fn fill_rect(
 
 const DIGITS: [&[&str; 7]; 10] = [
     &[
-        "00000",
-        "00000",
-        "00000",
-        "00000",
-        "00000",
-        "00000",
-        "00000",
+        "00000", "00000", "00000", "00000", "00000", "00000", "00000",
     ],
     &[
-        "00100",
-        "01100",
-        "00100",
-        "00100",
-        "00100",
-        "00100",
-        "01110",
+        "00100", "01100", "00100", "00100", "00100", "00100", "01110",
     ],
     &[
-        "01110",
-        "10001",
-        "00001",
-        "00010",
-        "00100",
-        "01000",
-        "11111",
+        "01110", "10001", "00001", "00010", "00100", "01000", "11111",
     ],
     &[
-        "11110",
-        "00001",
-        "00001",
-        "01110",
-        "00001",
-        "00001",
-        "11110",
+        "11110", "00001", "00001", "01110", "00001", "00001", "11110",
     ],
     &[
-        "00010",
-        "00110",
-        "01010",
-        "10010",
-        "11111",
-        "00010",
-        "00010",
+        "00010", "00110", "01010", "10010", "11111", "00010", "00010",
     ],
     &[
-        "11111",
-        "10000",
-        "11110",
-        "00001",
-        "00001",
-        "10001",
-        "01110",
+        "11111", "10000", "11110", "00001", "00001", "10001", "01110",
     ],
     &[
-        "00110",
-        "01000",
-        "10000",
-        "11110",
-        "10001",
-        "10001",
-        "01110",
+        "00110", "01000", "10000", "11110", "10001", "10001", "01110",
     ],
     &[
-        "11111",
-        "00001",
-        "00010",
-        "00100",
-        "01000",
-        "01000",
-        "01000",
+        "11111", "00001", "00010", "00100", "01000", "01000", "01000",
     ],
     &[
-        "01110",
-        "10001",
-        "10001",
-        "01110",
-        "10001",
-        "10001",
-        "01110",
+        "01110", "10001", "10001", "01110", "10001", "10001", "01110",
     ],
     &[
-        "01110",
-        "10001",
-        "10001",
-        "01111",
-        "00001",
-        "00010",
-        "01100",
+        "01110", "10001", "10001", "01111", "00001", "00010", "01100",
     ],
 ];
-
-
-
-
-
-
-
-
-
-
-
-
-

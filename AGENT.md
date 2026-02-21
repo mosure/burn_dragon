@@ -20,7 +20,7 @@ Repo layout (current crates):
 - `burn_dragon_language`: tokenizer, text configs, generation/inference, language training.
 - `burn_dragon_train`: training configs/utilities, vision training loops, metrics.
 - `burn_dragon_vision`: vision + foveation + saccade pipelines.
-- `burn_dragon_bevy`: visualization overlay/runtime (feature `viz`).
+- `bevy_dragon`: visualization overlay/runtime (feature `viz`).
 - `burn_dragon_web`: web/wasm bindings (feature `web`).
 - `burn_dragon_cli`: training/inference CLI binaries.
 

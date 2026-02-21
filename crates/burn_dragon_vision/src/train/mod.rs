@@ -28,13 +28,9 @@ mod tests;
 pub(crate) use test_utils::init_wgpu_test_runtime;
 
 #[cfg(feature = "integration_test")]
-pub use burn_dragon_train::train::gdpo::{
-    gdpo_cpu_fallbacks, gdpo_reset_cpu_fallbacks,
-};
+pub use burn_dragon_train::train::gdpo::{gdpo_cpu_fallbacks, gdpo_reset_cpu_fallbacks};
 #[cfg(feature = "integration_test")]
-pub use burn_dragon_train::train::metrics::{
-    loss_trace_len, loss_trace_reset, loss_trace_take,
-};
+pub use burn_dragon_train::train::metrics::{loss_trace_len, loss_trace_reset, loss_trace_take};
 #[cfg(feature = "cli")]
 pub use cli::run_cli;
 pub use saccade::SaccadeFoveationSampler;

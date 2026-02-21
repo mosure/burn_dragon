@@ -1,7 +1,7 @@
 use burn::module::{AutodiffModule, Content, Module, ModuleDisplay, ModuleDisplayDefault};
+use burn::tensor::Tensor;
 use burn::tensor::activation;
 use burn::tensor::backend::{AutodiffBackend, Backend};
-use burn::tensor::Tensor;
 use serde::{Deserialize, Serialize};
 
 const DISTILL_EPS: f32 = 1e-6;

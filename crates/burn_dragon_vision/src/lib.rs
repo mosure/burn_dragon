@@ -1,30 +1,30 @@
 #![recursion_limit = "256"]
 
+#[cfg(feature = "train")]
+pub mod config;
 pub mod constants;
 mod device;
 pub mod foveation;
-pub mod model;
-#[cfg(feature = "train")]
-pub mod config;
 #[cfg(feature = "train")]
 pub mod loss;
+pub mod model;
 #[cfg(feature = "train")]
 pub mod train;
 pub mod wgsl;
 
+pub use constants::{FOVEA_AA_THRESHOLD, SACCADE_FOVEA_SUBSAMPLES};
 pub use foveation::{
     CpuImageLevel, CpuPyramidCache, FoveaWarpMode, PyramidMode, build_pyramid_cache,
     image_from_nchw, lod_sigma_from_sigma, render_foveated_patch,
     render_foveated_patch_with_radius, sigma_from_unit,
 };
-pub use constants::{FOVEA_AA_THRESHOLD, SACCADE_FOVEA_SUBSAMPLES};
 pub use model::{
     CifarBatch, CifarDataLoader, CifarDataset, CifarSplit, CifarType, DinoFeatureStore,
     ImageNetAugmentations, ImageNetBatch, ImageNetDataLoader, ImageNetDataset,
     ImageNetDatasetConfig, ImageNetSplit, PatchEmbed, PatchEmbedOutput, PatchGrid,
     SpatialPositionalEncodingKind, VisionAttentionMode, VisionDragon, VisionDragonConfig,
-    VisionDragonMultiOutput, VisionDragonOutput, VisionLatentActivation, VisionPatchEmbedMode,
-    VisionNormalize, VisionTrmGraphConfig, VisionTrmGridMismatchPolicy, patchify,
+    VisionDragonMultiOutput, VisionDragonOutput, VisionLatentActivation, VisionNormalize,
+    VisionPatchEmbedMode, VisionTrmGraphConfig, VisionTrmGridMismatchPolicy, patchify,
     pool_patch_tokens, unpatchify,
 };
 

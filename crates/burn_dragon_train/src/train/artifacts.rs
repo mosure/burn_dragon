@@ -191,7 +191,9 @@ fn write_mp4(
 }
 
 fn resolve_ffmpeg(ffmpeg_path: Option<&Path>) -> Option<PathBuf> {
-    if let Some(path) = ffmpeg_path && path.exists() {
+    if let Some(path) = ffmpeg_path
+        && path.exists()
+    {
         return Some(path.to_path_buf());
     }
     let status = Command::new("ffmpeg")
@@ -499,6 +501,7 @@ impl fmt::Display for ArtifactWriteOutcome {
 #[cfg(test)]
 mod tests {
     use crate::train::artifacts::*;
+    use crate::train::test_support::create_stub_ffmpeg;
     use avirus::AVI;
 
     fn sample_frames() -> Vec<ArtifactFrame> {
@@ -586,15 +589,7 @@ mod tests {
     fn mp4_writer_uses_stub_ffmpeg() {
         let temp_dir = create_temp_dir("mp4_test").expect("temp dir");
         let bin_dir = temp_dir.join("bin");
-        fs::create_dir_all(&bin_dir).expect("bin dir");
-        let script_path = bin_dir.join("ffmpeg.cmd");
-        let script = r#"@echo off
-set OUT=
-for %%A in (%*) do set OUT=%%A
-type nul > "%OUT%"
-exit /b 0
-"#;
-        fs::write(&script_path, script).expect("write stub");
+        let script_path = create_stub_ffmpeg(&bin_dir).expect("ffmpeg stub");
 
         let output = temp_dir.join("sample.mp4");
         write_mp4(&output, &sample_frames(), 8, Some(&script_path)).expect("mp4 write");

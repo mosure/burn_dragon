@@ -1,13 +1,13 @@
+use crate::config::VisionLocationEmbeddingMode;
 use crate::train::prelude::*;
-use burn::tensor::Distribution;
-use burn::tensor::TensorData;
-use burn::tensor::backend::Backend as BackendTrait;
-use burn_dragon_core::{FusedKernelConfig, ManifoldHyperConnectionsConfig};
 use crate::{
     SpatialPositionalEncodingKind, VisionAttentionMode, VisionLatentActivation,
     VisionPatchEmbedMode,
 };
-use crate::config::VisionLocationEmbeddingMode;
+use burn::tensor::Distribution;
+use burn::tensor::TensorData;
+use burn::tensor::backend::Backend as BackendTrait;
+use burn_dragon_core::{FusedKernelConfig, ManifoldHyperConnectionsConfig};
 use burn_ndarray::NdArray;
 
 fn make_saccade_model<B: BackendTrait>(
@@ -256,4 +256,3 @@ fn location_embedding_pope_fills_double_budget() {
         assert!(tensor_scalar(tail_norm) < 1e-6);
     }
 }
-

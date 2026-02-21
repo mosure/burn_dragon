@@ -21,7 +21,7 @@ use burn_ndarray::NdArray;
 use burn_wgpu::Wgpu;
 
 #[cfg(feature = "cli")]
-use burn_dragon_train::wgpu::{init_runtime, WgpuDevice};
+use burn_dragon_train::wgpu::{WgpuDevice, init_runtime};
 
 #[cfg(all(feature = "cuda", feature = "cli"))]
 use burn_cuda::Cuda;
@@ -75,7 +75,9 @@ fn run(args: Args) -> Result<()> {
             }
             #[cfg(not(feature = "cuda"))]
             {
-                return Err(anyhow!("cuda backend requested but feature `cuda` is not enabled"));
+                return Err(anyhow!(
+                    "cuda backend requested but feature `cuda` is not enabled"
+                ));
             }
         }
         other => {

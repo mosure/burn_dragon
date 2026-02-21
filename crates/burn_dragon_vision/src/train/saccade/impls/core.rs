@@ -11,8 +11,12 @@ type SaccadeFinalizeOutput<B> = (
     Option<Vec<GdpoPolicyInputs<B>>>,
     Option<(Tensor<B, 3>, Tensor<B, 3>)>,
 );
-type SaccadeArtifacts<B> =
-    Option<(Vec<Tensor<B, 4>>, Tensor<B, 3>, Option<Tensor<B, 5>>, Vec<String>)>;
+type SaccadeArtifacts<B> = Option<(
+    Vec<Tensor<B, 4>>,
+    Tensor<B, 3>,
+    Option<Tensor<B, 5>>,
+    Vec<String>,
+)>;
 type SaccadeReconLossOutput<B> = (
     Tensor<B, 1>,
     Tensor<B, 1>,
@@ -391,32 +395,27 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
                 continue;
             }
             let diff = pred_patches.clone() - target_level.clone();
-            let (per_sample, mask_sum_level) = if let Some(mask) =
-                loss_masks.and_then(|masks| masks.get(level_idx))
-            {
-                let mask_expanded = mask.clone().unsqueeze_dim::<3>(2);
-                let per_sample = diff
-                    .powf_scalar(2.0)
-                    .mul(mask_expanded)
-                    .sum_dim(2)
-                    .sum_dim(1)
-                    .reshape([batch]);
-                let mask_sum_level = mask
-                    .clone()
-                    .sum_dim(1)
-                    .reshape([batch])
-                    .mul_scalar(patch_dim as f32);
-                (per_sample, mask_sum_level)
-            } else {
-                let per_sample = diff
-                    .powf_scalar(2.0)
-                    .sum_dim(2)
-                    .sum_dim(1)
-                    .reshape([batch]);
-                let mask_sum_level = Tensor::<B, 1>::ones([batch], &device)
-                    .mul_scalar((level_tokens * patch_dim) as f32);
-                (per_sample, mask_sum_level)
-            };
+            let (per_sample, mask_sum_level) =
+                if let Some(mask) = loss_masks.and_then(|masks| masks.get(level_idx)) {
+                    let mask_expanded = mask.clone().unsqueeze_dim::<3>(2);
+                    let per_sample = diff
+                        .powf_scalar(2.0)
+                        .mul(mask_expanded)
+                        .sum_dim(2)
+                        .sum_dim(1)
+                        .reshape([batch]);
+                    let mask_sum_level = mask
+                        .clone()
+                        .sum_dim(1)
+                        .reshape([batch])
+                        .mul_scalar(patch_dim as f32);
+                    (per_sample, mask_sum_level)
+                } else {
+                    let per_sample = diff.powf_scalar(2.0).sum_dim(2).sum_dim(1).reshape([batch]);
+                    let mask_sum_level = Tensor::<B, 1>::ones([batch], &device)
+                        .mul_scalar((level_tokens * patch_dim) as f32);
+                    (per_sample, mask_sum_level)
+                };
             loss_sum = Some(match loss_sum {
                 Some(accum) => accum + per_sample.clone(),
                 None => per_sample,
@@ -471,11 +470,11 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
             .map(|level| level.shape().dims::<3>())
             .unwrap_or([batch, 0, 0]);
         let denom = tokens.max(1).saturating_mul(dim.max(1));
-        let auto_chunk = if denom == 0 {
-            batch
-        } else {
-            (max_elems / denom).max(1).min(batch)
-        };
+        let auto_chunk = max_elems
+            .checked_div(denom)
+            .unwrap_or(batch)
+            .max(1)
+            .min(batch);
         let chunk = chunk_override.unwrap_or(auto_chunk).max(1).min(batch);
         if batch <= chunk {
             return self.recon_loss_per_sample_from_projected_levels_inner(
@@ -591,11 +590,11 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
             approx_dim = approx_dim.saturating_mul(2);
         }
         let denom = tokens.max(1).saturating_mul(approx_dim.max(1));
-        let auto_chunk = if denom == 0 {
-            batch
-        } else {
-            (max_elems / denom).max(1).min(batch)
-        };
+        let auto_chunk = max_elems
+            .checked_div(denom)
+            .unwrap_or(batch)
+            .max(1)
+            .min(batch);
         let chunk = chunk_override.unwrap_or(auto_chunk).max(1).min(batch);
         if batch <= chunk {
             return self.recon_loss_per_sample_from_state_inner(
@@ -675,11 +674,7 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
         advantage_fn: F,
     ) -> Option<Tensor<B, 1>>
     where
-        F: FnOnce(
-            Tensor<B, 2>,
-            Tensor<B, 2>,
-            &burn_dragon_train::GdpoConfig,
-        ) -> Tensor<B, 2>,
+        F: FnOnce(Tensor<B, 2>, Tensor<B, 2>, &burn_dragon_train::GdpoConfig) -> Tensor<B, 2>,
     {
         let gdpo_group = inputs.gdpo_group;
         let batch = inputs.hard_reward.shape().dims::<1>()[0];
@@ -952,14 +947,16 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
                     ..VisionLejepaConfig::default()
                 },
                 &views,
-                frames,
-                Some(residual),
-                None,
-                None,
-                None,
-                None,
-                Some(labels),
-                Some(legend),
+                LejepaArtifactBuildInput {
+                    frames,
+                    first_patch: Some(residual),
+                    pca_source: None,
+                    patch_norms_steps: None,
+                    pca_rgb_steps: None,
+                    probe_logits: None,
+                    labels: Some(labels),
+                    legend: Some(legend),
+                },
             )
         });
 
@@ -1221,11 +1218,7 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
                     traj.clone().mul_scalar(keep)
                         + out_tokens.clone().mul_scalar(ctx.traj_update_alpha)
                 };
-                for (update, weights) in scratch
-                    .updates
-                    .iter_mut()
-                    .zip(weights_for_eye.iter())
-                {
+                for (update, weights) in scratch.updates.iter_mut().zip(weights_for_eye.iter()) {
                     let update_eye = self.weighted_sum_tokens(
                         weights.clone().swap_dims(1, 2),
                         residual_pool.clone(),
@@ -1243,10 +1236,8 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
                         .sum_dim(1)
                         .mul_scalar(1.0 / traj_denom)
                         .reshape([ctx.batch, 1, self.pyramid_dim]);
-                    for (update, weights) in scratch
-                        .updates_null
-                        .iter_mut()
-                        .zip(weights_for_eye.iter())
+                    for (update, weights) in
+                        scratch.updates_null.iter_mut().zip(weights_for_eye.iter())
                     {
                         let update_eye_null = self.weighted_sum_tokens(
                             weights.clone().swap_dims(1, 2),
@@ -1812,8 +1803,7 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
                     let crops = if crop_views >= num_eyes {
                         crops.slice_dim(1, 0..num_eyes)
                     } else {
-                        let pad =
-                            Tensor::<B, 3>::zeros([batch, num_eyes - crop_views, 4], &device);
+                        let pad = Tensor::<B, 3>::zeros([batch, num_eyes - crop_views, 4], &device);
                         Tensor::cat(vec![crops, pad], 1)
                     };
                     Some(crops)
@@ -1886,7 +1876,13 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
                     })
                     .collect()
             };
-            (per_eye_levels, target_patches, loss_masks, grids, input_levels)
+            (
+                per_eye_levels,
+                target_patches,
+                loss_masks,
+                grids,
+                input_levels,
+            )
         } else {
             let base_levels = self.build_mip_pyramid(images.clone(), patch_size);
             if base_levels.is_empty() {
@@ -1909,7 +1905,13 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
                     Tensor::<B, 2>::ones([mask_batch, mask_tokens], &device)
                 })
                 .collect();
-            (vec![base_levels; num_eyes], target_patches, loss_masks, grids, input_levels)
+            (
+                vec![base_levels; num_eyes],
+                target_patches,
+                loss_masks,
+                grids,
+                input_levels,
+            )
         };
 
         let embed_dim = input_levels
@@ -1918,22 +1920,21 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
             .unwrap_or(0)
             .max(1);
         let tokens = grids.first().map(|grid| grid.num_patches()).unwrap_or(0);
-        let view_embed = if let (Some(view_crops), Some(view_embed)) =
-            (view_crops, self.view_embed.as_ref())
-        {
-            let [crop_batch, crop_eyes, _] = view_crops.shape().dims::<3>();
-            if crop_batch == 0 || crop_eyes == 0 {
-                None
+        let view_embed =
+            if let (Some(view_crops), Some(view_embed)) = (view_crops, self.view_embed.as_ref()) {
+                let [crop_batch, crop_eyes, _] = view_crops.shape().dims::<3>();
+                if crop_batch == 0 || crop_eyes == 0 {
+                    None
+                } else {
+                    let flat = view_crops.clone().reshape([crop_batch * crop_eyes, 4]);
+                    let embed = view_embed
+                        .forward(flat)
+                        .reshape([crop_batch, crop_eyes, 1, embed_dim]);
+                    Some(embed)
+                }
             } else {
-                let flat = view_crops.clone().reshape([crop_batch * crop_eyes, 4]);
-                let embed = view_embed
-                    .forward(flat)
-                    .reshape([crop_batch, crop_eyes, 1, embed_dim]);
-                Some(embed)
-            }
-        } else {
-            None
-        };
+                None
+            };
 
         let input_state_levels = if cross_view {
             let mut averaged = Vec::with_capacity(input_levels.len());
@@ -1949,14 +1950,13 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
                         count += 1.0;
                     }
                 }
-                let fallback = input_levels
-                    .get(level_idx)
-                    .cloned()
-                    .unwrap_or_else(|| {
-                        let [batch, tokens, dim] =
-                            input_levels.first().map(|t| t.shape().dims::<3>()).unwrap_or([0, 0, 0]);
-                        Tensor::<B, 3>::zeros([batch, tokens, dim], &device)
-                    });
+                let fallback = input_levels.get(level_idx).cloned().unwrap_or_else(|| {
+                    let [batch, tokens, dim] = input_levels
+                        .first()
+                        .map(|t| t.shape().dims::<3>())
+                        .unwrap_or([0, 0, 0]);
+                    Tensor::<B, 3>::zeros([batch, tokens, dim], &device)
+                });
                 let avg = sum
                     .map(|sum| sum.mul_scalar(1.0 / count.max(1.0)))
                     .unwrap_or(fallback);
@@ -2042,10 +2042,7 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
         // Heap-allocate rollout buffers to keep the stack frame small.
         let ctx = Box::new(SaccadeRolloutContext {
             device,
-            images: eye_views
-                .first()
-                .cloned()
-                .unwrap_or_else(|| images.clone()),
+            images: eye_views.first().cloned().unwrap_or_else(|| images.clone()),
             view_images: eye_views,
             view_embed,
             batch,
@@ -2099,4 +2096,3 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
         (loss_sum, mask_sum, inv, sigreg, artifacts, gdpo_inputs)
     }
 }
-

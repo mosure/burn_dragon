@@ -45,17 +45,13 @@ fn resolve_write_gate<B: BackendTrait>(
             .lower_equal_elem(0.0)
             .float();
             let ones = Tensor::<B, 2>::ones([batch.max(1), 1], &device);
-            let log_prob = write_mask_f
-                .clone()
-                .mul(write_prob.clone().log())
+            let log_prob = write_mask_f.clone().mul(write_prob.clone().log())
                 + ones
                     .clone()
                     .sub(write_mask_f.clone())
                     .mul(ones.clone().sub(write_prob.clone()).log());
             let gate_log_prob = log_prob.mul(gate_mask.clone());
-            let entropy = write_prob
-                .clone()
-                .mul(write_prob.clone().log())
+            let entropy = write_prob.clone().mul(write_prob.clone().log())
                 + ones
                     .clone()
                     .sub(write_prob.clone())
@@ -425,7 +421,11 @@ impl<B: AutodiffBackend> TrainStep<SudokuBatch<B>, SudokuTrainItem<B>> for Sudok
                 || self.training.policy.entropy_target_ema_decay > 0.0);
         if update_entropy_stats {
             let target_value = scalar_from_tensor(&losses.policy_entropy_target);
-            let ema_decay = self.training.policy.entropy_target_ema_decay.clamp(0.0, 0.9999);
+            let ema_decay = self
+                .training
+                .policy
+                .entropy_target_ema_decay
+                .clamp(0.0, 0.9999);
             let mut target_ema = self.entropy_target_ema.lock().unwrap();
             let ema_value = if ema_decay > 0.0 {
                 if *target_ema <= 0.0 {
@@ -441,8 +441,7 @@ impl<B: AutodiffBackend> TrainStep<SudokuBatch<B>, SudokuTrainItem<B>> for Sudok
                 TensorData::new(vec![ema_value], [1]),
                 &losses.policy_entropy_target.device(),
             );
-            if self.training.policy.entropy_adaptive
-                && self.training.policy.entropy_alpha_lr > 0.0
+            if self.training.policy.entropy_adaptive && self.training.policy.entropy_alpha_lr > 0.0
             {
                 let entropy_value = scalar_from_tensor(&losses.policy_entropy);
                 let mut entropy_alpha = self.entropy_alpha.lock().unwrap();
@@ -505,7 +504,8 @@ impl<B: BackendTrait> ValidStep<SudokuBatch<B>, SudokuOutput<B>> for SudokuTrain
         }
 
         let write_gate_floor = write_gate_floor_for_step(&self.training, train_step);
-        let losses = rollout_losses_valid::<B>(&self.model, batch, &self.training, write_gate_floor);
+        let losses =
+            rollout_losses_valid::<B>(&self.model, batch, &self.training, write_gate_floor);
         let target_tensor = losses.policy_entropy_target.clone();
         SudokuOutput::new(
             losses.loss,
@@ -594,7 +594,9 @@ impl<B: BackendTrait> GdpoAdvantageStats<B> {
         let add = 1.0 - decay;
         let mean = self.mean.take().expect("gdpo mean");
         let std = self.std.take().expect("gdpo std");
-        let mean = mean.mul_scalar(keep).add(batch_mean.clone().mul_scalar(add));
+        let mean = mean
+            .mul_scalar(keep)
+            .add(batch_mean.clone().mul_scalar(add));
         let std = std.mul_scalar(keep).add(batch_std.clone().mul_scalar(add));
         self.mean = Some(mean.clone());
         self.std = Some(std.clone());
@@ -773,10 +775,7 @@ fn gae_advantage<B: BackendTrait>(
     lambda: f32,
 ) -> Tensor<B, 1> {
     if rewards.is_empty() {
-        let device = values
-            .first()
-            .map(|v| v.device())
-            .unwrap_or_default();
+        let device = values.first().map(|v| v.device()).unwrap_or_default();
         return Tensor::<B, 1>::zeros([1], &device);
     }
     let device = rewards[0].device();
@@ -814,8 +813,7 @@ fn gae_advantages<B: BackendTrait>(
         let value = &values[idx];
         let done = &dones[idx];
         let not_done = done.clone().mul_scalar(-1.0).add_scalar(1.0);
-        let delta = reward.clone()
-            + next_value.clone().mul_scalar(gamma).mul(not_done.clone())
+        let delta = reward.clone() + next_value.clone().mul_scalar(gamma).mul(not_done.clone())
             - value.clone();
         adv = delta + adv.mul_scalar(gamma * lambda).mul(not_done);
         advantages_rev.push(adv.clone());
@@ -901,10 +899,8 @@ fn rollout_losses<B: AutodiffBackend>(
     } else {
         zeros.clone()
     };
-    let policy_entropy_alpha = Tensor::<B, 1>::from_data(
-        TensorData::new(vec![policy_entropy_weight], [1]),
-        &device,
-    );
+    let policy_entropy_alpha =
+        Tensor::<B, 1>::from_data(TensorData::new(vec![policy_entropy_weight], [1]), &device);
 
     let log_prob_mean = if rollout.policy_steps > 0 && gdpo_active {
         log_prob_sum
@@ -940,11 +936,7 @@ fn rollout_losses<B: AutodiffBackend>(
         let advantage = gdpo_advantage_autodiff::<B>(hard, easy, &training.gdpo)
             .reshape([rollout.batch.max(1), 1])
             .detach();
-        let advantage = apply_advantage_guardrails(
-            advantage,
-            &training.gdpo,
-            gdpo_stats.as_ref(),
-        );
+        let advantage = apply_advantage_guardrails(advantage, &training.gdpo, gdpo_stats.as_ref());
 
         let log_prob_old = log_prob_sum.clone().detach();
         let policy_loss = gdpo_policy_loss(
@@ -1159,7 +1151,7 @@ fn rollout_losses_train<B: AutodiffBackend>(
         puzzles = puzzles.repeat_dim(0, group);
         solutions = solutions.repeat_dim(0, group);
     }
-        let [batch_size, _] = puzzles.shape().dims::<2>();
+    let [batch_size, _] = puzzles.shape().dims::<2>();
     let ones_grid = Tensor::<B, 2>::ones([batch_size.max(1), GRID_LEN], &device);
     let action_index = build_action_index(batch_size, &device);
     let solution_one_hot = build_solution_one_hot(&solutions, batch_size, &device);
@@ -1179,12 +1171,11 @@ fn rollout_losses_train<B: AutodiffBackend>(
     let mut unknown_mask = tokens.clone().equal_elem(0).float();
     let loss_unknown_mask = unknown_mask.clone();
     let mut tokens_reward = tokens.clone();
-    let initial_unknown_counts = unknown_mask
-        .clone()
-        .sum_dim(1)
-        .reshape([batch_size.max(1)]);
-    let difficulty_scale =
-        difficulty_scale_from_unknowns(initial_unknown_counts.clone(), training.reward.unknown_power);
+    let initial_unknown_counts = unknown_mask.clone().sum_dim(1).reshape([batch_size.max(1)]);
+    let difficulty_scale = difficulty_scale_from_unknowns(
+        initial_unknown_counts.clone(),
+        training.reward.unknown_power,
+    );
     let easy_mode = training.reward.easy_mode;
     let hard_mode = training.reward.hard_mode;
     let info_enabled = training.reward.info_reward.enabled
@@ -1206,14 +1197,10 @@ fn rollout_losses_train<B: AutodiffBackend>(
     let baseline_lambda = training.reward.baseline.lambda.clamp(0.0, 1.0);
     let baseline_value_weight = training.reward.baseline.value_loss_weight.max(0.0);
     let no_op_penalty = training.reward.no_op_penalty.max(0.0);
-    let mut chunk_shaping_sum =
-        Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
-    let mut chunk_shaping_mask_sum =
-        Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
-    let mut rollout_shaping_sum =
-        Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
-    let mut rollout_shaping_mask_sum =
-        Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
+    let mut chunk_shaping_sum = Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
+    let mut chunk_shaping_mask_sum = Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
+    let mut rollout_shaping_sum = Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
+    let mut rollout_shaping_mask_sum = Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
     let mut conflict_prev = if shaping_enabled && conflict_weight > 0.0 {
         shaping_potential(&tokens, shaping_metric)
     } else {
@@ -1246,13 +1233,17 @@ fn rollout_losses_train<B: AutodiffBackend>(
     );
     let [_, _, embd] = input_cache.shape().dims();
     let cache_streams = trainer.model.cache_streams();
-    let input_cache = input_cache
-        .unsqueeze_dim::<4>(1)
-        .expand([batch_size.max(1), cache_streams, GRID_LEN, embd]);
-    let input_cache_read = input_cache
-        .clone()
-        .mean_dim(1)
-        .reshape([batch_size.max(1), GRID_LEN, embd]);
+    let input_cache = input_cache.unsqueeze_dim::<4>(1).expand([
+        batch_size.max(1),
+        cache_streams,
+        GRID_LEN,
+        embd,
+    ]);
+    let input_cache_read =
+        input_cache
+            .clone()
+            .mean_dim(1)
+            .reshape([batch_size.max(1), GRID_LEN, embd]);
     let mut cache = input_cache.clone();
     let mut summary_tokens = trainer.model.init_summary_tokens(batch_size);
     let summary_len = trainer.model.summary_token_count();
@@ -1273,10 +1264,8 @@ fn rollout_losses_train<B: AutodiffBackend>(
     let mut halt_loss_sum_metrics = zeros.clone();
     let mut halt_prob_sum_metrics = zeros.clone();
     let mut halt_target_sum_metrics = zeros.clone();
-    let mut policy_entropy_sum_metrics =
-        Tensor::<B, 2>::zeros([batch_size.max(1), 1], &device);
-    let mut log_prob_sum_metrics =
-        Tensor::<B, 2>::zeros([batch_size.max(1), 1], &device);
+    let mut policy_entropy_sum_metrics = Tensor::<B, 2>::zeros([batch_size.max(1), 1], &device);
+    let mut log_prob_sum_metrics = Tensor::<B, 2>::zeros([batch_size.max(1), 1], &device);
     let mut policy_recon_sum_metrics = zeros.clone();
     let mut action_count_sum_metrics = zeros.clone();
     let mut revisit_count_sum_metrics = zeros.clone();
@@ -1294,36 +1283,24 @@ fn rollout_losses_train<B: AutodiffBackend>(
     let mut chunk_global_loss_sum = zeros.clone();
     let mut chunk_halt_loss_sum = zeros.clone();
     let mut chunk_halt_steps = 0usize;
-    let mut chunk_policy_entropy_sum =
-        Tensor::<B, 2>::zeros([batch_size.max(1), 1], &device);
-    let mut chunk_log_prob_sum =
-        Tensor::<B, 2>::zeros([batch_size.max(1), 1], &device);
+    let mut chunk_policy_entropy_sum = Tensor::<B, 2>::zeros([batch_size.max(1), 1], &device);
+    let mut chunk_log_prob_sum = Tensor::<B, 2>::zeros([batch_size.max(1), 1], &device);
     let mut chunk_policy_recon_sum = zeros.clone();
-    let mut chunk_recon_delta_sum =
-        Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
-    let mut chunk_recon_mask_sum =
-        Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
-    let mut rollout_recon_delta_sum =
-        Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
-    let mut rollout_recon_mask_sum =
-        Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
-    let mut chunk_acc_delta_sum =
-        Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
-    let mut chunk_acc_delta_mask_sum =
-        Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
-    let mut rollout_acc_delta_sum =
-        Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
-    let mut rollout_acc_delta_mask_sum =
-        Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
+    let mut chunk_recon_delta_sum = Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
+    let mut chunk_recon_mask_sum = Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
+    let mut rollout_recon_delta_sum = Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
+    let mut rollout_recon_mask_sum = Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
+    let mut chunk_acc_delta_sum = Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
+    let mut chunk_acc_delta_mask_sum = Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
+    let mut rollout_acc_delta_sum = Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
+    let mut rollout_acc_delta_mask_sum = Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
     let mut info_reward_sum = Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
 
     let mut steps_done = 0usize;
 
     let mut grads_accum = GradientsAccumulator::<SudokuTrainer<B>>::new();
-    let mut visit_counts =
-        Tensor::<B, 2>::zeros([batch_size.max(1), GRID_LEN], &device);
-    let mut prev_action_one_hot =
-        Tensor::<B, 2>::zeros([batch_size.max(1), GRID_LEN], &device);
+    let mut visit_counts = Tensor::<B, 2>::zeros([batch_size.max(1), GRID_LEN], &device);
+    let mut prev_action_one_hot = Tensor::<B, 2>::zeros([batch_size.max(1), GRID_LEN], &device);
     let mut selectable_count_sum = zeros.clone();
     let mut selectable_steps = 0usize;
 
@@ -1357,10 +1334,7 @@ fn rollout_losses_train<B: AutodiffBackend>(
                 .mul(action_one_hot.clone().unsqueeze_dim::<3>(2))
                 .sum_dim(1)
                 .reshape([batch_size.max(1), 1, embd]);
-            let step_input = trainer
-                .model
-                .project_input_tokens(step_input_base)
-                + step_residual;
+            let step_input = trainer.model.project_input_tokens(step_input_base) + step_residual;
             let step_input = Tensor::cat(vec![summary_tokens.clone(), step_input], 1);
             let (step_hidden, _step_logits_full) = trainer
                 .model
@@ -1426,11 +1400,11 @@ fn rollout_losses_train<B: AutodiffBackend>(
                 .clone()
                 .unsqueeze_dim::<3>(2)
                 .unsqueeze_dim::<4>(1);
-            let cache_cell = cache
-                .clone()
-                .mul(action_mask.clone())
-                .sum_dim(2)
-                .reshape([batch_size.max(1) * cache_streams, 1, embd]);
+            let cache_cell = cache.clone().mul(action_mask.clone()).sum_dim(2).reshape([
+                batch_size.max(1) * cache_streams,
+                1,
+                embd,
+            ]);
             let summary_streams = summary_tokens
                 .clone()
                 .unsqueeze_dim::<4>(1)
@@ -1467,16 +1441,14 @@ fn rollout_losses_train<B: AutodiffBackend>(
     }
 
     for step_offset in 0..rollout_steps {
-
         let step_idx = step_offset + pre_steps;
         let cache_read = cache
             .clone()
             .mean_dim(1)
             .reshape([batch_size.max(1), GRID_LEN, embd]);
-        let policy_logits =
-            trainer
-                .model
-                .policy_logits_from_cache(summary_tokens.clone(), cache_read.clone());
+        let policy_logits = trainer
+            .model
+            .policy_logits_from_cache(summary_tokens.clone(), cache_read.clone());
 
         let step_value = if baseline_enabled {
             Some(
@@ -1602,14 +1574,10 @@ fn rollout_losses_train<B: AutodiffBackend>(
             .mul(action_one_hot.clone())
             .sum_dim(1)
             .reshape([batch_size.max(1), 1]);
-        action_count_sum_metrics =
-            action_count_sum_metrics + action_any.clone().mean().detach();
-        revisit_count_sum_metrics =
-            revisit_count_sum_metrics + step_revisit.mean().detach();
-        repeat_count_sum_metrics =
-            repeat_count_sum_metrics + step_repeat.mean().detach();
-        unknown_select_sum_metrics =
-            unknown_select_sum_metrics + step_unknown.mean().detach();
+        action_count_sum_metrics = action_count_sum_metrics + action_any.clone().mean().detach();
+        revisit_count_sum_metrics = revisit_count_sum_metrics + step_revisit.mean().detach();
+        repeat_count_sum_metrics = repeat_count_sum_metrics + step_repeat.mean().detach();
+        unknown_select_sum_metrics = unknown_select_sum_metrics + step_unknown.mean().detach();
         prev_action_one_hot = action_one_hot.clone();
         visit_counts = visit_counts + action_one_hot.clone();
 
@@ -1644,10 +1612,7 @@ fn rollout_losses_train<B: AutodiffBackend>(
             .mul(action_one_hot.clone().unsqueeze_dim::<3>(2))
             .sum_dim(1)
             .reshape([batch_size.max(1), 1, embd]);
-        let step_input = trainer
-            .model
-            .project_input_tokens(step_input_base)
-            + step_residual;
+        let step_input = trainer.model.project_input_tokens(step_input_base) + step_residual;
         let step_input = Tensor::cat(vec![summary_tokens.clone(), step_input], 1);
         let (step_hidden, _step_logits_full) = trainer
             .model
@@ -1678,9 +1643,7 @@ fn rollout_losses_train<B: AutodiffBackend>(
             .mul(action_one_hot.clone())
             .sum_dim(1)
             .reshape([batch_size.max(1), 1]);
-        let mut reward_mask = selected_editable
-            .clone()
-            .reshape([batch_size.max(1)]);
+        let mut reward_mask = selected_editable.clone().reshape([batch_size.max(1)]);
         let mut local_loss_mask = active_mask.clone();
         if matches!(training.recon.loss_mask, SudokuLossMask::Unknown) {
             let selected_unknown = loss_unknown_mask
@@ -1700,15 +1663,13 @@ fn rollout_losses_train<B: AutodiffBackend>(
                 &training.recon.loss,
             );
 
-        let reward_local_mask = active_mask
-            .clone()
-            .mul(selected_editable.clone());
+        let reward_local_mask = active_mask.clone().mul(selected_editable.clone());
         let (
             _reward_local_loss,
             _reward_local_acc,
             _reward_local_exact,
             reward_local_loss_per_sample,
-            ..
+            ..,
         ) = compute_loss_and_acc(
             &step_logits,
             &selected_solution,
@@ -1749,11 +1710,11 @@ fn rollout_losses_train<B: AutodiffBackend>(
             .clone()
             .unsqueeze_dim::<3>(2)
             .unsqueeze_dim::<4>(1);
-        let cache_cell = cache
-            .clone()
-            .mul(action_mask.clone())
-            .sum_dim(2)
-            .reshape([batch_size.max(1) * cache_streams, 1, embd]);
+        let cache_cell = cache.clone().mul(action_mask.clone()).sum_dim(2).reshape([
+            batch_size.max(1) * cache_streams,
+            1,
+            embd,
+        ]);
         let summary_streams = summary_tokens
             .clone()
             .unsqueeze_dim::<4>(1)
@@ -1768,9 +1729,10 @@ fn rollout_losses_train<B: AutodiffBackend>(
             .unsqueeze_dim::<4>(1)
             .expand([batch_size.max(1), cache_streams, 1, embd])
             .reshape([batch_size.max(1) * cache_streams, 1, embd]);
-        let (update_emb, write_gate) = trainer
-            .model
-            .update_cell_embedding_with_gate(summary_streams, cache_cell, token_emb);
+        let (update_emb, write_gate) =
+            trainer
+                .model
+                .update_cell_embedding_with_gate(summary_streams, cache_cell, token_emb);
         let write_gate = write_gate
             .reshape([batch_size.max(1), cache_streams.max(1), 1])
             .mean_dim(1)
@@ -1822,8 +1784,7 @@ fn rollout_losses_train<B: AutodiffBackend>(
         let update_values_pred_grid = pred_values.clone().repeat_dim(1, GRID_LEN);
         tokens_reward = tokens_reward.mask_where(update_mask.clone(), update_values_pred_grid);
 
-        reward_mask = reward_mask
-            .mul(write_mask_f.clone().reshape([batch_size.max(1)]));
+        reward_mask = reward_mask.mul(write_mask_f.clone().reshape([batch_size.max(1)]));
 
         let update_mask_cache = if training.policy.cache_update_clues {
             action_one_hot.clone()
@@ -1885,22 +1846,21 @@ fn rollout_losses_train<B: AutodiffBackend>(
             compute_grid_accuracy_masked(&tokens_reward, &solutions, &editable_mask);
         let (_acc_per_sample, acc, exact_acc, _solve_rate) =
             compute_grid_accuracy(&tokens_reward, &solutions);
-        let step_acc_delta = reward_acc_per_sample.clone().sub(prev_reward_acc_per_sample.clone());
+        let step_acc_delta = reward_acc_per_sample
+            .clone()
+            .sub(prev_reward_acc_per_sample.clone());
         prev_reward_acc_per_sample = reward_acc_per_sample.detach();
         last_reward_acc_per_sample = prev_reward_acc_per_sample.clone();
         last_acc = acc.detach();
         last_exact = exact_acc.detach();
 
         let mut global_loss = zeros.clone();
-        let mut global_loss_per_sample =
-            Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
-        let mut reward_global_loss_per_sample =
-            Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
+        let mut global_loss_per_sample = Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
+        let mut reward_global_loss_per_sample = Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
         let mut global_active = false;
         if recon_interval > 0 && (step_idx + 1) % recon_interval == 0 && global_samples > 0 {
             global_active = true;
-            let sample_prob =
-                (global_samples as f32 / GRID_LEN as f32).clamp(0.0, 1.0);
+            let sample_prob = (global_samples as f32 / GRID_LEN as f32).clamp(0.0, 1.0);
             let random = Tensor::<B, 2>::random(
                 [batch_size.max(1), GRID_LEN],
                 TensorDistribution::Uniform(0.0, 1.0),
@@ -1915,7 +1875,8 @@ fn rollout_losses_train<B: AutodiffBackend>(
             reward_global_mask = reward_global_mask.mul(editable_mask.clone());
             if matches!(training.recon.loss_mask, SudokuLossMask::Unknown) {
                 global_mask = global_mask.mul(loss_unknown_mask.clone());
-                reward_global_mask = reward_global_mask.mul(tokens_reward.clone().equal_elem(0).float());
+                reward_global_mask =
+                    reward_global_mask.mul(tokens_reward.clone().equal_elem(0).float());
             }
             global_mask = ensure_non_empty_mask(global_mask, action_one_hot.clone());
             let global_logits = trainer.model.value_logits_from_cache(cache_read.clone());
@@ -1935,7 +1896,7 @@ fn rollout_losses_train<B: AutodiffBackend>(
                 _reward_step_acc,
                 _reward_step_exact,
                 reward_step_loss_per_sample,
-                ..
+                ..,
             ) = compute_loss_and_acc(
                 &global_logits,
                 &solutions,
@@ -1948,16 +1909,13 @@ fn rollout_losses_train<B: AutodiffBackend>(
 
         let _step_recon_per_sample =
             local_loss_per_sample + global_loss_per_sample.mul_scalar(global_weight);
-        let step_recon_per_sample_reward = reward_local_loss_per_sample
-            + reward_global_loss_per_sample.mul_scalar(global_weight);
-        let step_recon_per_sample_reward_detached =
-            step_recon_per_sample_reward.clone().detach();
+        let step_recon_per_sample_reward =
+            reward_local_loss_per_sample + reward_global_loss_per_sample.mul_scalar(global_weight);
+        let step_recon_per_sample_reward_detached = step_recon_per_sample_reward.clone().detach();
         let mut baseline_loss = last_loss_per_sample.clone();
         let baseline_mask = baseline_loss.clone().equal_elem(0.0);
-        baseline_loss = baseline_loss.mask_where(
-            baseline_mask,
-            step_recon_per_sample_reward_detached.clone(),
-        );
+        baseline_loss =
+            baseline_loss.mask_where(baseline_mask, step_recon_per_sample_reward_detached.clone());
         let step_recon_delta = baseline_loss
             .sub(step_recon_per_sample_reward_detached.clone())
             .mul(reward_mask.clone());
@@ -1968,11 +1926,9 @@ fn rollout_losses_train<B: AutodiffBackend>(
         let step_recon_delta_reward = step_recon_delta
             .clone()
             .sub(no_op_penalty_per_sample.clone());
-        chunk_recon_delta_sum =
-            chunk_recon_delta_sum + step_recon_delta_reward.clone();
+        chunk_recon_delta_sum = chunk_recon_delta_sum + step_recon_delta_reward.clone();
         chunk_recon_mask_sum = chunk_recon_mask_sum + step_reward_mask.clone();
-        rollout_recon_delta_sum =
-            rollout_recon_delta_sum + step_recon_delta_reward.clone();
+        rollout_recon_delta_sum = rollout_recon_delta_sum + step_recon_delta_reward.clone();
         rollout_recon_mask_sum = rollout_recon_mask_sum + step_reward_mask.clone();
         let step_active_mask = active_mask.clone().reshape([batch_size.max(1)]);
         let write_gate_step = write_gate
@@ -2003,16 +1959,11 @@ fn rollout_losses_train<B: AutodiffBackend>(
         };
         if shaping_enabled {
             let mut shaping_step = Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
-            let keep = Tensor::<B, 1>::ones([batch_size.max(1)], &device)
-                .sub(reward_mask.clone());
-            let mut conflict_component =
-                Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
-            let mut unknown_component =
-                Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
-            let mut accuracy_component =
-                Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
-            let mut incorrect_component =
-                Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
+            let keep = Tensor::<B, 1>::ones([batch_size.max(1)], &device).sub(reward_mask.clone());
+            let mut conflict_component = Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
+            let mut unknown_component = Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
+            let mut accuracy_component = Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
+            let mut incorrect_component = Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
             let step_correct = pred_values
                 .clone()
                 .equal(selected_solution.clone())
@@ -2027,7 +1978,8 @@ fn rollout_losses_train<B: AutodiffBackend>(
                 shaping_delta = shaping_delta.mul(reward_mask.clone());
                 conflict_component = shaping_delta.mul_scalar(conflict_weight);
                 shaping_step = shaping_step + conflict_component.clone();
-                conflict_prev = conflict_prev.mul(keep.clone()) + conflict_next.mul(reward_mask.clone());
+                conflict_prev =
+                    conflict_prev.mul(keep.clone()) + conflict_next.mul(reward_mask.clone());
             }
             if unknown_weight > 0.0 {
                 let unknown_next = unknown_potential(&tokens);
@@ -2038,7 +1990,8 @@ fn rollout_losses_train<B: AutodiffBackend>(
                     .mul(step_correct.clone());
                 unknown_component = shaping_delta.mul_scalar(unknown_weight);
                 shaping_step = shaping_step + unknown_component.clone();
-                unknown_prev = unknown_prev.mul(keep.clone()) + unknown_next.mul(reward_mask.clone());
+                unknown_prev =
+                    unknown_prev.mul(keep.clone()) + unknown_next.mul(reward_mask.clone());
             }
             if accuracy_weight > 0.0 {
                 let acc_delta = step_acc_delta.clone().mul(step_active_mask.clone());
@@ -2118,9 +2071,7 @@ fn rollout_losses_train<B: AutodiffBackend>(
                 .mul_scalar(-1.0)
                 .detach();
             let reward_mean = reward.clone().mean();
-            let advantage = reward
-                .sub(reward_mean)
-                .reshape([batch_size.max(1), 1]);
+            let advantage = reward.sub(reward_mean).reshape([batch_size.max(1), 1]);
             let step_policy_recon = selected_log_prob
                 .clone()
                 .mul(advantage)
@@ -2128,12 +2079,11 @@ fn rollout_losses_train<B: AutodiffBackend>(
                 .mean();
             let step_policy_recon_detached = step_policy_recon.clone().detach();
             chunk_policy_recon_sum = chunk_policy_recon_sum + step_policy_recon;
-            policy_recon_sum_metrics =
-                policy_recon_sum_metrics + step_policy_recon_detached;
+            policy_recon_sum_metrics = policy_recon_sum_metrics + step_policy_recon_detached;
         }
 
-        let reward_keep = Tensor::<B, 1>::ones([batch_size.max(1)], &device)
-            .sub(reward_mask.clone());
+        let reward_keep =
+            Tensor::<B, 1>::ones([batch_size.max(1)], &device).sub(reward_mask.clone());
         last_loss_per_sample = last_loss_per_sample.mul(reward_keep)
             + step_recon_per_sample_reward_detached.mul(reward_mask.clone());
         let step_recon = local_loss.clone() + global_loss.clone().mul_scalar(global_weight);
@@ -2148,9 +2098,9 @@ fn rollout_losses_train<B: AutodiffBackend>(
         if chunk_end {
             let hard_reward = match hard_mode {
                 SudokuHardRewardMode::InfoReward => info_reward_sum.clone(),
-                SudokuHardRewardMode::Accuracy => {
-                    last_reward_acc_per_sample.clone().sub(reward_initial_acc.clone())
-                }
+                SudokuHardRewardMode::Accuracy => last_reward_acc_per_sample
+                    .clone()
+                    .sub(reward_initial_acc.clone()),
             };
             let chunk_shaping_mean = if shaping_enabled {
                 chunk_shaping_sum
@@ -2266,14 +2216,10 @@ fn rollout_losses_train<B: AutodiffBackend>(
                                 .mul(chunk_step_masks[idx].clone())
                                 .reshape([1, batch]),
                         );
-                        log_prob_stack.push(
-                            chunk_step_log_probs[idx]
-                                .clone()
-                                .reshape([1, batch, 1]),
-                        );
+                        log_prob_stack
+                            .push(chunk_step_log_probs[idx].clone().reshape([1, batch, 1]));
                     }
-                    let mut advantage = Tensor::cat(adv_stack, 0)
-                        .reshape([step_count * batch, 1]);
+                    let mut advantage = Tensor::cat(adv_stack, 0).reshape([step_count * batch, 1]);
                     if gdpo_group > 1 {
                         let scene_batch = if gdpo_group == 0 {
                             batch
@@ -2290,13 +2236,9 @@ fn rollout_losses_train<B: AutodiffBackend>(
                         advantage = gdpo_advantage_autodiff::<B>(hard, easy, &training.gdpo)
                             .reshape([step_count * batch, 1]);
                     }
-                    let advantage = apply_advantage_guardrails(
-                        advantage,
-                        &training.gdpo,
-                        gdpo_stats.as_ref(),
-                    );
-                    let log_prob = Tensor::cat(log_prob_stack, 0)
-                        .reshape([step_count * batch, 1]);
+                    let advantage =
+                        apply_advantage_guardrails(advantage, &training.gdpo, gdpo_stats.as_ref());
+                    let log_prob = Tensor::cat(log_prob_stack, 0).reshape([step_count * batch, 1]);
                     let log_prob_old = log_prob.clone().detach();
                     gdpo_policy_loss(log_prob, log_prob_old, advantage, &training.gdpo)
                 } else {
@@ -2316,11 +2258,8 @@ fn rollout_losses_train<B: AutodiffBackend>(
                     let advantage = gdpo_advantage_autodiff::<B>(hard, easy, &training.gdpo)
                         .reshape([batch_size.max(1), 1])
                         .detach();
-                    let advantage = apply_advantage_guardrails(
-                        advantage,
-                        &training.gdpo,
-                        gdpo_stats.as_ref(),
-                    );
+                    let advantage =
+                        apply_advantage_guardrails(advantage, &training.gdpo, gdpo_stats.as_ref());
                     let log_prob_old = chunk_log_prob_sum.clone().detach();
                     gdpo_policy_loss(
                         chunk_log_prob_sum.clone(),
@@ -2384,19 +2323,15 @@ fn rollout_losses_train<B: AutodiffBackend>(
             chunk_global_loss_sum = zeros.clone();
             chunk_halt_loss_sum = zeros.clone();
             chunk_halt_steps = 0;
-            chunk_policy_entropy_sum =
-                Tensor::<B, 2>::zeros([batch_size.max(1), 1], &device);
+            chunk_policy_entropy_sum = Tensor::<B, 2>::zeros([batch_size.max(1), 1], &device);
             chunk_log_prob_sum = Tensor::<B, 2>::zeros([batch_size.max(1), 1], &device);
             chunk_policy_recon_sum = zeros.clone();
-            chunk_recon_delta_sum =
-                Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
+            chunk_recon_delta_sum = Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
             chunk_recon_mask_sum = Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
             chunk_shaping_sum = Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
             chunk_shaping_mask_sum = Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
-            chunk_acc_delta_sum =
-                Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
-            chunk_acc_delta_mask_sum =
-                Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
+            chunk_acc_delta_sum = Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
+            chunk_acc_delta_mask_sum = Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
             info_reward_sum = Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
             chunk_step_rewards.clear();
             chunk_step_values.clear();
@@ -2442,13 +2377,10 @@ fn rollout_losses_train<B: AutodiffBackend>(
     } else {
         zeros.clone()
     };
-    let policy_entropy_alpha = Tensor::<B, 1>::from_data(
-        TensorData::new(vec![policy_entropy_weight], [1]),
-        &device,
-    );
+    let policy_entropy_alpha =
+        Tensor::<B, 1>::from_data(TensorData::new(vec![policy_entropy_weight], [1]), &device);
 
     let policy_recon_term = if policy_recon_weight > 0.0 && steps_done > 0 {
-
         policy_recon_sum_metrics
             .clone()
             .div_scalar(steps_done as f32)
@@ -2473,23 +2405,21 @@ fn rollout_losses_train<B: AutodiffBackend>(
     let total_visits = visit_counts.clone().sum_dim(1).clamp_min(1.0);
     let saccade_unique_frac = unique_cells.div(total_visits).mean();
     let write_gate_mean = if steps_done > 0 {
-        write_gate_sum_metrics
-            .clone()
-            .div_scalar(steps_done as f32)
+        write_gate_sum_metrics.clone().div_scalar(steps_done as f32)
     } else {
         zeros.clone()
     };
     let write_rate = if steps_done > 0 {
-        write_rate_sum_metrics
-            .clone()
-            .div_scalar(steps_done as f32)
+        write_rate_sum_metrics.clone().div_scalar(steps_done as f32)
     } else {
         zeros.clone()
     };
 
     let hard_reward = match hard_mode {
         SudokuHardRewardMode::InfoReward => info_reward_sum.clone(),
-        SudokuHardRewardMode::Accuracy => last_reward_acc_per_sample.clone().sub(reward_initial_acc.clone()),
+        SudokuHardRewardMode::Accuracy => last_reward_acc_per_sample
+            .clone()
+            .sub(reward_initial_acc.clone()),
     };
     let rollout_shaping_mean = if shaping_enabled {
         rollout_shaping_sum
@@ -2499,16 +2429,12 @@ fn rollout_losses_train<B: AutodiffBackend>(
         Tensor::<B, 1>::zeros([batch_size.max(1)], &device)
     };
     let mut easy_reward = match easy_mode {
-        SudokuEasyRewardMode::Recon => {
-            rollout_recon_delta_sum
-                .clone()
-                .div(rollout_recon_mask_sum.clone().clamp_min(1.0))
-        }
-        SudokuEasyRewardMode::AccuracyDelta => {
-            rollout_acc_delta_sum
-                .clone()
-                .div(rollout_acc_delta_mask_sum.clone().clamp_min(1.0))
-        }
+        SudokuEasyRewardMode::Recon => rollout_recon_delta_sum
+            .clone()
+            .div(rollout_recon_mask_sum.clone().clamp_min(1.0)),
+        SudokuEasyRewardMode::AccuracyDelta => rollout_acc_delta_sum
+            .clone()
+            .div(rollout_acc_delta_mask_sum.clone().clamp_min(1.0)),
         SudokuEasyRewardMode::Gae => {
             if baseline_enabled && !rollout_step_rewards.is_empty() {
                 let values_detached: Vec<_> = rollout_step_values
@@ -2583,14 +2509,9 @@ fn rollout_losses_train<B: AutodiffBackend>(
                         .mul(rollout_step_masks[idx].clone())
                         .reshape([1, batch]),
                 );
-                log_prob_stack.push(
-                    rollout_step_log_probs[idx]
-                        .clone()
-                        .reshape([1, batch, 1]),
-                );
+                log_prob_stack.push(rollout_step_log_probs[idx].clone().reshape([1, batch, 1]));
             }
-            let mut advantage = Tensor::cat(adv_stack, 0)
-                .reshape([step_count * batch, 1]);
+            let mut advantage = Tensor::cat(adv_stack, 0).reshape([step_count * batch, 1]);
             if gdpo_group > 1 {
                 let scene_batch = if gdpo_group == 0 {
                     batch
@@ -2608,15 +2529,10 @@ fn rollout_losses_train<B: AutodiffBackend>(
                     .reshape([step_count * batch, 1]);
             }
             let advantage = apply_advantage_guardrails(advantage, &training.gdpo, None);
-            let log_prob = Tensor::cat(log_prob_stack, 0)
-                .reshape([step_count * batch, 1]);
+            let log_prob = Tensor::cat(log_prob_stack, 0).reshape([step_count * batch, 1]);
             let log_prob_old = log_prob.clone().detach();
-            let policy_loss = gdpo_policy_loss(
-                log_prob,
-                log_prob_old,
-                advantage.clone(),
-                &training.gdpo,
-            );
+            let policy_loss =
+                gdpo_policy_loss(log_prob, log_prob_old, advantage.clone(), &training.gdpo);
 
             let adv_abs = advantage.clone().abs().mean();
             let adv_mean = advantage.clone().mean();
@@ -2862,7 +2778,7 @@ fn rollout_base_impl<B: BackendTrait>(
         puzzles = puzzles.repeat_dim(0, group);
         solutions = solutions.repeat_dim(0, group);
     }
-        let [batch_size, _] = puzzles.shape().dims::<2>();
+    let [batch_size, _] = puzzles.shape().dims::<2>();
     let ones_grid = Tensor::<B, 2>::ones([batch_size.max(1), GRID_LEN], &device);
     let action_index = build_action_index(batch_size, &device);
     let solution_one_hot = build_solution_one_hot(&solutions, batch_size, &device);
@@ -2882,12 +2798,11 @@ fn rollout_base_impl<B: BackendTrait>(
     let mut unknown_mask = tokens.clone().equal_elem(0).float();
     let loss_unknown_mask = unknown_mask.clone();
     let mut tokens_reward = tokens.clone();
-    let initial_unknown_counts = unknown_mask
-        .clone()
-        .sum_dim(1)
-        .reshape([batch_size.max(1)]);
-    let difficulty_scale =
-        difficulty_scale_from_unknowns(initial_unknown_counts.clone(), training.reward.unknown_power);
+    let initial_unknown_counts = unknown_mask.clone().sum_dim(1).reshape([batch_size.max(1)]);
+    let difficulty_scale = difficulty_scale_from_unknowns(
+        initial_unknown_counts.clone(),
+        training.reward.unknown_power,
+    );
     let easy_mode = training.reward.easy_mode;
     let hard_mode = training.reward.hard_mode;
     let info_enabled = training.reward.info_reward.enabled
@@ -2909,10 +2824,8 @@ fn rollout_base_impl<B: BackendTrait>(
     let baseline_lambda = training.reward.baseline.lambda.clamp(0.0, 1.0);
     let _baseline_value_weight = training.reward.baseline.value_loss_weight.max(0.0);
     let no_op_penalty = training.reward.no_op_penalty.max(0.0);
-    let mut rollout_shaping_sum =
-        Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
-    let mut rollout_shaping_mask_sum =
-        Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
+    let mut rollout_shaping_sum = Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
+    let mut rollout_shaping_mask_sum = Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
     let mut conflict_prev = if shaping_enabled && conflict_weight > 0.0 {
         shaping_potential(&tokens, shaping_metric)
     } else {
@@ -2930,20 +2843,21 @@ fn rollout_base_impl<B: BackendTrait>(
     let mut halted = Tensor::<B, 2>::zeros([batch_size.max(1), 1], &device);
 
     let mut state = model.init_state();
-    let input_cache = model.cell_embeddings_with_positions(
-        tokens.clone(),
-        row_ids.clone(),
-        col_ids.clone(),
-    );
+    let input_cache =
+        model.cell_embeddings_with_positions(tokens.clone(), row_ids.clone(), col_ids.clone());
     let [_, _, embd] = input_cache.shape().dims();
     let cache_streams = model.cache_streams();
-    let input_cache = input_cache
-        .unsqueeze_dim::<4>(1)
-        .expand([batch_size.max(1), cache_streams, GRID_LEN, embd]);
-    let input_cache_read = input_cache
-        .clone()
-        .mean_dim(1)
-        .reshape([batch_size.max(1), GRID_LEN, embd]);
+    let input_cache = input_cache.unsqueeze_dim::<4>(1).expand([
+        batch_size.max(1),
+        cache_streams,
+        GRID_LEN,
+        embd,
+    ]);
+    let input_cache_read =
+        input_cache
+            .clone()
+            .mean_dim(1)
+            .reshape([batch_size.max(1), GRID_LEN, embd]);
     let mut cache = input_cache.clone();
     let mut summary_tokens = model.init_summary_tokens(batch_size);
     let summary_len = model.summary_token_count();
@@ -2962,31 +2876,21 @@ fn rollout_base_impl<B: BackendTrait>(
     let zeros = Tensor::<B, 1>::zeros([1], &device);
     let mut recon_loss_sum = zeros.clone();
     let mut recon_steps = 0usize;
-    let mut chunk_recon_delta_sum =
-        Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
-    let mut chunk_recon_mask_sum =
-        Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
-    let mut rollout_recon_delta_sum =
-        Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
-    let mut rollout_recon_mask_sum =
-        Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
-    let mut chunk_acc_delta_sum =
-        Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
-    let mut chunk_acc_delta_mask_sum =
-        Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
-    let mut rollout_acc_delta_sum =
-        Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
-    let mut rollout_acc_delta_mask_sum =
-        Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
+    let mut chunk_recon_delta_sum = Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
+    let mut chunk_recon_mask_sum = Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
+    let mut rollout_recon_delta_sum = Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
+    let mut rollout_recon_mask_sum = Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
+    let mut chunk_acc_delta_sum = Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
+    let mut chunk_acc_delta_mask_sum = Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
+    let mut rollout_acc_delta_sum = Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
+    let mut rollout_acc_delta_mask_sum = Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
     let mut info_reward_sum = Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
     let mut halt_loss_sum = zeros.clone();
     let mut halt_prob_sum = zeros.clone();
     let mut halt_target_sum = zeros.clone();
 
-    let mut policy_entropy_sum =
-        Tensor::<B, 2>::zeros([batch_size.max(1), 1], &device);
-    let mut log_prob_sum =
-        Tensor::<B, 2>::zeros([batch_size.max(1), 1], &device);
+    let mut policy_entropy_sum = Tensor::<B, 2>::zeros([batch_size.max(1), 1], &device);
+    let mut log_prob_sum = Tensor::<B, 2>::zeros([batch_size.max(1), 1], &device);
     let mut policy_steps = 0usize;
     let mut action_count_sum = zeros.clone();
     let mut revisit_count_sum = zeros.clone();
@@ -2994,10 +2898,8 @@ fn rollout_base_impl<B: BackendTrait>(
     let mut unknown_select_sum = zeros.clone();
     let mut write_gate_sum = zeros.clone();
     let mut write_rate_sum = zeros.clone();
-    let mut visit_counts =
-        Tensor::<B, 2>::zeros([batch_size.max(1), GRID_LEN], &device);
-    let mut prev_action_one_hot =
-        Tensor::<B, 2>::zeros([batch_size.max(1), GRID_LEN], &device);
+    let mut visit_counts = Tensor::<B, 2>::zeros([batch_size.max(1), GRID_LEN], &device);
+    let mut prev_action_one_hot = Tensor::<B, 2>::zeros([batch_size.max(1), GRID_LEN], &device);
     let mut selectable_count_sum = zeros.clone();
     let mut selectable_steps = 0usize;
 
@@ -3028,12 +2930,10 @@ fn rollout_base_impl<B: BackendTrait>(
                 .mul(action_one_hot.clone().unsqueeze_dim::<3>(2))
                 .sum_dim(1)
                 .reshape([batch_size.max(1), 1, embd]);
-            let step_input = model
-                .project_input_tokens(step_input_base)
-                + step_residual;
+            let step_input = model.project_input_tokens(step_input_base) + step_residual;
             let step_input = Tensor::cat(vec![summary_tokens.clone(), step_input], 1);
-            let (step_hidden, _step_logits_full) = model
-                .forward_with_hidden_and_state_embedded(step_input, &mut state);
+            let (step_hidden, _step_logits_full) =
+                model.forward_with_hidden_and_state_embedded(step_input, &mut state);
             let summary_hidden = step_hidden.clone().slice_dim(1, 0..summary_len);
             let step_hidden = step_hidden.slice_dim(1, summary_len..summary_len + 1);
             summary_tokens = model.normalize_summary_tokens(summary_hidden);
@@ -3094,11 +2994,11 @@ fn rollout_base_impl<B: BackendTrait>(
                 .clone()
                 .unsqueeze_dim::<3>(2)
                 .unsqueeze_dim::<4>(1);
-            let cache_cell = cache
-                .clone()
-                .mul(action_mask.clone())
-                .sum_dim(2)
-                .reshape([batch_size.max(1) * cache_streams, 1, embd]);
+            let cache_cell = cache.clone().mul(action_mask.clone()).sum_dim(2).reshape([
+                batch_size.max(1) * cache_streams,
+                1,
+                embd,
+            ]);
             let summary_streams = summary_tokens
                 .clone()
                 .unsqueeze_dim::<4>(1)
@@ -3113,11 +3013,7 @@ fn rollout_base_impl<B: BackendTrait>(
                 .unsqueeze_dim::<4>(1)
                 .expand([batch_size.max(1), cache_streams, 1, embd])
                 .reshape([batch_size.max(1) * cache_streams, 1, embd]);
-            let update_emb = model.update_cell_embedding(
-                summary_streams,
-                cache_cell,
-                token_emb,
-            );
+            let update_emb = model.update_cell_embedding(summary_streams, cache_cell, token_emb);
             let update_emb = update_emb
                 .reshape([batch_size.max(1), cache_streams, 1, embd])
                 .expand([batch_size.max(1), cache_streams, GRID_LEN, embd]);
@@ -3230,9 +3126,12 @@ fn rollout_base_impl<B: BackendTrait>(
             policy_logits.clone()
         };
         let actions = match training.rollout.traversal {
-            SudokuTraversal::Saccade => {
-                sample_actions(sampled_logits, select_mask.clone(), train_mode, policy_epsilon)
-            }
+            SudokuTraversal::Saccade => sample_actions(
+                sampled_logits,
+                select_mask.clone(),
+                train_mode,
+                policy_epsilon,
+            ),
             SudokuTraversal::L2rT2b => static_traversal_actions(batch_size, step_idx, &device),
         };
         let mut action_one_hot = build_action_one_hot(&actions, &action_index);
@@ -3301,9 +3200,7 @@ fn rollout_base_impl<B: BackendTrait>(
             .mul(action_one_hot.clone().unsqueeze_dim::<3>(2))
             .sum_dim(1)
             .reshape([batch_size.max(1), 1, embd]);
-        let step_input = model
-            .project_input_tokens(step_input_base)
-            + step_residual;
+        let step_input = model.project_input_tokens(step_input_base) + step_residual;
         let step_input = Tensor::cat(vec![summary_tokens.clone(), step_input], 1);
         let (step_hidden, _step_logits_full) =
             model.forward_with_hidden_and_state_embedded(step_input, &mut state);
@@ -3331,9 +3228,7 @@ fn rollout_base_impl<B: BackendTrait>(
             .mul(action_one_hot.clone())
             .sum_dim(1)
             .reshape([batch_size.max(1), 1]);
-        let mut reward_mask = selected_editable
-            .clone()
-            .reshape([batch_size.max(1)]);
+        let mut reward_mask = selected_editable.clone().reshape([batch_size.max(1)]);
         let mut local_loss_mask = active_mask.clone();
         if matches!(training.recon.loss_mask, SudokuLossMask::Unknown) {
             let selected_unknown = loss_unknown_mask
@@ -3353,15 +3248,13 @@ fn rollout_base_impl<B: BackendTrait>(
                 &training.recon.loss,
             );
 
-        let reward_local_mask = active_mask
-            .clone()
-            .mul(selected_editable.clone());
+        let reward_local_mask = active_mask.clone().mul(selected_editable.clone());
         let (
             _reward_local_loss,
             _reward_local_acc,
             _reward_local_exact,
             reward_local_loss_per_sample,
-            ..
+            ..,
         ) = compute_loss_and_acc(
             &step_logits,
             &selected_solution,
@@ -3402,27 +3295,24 @@ fn rollout_base_impl<B: BackendTrait>(
             .clone()
             .unsqueeze_dim::<3>(2)
             .unsqueeze_dim::<4>(1);
-        let cache_cell = cache
-            .clone()
-            .mul(action_mask.clone())
-            .sum_dim(2)
-            .reshape([batch_size.max(1) * cache_streams, 1, embd]);
+        let cache_cell = cache.clone().mul(action_mask.clone()).sum_dim(2).reshape([
+            batch_size.max(1) * cache_streams,
+            1,
+            embd,
+        ]);
         let summary_streams = summary_tokens
             .clone()
             .unsqueeze_dim::<4>(1)
             .expand([batch_size.max(1), cache_streams, summary_len, embd])
             .reshape([batch_size.max(1) * cache_streams, summary_len, embd]);
-        let token_emb = model.cell_embeddings_with_positions(
-            update_values.clone(),
-            selected_row,
-            selected_col,
-        );
+        let token_emb =
+            model.cell_embeddings_with_positions(update_values.clone(), selected_row, selected_col);
         let token_emb = token_emb
             .unsqueeze_dim::<4>(1)
             .expand([batch_size.max(1), cache_streams, 1, embd])
             .reshape([batch_size.max(1) * cache_streams, 1, embd]);
-        let (update_emb, write_gate) = model
-            .update_cell_embedding_with_gate(summary_streams, cache_cell, token_emb);
+        let (update_emb, write_gate) =
+            model.update_cell_embedding_with_gate(summary_streams, cache_cell, token_emb);
         let write_gate = write_gate
             .reshape([batch_size.max(1), cache_streams.max(1), 1])
             .mean_dim(1)
@@ -3477,8 +3367,7 @@ fn rollout_base_impl<B: BackendTrait>(
         let update_values_pred_grid = pred_values.clone().repeat_dim(1, GRID_LEN);
         tokens_reward = tokens_reward.mask_where(update_mask.clone(), update_values_pred_grid);
 
-        reward_mask = reward_mask
-            .mul(write_mask_f.clone().reshape([batch_size.max(1)]));
+        reward_mask = reward_mask.mul(write_mask_f.clone().reshape([batch_size.max(1)]));
 
         let update_mask_cache = if training.policy.cache_update_clues {
             action_one_hot.clone()
@@ -3531,7 +3420,9 @@ fn rollout_base_impl<B: BackendTrait>(
             compute_grid_accuracy_masked(&tokens_reward, &solutions, &editable_mask);
         let (_acc_per_sample, acc, exact_acc, solve_rate) =
             compute_grid_accuracy(&tokens_reward, &solutions);
-        let step_acc_delta = reward_acc_per_sample.clone().sub(prev_reward_acc_per_sample.clone());
+        let step_acc_delta = reward_acc_per_sample
+            .clone()
+            .sub(prev_reward_acc_per_sample.clone());
         prev_reward_acc_per_sample = reward_acc_per_sample.detach();
         last_reward_acc_per_sample = prev_reward_acc_per_sample.clone();
         last_acc = acc;
@@ -3539,16 +3430,13 @@ fn rollout_base_impl<B: BackendTrait>(
         last_solve_rate = solve_rate;
 
         let mut global_loss = zeros.clone();
-        let mut global_loss_per_sample =
-            Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
-        let mut reward_global_loss_per_sample =
-            Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
+        let mut global_loss_per_sample = Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
+        let mut reward_global_loss_per_sample = Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
         if recon_loss_interval > 0
             && (step_idx + 1) % recon_loss_interval == 0
             && global_samples > 0
         {
-            let sample_prob =
-                (global_samples as f32 / GRID_LEN as f32).clamp(0.0, 1.0);
+            let sample_prob = (global_samples as f32 / GRID_LEN as f32).clamp(0.0, 1.0);
             let random = Tensor::<B, 2>::random(
                 [batch_size.max(1), GRID_LEN],
                 TensorDistribution::Uniform(0.0, 1.0),
@@ -3563,7 +3451,8 @@ fn rollout_base_impl<B: BackendTrait>(
             reward_global_mask = reward_global_mask.mul(editable_mask.clone());
             if matches!(training.recon.loss_mask, SudokuLossMask::Unknown) {
                 global_mask = global_mask.mul(loss_unknown_mask.clone());
-                reward_global_mask = reward_global_mask.mul(tokens_reward.clone().equal_elem(0).float());
+                reward_global_mask =
+                    reward_global_mask.mul(tokens_reward.clone().equal_elem(0).float());
             }
             global_mask = ensure_non_empty_mask(global_mask, action_one_hot.clone());
             let global_logits = model.value_logits_from_cache(cache_read.clone());
@@ -3583,7 +3472,7 @@ fn rollout_base_impl<B: BackendTrait>(
                 _reward_step_acc,
                 _reward_step_exact,
                 reward_step_loss_per_sample,
-                ..
+                ..,
             ) = compute_loss_and_acc(
                 &global_logits,
                 &solutions,
@@ -3596,16 +3485,13 @@ fn rollout_base_impl<B: BackendTrait>(
 
         let _step_recon_per_sample =
             local_loss_per_sample + global_loss_per_sample.mul_scalar(global_weight);
-        let step_recon_per_sample_reward = reward_local_loss_per_sample
-            + reward_global_loss_per_sample.mul_scalar(global_weight);
-        let step_recon_per_sample_reward_detached =
-            step_recon_per_sample_reward.clone().detach();
+        let step_recon_per_sample_reward =
+            reward_local_loss_per_sample + reward_global_loss_per_sample.mul_scalar(global_weight);
+        let step_recon_per_sample_reward_detached = step_recon_per_sample_reward.clone().detach();
         let mut baseline_loss = last_loss_per_sample.clone();
         let baseline_mask = baseline_loss.clone().equal_elem(0.0);
-        baseline_loss = baseline_loss.mask_where(
-            baseline_mask,
-            step_recon_per_sample_reward_detached.clone(),
-        );
+        baseline_loss =
+            baseline_loss.mask_where(baseline_mask, step_recon_per_sample_reward_detached.clone());
         let step_recon_delta = baseline_loss
             .sub(step_recon_per_sample_reward_detached.clone())
             .mul(reward_mask.clone());
@@ -3616,11 +3502,9 @@ fn rollout_base_impl<B: BackendTrait>(
         let step_recon_delta_reward = step_recon_delta
             .clone()
             .sub(no_op_penalty_per_sample.clone());
-        chunk_recon_delta_sum =
-            chunk_recon_delta_sum + step_recon_delta_reward.clone();
+        chunk_recon_delta_sum = chunk_recon_delta_sum + step_recon_delta_reward.clone();
         chunk_recon_mask_sum = chunk_recon_mask_sum + step_reward_mask.clone();
-        rollout_recon_delta_sum =
-            rollout_recon_delta_sum + step_recon_delta_reward.clone();
+        rollout_recon_delta_sum = rollout_recon_delta_sum + step_recon_delta_reward.clone();
         rollout_recon_mask_sum = rollout_recon_mask_sum + step_reward_mask.clone();
         let step_active_mask = active_mask.clone().reshape([batch_size.max(1)]);
         let write_gate_step = write_gate
@@ -3651,8 +3535,7 @@ fn rollout_base_impl<B: BackendTrait>(
         };
         if shaping_enabled {
             let mut shaping_step = Tensor::<B, 1>::zeros([batch_size.max(1)], &device);
-            let keep = Tensor::<B, 1>::ones([batch_size.max(1)], &device)
-                .sub(reward_mask.clone());
+            let keep = Tensor::<B, 1>::ones([batch_size.max(1)], &device).sub(reward_mask.clone());
             let step_correct = pred_values
                 .clone()
                 .equal(selected_solution.clone())
@@ -3666,7 +3549,8 @@ fn rollout_base_impl<B: BackendTrait>(
                     conflict_next.clone().mul_scalar(shaping_gamma) - conflict_prev.clone();
                 shaping_delta = shaping_delta.mul(reward_mask.clone());
                 shaping_step = shaping_step + shaping_delta.mul_scalar(conflict_weight);
-                conflict_prev = conflict_prev.mul(keep.clone()) + conflict_next.mul(reward_mask.clone());
+                conflict_prev =
+                    conflict_prev.mul(keep.clone()) + conflict_next.mul(reward_mask.clone());
             }
             if unknown_weight > 0.0 {
                 let unknown_next = unknown_potential(&tokens);
@@ -3676,7 +3560,8 @@ fn rollout_base_impl<B: BackendTrait>(
                     .mul(reward_mask.clone())
                     .mul(step_correct.clone());
                 shaping_step = shaping_step + shaping_delta.mul_scalar(unknown_weight);
-                unknown_prev = unknown_prev.mul(keep.clone()) + unknown_next.mul(reward_mask.clone());
+                unknown_prev =
+                    unknown_prev.mul(keep.clone()) + unknown_next.mul(reward_mask.clone());
             }
             if accuracy_weight > 0.0 {
                 let acc_delta = step_acc_delta.clone().mul(step_active_mask.clone());
@@ -3701,8 +3586,8 @@ fn rollout_base_impl<B: BackendTrait>(
             rollout_step_values.push(value);
         }
 
-        let reward_keep = Tensor::<B, 1>::ones([batch_size.max(1)], &device)
-            .sub(reward_mask.clone());
+        let reward_keep =
+            Tensor::<B, 1>::ones([batch_size.max(1)], &device).sub(reward_mask.clone());
         last_loss_per_sample = last_loss_per_sample.mul(reward_keep)
             + step_recon_per_sample_reward_detached.mul(reward_mask.clone());
         let step_recon = local_loss.clone() + global_loss.clone().mul_scalar(global_weight);
@@ -3719,7 +3604,11 @@ fn rollout_base_impl<B: BackendTrait>(
     let halt_target_mean = halt_target_sum.clone().div_scalar(rollout_steps as f32);
     let halt_prob_mean = halt_prob_sum.div(halt_target_sum.clamp_min(HALT_EPS));
 
-    let log_prob_sum = if track_policy { Some(log_prob_sum) } else { None };
+    let log_prob_sum = if track_policy {
+        Some(log_prob_sum)
+    } else {
+        None
+    };
     let policy_entropy_sum = if track_policy {
         policy_entropy_sum
     } else {
@@ -3735,7 +3624,9 @@ fn rollout_base_impl<B: BackendTrait>(
 
     let hard_reward = match hard_mode {
         SudokuHardRewardMode::InfoReward => info_reward_sum.clone(),
-        SudokuHardRewardMode::Accuracy => last_reward_acc_per_sample.clone().sub(reward_initial_acc.clone()),
+        SudokuHardRewardMode::Accuracy => last_reward_acc_per_sample
+            .clone()
+            .sub(reward_initial_acc.clone()),
     };
     let rollout_shaping_mean = if shaping_enabled {
         rollout_shaping_sum
@@ -3745,16 +3636,12 @@ fn rollout_base_impl<B: BackendTrait>(
         Tensor::<B, 1>::zeros([batch_size.max(1)], &device)
     };
     let mut easy_reward = match easy_mode {
-        SudokuEasyRewardMode::Recon => {
-            rollout_recon_delta_sum
-                .clone()
-                .div(rollout_recon_mask_sum.clone().clamp_min(1.0))
-        }
-        SudokuEasyRewardMode::AccuracyDelta => {
-            rollout_acc_delta_sum
-                .clone()
-                .div(rollout_acc_delta_mask_sum.clone().clamp_min(1.0))
-        }
+        SudokuEasyRewardMode::Recon => rollout_recon_delta_sum
+            .clone()
+            .div(rollout_recon_mask_sum.clone().clamp_min(1.0)),
+        SudokuEasyRewardMode::AccuracyDelta => rollout_acc_delta_sum
+            .clone()
+            .div(rollout_acc_delta_mask_sum.clone().clamp_min(1.0)),
         SudokuEasyRewardMode::Gae => {
             if baseline_enabled && !rollout_step_rewards.is_empty() {
                 let values_detached: Vec<_> = rollout_step_values
@@ -3838,12 +3725,7 @@ fn compute_grid_accuracy<B: BackendTrait>(
     let device = tokens.device();
     if batch == 0 || time == 0 {
         let zeros = Tensor::<B, 1>::zeros([1], &device);
-        return (
-            zeros.clone(),
-            zeros.clone(),
-            zeros.clone(),
-            zeros,
-        );
+        return (zeros.clone(), zeros.clone(), zeros.clone(), zeros);
     }
 
     let correct = tokens.clone().equal(solutions.clone()).float();
@@ -3878,11 +3760,7 @@ fn compute_grid_accuracy_masked<B: BackendTrait>(
     }
 
     let correct = tokens.clone().equal(solutions.clone()).float();
-    let mask_sum = mask
-        .clone()
-        .sum_dim(1)
-        .reshape([batch])
-        .clamp_min(1.0);
+    let mask_sum = mask.clone().sum_dim(1).reshape([batch]).clamp_min(1.0);
     let acc_per_sample = correct
         .mul(mask.clone())
         .sum_dim(1)
@@ -3995,9 +3873,7 @@ fn halt_bce_loss<B: BackendTrait>(logits: Tensor<B, 2>, targets: Tensor<B, 2>) -
         .clamp_max(1.0 - HALT_EPS);
     let ones = Tensor::<B, 2>::ones([batch.max(1), time.max(1)], &device);
     let log_prob = probs.clone().log();
-    let log_not = (ones.clone() - probs)
-        .clamp_min(HALT_EPS)
-        .log();
+    let log_not = (ones.clone() - probs).clamp_min(HALT_EPS).log();
     let loss = targets.clone() * log_prob + (ones - targets) * log_not;
     loss.mul_scalar(-1.0).mean()
 }
@@ -4050,15 +3926,11 @@ pub(crate) fn sample_actions<B: BackendTrait>(
         TensorDistribution::Uniform(0.0, 1.0),
         &device,
     );
-    let random_scores = random_scores * select_mask.clone()
-        + select_mask.clone().sub_scalar(1.0).mul_scalar(2.0);
+    let random_scores =
+        random_scores * select_mask.clone() + select_mask.clone().sub_scalar(1.0).mul_scalar(2.0);
     let random_actions = random_scores.argmax(1);
-    let gate = Tensor::<B, 2>::random(
-        [batch, 1],
-        TensorDistribution::Uniform(0.0, 1.0),
-        &device,
-    )
-    .lower_equal_elem(policy_epsilon);
+    let gate = Tensor::<B, 2>::random([batch, 1], TensorDistribution::Uniform(0.0, 1.0), &device)
+        .lower_equal_elem(policy_epsilon);
 
     gumbel_actions.mask_where(gate, random_actions)
 }
@@ -4105,10 +3977,8 @@ mod tests {
         for (idx, value) in solutions.iter_mut().enumerate().take(time) {
             *value = ((idx % 9) + 1) as i64;
         }
-        let solutions = Tensor::<B, 2, Int>::from_data(
-            TensorData::new(solutions, [batch, time]),
-            &device,
-        );
+        let solutions =
+            Tensor::<B, 2, Int>::from_data(TensorData::new(solutions, [batch, time]), &device);
         let solution_one_hot = build_solution_one_hot(&solutions, batch, &device);
 
         let mut logits = vec![0f32; batch * time * VOCAB_SIZE];
@@ -4116,10 +3986,8 @@ mod tests {
             let target = (idx % 9) + 1;
             logits[idx * VOCAB_SIZE + target] = 10.0;
         }
-        let logits = Tensor::<B, 3>::from_data(
-            TensorData::new(logits, [batch, time, VOCAB_SIZE]),
-            &device,
-        );
+        let logits =
+            Tensor::<B, 3>::from_data(TensorData::new(logits, [batch, time, VOCAB_SIZE]), &device);
 
         let loss_mask = Tensor::<B, 2>::ones([batch, time], &device);
         let (loss, acc, exact_acc, ..) = compute_loss_and_acc(
@@ -4135,7 +4003,11 @@ mod tests {
         let exact_value = exact_acc.into_data().iter::<f32>().next().unwrap_or(0.0);
 
         assert!(loss_value < 1e-2, "loss too high: {}", loss_value);
-        assert!((acc_value - 1.0).abs() < 1e-6, "acc not perfect: {}", acc_value);
+        assert!(
+            (acc_value - 1.0).abs() < 1e-6,
+            "acc not perfect: {}",
+            acc_value
+        );
         assert!(
             (exact_value - 1.0).abs() < 1e-6,
             "exact acc not perfect: {}",
@@ -4149,10 +4021,7 @@ mod tests {
         let device = <B as BackendTrait>::Device::default();
         let logits = Tensor::<B, 2>::zeros([2, 4], &device);
         let mask_data = vec![0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0];
-        let select_mask = Tensor::<B, 2>::from_data(
-            TensorData::new(mask_data, [2, 4]),
-            &device,
-        );
+        let select_mask = Tensor::<B, 2>::from_data(TensorData::new(mask_data, [2, 4]), &device);
         let actions = sample_actions(logits, select_mask, true, 1.0);
         let actions = actions
             .to_data()
@@ -4265,17 +4134,7 @@ mod tests {
         let batch = SudokuBatch::new(puzzles, solutions);
 
         let losses = rollout_losses(
-            &model,
-            batch,
-            &training,
-            0.0,
-            0.0,
-            false,
-            0.0,
-            1.0,
-            0.0,
-            0.0,
-            None,
+            &model, batch, &training, 0.0, 0.0, false, 0.0, 1.0, 0.0, 0.0, None,
         );
         let policy_loss = losses
             .policy_loss
@@ -4410,12 +4269,7 @@ mod tests {
             None,
         );
 
-        let loss = losses
-            .loss
-            .into_data()
-            .iter::<f32>()
-            .next()
-            .unwrap_or(0.0);
+        let loss = losses.loss.into_data().iter::<f32>().next().unwrap_or(0.0);
         let recon = losses
             .recon_loss
             .into_data()
@@ -4448,8 +4302,16 @@ mod tests {
             .unwrap_or_default();
 
         assert_eq!(values.len(), 2, "expected one potential per batch");
-        assert!((values[0] + 2.0).abs() < 1e-6, "expected -2, got {}", values[0]);
-        assert!((values[1] + 1.0).abs() < 1e-6, "expected -1, got {}", values[1]);
+        assert!(
+            (values[0] + 2.0).abs() < 1e-6,
+            "expected -2, got {}",
+            values[0]
+        );
+        assert!(
+            (values[1] + 1.0).abs() < 1e-6,
+            "expected -1, got {}",
+            values[1]
+        );
     }
 
     #[test]
@@ -4543,14 +4405,10 @@ mod tests {
         };
 
         let filled = vec![1i64; 2 * GRID_LEN];
-        let puzzles = Tensor::<B, 2, Int>::from_data(
-            TensorData::new(filled.clone(), [2, GRID_LEN]),
-            &device,
-        );
-        let solutions = Tensor::<B, 2, Int>::from_data(
-            TensorData::new(filled, [2, GRID_LEN]),
-            &device,
-        );
+        let puzzles =
+            Tensor::<B, 2, Int>::from_data(TensorData::new(filled.clone(), [2, GRID_LEN]), &device);
+        let solutions =
+            Tensor::<B, 2, Int>::from_data(TensorData::new(filled, [2, GRID_LEN]), &device);
         let batch = SudokuBatch::new(puzzles, solutions);
 
         let write_gate_floor = write_gate_floor_for_step(&training, 0);
@@ -4574,10 +4432,7 @@ mod tests {
         type B = NdArray<f32>;
         let device = <B as BackendTrait>::Device::default();
         let counts = Tensor::<B, 1>::from_data(
-            TensorData::new(
-                vec![0.0, 40.0, GRID_LEN as f32],
-                [3],
-            ),
+            TensorData::new(vec![0.0, 40.0, GRID_LEN as f32], [3]),
             &device,
         );
         let scale = difficulty_scale_from_unknowns(counts, 1.0);
@@ -4800,13 +4655,17 @@ fn rollout_losses_train_trm_chunk<B: AutodiffBackend>(
     );
     let [_, _, embd] = input_cache.shape().dims();
     let cache_streams = trainer.model.cache_streams();
-    let input_cache = input_cache
-        .unsqueeze_dim::<4>(1)
-        .expand([batch_size.max(1), cache_streams, GRID_LEN, embd]);
-    let input_cache_read = input_cache
-        .clone()
-        .mean_dim(1)
-        .reshape([batch_size.max(1), GRID_LEN, embd]);
+    let input_cache = input_cache.unsqueeze_dim::<4>(1).expand([
+        batch_size.max(1),
+        cache_streams,
+        GRID_LEN,
+        embd,
+    ]);
+    let input_cache_read =
+        input_cache
+            .clone()
+            .mean_dim(1)
+            .reshape([batch_size.max(1), GRID_LEN, embd]);
     let mut cache = input_cache.clone();
     let mut summary_tokens = trainer.model.init_summary_tokens(batch_size);
     let summary_len = trainer.model.summary_token_count();
@@ -4839,17 +4698,16 @@ fn rollout_losses_train_trm_chunk<B: AutodiffBackend>(
 
             let row_ids_chunk = slice_grid_2d_int(&row_ids, grid_start, chunk_len);
             let col_ids_chunk = slice_grid_2d_int(&col_ids, grid_start, chunk_len);
-            let input_cache_read_chunk = slice_grid_3d(&input_cache_read_pre, grid_start, chunk_len);
+            let input_cache_read_chunk =
+                slice_grid_3d(&input_cache_read_pre, grid_start, chunk_len);
             let cache_read = cache
                 .clone()
                 .mean_dim(1)
                 .reshape([batch_size.max(1), GRID_LEN, embd]);
             let cache_read_chunk = slice_grid_3d(&cache_read, grid_start, chunk_len);
 
-            let step_input = trainer
-                .model
-                .project_input_tokens(input_cache_read_chunk)
-                + cache_read_chunk;
+            let step_input =
+                trainer.model.project_input_tokens(input_cache_read_chunk) + cache_read_chunk;
             let chunk_input = Tensor::cat(vec![summary_tokens.clone(), step_input], 1);
             let (hidden, _logits_full) = trainer
                 .model
@@ -4858,7 +4716,10 @@ fn rollout_losses_train_trm_chunk<B: AutodiffBackend>(
             let summary_hidden = hidden.clone().slice_dim(1, 0..summary_len);
             summary_tokens = trainer.model.normalize_summary_tokens(summary_hidden);
             let step_hidden = hidden.slice_dim(1, summary_len..summary_len + chunk_len);
-            let step_logits = trainer.model.value_logits_from_hidden(step_hidden.clone()).detach();
+            let step_logits = trainer
+                .model
+                .value_logits_from_hidden(step_hidden.clone())
+                .detach();
 
             let solutions_chunk = slice_grid_2d_int(&solutions, grid_start, chunk_len);
             let teacher_force = if teacher_forcing_prob > 0.0 {
@@ -4873,7 +4734,9 @@ fn rollout_losses_train_trm_chunk<B: AutodiffBackend>(
                 Tensor::<B, 2>::zeros([batch_size.max(1), chunk_len], &device)
             };
             let teacher_mask = teacher_force.clone().greater_equal_elem(0.5);
-            let pred_values = step_logits.argmax(2).reshape([batch_size.max(1), chunk_len]);
+            let pred_values = step_logits
+                .argmax(2)
+                .reshape([batch_size.max(1), chunk_len]);
             let mut update_values = pred_values.clone();
             update_values = update_values.mask_where(teacher_mask, solutions_chunk.clone());
 
@@ -4898,10 +4761,11 @@ fn rollout_losses_train_trm_chunk<B: AutodiffBackend>(
                 .unsqueeze_dim::<4>(1)
                 .expand([batch_size.max(1), cache_streams, chunk_len, 1]);
             let cache_chunk = slice_grid_4d(&cache, grid_start, chunk_len);
-            let cache_cell = cache_chunk
-                .clone()
-                .swap_dims(1, 2)
-                .reshape([batch_size.max(1) * chunk_len * cache_streams, 1, embd]);
+            let cache_cell = cache_chunk.clone().swap_dims(1, 2).reshape([
+                batch_size.max(1) * chunk_len * cache_streams,
+                1,
+                embd,
+            ]);
             let summary_streams = step_hidden
                 .clone()
                 .unsqueeze_dim::<4>(2)
@@ -4954,10 +4818,8 @@ fn rollout_losses_train_trm_chunk<B: AutodiffBackend>(
             .reshape([batch_size.max(1), GRID_LEN, embd]);
         let cache_read_chunk = slice_grid_3d(&cache_read, grid_start, chunk_len);
 
-        let step_input = trainer
-            .model
-            .project_input_tokens(input_cache_read_chunk)
-            + cache_read_chunk;
+        let step_input =
+            trainer.model.project_input_tokens(input_cache_read_chunk) + cache_read_chunk;
         let chunk_input = Tensor::cat(vec![summary_tokens.clone(), step_input], 1);
         let (hidden, _logits_full) = trainer
             .model
@@ -5004,7 +4866,9 @@ fn rollout_losses_train_trm_chunk<B: AutodiffBackend>(
             Tensor::<B, 2>::zeros([batch_size.max(1), chunk_len], &device)
         };
         let teacher_mask = teacher_force.clone().greater_equal_elem(0.5);
-        let pred_values = step_logits.argmax(2).reshape([batch_size.max(1), chunk_len]);
+        let pred_values = step_logits
+            .argmax(2)
+            .reshape([batch_size.max(1), chunk_len]);
         let mut update_values = pred_values.clone();
         update_values = update_values.mask_where(teacher_mask, solutions_chunk.clone());
 
@@ -5032,10 +4896,11 @@ fn rollout_losses_train_trm_chunk<B: AutodiffBackend>(
             .unsqueeze_dim::<4>(1)
             .expand([batch_size.max(1), cache_streams, chunk_len, 1]);
         let cache_chunk = slice_grid_4d(&cache, grid_start, chunk_len);
-        let cache_cell = cache_chunk
-            .clone()
-            .swap_dims(1, 2)
-            .reshape([batch_size.max(1) * chunk_len * cache_streams, 1, embd]);
+        let cache_cell = cache_chunk.clone().swap_dims(1, 2).reshape([
+            batch_size.max(1) * chunk_len * cache_streams,
+            1,
+            embd,
+        ]);
         let summary_streams = step_hidden
             .clone()
             .unsqueeze_dim::<4>(2)
@@ -5050,11 +4915,10 @@ fn rollout_losses_train_trm_chunk<B: AutodiffBackend>(
             .unsqueeze_dim::<4>(2)
             .expand([batch_size.max(1), chunk_len, cache_streams, embd])
             .reshape([batch_size.max(1) * chunk_len * cache_streams, 1, embd]);
-        let update_emb = trainer.model.update_cell_embedding(
-            summary_streams,
-            cache_cell,
-            token_emb,
-        );
+        let update_emb =
+            trainer
+                .model
+                .update_cell_embedding(summary_streams, cache_cell, token_emb);
         let update_emb = update_emb
             .reshape([batch_size.max(1), chunk_len, cache_streams, embd])
             .swap_dims(1, 2);
@@ -5066,10 +4930,11 @@ fn rollout_losses_train_trm_chunk<B: AutodiffBackend>(
         if recon_interval > 0 && global_samples > 0 {
             let chunk_idx = steps_done / trm_chunk_size;
             if (chunk_idx + 1).is_multiple_of(recon_interval) {
-                let cache_read = cache
-                    .clone()
-                    .mean_dim(1)
-                    .reshape([batch_size.max(1), GRID_LEN, embd]);
+                let cache_read =
+                    cache
+                        .clone()
+                        .mean_dim(1)
+                        .reshape([batch_size.max(1), GRID_LEN, embd]);
                 let global_logits = trainer.model.value_logits_from_cache(cache_read);
                 let sample_prob = (global_samples as f32 / GRID_LEN as f32).clamp(0.0, 1.0);
                 let random = Tensor::<B, 2>::random(
@@ -5098,7 +4963,9 @@ fn rollout_losses_train_trm_chunk<B: AutodiffBackend>(
                 chunk_global_loss_sum =
                     chunk_global_loss_sum + global_loss.clone().mul_scalar(chunk_weight);
                 recon_loss_sum_metrics = recon_loss_sum_metrics
-                    + global_loss.detach().mul_scalar(chunk_weight * global_weight);
+                    + global_loss
+                        .detach()
+                        .mul_scalar(chunk_weight * global_weight);
                 chunk_global_steps += chunk_len;
             }
         }
@@ -5218,15 +5085,33 @@ fn rollout_losses_train_trm_constraint_ca<B: AutodiffBackend>(
     let ca_heads = trainer.model.ca_heads();
     let ca_head_dim = trainer.model.ca_head_dim();
     let mut mem_row = Tensor::<B, 5>::zeros(
-        [batch_size.max(1), ca_heads, GRID_SIDE, ca_head_dim, ca_head_dim],
+        [
+            batch_size.max(1),
+            ca_heads,
+            GRID_SIDE,
+            ca_head_dim,
+            ca_head_dim,
+        ],
         &device,
     );
     let mut mem_col = Tensor::<B, 5>::zeros(
-        [batch_size.max(1), ca_heads, GRID_SIDE, ca_head_dim, ca_head_dim],
+        [
+            batch_size.max(1),
+            ca_heads,
+            GRID_SIDE,
+            ca_head_dim,
+            ca_head_dim,
+        ],
         &device,
     );
     let mut mem_box = Tensor::<B, 5>::zeros(
-        [batch_size.max(1), ca_heads, GRID_SIDE, ca_head_dim, ca_head_dim],
+        [
+            batch_size.max(1),
+            ca_heads,
+            GRID_SIDE,
+            ca_head_dim,
+            ca_head_dim,
+        ],
         &device,
     );
 
@@ -5266,8 +5151,7 @@ fn rollout_losses_train_trm_constraint_ca<B: AutodiffBackend>(
                 recon_steps_metrics += 1;
 
                 if global_weight > 0.0 && global_samples > 0 {
-                    let sample_prob =
-                        (global_samples as f32 / GRID_LEN as f32).clamp(0.0, 1.0);
+                    let sample_prob = (global_samples as f32 / GRID_LEN as f32).clamp(0.0, 1.0);
                     let random = Tensor::<B, 2>::random(
                         [batch_size.max(1), GRID_LEN],
                         TensorDistribution::Uniform(0.0, 1.0),
@@ -5294,15 +5178,14 @@ fn rollout_losses_train_trm_constraint_ca<B: AutodiffBackend>(
                 chunk_loss_steps += 1;
             }
 
-            let (next_state, next_row, next_col, next_box) =
-                trainer.model.constraint_ca_step(
-                    cell_state,
-                    clue_mask.clone(),
-                    mem_row,
-                    mem_col,
-                    mem_box,
-                    training.rollout.trm_ca_decay,
-                );
+            let (next_state, next_row, next_col, next_box) = trainer.model.constraint_ca_step(
+                cell_state,
+                clue_mask.clone(),
+                mem_row,
+                mem_col,
+                mem_box,
+                training.rollout.trm_ca_decay,
+            );
             cell_state = next_state;
             mem_row = next_row;
             mem_col = next_col;
@@ -5405,15 +5288,33 @@ fn rollout_losses_valid_trm_constraint_ca<B: BackendTrait>(
     let ca_heads = model.ca_heads();
     let ca_head_dim = model.ca_head_dim();
     let mut mem_row = Tensor::<B, 5>::zeros(
-        [batch_size.max(1), ca_heads, GRID_SIDE, ca_head_dim, ca_head_dim],
+        [
+            batch_size.max(1),
+            ca_heads,
+            GRID_SIDE,
+            ca_head_dim,
+            ca_head_dim,
+        ],
         &device,
     );
     let mut mem_col = Tensor::<B, 5>::zeros(
-        [batch_size.max(1), ca_heads, GRID_SIDE, ca_head_dim, ca_head_dim],
+        [
+            batch_size.max(1),
+            ca_heads,
+            GRID_SIDE,
+            ca_head_dim,
+            ca_head_dim,
+        ],
         &device,
     );
     let mut mem_box = Tensor::<B, 5>::zeros(
-        [batch_size.max(1), ca_heads, GRID_SIDE, ca_head_dim, ca_head_dim],
+        [
+            batch_size.max(1),
+            ca_heads,
+            GRID_SIDE,
+            ca_head_dim,
+            ca_head_dim,
+        ],
         &device,
     );
 
@@ -5564,20 +5465,21 @@ fn rollout_losses_valid_trm_chunk<B: BackendTrait>(
     };
 
     let mut state = model.init_state();
-    let input_cache = model.cell_embeddings_with_positions(
-        tokens.clone(),
-        row_ids.clone(),
-        col_ids.clone(),
-    );
+    let input_cache =
+        model.cell_embeddings_with_positions(tokens.clone(), row_ids.clone(), col_ids.clone());
     let [_, _, embd] = input_cache.shape().dims();
     let cache_streams = model.cache_streams();
-    let input_cache = input_cache
-        .unsqueeze_dim::<4>(1)
-        .expand([batch_size.max(1), cache_streams, GRID_LEN, embd]);
-    let input_cache_read = input_cache
-        .clone()
-        .mean_dim(1)
-        .reshape([batch_size.max(1), GRID_LEN, embd]);
+    let input_cache = input_cache.unsqueeze_dim::<4>(1).expand([
+        batch_size.max(1),
+        cache_streams,
+        GRID_LEN,
+        embd,
+    ]);
+    let input_cache_read =
+        input_cache
+            .clone()
+            .mean_dim(1)
+            .reshape([batch_size.max(1), GRID_LEN, embd]);
     let mut cache = input_cache.clone();
     let mut summary_tokens = model.init_summary_tokens(batch_size);
     let summary_len = model.summary_token_count();
@@ -5605,7 +5507,8 @@ fn rollout_losses_valid_trm_chunk<B: BackendTrait>(
 
             let row_ids_chunk = slice_grid_2d_int(&row_ids, grid_start, chunk_len);
             let col_ids_chunk = slice_grid_2d_int(&col_ids, grid_start, chunk_len);
-            let input_cache_read_chunk = slice_grid_3d(&input_cache_read_pre, grid_start, chunk_len);
+            let input_cache_read_chunk =
+                slice_grid_3d(&input_cache_read_pre, grid_start, chunk_len);
             let cache_read = cache
                 .clone()
                 .mean_dim(1)
@@ -5614,8 +5517,8 @@ fn rollout_losses_valid_trm_chunk<B: BackendTrait>(
 
             let step_input = model.project_input_tokens(input_cache_read_chunk) + cache_read_chunk;
             let chunk_input = Tensor::cat(vec![summary_tokens.clone(), step_input], 1);
-            let (hidden, _logits_full) = model
-                .forward_with_hidden_and_state_embedded(chunk_input, &mut state);
+            let (hidden, _logits_full) =
+                model.forward_with_hidden_and_state_embedded(chunk_input, &mut state);
             let summary_hidden = hidden.clone().slice_dim(1, 0..summary_len);
             summary_tokens = model.normalize_summary_tokens(summary_hidden);
             let step_hidden = hidden.slice_dim(1, summary_len..summary_len + chunk_len);
@@ -5634,7 +5537,9 @@ fn rollout_losses_valid_trm_chunk<B: BackendTrait>(
                 Tensor::<B, 2>::zeros([batch_size.max(1), chunk_len], &device)
             };
             let teacher_mask = teacher_force.clone().greater_equal_elem(0.5);
-            let pred_values = step_logits.argmax(2).reshape([batch_size.max(1), chunk_len]);
+            let pred_values = step_logits
+                .argmax(2)
+                .reshape([batch_size.max(1), chunk_len]);
             let mut update_values = pred_values.clone();
             update_values = update_values.mask_where(teacher_mask, solutions_chunk.clone());
 
@@ -5659,10 +5564,11 @@ fn rollout_losses_valid_trm_chunk<B: BackendTrait>(
                 .unsqueeze_dim::<4>(1)
                 .expand([batch_size.max(1), cache_streams, chunk_len, 1]);
             let cache_chunk = slice_grid_4d(&cache, grid_start, chunk_len);
-            let cache_cell = cache_chunk
-                .clone()
-                .swap_dims(1, 2)
-                .reshape([batch_size.max(1) * chunk_len * cache_streams, 1, embd]);
+            let cache_cell = cache_chunk.clone().swap_dims(1, 2).reshape([
+                batch_size.max(1) * chunk_len * cache_streams,
+                1,
+                embd,
+            ]);
             let summary_streams = step_hidden
                 .clone()
                 .unsqueeze_dim::<4>(2)
@@ -5708,7 +5614,8 @@ fn rollout_losses_valid_trm_chunk<B: BackendTrait>(
 
         let step_input = model.project_input_tokens(input_cache_read_chunk) + cache_read_chunk;
         let chunk_input = Tensor::cat(vec![summary_tokens.clone(), step_input], 1);
-        let (hidden, _logits_full) = model.forward_with_hidden_and_state_embedded(chunk_input, &mut state);
+        let (hidden, _logits_full) =
+            model.forward_with_hidden_and_state_embedded(chunk_input, &mut state);
         let summary_hidden = hidden.clone().slice_dim(1, 0..summary_len);
         summary_tokens = model.normalize_summary_tokens(summary_hidden);
         let step_hidden = hidden.slice_dim(1, summary_len..summary_len + chunk_len);
@@ -5737,7 +5644,9 @@ fn rollout_losses_valid_trm_chunk<B: BackendTrait>(
         recon_loss_sum = recon_loss_sum + chunk_loss.clone().mul_scalar(chunk_weight);
         recon_steps += chunk_len;
 
-        let pred_values = step_logits.argmax(2).reshape([batch_size.max(1), chunk_len]);
+        let pred_values = step_logits
+            .argmax(2)
+            .reshape([batch_size.max(1), chunk_len]);
         let editable_chunk = slice_grid_2d(&editable_mask, grid_start, chunk_len);
         let update_mask_chunk = editable_chunk.clone().greater_equal_elem(0.5);
         let tokens_chunk = slice_grid_2d_int(&tokens, grid_start, chunk_len)
@@ -5758,10 +5667,11 @@ fn rollout_losses_valid_trm_chunk<B: BackendTrait>(
             .unsqueeze_dim::<4>(1)
             .expand([batch_size.max(1), cache_streams, chunk_len, 1]);
         let cache_chunk = slice_grid_4d(&cache, grid_start, chunk_len);
-        let cache_cell = cache_chunk
-            .clone()
-            .swap_dims(1, 2)
-            .reshape([batch_size.max(1) * chunk_len * cache_streams, 1, embd]);
+        let cache_cell = cache_chunk.clone().swap_dims(1, 2).reshape([
+            batch_size.max(1) * chunk_len * cache_streams,
+            1,
+            embd,
+        ]);
         let summary_streams = step_hidden
             .clone()
             .unsqueeze_dim::<4>(2)
@@ -5776,11 +5686,7 @@ fn rollout_losses_valid_trm_chunk<B: BackendTrait>(
             .unsqueeze_dim::<4>(2)
             .expand([batch_size.max(1), chunk_len, cache_streams, embd])
             .reshape([batch_size.max(1) * chunk_len * cache_streams, 1, embd]);
-        let update_emb = model.update_cell_embedding(
-            summary_streams,
-            cache_cell,
-            token_emb,
-        );
+        let update_emb = model.update_cell_embedding(summary_streams, cache_cell, token_emb);
         let update_emb = update_emb
             .reshape([batch_size.max(1), chunk_len, cache_streams, embd])
             .swap_dims(1, 2);
@@ -5792,10 +5698,11 @@ fn rollout_losses_valid_trm_chunk<B: BackendTrait>(
         if recon_interval > 0 && global_samples > 0 {
             let chunk_idx = steps_done / trm_chunk_size;
             if (chunk_idx + 1).is_multiple_of(recon_interval) {
-                let cache_read = cache
-                    .clone()
-                    .mean_dim(1)
-                    .reshape([batch_size.max(1), GRID_LEN, embd]);
+                let cache_read =
+                    cache
+                        .clone()
+                        .mean_dim(1)
+                        .reshape([batch_size.max(1), GRID_LEN, embd]);
                 let global_logits = model.value_logits_from_cache(cache_read);
                 let sample_prob = (global_samples as f32 / GRID_LEN as f32).clamp(0.0, 1.0);
                 let random = Tensor::<B, 2>::random(
@@ -5875,4 +5782,3 @@ fn rollout_losses_valid_trm_chunk<B: BackendTrait>(
         write_rate: zeros,
     }
 }
-

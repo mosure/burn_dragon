@@ -12,16 +12,16 @@ mod vision_bench {
     use burn::tensor::Tensor;
     use burn::tensor::backend::{AutodiffBackend, Backend as BackendTrait};
     use burn_autodiff::Autodiff;
-    use burn_dragon::train::WgpuRuntimeConfig;
-    use burn_dragon::vision::train::bench::{VisionSaccadeBench, VisionScatterBench};
     use burn_dragon::ManifoldHyperConnectionsConfig;
+    use burn_dragon::train::WgpuRuntimeConfig;
+    use burn_dragon::train::wgpu::init_runtime;
+    use burn_dragon::vision::train::bench::{VisionSaccadeBench, VisionScatterBench};
     use burn_dragon::vision::{
         ImageNetAugmentations, ImageNetSplit, SpatialPositionalEncodingKind, VisionAttentionMode,
         VisionAugmentationConfig, VisionDragonConfig, VisionFoveaSamplingMode,
         VisionFoveaScatterMode, VisionFoveaWarpMode, VisionLatentActivation, VisionNormalize,
         VisionPatchEmbedMode, VisionPyramidMode, VisionSaccadeConfig,
     };
-    use burn_dragon::train::wgpu::init_runtime;
     use burn_dragon_vision::FOVEATION_SHADER;
     use burn_dragon_vision::foveation;
     use burn_wgpu::{Wgpu, WgpuDevice};
@@ -1130,4 +1130,3 @@ criterion_main!(benches);
 fn main() {
     eprintln!("vision_pipeline benchmarks require --features train,benchmark");
 }
-

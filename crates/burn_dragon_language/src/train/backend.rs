@@ -1,6 +1,6 @@
 use crate::train::prelude::*;
 use crate::train::schedule::{
-    resolve_lr_scheduler, resolve_train_schedule, train_with_scheduler, TrainEnvironment,
+    TrainEnvironment, resolve_lr_scheduler, resolve_train_schedule, train_with_scheduler,
 };
 use crate::train::utils::write_run_config;
 

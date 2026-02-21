@@ -33,10 +33,9 @@ fn language_configs_parse_serialize_validate() {
         } else {
             vec![base_path.clone(), root.join(file)]
         };
-        let config: TrainingConfig =
-            load_training_config(&paths).unwrap_or_else(|err| {
-                panic!("failed to load language config from {paths:?}: {err}");
-            });
+        let config: TrainingConfig = load_training_config(&paths).unwrap_or_else(|err| {
+            panic!("failed to load language config from {paths:?}: {err}");
+        });
         config
             .validate()
             .unwrap_or_else(|err| panic!("language config validation failed: {err}"));

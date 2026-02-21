@@ -12,13 +12,13 @@ use serde::Deserialize;
 use burn::module::Module;
 use burn::record::{BinFileRecorder, FullPrecisionSettings, Recorder};
 use burn::tensor::backend::Backend;
-use burn_dragon::train::wgpu::init_runtime;
+use burn_dragon::BDH;
 use burn_dragon::language::{
     ContextStrategy, ContextStrategyConfig, GenerationConfig, ModelOverrides, TrainingConfig,
     build_model_config, generate_text, load_training_config, prefill_state,
     resolve_context_strategy, sample_next_token,
 };
-use burn_dragon::BDH;
+use burn_dragon::train::wgpu::init_runtime;
 use burn_wgpu::Wgpu;
 
 #[cfg(feature = "cuda")]

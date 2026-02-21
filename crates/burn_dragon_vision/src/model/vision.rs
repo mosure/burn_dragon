@@ -7,7 +7,7 @@ use burn::nn::{
     Dropout, DropoutConfig, LayerNorm, LayerNormConfig, Linear, LinearConfig, PaddingConfig2d,
 };
 use burn::tensor::backend::{AutodiffBackend, Backend};
-use burn::tensor::{Distribution as TensorDistribution, Tensor, TensorData, activation, Int};
+use burn::tensor::{Distribution as TensorDistribution, Int, Tensor, TensorData, activation};
 use serde::{Deserialize, Serialize};
 
 use burn_dragon_core::{
@@ -1117,8 +1117,10 @@ impl<B: Backend> VisionDragon<B> {
         let trm_graph = config.trm_graph.clone();
         let (trm_x, trm_v, trm_y, trm_enc, trm_norm, trm_hub_gate) = if trm_graph.enabled {
             let trm_x = LinearConfig::new(config.embed_dim, trm_graph.rank.max(1)).init(device);
-            let trm_v = LinearConfig::new(config.embed_dim, trm_graph.value_dim.max(1)).init(device);
-            let trm_y = LinearConfig::new(trm_graph.value_dim.max(1), trm_graph.rank.max(1)).init(device);
+            let trm_v =
+                LinearConfig::new(config.embed_dim, trm_graph.value_dim.max(1)).init(device);
+            let trm_y =
+                LinearConfig::new(trm_graph.value_dim.max(1), trm_graph.rank.max(1)).init(device);
             let trm_enc = LinearConfig::new(trm_graph.rank.max(1), config.embed_dim).init(device);
             let trm_norm = LayerNormConfig::new(trm_graph.value_dim.max(1)).init(device);
             let trm_hub_gate = if trm_graph.hub_count > 1 && trm_graph.hub_gates {
@@ -1613,17 +1615,10 @@ impl<B: Backend> VisionDragon<B> {
         let mut mem8 =
             Tensor::<B, 5>::zeros([batch, rank, value_dim, grid_height, grid_width], &device);
         let mut mem32 = Tensor::<B, 5>::zeros(
-            [
-                batch,
-                rank,
-                value_dim,
-                h32_height.max(1),
-                h32_width.max(1),
-            ],
+            [batch, rank, value_dim, h32_height.max(1), h32_width.max(1)],
             &device,
         );
-        let mut mem_hub =
-            Tensor::<B, 4>::zeros([batch, hub_count, rank, value_dim], &device);
+        let mut mem_hub = Tensor::<B, 4>::zeros([batch, hub_count, rank, value_dim], &device);
 
         for step_idx in 0..steps {
             let x8 = activation::relu(self.project_spatial(h8.clone(), trm_x));
@@ -1659,15 +1654,8 @@ impl<B: Backend> VisionDragon<B> {
             mem8 = mem8.mul_scalar(decay).add(u8.clone());
             mem32 = mem32.mul_scalar(decay).add(u32.clone()).add(u8_pool);
 
-            mem_hub = self.trm_update_hub(
-                mem_hub,
-                u8.clone(),
-                u32,
-                hub_w8,
-                hub_w32,
-                hub_count,
-                decay,
-            );
+            mem_hub =
+                self.trm_update_hub(mem_hub, u8.clone(), u32, hub_w8, hub_w32, hub_count, decay);
 
             if step_idx < detach_until {
                 h8 = h8.detach();
@@ -1683,10 +1671,7 @@ impl<B: Backend> VisionDragon<B> {
             .swap_dims(1, 2)
             .reshape([batch, patch_count, dim]);
         if has_cls {
-            let cls = patch_tokens
-                .clone()
-                .mean_dim(1)
-                .reshape([batch, 1, dim]);
+            let cls = patch_tokens.clone().mean_dim(1).reshape([batch, 1, dim]);
             Tensor::cat(vec![cls, patch_tokens], 1)
         } else {
             patch_tokens
@@ -1777,10 +1762,12 @@ impl<B: Backend> VisionDragon<B> {
             if cross_steps > 0 {
                 let flat = current.reshape([batch, streams * time, self.embed_dim]);
                 let mixed = self.encode_tokens_steps_inner(flat, cross_steps, 0, false);
-                current = self
-                    .sync_cls_tokens_multi(self.apply_token_norm(mixed.reshape([
-                        batch, streams, time, self.embed_dim,
-                    ])));
+                current = self.sync_cls_tokens_multi(self.apply_token_norm(mixed.reshape([
+                    batch,
+                    streams,
+                    time,
+                    self.embed_dim,
+                ])));
             }
         }
 
@@ -1872,7 +1859,10 @@ impl<B: Backend> VisionDragon<B> {
     fn trm_contract(&self, memory: Tensor<B, 5>, query: Tensor<B, 4>) -> Tensor<B, 4> {
         let [batch, rank, value_dim, height, width] = memory.shape().dims::<5>();
         if batch == 0 || rank == 0 || value_dim == 0 || height == 0 || width == 0 {
-            return Tensor::<B, 4>::zeros([batch.max(1), value_dim.max(1), height.max(1), width.max(1)], &memory.device());
+            return Tensor::<B, 4>::zeros(
+                [batch.max(1), value_dim.max(1), height.max(1), width.max(1)],
+                &memory.device(),
+            );
         }
         let query = query.unsqueeze_dim::<5>(2);
         memory.mul(query).sum_dims_squeeze::<4, usize>(&[1])
@@ -1881,7 +1871,10 @@ impl<B: Backend> VisionDragon<B> {
     fn trm_local_read(&self, memory: Tensor<B, 5>, query: Tensor<B, 4>) -> Tensor<B, 4> {
         let [batch, _, value_dim, height, width] = memory.shape().dims::<5>();
         if batch == 0 || value_dim == 0 || height == 0 || width == 0 {
-            return Tensor::<B, 4>::zeros([batch.max(1), value_dim.max(1), height.max(1), width.max(1)], &memory.device());
+            return Tensor::<B, 4>::zeros(
+                [batch.max(1), value_dim.max(1), height.max(1), width.max(1)],
+                &memory.device(),
+            );
         }
         let mut acc = Tensor::<B, 4>::zeros([batch, value_dim, height, width], &memory.device());
         let radius = self.trm_graph.local_radius.max(1) as isize;
@@ -1944,7 +1937,13 @@ impl<B: Backend> VisionDragon<B> {
         let pooled_width = width / scale;
         if pooled_height == 0 || pooled_width == 0 {
             return Tensor::<B, 5>::zeros(
-                [batch, rank, value_dim, pooled_height.max(1), pooled_width.max(1)],
+                [
+                    batch,
+                    rank,
+                    value_dim,
+                    pooled_height.max(1),
+                    pooled_width.max(1),
+                ],
                 &u.device(),
             );
         }
@@ -2003,10 +2002,7 @@ impl<B: Backend> VisionDragon<B> {
         if let Some(gate) = hub_gate {
             let weights = self.project_spatial(h, gate);
             let weights = activation::relu(weights);
-            let denom = weights
-                .clone()
-                .sum_dim(1)
-                .add_scalar(ROW_NORM_EPS);
+            let denom = weights.clone().sum_dim(1).add_scalar(ROW_NORM_EPS);
             weights / denom
         } else {
             Tensor::<B, 4>::ones([batch, hub_count, height, width], &device)
@@ -2132,7 +2128,9 @@ impl<B: Backend> VisionDragon<B> {
         let k = query.clone();
         let query_scaled = query.clone().div_scalar(scale);
         let mut scores = query_scaled.matmul(k.swap_dims(2, 3));
-        if self.use_alibi && let Some(slopes) = self.alibi_slopes.as_ref() {
+        if self.use_alibi
+            && let Some(slopes) = self.alibi_slopes.as_ref()
+        {
             let device = query.device();
             let [_, heads, time, _] = query.shape().dims::<4>();
             let slopes = slopes.clone().reshape([1, heads, 1, 1]);
@@ -3155,7 +3153,9 @@ mod imagenet {
             }
             let mut pruned = VecDeque::with_capacity(state.entries.len());
             for (path, tick) in state.order.drain(..) {
-                if let Some(entry) = state.entries.get(&path) && entry.tick == tick {
+                if let Some(entry) = state.entries.get(&path)
+                    && entry.tick == tick
+                {
                     pruned.push_back((path, tick));
                 }
             }
@@ -3291,7 +3291,9 @@ mod imagenet {
         }
 
         fn load_image_cached(&self, path: &Path) -> Result<Arc<DynamicImage>> {
-            if let Some(cache) = &self.cache && let Some(image) = cache.get(path) {
+            if let Some(cache) = &self.cache
+                && let Some(image) = cache.get(path)
+            {
                 return Ok(image);
             }
 
@@ -3450,7 +3452,9 @@ mod imagenet {
                             if view_idx == 0 {
                                 self.normalize.apply(&aug, &mut images);
                             }
-                            if view_idx == 1 && let Some(buffer) = target_images.as_mut() {
+                            if view_idx == 1
+                                && let Some(buffer) = target_images.as_mut()
+                            {
                                 self.normalize.apply(&aug, buffer);
                             }
                             if let Some(buffer) = view_images.as_mut() {
@@ -3462,25 +3466,30 @@ mod imagenet {
                         }
                     } else {
                         for view_idx in 0..self.global_views {
-                            let (aug, crop) = if matches!(self.augmentations.split, ImageNetSplit::Train)
-                                && !self.augmentations.is_deterministic()
-                            {
-                                let crop = self
-                                    .augmentations
-                                    .random_resized_crop_params(image.as_ref(), &mut rng);
-                                let aug = self
-                                    .augmentations
-                                    .apply_train_with_crop(image.as_ref(), &mut rng, crop);
-                                (aug, crop)
-                            } else {
-                                let crop = self.augmentations.val_crop_params(image.as_ref());
-                                let aug = self.augmentations.apply_val(image.as_ref());
-                                (aug, crop)
-                            };
+                            let (aug, crop) =
+                                if matches!(self.augmentations.split, ImageNetSplit::Train)
+                                    && !self.augmentations.is_deterministic()
+                                {
+                                    let crop = self
+                                        .augmentations
+                                        .random_resized_crop_params(image.as_ref(), &mut rng);
+                                    let aug = self.augmentations.apply_train_with_crop(
+                                        image.as_ref(),
+                                        &mut rng,
+                                        crop,
+                                    );
+                                    (aug, crop)
+                                } else {
+                                    let crop = self.augmentations.val_crop_params(image.as_ref());
+                                    let aug = self.augmentations.apply_val(image.as_ref());
+                                    (aug, crop)
+                                };
                             if view_idx == 0 {
                                 self.normalize.apply(&aug, &mut images);
                             }
-                            if view_idx == 1 && let Some(buffer) = target_images.as_mut() {
+                            if view_idx == 1
+                                && let Some(buffer) = target_images.as_mut()
+                            {
                                 self.normalize.apply(&aug, buffer);
                             }
                             if let Some(buffer) = view_crops.as_mut() {
@@ -4091,9 +4100,7 @@ mod imagenet {
             let batch = if let Some(prefetcher) = &mut self.prefetcher {
                 match prefetcher.recv() {
                     Some(Ok(ImageNetPrefetchItem::Batch(batch))) => batch,
-                    Some(Ok(ImageNetPrefetchItem::Data(data))) => {
-                        (*data).into_batch(&self.device)
-                    }
+                    Some(Ok(ImageNetPrefetchItem::Data(data))) => (*data).into_batch(&self.device),
                     Some(Err(err)) => panic!("imagenet prefetch error: {err}"),
                     None => panic!("imagenet prefetch channel closed early"),
                 }
@@ -4227,4 +4234,3 @@ pub use imagenet::{
     DinoFeatureStore, ImageNetAugmentations, ImageNetBatch, ImageNetDataLoader, ImageNetDataset,
     ImageNetDatasetConfig, ImageNetSplit, VisionNormalize,
 };
-

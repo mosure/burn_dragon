@@ -111,10 +111,7 @@ where
 }
 
 #[cfg(target_arch = "wasm32")]
-pub fn start_overlay_wasm<B>(
-    config: VizConfig,
-    dims: VizDimensions,
-) -> VizOverlay<B>
+pub fn start_overlay_wasm<B>(config: VizConfig, dims: VizDimensions) -> VizOverlay<B>
 where
     B: Backend<Device = burn_wgpu::WgpuDevice> + 'static,
     B::Device: Default + Clone,

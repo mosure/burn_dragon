@@ -906,9 +906,7 @@ mod loss_trace {
         }
 
         fn update(&mut self, item: &Self::Input, metadata: &MetricMetadata) -> MetricEntry {
-            if self.every > 1
-                && !metadata.iteration.is_multiple_of(self.every)
-                && self.initialized
+            if self.every > 1 && !metadata.iteration.is_multiple_of(self.every) && self.initialized
             {
                 return MetricEntry::new(
                     Arc::clone(&self.name),
@@ -940,13 +938,12 @@ mod loss_trace {
             self.initialized = false;
         }
     }
-
 }
 
 #[cfg(feature = "integration_test")]
-pub use loss_trace::{len as loss_trace_len, reset as loss_trace_reset, take as loss_trace_take};
-#[cfg(feature = "integration_test")]
 pub use loss_trace::LossTraceMetric;
+#[cfg(feature = "integration_test")]
+pub use loss_trace::{len as loss_trace_len, reset as loss_trace_reset, take as loss_trace_take};
 
 #[cfg(feature = "integration_test")]
 mod solve_rate_trace {
@@ -1012,9 +1009,7 @@ mod solve_rate_trace {
         }
 
         fn update(&mut self, item: &Self::Input, metadata: &MetricMetadata) -> MetricEntry {
-            if self.every > 1
-                && !metadata.iteration.is_multiple_of(self.every)
-                && self.initialized
+            if self.every > 1 && !metadata.iteration.is_multiple_of(self.every) && self.initialized
             {
                 return MetricEntry::new(
                     Arc::clone(&self.name),
@@ -1049,11 +1044,11 @@ mod solve_rate_trace {
 }
 
 #[cfg(feature = "integration_test")]
+pub use solve_rate_trace::SolveRateTraceMetric;
+#[cfg(feature = "integration_test")]
 pub use solve_rate_trace::{
     len as solve_rate_trace_len, reset as solve_rate_trace_reset, take as solve_rate_trace_take,
 };
-#[cfg(feature = "integration_test")]
-pub use solve_rate_trace::SolveRateTraceMetric;
 
 #[cfg(feature = "integration_test")]
 mod halt_prob_trace {
@@ -1119,9 +1114,7 @@ mod halt_prob_trace {
         }
 
         fn update(&mut self, item: &Self::Input, metadata: &MetricMetadata) -> MetricEntry {
-            if self.every > 1
-                && !metadata.iteration.is_multiple_of(self.every)
-                && self.initialized
+            if self.every > 1 && !metadata.iteration.is_multiple_of(self.every) && self.initialized
             {
                 return MetricEntry::new(
                     Arc::clone(&self.name),
@@ -1156,8 +1149,8 @@ mod halt_prob_trace {
 }
 
 #[cfg(feature = "integration_test")]
+pub use halt_prob_trace::HaltProbTraceMetric;
+#[cfg(feature = "integration_test")]
 pub use halt_prob_trace::{
     len as halt_prob_trace_len, reset as halt_prob_trace_reset, take as halt_prob_trace_take,
 };
-#[cfg(feature = "integration_test")]
-pub use halt_prob_trace::HaltProbTraceMetric;

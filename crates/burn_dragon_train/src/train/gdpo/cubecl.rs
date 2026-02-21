@@ -23,13 +23,12 @@ where
 {
     #[cfg(feature = "cuda")]
     {
-        matches_type::<
-            B::FloatTensorPrimitive,
-            FusionTensor<FusionCubeRuntime<WgpuRuntime, u32>>,
-        >() || matches_type::<
-            B::FloatTensorPrimitive,
-            FusionTensor<FusionCubeRuntime<WgpuRuntime, u8>>,
-        >() || matches_type::<B::FloatTensorPrimitive, CubeTensor<WgpuRuntime>>()
+        matches_type::<B::FloatTensorPrimitive, FusionTensor<FusionCubeRuntime<WgpuRuntime, u32>>>()
+            || matches_type::<
+                B::FloatTensorPrimitive,
+                FusionTensor<FusionCubeRuntime<WgpuRuntime, u8>>,
+            >()
+            || matches_type::<B::FloatTensorPrimitive, CubeTensor<WgpuRuntime>>()
             || matches_type::<
                 B::FloatTensorPrimitive,
                 FusionTensor<FusionCubeRuntime<CudaRuntime, u32>>,
@@ -42,13 +41,12 @@ where
     }
     #[cfg(not(feature = "cuda"))]
     {
-        matches_type::<
-            B::FloatTensorPrimitive,
-            FusionTensor<FusionCubeRuntime<WgpuRuntime, u32>>,
-        >() || matches_type::<
-            B::FloatTensorPrimitive,
-            FusionTensor<FusionCubeRuntime<WgpuRuntime, u8>>,
-        >() || matches_type::<B::FloatTensorPrimitive, CubeTensor<WgpuRuntime>>()
+        matches_type::<B::FloatTensorPrimitive, FusionTensor<FusionCubeRuntime<WgpuRuntime, u32>>>()
+            || matches_type::<
+                B::FloatTensorPrimitive,
+                FusionTensor<FusionCubeRuntime<WgpuRuntime, u8>>,
+            >()
+            || matches_type::<B::FloatTensorPrimitive, CubeTensor<WgpuRuntime>>()
     }
 }
 

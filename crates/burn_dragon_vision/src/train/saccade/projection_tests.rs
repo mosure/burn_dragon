@@ -63,6 +63,19 @@ fn run_projection_variants<B: BackendTrait>(device: &B::Device, patch_size: usiz
     );
 }
 
+#[cfg(all(feature = "cuda", not(target_arch = "wasm32")))]
+fn cuda_random_kernel_stable() -> bool {
+    static STABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *STABLE.get_or_init(|| {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let device = burn_cuda::CudaDevice::default();
+            let _ = Tensor::<Cuda<f32>, 3>::random([1, 1, 1], TensorDistribution::Default, &device);
+            Cuda::<f32>::sync(&device);
+        }))
+        .is_ok()
+    })
+}
+
 #[test]
 fn input_projection_forward_shapes_across_patch_sizes() {
     type Backend = NdArray<f32>;
@@ -89,6 +102,9 @@ fn input_projection_forward_shapes_wgpu() {
 #[test]
 fn input_projection_forward_shapes_cuda() {
     type Backend = Cuda<f32>;
+    if !cuda_random_kernel_stable() {
+        return;
+    }
     let device = burn_cuda::CudaDevice::default();
     let patch_sizes = [16usize, 32, 64, 128];
     for patch_size in patch_sizes {

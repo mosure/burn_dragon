@@ -26,14 +26,11 @@ use burn::tensor::backend::Backend;
 use burn::tensor::{Tensor, TensorData};
 #[cfg(test)]
 use burn_dragon_vision::FOVEA_AA_THRESHOLD;
-use burn_dragon_vision::{
-    SpatialPositionalEncodingKind, VisionAttentionMode, VisionDragonConfig,
-};
-use burn_dragon_vision::{
-    foveation, VisionFoveaSamplingMode, VisionFoveaWarpMode, VisionPyramidMode,
-    VisionSaccadeConfig,
-};
 use burn_dragon_vision::train::SaccadeFoveationSampler;
+use burn_dragon_vision::{SpatialPositionalEncodingKind, VisionAttentionMode, VisionDragonConfig};
+use burn_dragon_vision::{
+    VisionFoveaSamplingMode, VisionFoveaWarpMode, VisionPyramidMode, VisionSaccadeConfig, foveation,
+};
 use burn_wgpu::Wgpu;
 use half::f16;
 use image::ImageReader;
@@ -2753,4 +2750,3 @@ fn patch_to_rgba<B: Backend>(patch: Tensor<B, 4>) -> Tensor<B, 3> {
         Tensor::cat(vec![patch, alpha], 2)
     }
 }
-

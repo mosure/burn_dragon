@@ -535,4 +535,3 @@ pub(crate) struct SaccadeLaplacianImages<B: BackendTrait> {
     pub(crate) residuals: Vec<Tensor<B, 4>>,
     pub(crate) coarse: Tensor<B, 4>,
 }
-

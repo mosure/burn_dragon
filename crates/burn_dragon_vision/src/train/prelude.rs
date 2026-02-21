@@ -60,6 +60,23 @@ pub(crate) use burn_cuda::Cuda;
 
 pub(crate) use burn::record::{BinFileRecorder, FullPrecisionSettings};
 
+#[cfg(feature = "cli")]
+pub(crate) use crate::config::load_vision_training_config;
+pub(crate) use crate::config::{
+    ImagenetteVariant, VisionDatasetConfig, VisionDatasetDownloadConfig, VisionFoveaSamplingMode,
+    VisionFoveaScatterMode, VisionFoveaWarpMode, VisionLejepaConfig, VisionLejepaLossConfig,
+    VisionMaeConfig, VisionPyramidMode, VisionSaccadeConfig, VisionSaccadeInputProjectionCnnConfig,
+    VisionSaccadeInputProjectionConfig, VisionSaccadeInputProjectionMicroVitConfig,
+    VisionTeacherConfig, VisionTeacherVariant, VisionTrainingConfig, VisionTrainingHyperparameters,
+    VisionTrainingModeConfig,
+};
+pub(crate) use crate::loss::{VisionDistillationLossConfig, vision_distillation_loss};
+pub(crate) use crate::{
+    DinoFeatureStore, ImageNetAugmentations, ImageNetBatch, ImageNetDataLoader, ImageNetDataset,
+    ImageNetDatasetConfig, ImageNetSplit, PatchGrid, SpatialPositionalEncodingKind,
+    VisionAttentionMode, VisionDragon, VisionDragonConfig, VisionLatentActivation, VisionNormalize,
+    VisionPatchEmbedMode, patchify, unpatchify,
+};
 pub(crate) use burn_dino::correctness::load_model_from_checkpoint;
 pub(crate) use burn_dino::model::dino::{DinoVisionTransformer, DinoVisionTransformerConfig};
 #[cfg(feature = "cli")]
@@ -67,30 +84,13 @@ pub(crate) use burn_dragon_train::wgpu::init_runtime;
 pub(crate) use burn_dragon_train::{
     GdpoHardGate, LearningRateScheduleConfig, OptimizerConfig, VisionArtifactOutputMode,
 };
-pub(crate) use crate::config::{
-    ImagenetteVariant, VisionDatasetConfig, VisionDatasetDownloadConfig, VisionFoveaSamplingMode,
-    VisionFoveaScatterMode, VisionFoveaWarpMode, VisionLejepaConfig, VisionLejepaLossConfig,
-    VisionMaeConfig, VisionPyramidMode, VisionSaccadeConfig,
-    VisionSaccadeInputProjectionCnnConfig, VisionSaccadeInputProjectionConfig,
-    VisionSaccadeInputProjectionMicroVitConfig, VisionTeacherConfig, VisionTeacherVariant,
-    VisionTrainingConfig, VisionTrainingHyperparameters, VisionTrainingModeConfig,
-};
-pub(crate) use crate::{
-    DinoFeatureStore, ImageNetAugmentations, ImageNetBatch, ImageNetDataLoader, ImageNetDataset,
-    ImageNetDatasetConfig, ImageNetSplit, PatchGrid, SpatialPositionalEncodingKind,
-    VisionAttentionMode, VisionDragon, VisionDragonConfig,
-    VisionLatentActivation, VisionNormalize, VisionPatchEmbedMode, patchify, unpatchify,
-};
-pub(crate) use crate::loss::{VisionDistillationLossConfig, vision_distillation_loss};
-#[cfg(feature = "cli")]
-pub(crate) use crate::config::load_vision_training_config;
 pub(crate) use serde::Serialize;
 
 pub(crate) use crate::train::constants::*;
+pub(crate) use crate::train::pipeline::*;
 pub(crate) use crate::train::saccade::*;
 pub(crate) use crate::train::vision::*;
 pub(crate) use burn_dragon_train::train::teacher::*;
-pub(crate) use crate::train::pipeline::*;
 
 pub(crate) use burn_dragon_train::train::metrics::{
     ActionClampRateInput, AdvantageAbsMeanInput, AdvantageStdInput, DeviceMemoryMetric,
@@ -99,4 +99,3 @@ pub(crate) use burn_dragon_train::train::metrics::{
     ProbeLossInput, ReconLossInput, ReconPsnrFullInput, ReconPsnrMaskedInput, ScalarMetric,
     SigRegLossInput, VisionArtifactInput, VisionArtifactMetric, VisionOutput, VisionTrainItem,
 };
-

@@ -1,6 +1,10 @@
 use crate::train::prelude::*;
 
-type MaskedMipPyramid<B> = (Vec<SaccadeMipLevel<B>>, Vec<Tensor<B, 3>>, Vec<Tensor<B, 2>>);
+type MaskedMipPyramid<B> = (
+    Vec<SaccadeMipLevel<B>>,
+    Vec<Tensor<B, 3>>,
+    Vec<Tensor<B, 2>>,
+);
 
 impl<B: BackendTrait> VisionSaccadeModel<B> {
     fn cross_view_overlap_mask(
@@ -83,11 +87,7 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
             .sub(other_x1.clone())
             .greater_equal_elem(0.0)
             .float()
-            * orig_x
-                .clone()
-                .sub(other_x2)
-                .lower_equal_elem(0.0)
-                .float();
+            * orig_x.clone().sub(other_x2).lower_equal_elem(0.0).float();
         let in_y = orig_y
             .clone()
             .sub(other_y1.clone())

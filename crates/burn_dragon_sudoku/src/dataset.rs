@@ -19,7 +19,7 @@ use crate::config::{
     SudokuDatasetConfig, SudokuDatasetSourceConfig, SudokuHuggingFaceConfig, SudokuLocalConfig,
     SudokuRecordFormat,
 };
-use crate::vocab::{SudokuVocab, GRID_LEN};
+use crate::vocab::{GRID_LEN, SudokuVocab};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SudokuSplit {
@@ -65,12 +65,8 @@ impl SudokuDataset {
         fs::create_dir_all(cache_dir)?;
 
         let (mut train_records, mut val_records) = match &config.source {
-            SudokuDatasetSourceConfig::HuggingFace(cfg) => {
-                load_hf_records(cfg, cache_dir)?
-            }
-            SudokuDatasetSourceConfig::Local(cfg) => {
-                load_local_records(cfg)?
-            }
+            SudokuDatasetSourceConfig::HuggingFace(cfg) => load_hf_records(cfg, cache_dir)?,
+            SudokuDatasetSourceConfig::Local(cfg) => load_local_records(cfg)?,
         };
 
         if train_records.is_empty() && val_records.is_empty() {
@@ -113,10 +109,14 @@ impl SudokuDataset {
         all_records.extend(train_records);
         all_records.extend(val_records);
 
-        let puzzles: Vec<Vec<u8>> =
-            all_records.iter().map(|record| record.puzzle.clone()).collect();
-        let solutions: Vec<Vec<u8>> =
-            all_records.iter().map(|record| record.solution.clone()).collect();
+        let puzzles: Vec<Vec<u8>> = all_records
+            .iter()
+            .map(|record| record.puzzle.clone())
+            .collect();
+        let solutions: Vec<Vec<u8>> = all_records
+            .iter()
+            .map(|record| record.solution.clone())
+            .collect();
 
         let summary = format!(
             "Prepared Sudoku dataset with batch_size={}, records={}, train_len={} (split_ratio={})",
@@ -183,7 +183,11 @@ impl SudokuDataset {
         span.div_ceil(self.batch_size).max(1)
     }
 
-    pub fn sample_batch<B: Backend>(&self, split: SudokuSplit, device: &B::Device) -> SudokuBatch<B> {
+    pub fn sample_batch<B: Backend>(
+        &self,
+        split: SudokuSplit,
+        device: &B::Device,
+    ) -> SudokuBatch<B> {
         let (offset, span) = self.split_offset_and_span(split);
         let mut rng = thread_rng();
         let mut puzzles = vec![0i64; self.batch_size * GRID_LEN];
@@ -495,9 +499,15 @@ fn collect_records(
     records: &mut Vec<SudokuRecord>,
 ) -> io::Result<()> {
     match format {
-        SudokuRecordFormat::Jsonl => collect_jsonl_records(path, puzzle_field, solution_field, max_records, records),
-        SudokuRecordFormat::Csv => collect_csv_records(path, puzzle_field, solution_field, max_records, records),
-        SudokuRecordFormat::Parquet => collect_parquet_records(path, puzzle_field, solution_field, max_records, records),
+        SudokuRecordFormat::Jsonl => {
+            collect_jsonl_records(path, puzzle_field, solution_field, max_records, records)
+        }
+        SudokuRecordFormat::Csv => {
+            collect_csv_records(path, puzzle_field, solution_field, max_records, records)
+        }
+        SudokuRecordFormat::Parquet => {
+            collect_parquet_records(path, puzzle_field, solution_field, max_records, records)
+        }
     }
 }
 
@@ -569,18 +579,32 @@ fn collect_csv_records(
         )
     })?;
 
-    let puzzle_idx = headers.iter().position(|h| h == puzzle_field).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("missing field `{}` in csv file {}", puzzle_field, path.display()),
-        )
-    })?;
-    let solution_idx = headers.iter().position(|h| h == solution_field).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("missing field `{}` in csv file {}", solution_field, path.display()),
-        )
-    })?;
+    let puzzle_idx = headers
+        .iter()
+        .position(|h| h == puzzle_field)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "missing field `{}` in csv file {}",
+                    puzzle_field,
+                    path.display()
+                ),
+            )
+        })?;
+    let solution_idx = headers
+        .iter()
+        .position(|h| h == solution_field)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "missing field `{}` in csv file {}",
+                    solution_field,
+                    path.display()
+                ),
+            )
+        })?;
 
     for record in reader.records() {
         if max_records.is_some_and(|limit| records.len() >= limit) {
@@ -624,13 +648,21 @@ fn collect_parquet_records(
     let puzzle_idx = *index_map.get(puzzle_field).ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("missing field `{}` in parquet file {}", puzzle_field, path.display()),
+            format!(
+                "missing field `{}` in parquet file {}",
+                puzzle_field,
+                path.display()
+            ),
         )
     })?;
     let solution_idx = *index_map.get(solution_field).ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("missing field `{}` in parquet file {}", solution_field, path.display()),
+            format!(
+                "missing field `{}` in parquet file {}",
+                solution_field,
+                path.display()
+            ),
         )
     })?;
 
@@ -644,7 +676,10 @@ fn collect_parquet_records(
         let puzzle = row
             .get_string(puzzle_idx)
             .map(|s| s.to_string())
-            .or_else(|_| row.get_bytes(puzzle_idx).map(|bytes| String::from_utf8_lossy(bytes.data()).to_string()))
+            .or_else(|_| {
+                row.get_bytes(puzzle_idx)
+                    .map(|bytes| String::from_utf8_lossy(bytes.data()).to_string())
+            })
             .or_else(|_| {
                 row.get_column_iter()
                     .nth(puzzle_idx)
@@ -655,7 +690,10 @@ fn collect_parquet_records(
         let solution = row
             .get_string(solution_idx)
             .map(|s| s.to_string())
-            .or_else(|_| row.get_bytes(solution_idx).map(|bytes| String::from_utf8_lossy(bytes.data()).to_string()))
+            .or_else(|_| {
+                row.get_bytes(solution_idx)
+                    .map(|bytes| String::from_utf8_lossy(bytes.data()).to_string())
+            })
             .or_else(|_| {
                 row.get_column_iter()
                     .nth(solution_idx)

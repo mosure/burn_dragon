@@ -143,12 +143,11 @@ where
 
     #[cfg(feature = "integration_test")]
     if env.training.trace_train_loss {
-        builder = builder.metric_train(
-            burn_dragon_train::train::metrics::LossTraceMetric::<ValidBackend<B>>::new(
-                "loss_trace",
-                env.training.trace_train_loss_every,
-            ),
-        );
+        builder = builder.metric_train(burn_dragon_train::train::metrics::LossTraceMetric::<
+            ValidBackend<B>,
+        >::new(
+            "loss_trace", env.training.trace_train_loss_every
+        ));
     }
 
     let cleanup_iters = env.training.memory_cleanup_iters;
@@ -240,20 +239,28 @@ where
                 .metric_train_numeric(ScalarMetric::<
                     ValidBackend<B>,
                     ReconPsnrMaskedInput<ValidBackend<B>>,
-                >::new_every(psnr_masked.as_str(), metric_every))
+                >::new_every(
+                    psnr_masked.as_str(), metric_every
+                ))
                 .metric_valid_numeric(ScalarMetric::<
                     ValidBackend<B>,
                     ReconPsnrMaskedInput<ValidBackend<B>>,
-                >::new_every(psnr_masked.as_str(), metric_every));
+                >::new_every(
+                    psnr_masked.as_str(), metric_every
+                ));
             builder = builder
                 .metric_train_numeric(ScalarMetric::<
                     ValidBackend<B>,
                     ReconPsnrFullInput<ValidBackend<B>>,
-                >::new_every(psnr_full.as_str(), metric_every))
+                >::new_every(
+                    psnr_full.as_str(), metric_every
+                ))
                 .metric_valid_numeric(ScalarMetric::<
                     ValidBackend<B>,
                     ReconPsnrFullInput<ValidBackend<B>>,
-                >::new_every(psnr_full.as_str(), metric_every));
+                >::new_every(
+                    psnr_full.as_str(), metric_every
+                ));
         }
         if diagnostics.policy {
             let name = format!("{prefix}_policy_loss");
@@ -307,11 +314,15 @@ where
                 .metric_train_numeric(ScalarMetric::<
                     ValidBackend<B>,
                     ActionClampRateInput<ValidBackend<B>>,
-                >::new_every(clamp_rate.as_str(), metric_every))
+                >::new_every(
+                    clamp_rate.as_str(), metric_every
+                ))
                 .metric_valid_numeric(ScalarMetric::<
                     ValidBackend<B>,
                     ActionClampRateInput<ValidBackend<B>>,
-                >::new_every(clamp_rate.as_str(), metric_every));
+                >::new_every(
+                    clamp_rate.as_str(), metric_every
+                ));
         }
         if diagnostics.probe {
             let probe_loss = format!("{prefix}_probe_loss");
@@ -320,19 +331,27 @@ where
                 .metric_train_numeric(ScalarMetric::<
                     ValidBackend<B>,
                     ProbeLossInput<ValidBackend<B>>,
-                >::new_every(probe_loss.as_str(), metric_every))
+                >::new_every(
+                    probe_loss.as_str(), metric_every
+                ))
                 .metric_valid_numeric(ScalarMetric::<
                     ValidBackend<B>,
                     ProbeLossInput<ValidBackend<B>>,
-                >::new_every(probe_loss.as_str(), metric_every))
+                >::new_every(
+                    probe_loss.as_str(), metric_every
+                ))
                 .metric_train_numeric(ScalarMetric::<
                     ValidBackend<B>,
                     ProbeAccInput<ValidBackend<B>>,
-                >::new_every(probe_acc.as_str(), metric_every))
+                >::new_every(
+                    probe_acc.as_str(), metric_every
+                ))
                 .metric_valid_numeric(ScalarMetric::<
                     ValidBackend<B>,
                     ProbeAccInput<ValidBackend<B>>,
-                >::new_every(probe_acc.as_str(), metric_every));
+                >::new_every(
+                    probe_acc.as_str(), metric_every
+                ));
         }
 
         if diagnostics.artifact_every > 0 {
@@ -557,4 +576,3 @@ mod tests {
         }
     }
 }
-

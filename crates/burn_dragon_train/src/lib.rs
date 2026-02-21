@@ -13,6 +13,4 @@ pub use config::{
     WgpuRuntimeConfig,
 };
 #[cfg(feature = "train")]
-pub use config::{
-    LearningRateScheduleConfig, OptimizerConfig, VisionArtifactOutputMode,
-};
+pub use config::{LearningRateScheduleConfig, OptimizerConfig, VisionArtifactOutputMode};

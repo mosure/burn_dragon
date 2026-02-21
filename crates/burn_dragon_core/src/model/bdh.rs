@@ -92,10 +92,7 @@ impl<B: Backend> BDH<B> {
         self.forward_with_state(tokens, &mut state)
     }
 
-    pub fn forward_with_hidden(
-        &self,
-        tokens: Tensor<B, 2, Int>,
-    ) -> (Tensor<B, 3>, Tensor<B, 3>) {
+    pub fn forward_with_hidden(&self, tokens: Tensor<B, 2, Int>) -> (Tensor<B, 3>, Tensor<B, 3>) {
         let embedded = self.embed.forward(tokens);
         let [batch, time, embd] = embedded.shape().dims::<3>();
         let mut current = embedded.reshape([batch, 1, time, embd]);

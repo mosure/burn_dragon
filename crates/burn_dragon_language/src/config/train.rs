@@ -139,7 +139,9 @@ impl TrainingConfig {
         if self.training.log_frequency == 0 {
             return Err(anyhow!("training.log_frequency must be > 0"));
         }
-        if let Some(epochs) = self.training.epochs && epochs == 0 {
+        if let Some(epochs) = self.training.epochs
+            && epochs == 0
+        {
             return Err(anyhow!("training.epochs must be > 0"));
         }
         self.optimizer.validate()?;
@@ -149,13 +151,17 @@ impl TrainingConfig {
                 self.dataset.train_split_ratio
             ));
         }
-        if let Some(max_tokens) = self.generation.max_tokens && max_tokens <= 0 {
+        if let Some(max_tokens) = self.generation.max_tokens
+            && max_tokens <= 0
+        {
             return Err(anyhow!("generation.max_tokens must be > 0"));
         }
         if self.generation.temperature <= 0.0 {
             return Err(anyhow!("generation.temperature must be > 0"));
         }
-        if let Some(top_k) = self.generation.top_k && top_k == 0 {
+        if let Some(top_k) = self.generation.top_k
+            && top_k == 0
+        {
             return Err(anyhow!("generation.top_k must be > 0"));
         }
 
@@ -182,7 +188,9 @@ impl TrainingConfig {
             DatasetSourceConfig::Shakespeare { .. } => {}
         }
 
-        if let Some(gdpo) = &self.training.gdpo && gdpo.enabled {
+        if let Some(gdpo) = &self.training.gdpo
+            && gdpo.enabled
+        {
             if gdpo.group_size == 0 {
                 return Err(anyhow!("training.gdpo.group_size must be > 0"));
             }
@@ -220,24 +228,36 @@ impl TrainingConfig {
             }
         }
 
-        if let Some(n_layer) = self.model.n_layer && n_layer == 0 {
+        if let Some(n_layer) = self.model.n_layer
+            && n_layer == 0
+        {
             return Err(anyhow!("model.n_layer must be > 0 when set"));
         }
-        if let Some(n_embd) = self.model.n_embd && n_embd == 0 {
+        if let Some(n_embd) = self.model.n_embd
+            && n_embd == 0
+        {
             return Err(anyhow!("model.n_embd must be > 0 when set"));
         }
-        if let Some(n_head) = self.model.n_head && n_head == 0 {
+        if let Some(n_head) = self.model.n_head
+            && n_head == 0
+        {
             return Err(anyhow!("model.n_head must be > 0 when set"));
         }
-        if let Some(multiplier) = self.model.mlp_internal_dim_multiplier && multiplier == 0 {
+        if let Some(multiplier) = self.model.mlp_internal_dim_multiplier
+            && multiplier == 0
+        {
             return Err(anyhow!(
                 "model.mlp_internal_dim_multiplier must be > 0 when set"
             ));
         }
-        if let Some(dropout) = self.model.dropout && dropout < 0.0 {
+        if let Some(dropout) = self.model.dropout
+            && dropout < 0.0
+        {
             return Err(anyhow!("model.dropout must be >= 0"));
         }
-        if let Some(block_size) = self.model.block_size && block_size == 0 {
+        if let Some(block_size) = self.model.block_size
+            && block_size == 0
+        {
             return Err(anyhow!("model.block_size must be > 0 when set"));
         }
 
@@ -516,7 +536,10 @@ mod tests {
         assert_eq!(config.model.dropout, Some(0.1));
         assert_eq!(config.model.fused_kernels, Some(true));
         assert_eq!(config.model.block_size, Some(256));
-        assert_eq!(config.model.rotary_embedding, Some(burn_dragon_core::RotaryEmbedding::Alibi));
+        assert_eq!(
+            config.model.rotary_embedding,
+            Some(burn_dragon_core::RotaryEmbedding::Alibi)
+        );
     }
 
     #[test]

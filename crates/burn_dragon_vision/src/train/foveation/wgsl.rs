@@ -18,8 +18,8 @@ use cubecl_runtime::server::Bindings;
 
 use crate::FOVEATION_BUFFER_SHADER;
 
-use crate::train::saccade::{SaccadeLaplacianImages, SaccadeMipLevel};
 use crate::config::VisionFoveaWarpMode;
+use crate::train::saccade::{SaccadeLaplacianImages, SaccadeMipLevel};
 
 const MAX_LEVELS: usize = 8;
 const META_HEADER_LEN: usize = 10;

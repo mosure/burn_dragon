@@ -46,13 +46,12 @@ where
 {
     #[cfg(feature = "cuda")]
     {
-        matches_type::<
-            B::FloatTensorPrimitive,
-            FusionTensor<FusionCubeRuntime<WgpuRuntime, u32>>,
-        >() || matches_type::<
-            B::FloatTensorPrimitive,
-            FusionTensor<FusionCubeRuntime<WgpuRuntime, u8>>,
-        >() || matches_type::<B::FloatTensorPrimitive, CubeTensor<WgpuRuntime>>()
+        matches_type::<B::FloatTensorPrimitive, FusionTensor<FusionCubeRuntime<WgpuRuntime, u32>>>()
+            || matches_type::<
+                B::FloatTensorPrimitive,
+                FusionTensor<FusionCubeRuntime<WgpuRuntime, u8>>,
+            >()
+            || matches_type::<B::FloatTensorPrimitive, CubeTensor<WgpuRuntime>>()
             || matches_type::<
                 B::FloatTensorPrimitive,
                 FusionTensor<FusionCubeRuntime<CudaRuntime, u32>>,
@@ -65,13 +64,12 @@ where
     }
     #[cfg(not(feature = "cuda"))]
     {
-        matches_type::<
-            B::FloatTensorPrimitive,
-            FusionTensor<FusionCubeRuntime<WgpuRuntime, u32>>,
-        >() || matches_type::<
-            B::FloatTensorPrimitive,
-            FusionTensor<FusionCubeRuntime<WgpuRuntime, u8>>,
-        >() || matches_type::<B::FloatTensorPrimitive, CubeTensor<WgpuRuntime>>()
+        matches_type::<B::FloatTensorPrimitive, FusionTensor<FusionCubeRuntime<WgpuRuntime, u32>>>()
+            || matches_type::<
+                B::FloatTensorPrimitive,
+                FusionTensor<FusionCubeRuntime<WgpuRuntime, u8>>,
+            >()
+            || matches_type::<B::FloatTensorPrimitive, CubeTensor<WgpuRuntime>>()
     }
 }
 
@@ -101,51 +99,47 @@ where
     }
 
     let level_count = levels.len().min(MAX_LAPLACIAN_LEVELS);
-    if let Some(laplacian) = laplacian_images && levels.len() <= MAX_LAPLACIAN_LEVELS {
-        if let Some(result) =
-            try_foveated_patch_cubecl_laplacian_fused_runtime::<B, u32, WgpuRuntime>(
-                laplacian,
-                level_count,
-                center_x,
-                center_y,
-                sigma_px,
-                radius_px,
-                lod_sigma,
-                patch_h,
-                patch_w,
-            )
-        {
+    if let Some(laplacian) = laplacian_images
+        && levels.len() <= MAX_LAPLACIAN_LEVELS
+    {
+        if let Some(result) = try_foveated_patch_cubecl_laplacian_fused_runtime::<B, u32, WgpuRuntime>(
+            laplacian,
+            level_count,
+            center_x,
+            center_y,
+            sigma_px,
+            radius_px,
+            lod_sigma,
+            patch_h,
+            patch_w,
+        ) {
             return Some(result);
         }
-        if let Some(result) =
-            try_foveated_patch_cubecl_laplacian_fused_runtime::<B, u8, WgpuRuntime>(
-                laplacian,
-                level_count,
-                center_x,
-                center_y,
-                sigma_px,
-                radius_px,
-                lod_sigma,
-                patch_h,
-                patch_w,
-            )
-        {
+        if let Some(result) = try_foveated_patch_cubecl_laplacian_fused_runtime::<B, u8, WgpuRuntime>(
+            laplacian,
+            level_count,
+            center_x,
+            center_y,
+            sigma_px,
+            radius_px,
+            lod_sigma,
+            patch_h,
+            patch_w,
+        ) {
             return Some(result);
         }
         #[cfg(feature = "cuda")]
-        if let Some(result) =
-            try_foveated_patch_cubecl_laplacian_fused_runtime::<B, u32, CudaRuntime>(
-                laplacian,
-                level_count,
-                center_x,
-                center_y,
-                sigma_px,
-                radius_px,
-                lod_sigma,
-                patch_h,
-                patch_w,
-            )
-        {
+        if let Some(result) = try_foveated_patch_cubecl_laplacian_fused_runtime::<B, u32, CudaRuntime>(
+            laplacian,
+            level_count,
+            center_x,
+            center_y,
+            sigma_px,
+            radius_px,
+            lod_sigma,
+            patch_h,
+            patch_w,
+        ) {
             return Some(result);
         }
         #[cfg(feature = "cuda")]
@@ -192,7 +186,9 @@ where
         return None;
     }
 
-    let level_images = if let Some(laplacian) = laplacian_images && levels.len() > MAX_LAPLACIAN_LEVELS {
+    let level_images = if let Some(laplacian) = laplacian_images
+        && levels.len() > MAX_LAPLACIAN_LEVELS
+    {
         let mut recon = Vec::with_capacity(levels.len());
         let mut current = laplacian.coarse.clone();
         recon.push(current.clone());
@@ -587,9 +583,7 @@ where
     Some(cube)
 }
 
-fn resolve_direct_tensor<B, R, const D: usize>(
-    tensor: &BurnTensor<B, D>,
-) -> Option<CubeTensor<R>>
+fn resolve_direct_tensor<B, R, const D: usize>(tensor: &BurnTensor<B, D>) -> Option<CubeTensor<R>>
 where
     B: BackendTrait,
     B::FloatTensorPrimitive: 'static,

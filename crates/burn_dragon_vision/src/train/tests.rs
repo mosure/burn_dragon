@@ -1,25 +1,25 @@
 #[cfg(not(target_arch = "wasm32"))]
 use super::init_wgpu_test_runtime;
-use crate::foveation;
-use crate::train::SaccadeFoveationSampler;
-use crate::train::prelude::*;
-use burn_autodiff::Autodiff;
-#[cfg(not(target_arch = "wasm32"))]
-use burn_cubecl::CubeBackend;
-use burn_dragon_language::ContextStrategyConfig;
-use burn_dragon_language::TrainingHyperparameters;
-use burn_dragon_language::dataset::SequenceBatch;
-use burn_dragon_language::train::resolve_train_schedule;
-use burn_dragon_train::train::pipeline::ScheduleSource as TrainScheduleSource;
-use burn_dragon_core::{BDH, BDHConfig, FusedKernelConfig, ManifoldHyperConnectionsConfig};
-use crate::{SpatialPositionalEncodingKind, VisionAttentionMode, VisionLatentActivation};
-#[cfg(not(target_arch = "wasm32"))]
-use crate::config::{VisionTrainingModeConfig, load_vision_training_config};
 use crate::config::{
     VisionLossConfig, VisionPyramidMode, VisionReconLossConfig, VisionSaccadeCacheConfig,
     VisionSaccadeCrossViewConfig, VisionSaccadeInputProjectionConfig, VisionSaccadePolicyConfig,
     VisionTbpttConfig,
 };
+#[cfg(not(target_arch = "wasm32"))]
+use crate::config::{VisionTrainingModeConfig, load_vision_training_config};
+use crate::foveation;
+use crate::train::SaccadeFoveationSampler;
+use crate::train::prelude::*;
+use crate::{SpatialPositionalEncodingKind, VisionAttentionMode, VisionLatentActivation};
+use burn_autodiff::Autodiff;
+#[cfg(not(target_arch = "wasm32"))]
+use burn_cubecl::CubeBackend;
+use burn_dragon_core::{BDH, BDHConfig, FusedKernelConfig, ManifoldHyperConnectionsConfig};
+use burn_dragon_language::ContextStrategyConfig;
+use burn_dragon_language::TrainingHyperparameters;
+use burn_dragon_language::dataset::SequenceBatch;
+use burn_dragon_language::train::resolve_train_schedule;
+use burn_dragon_train::train::pipeline::ScheduleSource as TrainScheduleSource;
 use burn_ndarray::NdArray;
 #[cfg(not(target_arch = "wasm32"))]
 use burn_wgpu::Wgpu;
@@ -187,7 +187,11 @@ fn make_checkerboard_image(
             let cy = y / cell;
             for x in 0..width {
                 let cx = x / cell;
-                let value = if (cx + cy).is_multiple_of(2) { 0.0 } else { 1.0 };
+                let value = if (cx + cy).is_multiple_of(2) {
+                    0.0
+                } else {
+                    1.0
+                };
                 data.push(value);
             }
         }
@@ -391,7 +395,11 @@ fn vision_saccade_tiny_path() -> PathBuf {
             .join("vision")
             .join("saccade")
             .join("tiny.toml"),
-        manifest_dir.join("config").join("vision").join("saccade").join("tiny.toml"),
+        manifest_dir
+            .join("config")
+            .join("vision")
+            .join("saccade")
+            .join("tiny.toml"),
     ];
     for candidate in &candidates {
         if candidate.exists() {
@@ -454,6 +462,19 @@ fn cuda_memory_pool_stable() -> bool {
             let _ = Tensor::<Cuda<f32>, 2>::zeros([1, 1], &device);
             Cuda::<f32>::sync(&device);
             let _ = cuda_memory_snapshot(&device);
+        }))
+        .is_ok()
+    })
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "cuda"))]
+fn cuda_random_kernel_stable() -> bool {
+    static STABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *STABLE.get_or_init(|| {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let device = burn_cuda::CudaDevice::default();
+            let _ = Tensor::<Cuda<f32>, 2>::random([1, 1], TensorDistribution::Default, &device);
+            Cuda::<f32>::sync(&device);
         }))
         .is_ok()
     })
@@ -1072,16 +1093,9 @@ fn fovea_warped_checkerboard_moire_is_bounded() {
         let mean =
             Tensor::<Backend, 2>::from_data(TensorData::new(vec![0.5, 0.5], [1, 2]), &device);
         let sigma = Tensor::<Backend, 2>::from_data(TensorData::new(vec![0.08], [1, 1]), &device);
-        let radius =
-            Tensor::<Backend, 2>::from_data(TensorData::new(vec![0.3], [1, 1]), &device);
-        let patch = saccade.foveated_patch_image_with_radius(
-            &levels,
-            &base_grid,
-            mean,
-            sigma,
-            radius,
-            None,
-        );
+        let radius = Tensor::<Backend, 2>::from_data(TensorData::new(vec![0.3], [1, 1]), &device);
+        let patch = saccade
+            .foveated_patch_image_with_radius(&levels, &base_grid, mean, sigma, radius, None);
         let patch_vec = patch
             .to_data()
             .convert::<f32>()
@@ -1131,7 +1145,9 @@ fn fovea_warped_image_gradients_focus_center() {
         let sigma_raw =
             Tensor::<Backend, 2>::from_data(TensorData::new(vec![0.08], [1, 1]), &device);
         let mean = activation::sigmoid(mean_raw);
-        let sigma = activation::sigmoid(sigma_raw).mul_scalar(0.25).add_scalar(0.05);
+        let sigma = activation::sigmoid(sigma_raw)
+            .mul_scalar(0.25)
+            .add_scalar(0.05);
         let patch = saccade.foveated_patch_image(&levels, &base_grid, mean, sigma, None);
         let grads = patch.mean().backward();
         let image_grad = images.grad(&grads).expect("image grad");
@@ -1192,7 +1208,9 @@ fn fovea_warped_feature_gradients_focus_center() {
         let sigma_raw =
             Tensor::<Backend, 2>::from_data(TensorData::new(vec![0.06], [1, 1]), &device);
         let mean = activation::sigmoid(mean_raw);
-        let sigma = activation::sigmoid(sigma_raw).mul_scalar(0.2).add_scalar(0.05);
+        let sigma = activation::sigmoid(sigma_raw)
+            .mul_scalar(0.2)
+            .add_scalar(0.05);
         let level = SaccadeMipLevel {
             tokens: Tensor::<Backend, 3>::zeros([1, 1, 1], &device),
             grid: PatchGrid {
@@ -1817,6 +1835,9 @@ fn cuda_foveation_custom_backward_produces_grads() {
     if !crate::train::foveation::cubecl::supports_backend::<Cuda<f32>>() {
         return;
     }
+    if !cuda_memory_pool_stable() || !cuda_random_kernel_stable() {
+        return;
+    }
 
     let device = burn_cuda::CudaDevice::default();
 
@@ -1905,7 +1926,7 @@ fn wgpu_vision_saccade_memory_stays_bounded_across_epochs() {
 
     let vision_config = config.vision.build();
     let saccade_config = match config.mode {
-        VisionTrainingModeConfig::Saccade(config) => config,
+        VisionTrainingModeConfig::Saccade(config) => *config,
         other => panic!("expected saccade config, got {other:?}"),
     };
     let fixed_steps = config
@@ -2087,7 +2108,7 @@ fn cuda_vision_saccade_memory_stays_bounded_across_epochs() {
 
         let vision_config = config.vision.build();
         let saccade_config = match config.mode {
-            VisionTrainingModeConfig::Saccade(config) => config,
+            VisionTrainingModeConfig::Saccade(config) => *config,
             other => panic!("expected saccade config, got {other:?}"),
         };
         let fixed_steps = config
@@ -2224,4 +2245,3 @@ fn cuda_vision_saccade_train_memory_stays_bounded_small_config() {
         );
     }));
 }
-

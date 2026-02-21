@@ -39,9 +39,7 @@ where
 
     maybe_download_vision_dataset(&config.dataset)?;
 
-    let grid = vision_config
-        .image_size
-        .div_ceil(vision_config.patch_size);
+    let grid = vision_config.image_size.div_ceil(vision_config.patch_size);
     let student_patch_tokens = grid * grid;
 
     let normalize =
@@ -524,7 +522,7 @@ where
             )
         }
         VisionTrainingModeConfig::Saccade(saccade) => {
-            let mut saccade = saccade.clone();
+            let mut saccade = (**saccade).clone();
             if saccade.num_eyes == 0 {
                 saccade.num_eyes = config.vision.num_eyes.max(1);
             }
@@ -796,16 +794,21 @@ where
                 .patch_size
                 .saturating_mul(vision_config.patch_size)
                 .saturating_mul(vision_config.in_channels);
+            let recon = VisionReconstructionInit {
+                patch_dim: recon_patch_dim,
+                normalize_std: config.augment.normalize_std,
+                patch_size: vision_config.patch_size,
+                in_channels: vision_config.in_channels,
+            };
             let mut model = Some(VisionLejepaModel::new(
                 model,
                 lejepa,
-                vision_config.embed_dim,
-                train_dataset.num_classes(),
-                rollout,
-                recon_patch_dim,
-                config.augment.normalize_std,
-                vision_config.patch_size,
-                vision_config.in_channels,
+                VisionLejepaInit {
+                    embed_dim: vision_config.embed_dim,
+                    num_classes: train_dataset.num_classes(),
+                    rollout,
+                    recon,
+                },
                 &device,
             ));
             let mut optim =
@@ -877,16 +880,21 @@ where
                 .patch_size
                 .saturating_mul(vision_config.patch_size)
                 .saturating_mul(vision_config.in_channels);
+            let recon = VisionReconstructionInit {
+                patch_dim: recon_patch_dim,
+                normalize_std: config.augment.normalize_std,
+                patch_size: vision_config.patch_size,
+                in_channels: vision_config.in_channels,
+            };
             let mut model = Some(VisionMaeModel::new(
                 model,
                 mae,
-                vision_config.num_eyes,
-                vision_config.embed_dim,
-                rollout,
-                recon_patch_dim,
-                config.augment.normalize_std,
-                vision_config.patch_size,
-                vision_config.in_channels,
+                VisionMaeInit {
+                    num_eyes: vision_config.num_eyes,
+                    embed_dim: vision_config.embed_dim,
+                    rollout,
+                    recon,
+                },
                 &device,
             ));
             let mut optim =
@@ -1052,4 +1060,3 @@ where
 {
     train_vision_backend::<B, Init>(config, backend_name, init_backend)
 }
-

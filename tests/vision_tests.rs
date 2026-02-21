@@ -1,10 +1,10 @@
 use burn::tensor::backend::Backend as BackendTrait;
 use burn::tensor::{Distribution, Tensor};
-use burn_dragon::{FusedKernelConfig, ManifoldHyperConnectionsConfig};
 use burn_dragon::vision::{
     PatchEmbed, PatchGrid, SpatialPositionalEncodingKind, VisionAttentionMode, VisionDragon,
     VisionDragonConfig, VisionLatentActivation, VisionPatchEmbedMode, pool_patch_tokens,
 };
+use burn_dragon::{FusedKernelConfig, ManifoldHyperConnectionsConfig};
 use burn_ndarray::NdArray;
 
 #[test]
@@ -37,6 +37,7 @@ fn patch_embed_and_model_shapes() {
         use_alibi: true,
         fused_kernels: FusedKernelConfig::default(),
         mhc: ManifoldHyperConnectionsConfig::default(),
+        trm_graph: Default::default(),
     };
 
     let images = Tensor::<Backend, 4>::random([2, 3, 32, 32], Distribution::Default, &device);
@@ -82,6 +83,7 @@ fn patch_embed_raw_matches_add_position() {
         use_alibi: true,
         fused_kernels: FusedKernelConfig::default(),
         mhc: ManifoldHyperConnectionsConfig::default(),
+        trm_graph: Default::default(),
     };
 
     let images = Tensor::<Backend, 4>::random([2, 3, 32, 32], Distribution::Default, &device);
@@ -128,6 +130,7 @@ fn vision_forward_steps_shapes() {
         use_alibi: true,
         fused_kernels: FusedKernelConfig::default(),
         mhc: ManifoldHyperConnectionsConfig::default(),
+        trm_graph: Default::default(),
     };
 
     let images = Tensor::<Backend, 4>::random([2, 3, 32, 32], Distribution::Default, &device);
@@ -641,6 +644,4 @@ mod train_tests {
             .expect("loss vec")[0];
         assert!(value.is_finite());
     }
-
 }
-

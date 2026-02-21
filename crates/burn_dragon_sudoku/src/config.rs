@@ -235,8 +235,6 @@ impl ModuleDisplayDefault for SudokuGridPositional {
 
 impl ModuleDisplay for SudokuGridPositional {}
 
-
-
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SudokuTraversal {
@@ -291,7 +289,6 @@ pub struct SudokuRolloutSchedule {
     #[serde(default)]
     pub anneal_iters: usize,
 }
-
 
 impl Default for SudokuRolloutConfig {
     fn default() -> Self {
@@ -910,7 +907,6 @@ pub enum SudokuCacheUpdateMode {
     GatedResidual,
 }
 
-
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default)]
 pub struct SudokuCacheUpdateConfig {
     #[serde(default)]
@@ -1016,7 +1012,9 @@ impl SudokuTrainingConfig {
             return Err(anyhow!("training.batch_size must be > 0"));
         }
         if self.training.epochs.is_none() && self.training.max_iters == 0 {
-            return Err(anyhow!("training.max_iters must be > 0 when epochs is not set"));
+            return Err(anyhow!(
+                "training.max_iters must be > 0 when epochs is not set"
+            ));
         }
         if self.training.log_frequency == 0 {
             return Err(anyhow!("training.log_frequency must be > 0"));
@@ -1074,7 +1072,8 @@ impl SudokuTrainingConfig {
         {
             return Err(anyhow!(
                 "training.rollout.backprop_steps ({}) must be <= rollout_max_steps ({})",
-                backprop_steps, max_rollout_steps
+                backprop_steps,
+                max_rollout_steps
             ));
         }
         if self.training.halt.weight < 0.0 {
@@ -1092,7 +1091,8 @@ impl SudokuTrainingConfig {
         if self.training.halt.min_steps > max_rollout_steps {
             return Err(anyhow!(
                 "training.halt.min_steps ({}) must be <= rollout_max_steps ({})",
-                self.training.halt.min_steps, max_rollout_steps
+                self.training.halt.min_steps,
+                max_rollout_steps
             ));
         }
         if self.training.rollout.saccade_step_cells == 0 {
@@ -1109,7 +1109,8 @@ impl SudokuTrainingConfig {
             if chunk > max_chunk {
                 return Err(anyhow!(
                     "training.rollout.trm_chunk_size ({}) must be <= {}",
-                    chunk, max_chunk
+                    chunk,
+                    max_chunk
                 ));
             }
         }
@@ -1241,8 +1242,7 @@ impl SudokuTrainingConfig {
                 self.training.policy.revisit_penalty
             ));
         }
-        if !self.training.policy.recon_weight.is_finite()
-            || self.training.policy.recon_weight < 0.0
+        if !self.training.policy.recon_weight.is_finite() || self.training.policy.recon_weight < 0.0
         {
             return Err(anyhow!(
                 "training.policy.recon_weight must be >= 0 (got {})",
@@ -1325,7 +1325,8 @@ impl SudokuTrainingConfig {
                 ));
             }
         }
-        if self.training.reward.info_reward.enabled && self.training.reward.info_reward.stride == 0 {
+        if self.training.reward.info_reward.enabled && self.training.reward.info_reward.stride == 0
+        {
             return Err(anyhow!(
                 "training.reward.info_reward.stride must be > 0 (got 0)"
             ));
@@ -1394,7 +1395,9 @@ impl SudokuTrainingConfig {
                 self.training.recon.loss_weight_final
             ));
         }
-        if let Some(epochs) = self.training.epochs && epochs == 0 {
+        if let Some(epochs) = self.training.epochs
+            && epochs == 0
+        {
             return Err(anyhow!("training.epochs must be > 0"));
         }
         if !(0.0 < self.dataset.train_split_ratio && self.dataset.train_split_ratio <= 1.0) {
@@ -1498,7 +1501,9 @@ impl SudokuTrainingConfig {
                 ));
             }
             if self.model.grid_rope_theta <= 0.0 {
-                return Err(anyhow!("model.grid_rope_theta must be > 0 for model.grid_positional = rope_2d"));
+                return Err(anyhow!(
+                    "model.grid_rope_theta must be > 0 for model.grid_positional = rope_2d"
+                ));
             }
         }
 
@@ -1743,7 +1748,6 @@ fn default_policy_entropy_weight_final() -> f32 {
     0.0
 }
 
-
 fn default_policy_entropy_adaptive() -> bool {
     false
 }
@@ -1926,14 +1930,6 @@ mod tests {
     }
 }
 
-
-
-
-
-
-
-
-
 fn default_cache_mhc_num_streams() -> usize {
     1
 }
@@ -1957,26 +1953,3 @@ fn default_cache_mhc_add_branch_out_to_residual() -> bool {
 fn default_cache_mhc_dropout() -> f64 {
     0.0
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

@@ -8,14 +8,14 @@ use std::time::{Duration, Instant};
 use burn::tensor::backend::AutodiffBackend;
 use burn_autodiff::Autodiff;
 use burn_dragon::train::WgpuRuntimeConfig;
-use burn_dragon::vision::{
-    VisionTrainingConfig, VisionTrainingModeConfig, load_vision_training_config,
-};
+use burn_dragon::vision::train::bench::VisionMaeTrainStepBench;
 use burn_dragon::vision::{
     ImageNetAugmentations, ImageNetBatch, ImageNetDataLoader, ImageNetDataset,
     ImageNetDatasetConfig, ImageNetSplit, VisionNormalize,
 };
-use burn_dragon::vision::train::bench::VisionMaeTrainStepBench;
+use burn_dragon::vision::{
+    VisionTrainingConfig, VisionTrainingModeConfig, load_vision_training_config,
+};
 use burn_ndarray::NdArray;
 #[cfg(feature = "cli")]
 use burn_wgpu::{CubeBackend, WgpuDevice, WgpuRuntime};
@@ -86,7 +86,10 @@ fn bench_config_names() -> Vec<String> {
             return configs;
         }
     }
-    vec!["vision/mae/tiny".to_string(), "vision/croco/tiny".to_string()]
+    vec![
+        "vision/mae/tiny".to_string(),
+        "vision/croco/tiny".to_string(),
+    ]
 }
 
 fn build_train_dataset(config: &VisionTrainingConfig) -> Option<Arc<ImageNetDataset>> {

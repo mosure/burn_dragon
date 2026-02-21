@@ -8,15 +8,15 @@ use std::time::{Duration, Instant};
 use burn::tensor::backend::AutodiffBackend;
 use burn_autodiff::Autodiff;
 use burn_dragon::train::WgpuRuntimeConfig;
-use burn_dragon::vision::{
-    VisionTrainingConfig, VisionTrainingModeConfig, load_vision_training_config,
-};
+use burn_dragon::train::wgpu::init_runtime;
+use burn_dragon::vision::train::bench::VisionLejepaTrainStepBench;
 use burn_dragon::vision::{
     ImageNetAugmentations, ImageNetBatch, ImageNetDataLoader, ImageNetDataset,
     ImageNetDatasetConfig, ImageNetSplit, VisionNormalize,
 };
-use burn_dragon::vision::train::bench::VisionLejepaTrainStepBench;
-use burn_dragon::train::wgpu::init_runtime;
+use burn_dragon::vision::{
+    VisionTrainingConfig, VisionTrainingModeConfig, load_vision_training_config,
+};
 use burn_wgpu::{CubeBackend, WgpuDevice, WgpuRuntime};
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use serde::Deserialize;

@@ -71,14 +71,13 @@ pub(crate) use burn_dino::model::dino::{DinoVisionTransformer, DinoVisionTransfo
 pub(crate) use serde::Serialize;
 
 pub(crate) use crate::train::constants::*;
-pub(crate) use crate::train::teacher::*;
 pub(crate) use crate::train::pipeline::*;
+pub(crate) use crate::train::teacher::*;
 
 pub(crate) use crate::train::metrics::{
     ActionClampRateInput, AdvantageAbsMeanInput, AdvantageStdInput, DeviceMemoryMetric,
     DeviceMetric, InvLossInput, LogProbMeanInput, LossValue, MemoryCleanupMetric,
     PolicyEntropyInput, PolicyLossInput, ProbeAccInput, ProbeLossInput, ReconLossInput,
-    ReconPsnrFullInput, ReconPsnrMaskedInput, ScalarMetric, SigRegLossInput,
-    VisionArtifactInput, VisionArtifactMetric, VisionOutput, VisionTrainItem,
+    ReconPsnrFullInput, ReconPsnrMaskedInput, ScalarMetric, SigRegLossInput, VisionArtifactInput,
+    VisionArtifactMetric, VisionOutput, VisionTrainItem,
 };
-

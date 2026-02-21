@@ -917,6 +917,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "bevy_dragon"
+version = "0.4.0"
+dependencies = [
+ "bevy",
+ "bevy_burn",
+ "burn",
+ "burn-ndarray",
+ "burn-wgpu",
+ "burn_dragon_core",
+ "wasm-bindgen-futures",
+]
+
+[[package]]
 name = "bevy_ecs"
 version = "0.17.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2420,12 +2433,12 @@ dependencies = [
 name = "burn_dragon"
 version = "0.4.0"
 dependencies = [
+ "bevy_dragon",
  "burn",
  "burn-autodiff",
  "burn-cuda",
  "burn-ndarray",
  "burn-wgpu",
- "burn_dragon_bevy",
  "burn_dragon_core",
  "burn_dragon_language",
  "burn_dragon_train",
@@ -2441,19 +2454,6 @@ dependencies = [
  "tempfile",
  "toml",
  "wgpu",
-]
-
-[[package]]
-name = "burn_dragon_bevy"
-version = "0.4.0"
-dependencies = [
- "bevy",
- "bevy_burn",
- "burn",
- "burn-ndarray",
- "burn-wgpu",
- "burn_dragon_core",
- "wasm-bindgen-futures",
 ]
 
 [[package]]
@@ -2630,9 +2630,9 @@ name = "burn_dragon_web"
 version = "0.4.0"
 dependencies = [
  "anyhow",
+ "bevy_dragon",
  "burn",
  "burn-wgpu",
- "burn_dragon_bevy",
  "burn_dragon_core",
  "burn_dragon_language",
  "console_error_panic_hook",

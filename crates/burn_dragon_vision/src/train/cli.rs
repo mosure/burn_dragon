@@ -8,7 +8,7 @@ use burn_dragon_language::train::train_backend;
 use burn_dragon_language::{load_training_config, train::build_vocab_only, train::prepare_dataset};
 
 #[cfg(feature = "cli")]
-fn run_in_training_thread<F, T>(name: &str, work: F) -> Result<T>
+fn run_in_training_thread<F, T>(_name: &str, work: F) -> Result<T>
 where
     F: FnOnce() -> Result<T> + Send + 'static,
     T: Send + 'static,
@@ -16,7 +16,7 @@ where
     #[cfg(target_os = "windows")]
     {
         let handle = std::thread::Builder::new()
-            .name(name.to_string())
+            .name(_name.to_string())
             .spawn(work)
             .context("spawn training thread")?;
         handle
@@ -85,9 +85,11 @@ pub fn run_cli() -> Result<()> {
             BackendArg::WgpuNoFusion => {
                 use burn_wgpu::{CubeBackend, WgpuRuntime};
                 type WgpuNoFusion = CubeBackend<WgpuRuntime, f32, i32, u32>;
-                train_vision_backend::<Autodiff<WgpuNoFusion>, _>(&config, "wgpu-nofusion", |device| {
-                    init_runtime(device, &config.wgpu)
-                })
+                train_vision_backend::<Autodiff<WgpuNoFusion>, _>(
+                    &config,
+                    "wgpu-nofusion",
+                    |device| init_runtime(device, &config.wgpu),
+                )
             }
             BackendArg::Cuda => {
                 #[cfg(feature = "cuda")]

@@ -7,9 +7,9 @@ use std::cmp::Ordering;
 
 use burn_dragon_core::{BDH, ModelState};
 
+use crate::GenerationConfig;
 use crate::config::ContextStrategyConfig;
 use crate::tokenizer::Tokenizer;
-use crate::GenerationConfig;
 
 #[derive(Clone, Copy, Debug)]
 pub enum ContextStrategy {

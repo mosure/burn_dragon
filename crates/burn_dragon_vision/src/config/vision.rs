@@ -8,13 +8,12 @@ use burn::tensor::backend::{AutodiffBackend, Backend};
 use serde::{Deserialize, Serialize};
 use toml::Value;
 
-use burn_dragon_core::FusedKernelConfig;
-use crate::{
-    SpatialPositionalEncodingKind, VisionAttentionMode, VisionLatentActivation,
-    VisionPatchEmbedMode, VisionDragonConfig, VisionTrmGraphConfig,
-    VisionTrmGridMismatchPolicy,
-};
 use crate::loss::VisionDistillationLossConfig;
+use crate::{
+    SpatialPositionalEncodingKind, VisionAttentionMode, VisionDragonConfig, VisionLatentActivation,
+    VisionPatchEmbedMode, VisionTrmGraphConfig, VisionTrmGridMismatchPolicy,
+};
+use burn_dragon_core::FusedKernelConfig;
 use burn_dragon_train::{
     GdpoConfig, GdpoHardGate, OptimizerConfig, VisionArtifactOutputMode, VisionTeacherVariant,
     WgpuRuntimeConfig,
@@ -319,7 +318,9 @@ impl VisionTrainingConfig {
         if self.training.trace_train_loss_every == 0 {
             return Err(anyhow!("training.trace_train_loss_every must be > 0"));
         }
-        if let Some(epochs) = self.training.epochs && epochs == 0 {
+        if let Some(epochs) = self.training.epochs
+            && epochs == 0
+        {
             return Err(anyhow!("training.epochs must be > 0"));
         }
         self.optimizer.validate()?;
@@ -362,9 +363,7 @@ impl VisionTrainingConfig {
             return Err(anyhow!("vision.num_eyes must be > 0"));
         }
         if self.vision.cls_sync_alpha < 0.0 || self.vision.cls_sync_alpha > 1.0 {
-            return Err(anyhow!(
-                "vision.cls_sync_alpha must be between 0.0 and 1.0"
-            ));
+            return Err(anyhow!("vision.cls_sync_alpha must be between 0.0 and 1.0"));
         }
         if self.vision.dropout < 0.0 {
             return Err(anyhow!("vision.dropout must be >= 0"));
@@ -405,7 +404,7 @@ pub enum VisionTrainingModeConfig {
     Distill(VisionDistillConfig),
     Lejepa(VisionLejepaConfig),
     Mae(VisionMaeConfig),
-    Saccade(VisionSaccadeConfig),
+    Saccade(Box<VisionSaccadeConfig>),
 }
 
 impl Default for VisionTrainingModeConfig {
@@ -1831,7 +1830,9 @@ fn validate_vision_mode(mode: &VisionTrainingModeConfig, vision: &VisionModelCon
             if mae.cross_view.enabled {
                 let num_eyes = vision.num_eyes.max(1);
                 if num_eyes < 2 {
-                    return Err(anyhow!("vision.num_eyes must be >= 2 when cross_view is enabled"));
+                    return Err(anyhow!(
+                        "vision.num_eyes must be >= 2 when cross_view is enabled"
+                    ));
                 }
                 if !(0.0..=1.0).contains(&mae.cross_view.min_overlap) {
                     return Err(anyhow!(
@@ -2173,9 +2174,10 @@ fn yaml_to_toml(value: serde_yaml::Value) -> Result<Value> {
             }
             Ok(Value::Table(table))
         }
-        serde_yaml::Value::Tagged(tagged) => {
-            Err(anyhow!("tagged YAML values are not supported: {:?}", tagged.tag))
-        }
+        serde_yaml::Value::Tagged(tagged) => Err(anyhow!(
+            "tagged YAML values are not supported: {:?}",
+            tagged.tag
+        )),
     }
 }
 
@@ -2621,7 +2623,9 @@ mod tests {
         "#;
 
         let config: VisionTrainingConfig = toml::from_str(text).expect("parse config");
-        let err = config.validate().expect_err("strict TRM must reject mismatch");
+        let err = config
+            .validate()
+            .expect_err("strict TRM must reject mismatch");
         let message = format!("{err:#}");
         assert!(message.contains("TRM graph strict mode requires local view grid"));
     }
@@ -2703,4 +2707,3 @@ mod tests {
             .expect("explicit fallback should allow mismatch");
     }
 }
-

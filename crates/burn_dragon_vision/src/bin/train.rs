@@ -71,9 +71,11 @@ fn run(args: Args) -> Result<()> {
         "wgpu-nofusion" => {
             use burn_wgpu::{CubeBackend, WgpuRuntime};
             type WgpuNoFusion = CubeBackend<WgpuRuntime, f32, i32, u32>;
-            train_vision_backend::<Autodiff<WgpuNoFusion>, _>(&config, "wgpu-nofusion", |device| {
-                init_runtime(device, &config.wgpu)
-            })?;
+            train_vision_backend::<Autodiff<WgpuNoFusion>, _>(
+                &config,
+                "wgpu-nofusion",
+                |device| init_runtime(device, &config.wgpu),
+            )?;
         }
         "cuda" => {
             #[cfg(feature = "cuda")]
@@ -82,7 +84,9 @@ fn run(args: Args) -> Result<()> {
             }
             #[cfg(not(feature = "cuda"))]
             {
-                return Err(anyhow!("cuda backend requested but feature `cuda` is not enabled"));
+                return Err(anyhow!(
+                    "cuda backend requested but feature `cuda` is not enabled"
+                ));
             }
         }
         other => {

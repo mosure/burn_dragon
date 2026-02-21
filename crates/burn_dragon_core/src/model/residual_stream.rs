@@ -1,6 +1,6 @@
 use burn::nn::Dropout;
-use burn::tensor::backend::Backend;
 use burn::tensor::Tensor;
+use burn::tensor::backend::Backend;
 
 use crate::kernel::{BlockPattern1d, relu_lowrank};
 
@@ -57,7 +57,13 @@ where
     let attn = apply_norm(attn);
 
     let y_sparse = if use_fused {
-        relu_lowrank::fused_forward(attn.clone(), encoder_v, None, relu_threshold, latent_pattern)
+        relu_lowrank::fused_forward(
+            attn.clone(),
+            encoder_v,
+            None,
+            relu_threshold,
+            latent_pattern,
+        )
     } else {
         let mut y_latent = attn.matmul(encoder_v);
         if apply_threshold && relu_threshold != 0.0 {

@@ -21,10 +21,14 @@ impl OptimizerConfig {
         if self.weight_decay < 0.0 {
             return Err(anyhow!("optimizer.weight_decay must be >= 0"));
         }
-        if let Some(clip) = self.grad_clip_norm && clip <= 0.0 {
+        if let Some(clip) = self.grad_clip_norm
+            && clip <= 0.0
+        {
             return Err(anyhow!("optimizer.grad_clip_norm must be > 0"));
         }
-        if let Some(clip) = self.grad_clip_value && clip <= 0.0 {
+        if let Some(clip) = self.grad_clip_value
+            && clip <= 0.0
+        {
             return Err(anyhow!("optimizer.grad_clip_value must be > 0"));
         }
         if self.grad_clip_norm.is_some() && self.grad_clip_value.is_some() {

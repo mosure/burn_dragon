@@ -1,17 +1,19 @@
-use crate::train::prelude::*;
-use burn::optim::Optimizer;
-use burn::tensor::Distribution;
-use burn_autodiff::Autodiff;
-use burn_dragon_core::{FusedKernelConfig, ManifoldHyperConnectionsConfig};
-use crate::{
-    SpatialPositionalEncodingKind, VisionAttentionMode, VisionLatentActivation,
-    VisionPatchEmbedMode,
+use crate::config::{
+    VisionAugmentationConfig, VisionMaeCrossViewConfig, VisionMaeLossConfig, VisionReconLossConfig,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use crate::config::{VisionTrainingModeConfig, load_vision_training_config};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::train::pipeline::resolve_vision_rollout;
-use crate::config::{VisionAugmentationConfig, VisionMaeCrossViewConfig, VisionMaeLossConfig, VisionReconLossConfig};
+use crate::train::prelude::*;
+use crate::{
+    SpatialPositionalEncodingKind, VisionAttentionMode, VisionLatentActivation,
+    VisionPatchEmbedMode,
+};
+use burn::optim::Optimizer;
+use burn::tensor::Distribution;
+use burn_autodiff::Autodiff;
+use burn_dragon_core::{FusedKernelConfig, ManifoldHyperConnectionsConfig};
 use burn_ndarray::NdArray;
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
@@ -74,13 +76,17 @@ fn mae_pyramid_recon_loss_is_finite() {
     let mae = VisionMaeModel::new(
         model,
         mae_config,
-        num_eyes,
-        8,
-        rollout,
-        recon_patch_dim,
-        normalize_std,
-        patch_size,
-        in_channels,
+        VisionMaeInit {
+            num_eyes,
+            embed_dim: 8,
+            rollout,
+            recon: VisionReconstructionInit {
+                patch_dim: recon_patch_dim,
+                normalize_std,
+                patch_size,
+                in_channels,
+            },
+        },
         &device,
     );
 
@@ -169,13 +175,17 @@ fn mae_cross_view_forward_is_finite() {
     let mae = VisionMaeModel::new(
         model,
         mae_config,
-        num_eyes,
-        16,
-        rollout,
-        recon_patch_dim,
-        normalize_std,
-        patch_size,
-        in_channels,
+        VisionMaeInit {
+            num_eyes,
+            embed_dim: 16,
+            rollout,
+            recon: VisionReconstructionInit {
+                patch_dim: recon_patch_dim,
+                normalize_std,
+                patch_size,
+                in_channels,
+            },
+        },
         &device,
     );
 
@@ -192,7 +202,17 @@ fn mae_cross_view_forward_is_finite() {
         1,
     );
     let labels = Tensor::<Backend, 1, Int>::zeros([batch_size], &device);
-    let batch = ImageNetBatch::new(images, None, Some(views), None, None, None, labels, None, None);
+    let batch = ImageNetBatch::new(
+        images,
+        None,
+        Some(views),
+        None,
+        None,
+        None,
+        labels,
+        None,
+        None,
+    );
 
     let losses = mae.forward_losses(batch, 1, 1, false, false, false);
     let value = losses
@@ -254,7 +274,11 @@ fn vision_identity_tiny_path() -> PathBuf {
             .join("vision")
             .join("identity")
             .join("tiny.toml"),
-        manifest_dir.join("config").join("vision").join("identity").join("tiny.toml"),
+        manifest_dir
+            .join("config")
+            .join("vision")
+            .join("identity")
+            .join("tiny.toml"),
     ];
     for candidate in &candidates {
         if candidate.exists() {
@@ -300,8 +324,7 @@ fn mae_config_smoke_from_env() {
     if paths.is_empty() {
         return;
     }
-    let config =
-        load_vision_training_config(&paths).expect("load VISION_MAE_CONFIG_SMOKE config");
+    let config = load_vision_training_config(&paths).expect("load VISION_MAE_CONFIG_SMOKE config");
     let mae_cfg = match &config.mode {
         VisionTrainingModeConfig::Mae(mae) => mae.clone(),
         _ => panic!("VISION_MAE_CONFIG_SMOKE config is not mae mode"),
@@ -309,40 +332,55 @@ fn mae_config_smoke_from_env() {
 
     type Backend = Autodiff<NdArray<f32>>;
     let device = <Backend as BackendTrait>::Device::default();
-    let rollout = resolve_vision_rollout(&config.training, config.vision.steps)
-        .expect("resolve rollout");
+    let rollout =
+        resolve_vision_rollout(&config.training, config.vision.steps).expect("resolve rollout");
     let vision_cfg = config.vision.build();
-    let recon_patch_dim =
-        vision_cfg.patch_size * vision_cfg.patch_size * vision_cfg.in_channels;
+    let recon_patch_dim = vision_cfg.patch_size * vision_cfg.patch_size * vision_cfg.in_channels;
     let model = VisionDragon::<Backend>::new(vision_cfg.clone(), &device);
     let normalize_std = config.augment.normalize_std;
     let mae = VisionMaeModel::new(
         model,
         mae_cfg,
-        vision_cfg.num_eyes,
-        vision_cfg.embed_dim,
-        rollout,
-        recon_patch_dim,
-        normalize_std,
-        vision_cfg.patch_size,
-        vision_cfg.in_channels,
+        VisionMaeInit {
+            num_eyes: vision_cfg.num_eyes,
+            embed_dim: vision_cfg.embed_dim,
+            rollout,
+            recon: VisionReconstructionInit {
+                patch_dim: recon_patch_dim,
+                normalize_std,
+                patch_size: vision_cfg.patch_size,
+                in_channels: vision_cfg.in_channels,
+            },
+        },
         &device,
     );
 
     let batch_size = 2;
     let images = Tensor::<Backend, 4>::random(
-        [batch_size, vision_cfg.in_channels, vision_cfg.image_size, vision_cfg.image_size],
+        [
+            batch_size,
+            vision_cfg.in_channels,
+            vision_cfg.image_size,
+            vision_cfg.image_size,
+        ],
         Distribution::Default,
         &device,
     );
     let labels = Tensor::<Backend, 1, Int>::zeros([batch_size], &device);
     let batch = if mae.config.cross_view.enabled {
         let eyes = mae.num_eyes.max(1);
-        let views = images
-            .clone()
-            .unsqueeze_dim::<5>(1)
-            .repeat_dim(1, eyes);
-        ImageNetBatch::new(images, None, Some(views), None, None, None, labels, None, None)
+        let views = images.clone().unsqueeze_dim::<5>(1).repeat_dim(1, eyes);
+        ImageNetBatch::new(
+            images,
+            None,
+            Some(views),
+            None,
+            None,
+            None,
+            labels,
+            None,
+            None,
+        )
     } else {
         ImageNetBatch::new(images, None, None, None, None, None, labels, None, None)
     };
@@ -419,13 +457,17 @@ fn mae_recon_psnr_improves_on_toy_batch() {
     let mut mae = VisionMaeModel::new(
         model,
         mae_config,
-        vision_config.num_eyes,
-        vision_config.embed_dim,
-        rollout,
-        recon_patch_dim,
-        normalize_std,
-        vision_config.patch_size,
-        vision_config.in_channels,
+        VisionMaeInit {
+            num_eyes: vision_config.num_eyes,
+            embed_dim: vision_config.embed_dim,
+            rollout,
+            recon: VisionReconstructionInit {
+                patch_dim: recon_patch_dim,
+                normalize_std,
+                patch_size: vision_config.patch_size,
+                in_channels: vision_config.in_channels,
+            },
+        },
         &device,
     );
 
@@ -491,13 +533,17 @@ fn identity_config_recon_loss_decreases() {
     let mut mae = VisionMaeModel::new(
         model,
         mae_config,
-        vision_config.num_eyes,
-        vision_config.embed_dim,
-        rollout,
-        recon_patch_dim,
-        normalize_std,
-        vision_config.patch_size,
-        vision_config.in_channels,
+        VisionMaeInit {
+            num_eyes: vision_config.num_eyes,
+            embed_dim: vision_config.embed_dim,
+            rollout,
+            recon: VisionReconstructionInit {
+                patch_dim: recon_patch_dim,
+                normalize_std,
+                patch_size: vision_config.patch_size,
+                in_channels: vision_config.in_channels,
+            },
+        },
         &device,
     );
 
@@ -543,4 +589,3 @@ fn identity_config_recon_loss_decreases() {
     assert!(final_recon.is_finite());
     assert!(final_recon < initial_recon);
 }
-

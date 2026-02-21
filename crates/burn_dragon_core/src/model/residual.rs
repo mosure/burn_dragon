@@ -181,11 +181,7 @@ mod mhc_tests {
             .to_data()
             .iter::<f32>()
             .collect::<Vec<_>>();
-        let col_sums = h_res
-            .sum_dim(0)
-            .to_data()
-            .iter::<f32>()
-            .collect::<Vec<_>>();
+        let col_sums = h_res.sum_dim(0).to_data().iter::<f32>().collect::<Vec<_>>();
         for sum in row_sums.into_iter().chain(col_sums.into_iter()) {
             assert!((sum - 1.0).abs() < 1e-3, "sum not close to 1: {sum}");
         }
@@ -212,6 +208,9 @@ mod mhc_tests {
             [4, config.num_streams, 6, 8]
         );
         let beta = beta.expect("expected beta");
-        assert_eq!(beta.shape().dims::<2>(), [config.num_views, config.num_streams]);
+        assert_eq!(
+            beta.shape().dims::<2>(),
+            [config.num_views, config.num_streams]
+        );
     }
 }

@@ -630,10 +630,7 @@ impl<B: BackendTrait, I: ScalarValue<B> + Send + Sync> burn_train::metric::Metri
         item: &Self::Input,
         metadata: &burn_train::metric::MetricMetadata,
     ) -> burn_train::metric::MetricEntry {
-        if self.every > 1
-            && !metadata.iteration.is_multiple_of(self.every)
-            && self.initialized
-        {
+        if self.every > 1 && !metadata.iteration.is_multiple_of(self.every) && self.initialized {
             return burn_train::metric::MetricEntry::new(
                 Arc::clone(&self.name),
                 burn_train::metric::format_float(self.last, 4),
@@ -740,10 +737,7 @@ impl<B: BackendTrait> burn_train::metric::Metric for LossTraceMetric<B> {
         item: &Self::Input,
         metadata: &burn_train::metric::MetricMetadata,
     ) -> burn_train::metric::MetricEntry {
-        if self.every > 1
-            && !metadata.iteration.is_multiple_of(self.every)
-            && self.initialized
-        {
+        if self.every > 1 && !metadata.iteration.is_multiple_of(self.every) && self.initialized {
             return burn_train::metric::MetricEntry::new(
                 Arc::clone(&self.name),
                 burn_train::metric::format_float(self.last, 4),
@@ -1068,7 +1062,8 @@ where
         if self.max_bytes > 0 {
             let mut current = usage.reserved_bytes.max(usage.in_use_bytes);
             if current > self.max_bytes {
-                let allow_cleanup = allow_memory_cleanup::<B>(&self.device, self.allow_cuda_cleanup);
+                let allow_cleanup =
+                    allow_memory_cleanup::<B>(&self.device, self.allow_cuda_cleanup);
                 if allow_cleanup {
                     let _guard = crate::device::device_allocation_lock().lock().ok();
                     B::sync(&self.device);
@@ -1212,9 +1207,8 @@ impl<B: BackendTrait> VisionArtifactMetric<B> {
         for view_idx in 0..view_count {
             for y in 0..height {
                 for x in 0..width {
-                    let base = ((batch_idx * view_count + view_idx) * channels * height + y)
-                        * width
-                        + x;
+                    let base =
+                        ((batch_idx * view_count + view_idx) * channels * height + y) * width + x;
                     let r = self.denormalize_channel(views_vec[base], 0);
                     let g = self.denormalize_channel(views_vec[base + height * width], 1);
                     let b = self.denormalize_channel(views_vec[base + 2 * height * width], 2);
@@ -1263,7 +1257,8 @@ impl<B: BackendTrait> VisionArtifactMetric<B> {
                     let base = pca_offset + gy * grid_w + gx;
                     let r = (pca_vec[base].clamp(0.0, 1.0) * 255.0).round() as u8;
                     let g = (pca_vec[base + grid_h * grid_w].clamp(0.0, 1.0) * 255.0).round() as u8;
-                    let b = (pca_vec[base + 2 * grid_h * grid_w].clamp(0.0, 1.0) * 255.0).round() as u8;
+                    let b =
+                        (pca_vec[base + 2 * grid_h * grid_w].clamp(0.0, 1.0) * 255.0).round() as u8;
                     for y in (gy * heat_patch_h)..((gy + 1) * heat_patch_h) {
                         for x in (gx * heat_patch_w)..((gx + 1) * heat_patch_w) {
                             let out_x = column_idx * width + x;
@@ -1374,56 +1369,56 @@ impl<B: BackendTrait> burn_train::metric::Metric for VisionArtifactMetric<B> {
                         "0".to_string(),
                     );
                 }
-                let (grid_h, grid_w, _norm_batch) = if let Some(patch_steps) =
-                    &item.patch_norms_steps
-                {
-                    let [norm_batch, _frame_count, grid_h, grid_w] = patch_steps.shape().dims::<4>();
-                    if norm_batch == 0 || grid_h == 0 || grid_w == 0 {
+                let (grid_h, grid_w, _norm_batch) =
+                    if let Some(patch_steps) = &item.patch_norms_steps {
+                        let [norm_batch, _frame_count, grid_h, grid_w] =
+                            patch_steps.shape().dims::<4>();
+                        if norm_batch == 0 || grid_h == 0 || grid_w == 0 {
+                            return burn_train::metric::MetricEntry::new(
+                                Arc::clone(&self.name),
+                                "empty_norms_steps".to_string(),
+                                "0".to_string(),
+                            );
+                        }
+                        (grid_h, grid_w, norm_batch)
+                    } else if let Some(pca_steps) = &item.pca_rgb_steps {
+                        let [pca_batch, _frame_count, pca_channels, grid_h, grid_w] =
+                            pca_steps.shape().dims::<5>();
+                        if pca_batch == 0 || grid_h == 0 || grid_w == 0 || pca_channels < 3 {
+                            return burn_train::metric::MetricEntry::new(
+                                Arc::clone(&self.name),
+                                "empty_pca_steps".to_string(),
+                                "0".to_string(),
+                            );
+                        }
+                        (grid_h, grid_w, pca_batch)
+                    } else if let Some(patch_norms) = &item.patch_norms {
+                        let [norm_batch, grid_h, grid_w] = patch_norms.shape().dims::<3>();
+                        if norm_batch == 0 || grid_h == 0 || grid_w == 0 {
+                            return burn_train::metric::MetricEntry::new(
+                                Arc::clone(&self.name),
+                                "empty_norms".to_string(),
+                                "0".to_string(),
+                            );
+                        }
+                        (grid_h, grid_w, norm_batch)
+                    } else if let Some(pca_rgb) = &item.pca_rgb {
+                        let [pca_batch, pca_channels, grid_h, grid_w] = pca_rgb.shape().dims::<4>();
+                        if pca_batch == 0 || grid_h == 0 || grid_w == 0 || pca_channels < 3 {
+                            return burn_train::metric::MetricEntry::new(
+                                Arc::clone(&self.name),
+                                "empty_pca".to_string(),
+                                "0".to_string(),
+                            );
+                        }
+                        (grid_h, grid_w, pca_batch)
+                    } else {
                         return burn_train::metric::MetricEntry::new(
                             Arc::clone(&self.name),
-                            "empty_norms_steps".to_string(),
+                            "no_patch_data".to_string(),
                             "0".to_string(),
                         );
-                    }
-                    (grid_h, grid_w, norm_batch)
-                } else if let Some(pca_steps) = &item.pca_rgb_steps {
-                    let [pca_batch, _frame_count, pca_channels, grid_h, grid_w] =
-                        pca_steps.shape().dims::<5>();
-                    if pca_batch == 0 || grid_h == 0 || grid_w == 0 || pca_channels < 3 {
-                        return burn_train::metric::MetricEntry::new(
-                            Arc::clone(&self.name),
-                            "empty_pca_steps".to_string(),
-                            "0".to_string(),
-                        );
-                    }
-                    (grid_h, grid_w, pca_batch)
-                } else if let Some(patch_norms) = &item.patch_norms {
-                    let [norm_batch, grid_h, grid_w] = patch_norms.shape().dims::<3>();
-                    if norm_batch == 0 || grid_h == 0 || grid_w == 0 {
-                        return burn_train::metric::MetricEntry::new(
-                            Arc::clone(&self.name),
-                            "empty_norms".to_string(),
-                            "0".to_string(),
-                        );
-                    }
-                    (grid_h, grid_w, norm_batch)
-                } else if let Some(pca_rgb) = &item.pca_rgb {
-                    let [pca_batch, pca_channels, grid_h, grid_w] = pca_rgb.shape().dims::<4>();
-                    if pca_batch == 0 || grid_h == 0 || grid_w == 0 || pca_channels < 3 {
-                        return burn_train::metric::MetricEntry::new(
-                            Arc::clone(&self.name),
-                            "empty_pca".to_string(),
-                            "0".to_string(),
-                        );
-                    }
-                    (grid_h, grid_w, pca_batch)
-                } else {
-                    return burn_train::metric::MetricEntry::new(
-                        Arc::clone(&self.name),
-                        "no_patch_data".to_string(),
-                        "0".to_string(),
-                    );
-                };
+                    };
                 let views_vec = match views.to_data().convert::<f32>().into_vec::<f32>() {
                     Ok(vec) => vec,
                     Err(_) => {
@@ -1448,10 +1443,7 @@ impl<B: BackendTrait> burn_train::metric::Metric for VisionArtifactMetric<B> {
                 } else {
                     None
                 };
-                let pca_dims = item
-                    .pca_rgb
-                    .as_ref()
-                    .map(|pca| pca.shape().dims::<4>());
+                let pca_dims = item.pca_rgb.as_ref().map(|pca| pca.shape().dims::<4>());
                 let mut pca_vec = if let Some(pca_rgb) = &item.pca_rgb {
                     match pca_rgb.to_data().convert::<f32>().into_vec::<f32>() {
                         Ok(vec) => Some(vec),
@@ -1466,7 +1458,8 @@ impl<B: BackendTrait> burn_train::metric::Metric for VisionArtifactMetric<B> {
                 } else {
                     None
                 };
-                if let (Some([_, pca_channels, pca_h, pca_w]), Some(vec)) = (pca_dims, pca_vec.as_ref())
+                if let (Some([_, pca_channels, pca_h, pca_w]), Some(vec)) =
+                    (pca_dims, pca_vec.as_ref())
                 {
                     if pca_channels < 3 || pca_h != grid_h || pca_w != grid_w {
                         pca_vec = None;
@@ -1611,44 +1604,43 @@ impl<B: BackendTrait> burn_train::metric::Metric for VisionArtifactMetric<B> {
                     let mut frames = Vec::new();
                     if temporal_frames > 0 {
                         for frame_idx in 0..temporal_frames {
-                            let patch_frame_vec =
-                                if let (Some(vec), Some(frame_count)) =
-                                    (patch_steps_vec.as_ref(), patch_steps_frames)
-                                {
-                                    let frame_stride = grid_h * grid_w;
-                                    let mut out = vec![0.0f32; batch * frame_stride];
-                                    for batch_step in 0..batch {
-                                        let src =
-                                            (batch_step * frame_count + frame_idx) * frame_stride;
-                                        let dst = batch_step * frame_stride;
-                                        out[dst..dst + frame_stride]
-                                            .copy_from_slice(&vec[src..src + frame_stride]);
-                                    }
-                                    Some(out)
-                                } else {
-                                    None
-                                };
-                            let pca_frame_vec = if let (Some(vec), Some((frame_count, pca_channels))) =
-                                (pca_steps_vec.as_ref(), pca_steps_meta)
+                            let patch_frame_vec = if let (Some(vec), Some(frame_count)) =
+                                (patch_steps_vec.as_ref(), patch_steps_frames)
                             {
-                                let channel_stride = grid_h * grid_w;
-                                let src_frame_stride = pca_channels * channel_stride;
-                                let mut out = vec![0.0f32; batch * 3 * channel_stride];
+                                let frame_stride = grid_h * grid_w;
+                                let mut out = vec![0.0f32; batch * frame_stride];
                                 for batch_step in 0..batch {
-                                    let src_base =
-                                        (batch_step * frame_count + frame_idx) * src_frame_stride;
-                                    let dst_base = batch_step * 3 * channel_stride;
-                                    for channel in 0..3 {
-                                        let src = src_base + channel * channel_stride;
-                                        let dst = dst_base + channel * channel_stride;
-                                        out[dst..dst + channel_stride]
-                                            .copy_from_slice(&vec[src..src + channel_stride]);
-                                    }
+                                    let src = (batch_step * frame_count + frame_idx) * frame_stride;
+                                    let dst = batch_step * frame_stride;
+                                    out[dst..dst + frame_stride]
+                                        .copy_from_slice(&vec[src..src + frame_stride]);
                                 }
                                 Some(out)
                             } else {
                                 None
                             };
+                            let pca_frame_vec =
+                                if let (Some(vec), Some((frame_count, pca_channels))) =
+                                    (pca_steps_vec.as_ref(), pca_steps_meta)
+                                {
+                                    let channel_stride = grid_h * grid_w;
+                                    let src_frame_stride = pca_channels * channel_stride;
+                                    let mut out = vec![0.0f32; batch * 3 * channel_stride];
+                                    for batch_step in 0..batch {
+                                        let src_base = (batch_step * frame_count + frame_idx)
+                                            * src_frame_stride;
+                                        let dst_base = batch_step * 3 * channel_stride;
+                                        for channel in 0..3 {
+                                            let src = src_base + channel * channel_stride;
+                                            let dst = dst_base + channel * channel_stride;
+                                            out[dst..dst + channel_stride]
+                                                .copy_from_slice(&vec[src..src + channel_stride]);
+                                        }
+                                    }
+                                    Some(out)
+                                } else {
+                                    None
+                                };
                             let patch_ref = patch_frame_vec.as_deref().or(patch_vec.as_deref());
                             let pca_ref = pca_frame_vec.as_deref().or(pca_vec.as_deref());
                             if let Some(frame) = self.build_lejepa_frame(
@@ -1871,10 +1863,7 @@ impl<B: BackendTrait> burn_train::metric::Metric for VisionArtifactMetric<B> {
         } else {
             None
         };
-        let pca_dims = item
-            .pca_rgb
-            .as_ref()
-            .map(|pca| pca.shape().dims::<4>());
+        let pca_dims = item.pca_rgb.as_ref().map(|pca| pca.shape().dims::<4>());
         let mut pca_vec = if let Some(pca_rgb) = &item.pca_rgb {
             match pca_rgb.to_data().convert::<f32>().into_vec::<f32>() {
                 Ok(vec) => Some(vec),
@@ -1889,9 +1878,7 @@ impl<B: BackendTrait> burn_train::metric::Metric for VisionArtifactMetric<B> {
         } else {
             None
         };
-        if let (Some([_, pca_channels, pca_h, pca_w]), Some(vec)) =
-            (pca_dims, pca_vec.as_ref())
-        {
+        if let (Some([_, pca_channels, pca_h, pca_w]), Some(vec)) = (pca_dims, pca_vec.as_ref()) {
             if pca_channels < 3 || pca_h != grid_h || pca_w != grid_w {
                 pca_vec = None;
             } else {
@@ -2026,6 +2013,7 @@ impl<B: BackendTrait> burn_train::metric::Metric for VisionArtifactMetric<B> {
 #[cfg(test)]
 mod tests {
     use crate::train::metrics::*;
+    use crate::train::test_support::create_stub_ffmpeg;
     use burn::data::dataloader::Progress;
     use burn_ndarray::NdArray;
     use burn_train::metric::{Metric, MetricMetadata};
@@ -2284,15 +2272,7 @@ mod tests {
         let device = <Backend as BackendTrait>::Device::default();
         let output_dir = tempdir().expect("tempdir");
         let bin_dir = output_dir.path().join("bin");
-        fs::create_dir_all(&bin_dir).expect("bin dir");
-        let script_path = bin_dir.join("ffmpeg.cmd");
-        let script = r#"@echo off
-set OUT=
-for %%A in (%*) do set OUT=%%A
-type nul > "%OUT%"
-exit /b 0
-"#;
-        fs::write(&script_path, script).expect("write stub");
+        let script_path = create_stub_ffmpeg(&bin_dir).expect("ffmpeg stub");
         let mut metric = VisionArtifactMetric::<Backend>::new(
             output_dir.path().to_path_buf(),
             1,

@@ -26,7 +26,7 @@ use burn_dragon_language::tokenizer::char_vocab::CharVocab;
 use burn_dragon_language::{ContextStrategyConfig, ModelOverrides, build_model_config};
 
 #[cfg(feature = "viz")]
-use burn_dragon_bevy::{VizConfig, VizDimensions, VizEncoder, viz};
+use bevy_dragon::{VizConfig, VizDimensions, VizEncoder, viz};
 type WebBackend = burn_wgpu::WebGpu<f32>;
 type WebDevice = <WebBackend as Backend>::Device;
 

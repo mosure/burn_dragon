@@ -78,7 +78,8 @@ mod tests {
 
     #[test]
     fn encode_decode_round_trip() {
-        let grid = "530070000600195000098000060800060003400803001700020006060000280000419005000080079";
+        let grid =
+            "530070000600195000098000060800060003400803001700020006060000280000419005000080079";
         let tokens = SudokuVocab::encode_grid(grid).expect("encode");
         let decoded = SudokuVocab::decode_grid(&tokens).expect("decode");
         assert_eq!(decoded, grid);

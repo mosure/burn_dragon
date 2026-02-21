@@ -35,49 +35,47 @@ pub(crate) use burn::tensor::backend::{AutodiffBackend, Backend as BackendTrait}
 pub(crate) use burn::tensor::{Int, Tensor, TensorData};
 pub(crate) use burn_train::metric::{LearningRateMetric, LossMetric};
 pub(crate) use burn_train::{
-    LearnerBuilder, LearningStrategy, TrainOutput, TrainingResult, TrainStep, ValidStep,
+    LearnerBuilder, LearningStrategy, TrainOutput, TrainStep, TrainingResult, ValidStep,
 };
 pub(crate) use tracing::info;
 
 pub(crate) use burn::record::{BinFileRecorder, FullPrecisionSettings};
 
+#[cfg(feature = "cli")]
+pub(crate) use burn_autodiff::Autodiff;
 #[cfg(all(feature = "cuda", test))]
 pub(crate) use burn_cuda::Cuda;
 #[cfg(feature = "cli")]
-pub(crate) use burn_autodiff::Autodiff;
+pub(crate) use burn_dragon_train::wgpu::{WgpuDevice, init_runtime};
 #[cfg(feature = "cli")]
 pub(crate) use burn_ndarray::NdArray;
 #[cfg(feature = "cli")]
 pub(crate) use burn_wgpu::Wgpu;
-#[cfg(feature = "cli")]
-pub(crate) use burn_dragon_train::wgpu::{init_runtime, WgpuDevice};
 
 pub(crate) use serde::Serialize;
 
 pub(crate) use crate::config::{
-    SudokuArtifactConfig, SudokuCacheMhcConfig, SudokuCacheUpdateConfig, SudokuDatasetConfig, SudokuDatasetSourceConfig, SudokuHaltConfig,
-    SudokuLossMask, SudokuGridPositional, SudokuModelConfig, SudokuPolicyConfig, SudokuPolicyHead, SudokuReconConfig,
-    SudokuReconLoss, SudokuRevisitConfig, SudokuRewardBaselineConfig, SudokuRewardConfig,
-    SudokuRewardShapingConfig, SudokuRewardShapingMetric, SudokuEasyRewardMode, SudokuHardRewardMode,
-    SudokuInfoRewardConfig, SudokuRolloutConfig, SudokuTraversal, SudokuTrmMode,
-    SudokuRolloutSchedule, SudokuTrainingConfig, SudokuTrainingHyperparameters, SudokuValidationConfig,
+    SudokuArtifactConfig, SudokuCacheMhcConfig, SudokuCacheUpdateConfig, SudokuDatasetConfig,
+    SudokuDatasetSourceConfig, SudokuEasyRewardMode, SudokuGridPositional, SudokuHaltConfig,
+    SudokuHardRewardMode, SudokuInfoRewardConfig, SudokuLossMask, SudokuModelConfig,
+    SudokuPolicyConfig, SudokuPolicyHead, SudokuReconConfig, SudokuReconLoss, SudokuRevisitConfig,
+    SudokuRewardBaselineConfig, SudokuRewardConfig, SudokuRewardShapingConfig,
+    SudokuRewardShapingMetric, SudokuRolloutConfig, SudokuRolloutSchedule, SudokuTrainingConfig,
+    SudokuTrainingHyperparameters, SudokuTraversal, SudokuTrmMode, SudokuValidationConfig,
     SudokuWriteGateMode,
 };
 pub(crate) use crate::dataset::{SudokuBatch, SudokuDataset, SudokuRandomDataLoader, SudokuSplit};
 pub(crate) use crate::model::SudokuSaccadeModel;
 
-pub(crate) use burn_dragon_train::{
-    GdpoConfig, GdpoHardGate, LearningRateScheduleConfig, OptimizerConfig, VisionArtifactOutputMode,
-    WgpuRuntimeConfig,
-};
 pub(crate) use burn_dragon_train::train::constants::ValidBackend;
-pub(crate) use burn_dragon_train::train::metrics::{DeviceMetric, LossValue, ScalarMetric, ScalarValue};
+pub(crate) use burn_dragon_train::train::metrics::{
+    DeviceMetric, LossValue, ScalarMetric, ScalarValue,
+};
 pub(crate) use burn_dragon_train::train::pipeline::{
     ResolvedLrScheduler, ScheduleSource, TrainSchedule, adamw_config_from_optimizer,
     create_run_dir, write_latest_run,
 };
-
-
-
-
-
+pub(crate) use burn_dragon_train::{
+    GdpoConfig, GdpoHardGate, LearningRateScheduleConfig, OptimizerConfig,
+    VisionArtifactOutputMode, WgpuRuntimeConfig,
+};

@@ -581,4 +581,3 @@ impl<B: BackendTrait> ValidStep<ImageNetBatch<B>, VisionOutput<B>> for VisionSac
         )
     }
 }
-

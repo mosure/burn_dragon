@@ -214,8 +214,11 @@ fn run_cuda_training_gpu_utilization(config_path: PathBuf, integration_path: Pat
     let done = Arc::new(AtomicBool::new(false));
     let done_clone = Arc::clone(&done);
     let handle = thread::spawn(move || {
-        let result =
-            train_vision_backend_for_test::<Autodiff<CudaCubeBackend>, _>(&config, "cuda-cubecl", |_| {});
+        let result = train_vision_backend_for_test::<Autodiff<CudaCubeBackend>, _>(
+            &config,
+            "cuda-cubecl",
+            |_| {},
+        );
         done_clone.store(true, Ordering::Relaxed);
         result
     });

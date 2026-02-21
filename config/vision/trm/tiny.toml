@@ -59,6 +59,8 @@ local_diagonals = true
 local_self = true
 decay = 0.9
 hub_gates = true
+# Local 96x96 crops do not match the 224x224 TRM grid; opt into explicit fallback.
+grid_mismatch_policy = "fallback_default"
 
 [mode]
 type = "lejepa"

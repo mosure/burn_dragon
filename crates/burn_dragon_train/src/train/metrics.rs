@@ -88,6 +88,8 @@ pub struct VisionArtifactInput<B: BackendTrait> {
     pub frames: Option<Tensor<B, 5>>,
     pub patch_norms: Option<Tensor<B, 3>>,
     pub pca_rgb: Option<Tensor<B, 4>>,
+    pub patch_norms_steps: Option<Tensor<B, 4>>,
+    pub pca_rgb_steps: Option<Tensor<B, 5>>,
     pub probe_logits: Option<Tensor<B, 2>>,
     pub labels: Option<Tensor<B, 1, Int>>,
     pub legend: Option<Vec<String>>,
@@ -100,6 +102,8 @@ impl<B: BackendTrait> VisionArtifactInput<B> {
             frames: None,
             patch_norms: None,
             pca_rgb: None,
+            patch_norms_steps: None,
+            pca_rgb_steps: None,
             probe_logits: None,
             labels: None,
             legend: None,
@@ -1354,171 +1358,361 @@ impl<B: BackendTrait> burn_train::metric::Metric for VisionArtifactMetric<B> {
         if self.output_mode != VisionArtifactOutputMode::Images {
             if item.frames.is_none()
                 && let Some(views) = &item.views
-                && (item.patch_norms.is_some() || item.pca_rgb.is_some())
+                && (item.patch_norms.is_some()
+                    || item.pca_rgb.is_some()
+                    || item.patch_norms_steps.is_some()
+                    || item.pca_rgb_steps.is_some())
             {
-                    if let Some(legend) = item.legend.as_ref() {
-                        self.write_legend(legend);
-                    }
-                    let [batch, view_count, channels, height, width] = views.shape().dims::<5>();
-                    if batch == 0 || view_count == 0 || channels == 0 || height == 0 || width == 0 {
+                if let Some(legend) = item.legend.as_ref() {
+                    self.write_legend(legend);
+                }
+                let [batch, view_count, channels, height, width] = views.shape().dims::<5>();
+                if batch == 0 || view_count == 0 || channels == 0 || height == 0 || width == 0 {
+                    return burn_train::metric::MetricEntry::new(
+                        Arc::clone(&self.name),
+                        "empty_views".to_string(),
+                        "0".to_string(),
+                    );
+                }
+                let (grid_h, grid_w, _norm_batch) = if let Some(patch_steps) =
+                    &item.patch_norms_steps
+                {
+                    let [norm_batch, _frame_count, grid_h, grid_w] = patch_steps.shape().dims::<4>();
+                    if norm_batch == 0 || grid_h == 0 || grid_w == 0 {
                         return burn_train::metric::MetricEntry::new(
                             Arc::clone(&self.name),
-                            "empty_views".to_string(),
+                            "empty_norms_steps".to_string(),
                             "0".to_string(),
                         );
                     }
-                    let (grid_h, grid_w, _norm_batch) = if let Some(patch_norms) = &item.patch_norms {
-                        let [norm_batch, grid_h, grid_w] = patch_norms.shape().dims::<3>();
-                        if norm_batch == 0 || grid_h == 0 || grid_w == 0 {
-                            return burn_train::metric::MetricEntry::new(
-                                Arc::clone(&self.name),
-                                "empty_norms".to_string(),
-                                "0".to_string(),
-                            );
-                        }
-                        (grid_h, grid_w, norm_batch)
-                    } else if let Some(pca_rgb) = &item.pca_rgb {
-                        let [pca_batch, pca_channels, grid_h, grid_w] = pca_rgb.shape().dims::<4>();
-                        if pca_batch == 0 || grid_h == 0 || grid_w == 0 || pca_channels < 3 {
-                            return burn_train::metric::MetricEntry::new(
-                                Arc::clone(&self.name),
-                                "empty_pca".to_string(),
-                                "0".to_string(),
-                            );
-                        }
-                        (grid_h, grid_w, pca_batch)
-                    } else {
+                    (grid_h, grid_w, norm_batch)
+                } else if let Some(pca_steps) = &item.pca_rgb_steps {
+                    let [pca_batch, _frame_count, pca_channels, grid_h, grid_w] =
+                        pca_steps.shape().dims::<5>();
+                    if pca_batch == 0 || grid_h == 0 || grid_w == 0 || pca_channels < 3 {
                         return burn_train::metric::MetricEntry::new(
                             Arc::clone(&self.name),
-                            "no_patch_data".to_string(),
+                            "empty_pca_steps".to_string(),
                             "0".to_string(),
                         );
-                    };
-                    let views_vec = match views.to_data().convert::<f32>().into_vec::<f32>() {
-                        Ok(vec) => vec,
+                    }
+                    (grid_h, grid_w, pca_batch)
+                } else if let Some(patch_norms) = &item.patch_norms {
+                    let [norm_batch, grid_h, grid_w] = patch_norms.shape().dims::<3>();
+                    if norm_batch == 0 || grid_h == 0 || grid_w == 0 {
+                        return burn_train::metric::MetricEntry::new(
+                            Arc::clone(&self.name),
+                            "empty_norms".to_string(),
+                            "0".to_string(),
+                        );
+                    }
+                    (grid_h, grid_w, norm_batch)
+                } else if let Some(pca_rgb) = &item.pca_rgb {
+                    let [pca_batch, pca_channels, grid_h, grid_w] = pca_rgb.shape().dims::<4>();
+                    if pca_batch == 0 || grid_h == 0 || grid_w == 0 || pca_channels < 3 {
+                        return burn_train::metric::MetricEntry::new(
+                            Arc::clone(&self.name),
+                            "empty_pca".to_string(),
+                            "0".to_string(),
+                        );
+                    }
+                    (grid_h, grid_w, pca_batch)
+                } else {
+                    return burn_train::metric::MetricEntry::new(
+                        Arc::clone(&self.name),
+                        "no_patch_data".to_string(),
+                        "0".to_string(),
+                    );
+                };
+                let views_vec = match views.to_data().convert::<f32>().into_vec::<f32>() {
+                    Ok(vec) => vec,
+                    Err(_) => {
+                        return burn_train::metric::MetricEntry::new(
+                            Arc::clone(&self.name),
+                            "view_copy_failed".to_string(),
+                            "0".to_string(),
+                        );
+                    }
+                };
+                let patch_vec = if let Some(patch_norms) = &item.patch_norms {
+                    match patch_norms.to_data().convert::<f32>().into_vec::<f32>() {
+                        Ok(vec) => Some(vec),
                         Err(_) => {
                             return burn_train::metric::MetricEntry::new(
                                 Arc::clone(&self.name),
-                                "view_copy_failed".to_string(),
+                                "patch_copy_failed".to_string(),
+                                "0".to_string(),
+                            );
+                        }
+                    }
+                } else {
+                    None
+                };
+                let pca_dims = item
+                    .pca_rgb
+                    .as_ref()
+                    .map(|pca| pca.shape().dims::<4>());
+                let mut pca_vec = if let Some(pca_rgb) = &item.pca_rgb {
+                    match pca_rgb.to_data().convert::<f32>().into_vec::<f32>() {
+                        Ok(vec) => Some(vec),
+                        Err(_) => {
+                            return burn_train::metric::MetricEntry::new(
+                                Arc::clone(&self.name),
+                                "pca_copy_failed".to_string(),
+                                "0".to_string(),
+                            );
+                        }
+                    }
+                } else {
+                    None
+                };
+                if let (Some([_, pca_channels, pca_h, pca_w]), Some(vec)) = (pca_dims, pca_vec.as_ref())
+                {
+                    if pca_channels < 3 || pca_h != grid_h || pca_w != grid_w {
+                        pca_vec = None;
+                    } else {
+                        let channel_stride = grid_h * grid_w;
+                        let sample_stride = pca_channels * channel_stride;
+                        let expected = batch * sample_stride;
+                        if vec.len() < expected {
+                            pca_vec = None;
+                        } else if pca_channels > 3 {
+                            let mut packed = vec![0.0f32; batch * 3 * channel_stride];
+                            for sample_idx in 0..batch {
+                                let src_base = sample_idx * sample_stride;
+                                let dst_base = sample_idx * 3 * channel_stride;
+                                for channel in 0..3 {
+                                    let src = src_base + channel * channel_stride;
+                                    let dst = dst_base + channel * channel_stride;
+                                    packed[dst..dst + channel_stride]
+                                        .copy_from_slice(&vec[src..src + channel_stride]);
+                                }
+                            }
+                            pca_vec = Some(packed);
+                        }
+                    }
+                }
+
+                let patch_steps_dims = item
+                    .patch_norms_steps
+                    .as_ref()
+                    .map(|maps| maps.shape().dims::<4>());
+                let patch_steps_vec = if let Some(maps) = &item.patch_norms_steps {
+                    match maps.to_data().convert::<f32>().into_vec::<f32>() {
+                        Ok(vec) => Some(vec),
+                        Err(_) => {
+                            return burn_train::metric::MetricEntry::new(
+                                Arc::clone(&self.name),
+                                "patch_steps_copy_failed".to_string(),
+                                "0".to_string(),
+                            );
+                        }
+                    }
+                } else {
+                    None
+                };
+                let pca_steps_dims = item
+                    .pca_rgb_steps
+                    .as_ref()
+                    .map(|maps| maps.shape().dims::<5>());
+                let pca_steps_vec = if let Some(maps) = &item.pca_rgb_steps {
+                    match maps.to_data().convert::<f32>().into_vec::<f32>() {
+                        Ok(vec) => Some(vec),
+                        Err(_) => {
+                            return burn_train::metric::MetricEntry::new(
+                                Arc::clone(&self.name),
+                                "pca_steps_copy_failed".to_string(),
+                                "0".to_string(),
+                            );
+                        }
+                    }
+                } else {
+                    None
+                };
+
+                let patch_steps_frames =
+                    if let (Some([norm_batch, frame_count, p_h, p_w]), Some(vec)) =
+                        (patch_steps_dims, patch_steps_vec.as_ref())
+                    {
+                        let expected = norm_batch
+                            .saturating_mul(frame_count)
+                            .saturating_mul(p_h)
+                            .saturating_mul(p_w);
+                        if norm_batch == batch
+                            && p_h == grid_h
+                            && p_w == grid_w
+                            && frame_count > 0
+                            && vec.len() >= expected
+                        {
+                            Some(frame_count)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                let pca_steps_meta =
+                    if let (Some([pca_batch, frame_count, pca_channels, p_h, p_w]), Some(vec)) =
+                        (pca_steps_dims, pca_steps_vec.as_ref())
+                    {
+                        let expected = pca_batch
+                            .saturating_mul(frame_count)
+                            .saturating_mul(pca_channels)
+                            .saturating_mul(p_h)
+                            .saturating_mul(p_w);
+                        if pca_batch == batch
+                            && pca_channels >= 3
+                            && p_h == grid_h
+                            && p_w == grid_w
+                            && frame_count > 0
+                            && vec.len() >= expected
+                        {
+                            Some((frame_count, pca_channels))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                let temporal_frames = match (patch_steps_frames, pca_steps_meta) {
+                    (Some(patch_frames), Some((pca_frames, _))) => patch_frames.min(pca_frames),
+                    (Some(patch_frames), None) => patch_frames,
+                    (None, Some((pca_frames, _))) => pca_frames,
+                    (None, None) => 0,
+                };
+
+                let probe_preds =
+                    if let (Some(logits), Some(labels)) = (&item.probe_logits, &item.labels) {
+                        let preds = logits
+                            .clone()
+                            .argmax(1)
+                            .to_data()
+                            .convert::<i64>()
+                            .into_vec::<i64>()
+                            .ok();
+                        let labels = labels
+                            .clone()
+                            .to_data()
+                            .convert::<i64>()
+                            .into_vec::<i64>()
+                            .ok();
+                        preds.zip(labels)
+                    } else {
+                        None
+                    };
+
+                let mut saved = 0usize;
+                let mut last_mode = self.output_mode;
+                let batch_limit = batch.min(self.remaining_images);
+                for batch_idx in 0..batch_limit {
+                    let probe_slices = probe_preds
+                        .as_ref()
+                        .map(|(preds, labels)| (preds.as_slice(), labels.as_slice()));
+                    let mut frames = Vec::new();
+                    if temporal_frames > 0 {
+                        for frame_idx in 0..temporal_frames {
+                            let patch_frame_vec =
+                                if let (Some(vec), Some(frame_count)) =
+                                    (patch_steps_vec.as_ref(), patch_steps_frames)
+                                {
+                                    let frame_stride = grid_h * grid_w;
+                                    let mut out = vec![0.0f32; batch * frame_stride];
+                                    for batch_step in 0..batch {
+                                        let src =
+                                            (batch_step * frame_count + frame_idx) * frame_stride;
+                                        let dst = batch_step * frame_stride;
+                                        out[dst..dst + frame_stride]
+                                            .copy_from_slice(&vec[src..src + frame_stride]);
+                                    }
+                                    Some(out)
+                                } else {
+                                    None
+                                };
+                            let pca_frame_vec = if let (Some(vec), Some((frame_count, pca_channels))) =
+                                (pca_steps_vec.as_ref(), pca_steps_meta)
+                            {
+                                let channel_stride = grid_h * grid_w;
+                                let src_frame_stride = pca_channels * channel_stride;
+                                let mut out = vec![0.0f32; batch * 3 * channel_stride];
+                                for batch_step in 0..batch {
+                                    let src_base =
+                                        (batch_step * frame_count + frame_idx) * src_frame_stride;
+                                    let dst_base = batch_step * 3 * channel_stride;
+                                    for channel in 0..3 {
+                                        let src = src_base + channel * channel_stride;
+                                        let dst = dst_base + channel * channel_stride;
+                                        out[dst..dst + channel_stride]
+                                            .copy_from_slice(&vec[src..src + channel_stride]);
+                                    }
+                                }
+                                Some(out)
+                            } else {
+                                None
+                            };
+                            let patch_ref = patch_frame_vec.as_deref().or(patch_vec.as_deref());
+                            let pca_ref = pca_frame_vec.as_deref().or(pca_vec.as_deref());
+                            if let Some(frame) = self.build_lejepa_frame(
+                                &views_vec,
+                                patch_ref,
+                                pca_ref,
+                                batch_idx,
+                                view_count,
+                                channels,
+                                height,
+                                width,
+                                grid_h,
+                                grid_w,
+                                probe_slices,
+                            ) {
+                                frames.push(frame);
+                            }
+                        }
+                    } else if let Some(frame) = self.build_lejepa_frame(
+                        &views_vec,
+                        patch_vec.as_deref(),
+                        pca_vec.as_deref(),
+                        batch_idx,
+                        view_count,
+                        channels,
+                        height,
+                        width,
+                        grid_h,
+                        grid_w,
+                        probe_slices,
+                    ) {
+                        frames.push(frame);
+                    }
+                    if frames.is_empty() {
+                        continue;
+                    }
+                    let outcome = match write_video(
+                        &self.output_dir,
+                        self.output_mode,
+                        self.overwrite,
+                        metadata.iteration,
+                        batch_idx,
+                        &frames,
+                        self.fps,
+                        self.ffmpeg_path.as_deref(),
+                    ) {
+                        Ok(outcome) => outcome,
+                        Err(_) => {
+                            return burn_train::metric::MetricEntry::new(
+                                Arc::clone(&self.name),
+                                "video_write_failed".to_string(),
                                 "0".to_string(),
                             );
                         }
                     };
-                    let patch_vec = if let Some(patch_norms) = &item.patch_norms {
-                        match patch_norms.to_data().convert::<f32>().into_vec::<f32>() {
-                            Ok(vec) => Some(vec),
-                            Err(_) => {
-                                return burn_train::metric::MetricEntry::new(
-                                    Arc::clone(&self.name),
-                                    "patch_copy_failed".to_string(),
-                                    "0".to_string(),
-                                );
-                            }
-                        }
-                    } else {
-                        None
-                    };
-                    let pca_dims = item
-                        .pca_rgb
-                        .as_ref()
-                        .map(|pca| pca.shape().dims::<4>());
-                    let mut pca_vec = if let Some(pca_rgb) = &item.pca_rgb {
-                        match pca_rgb.to_data().convert::<f32>().into_vec::<f32>() {
-                            Ok(vec) => Some(vec),
-                            Err(_) => {
-                                return burn_train::metric::MetricEntry::new(
-                                    Arc::clone(&self.name),
-                                    "pca_copy_failed".to_string(),
-                                    "0".to_string(),
-                                );
-                            }
-                        }
-                    } else {
-                        None
-                    };
-                    if let (Some([_, pca_channels, pca_h, pca_w]), Some(vec)) =
-                        (pca_dims, pca_vec.as_ref())
-                    {
-                        if pca_channels < 3 || pca_h != grid_h || pca_w != grid_w {
-                            pca_vec = None;
-                        } else {
-                            let expected = batch * 3 * grid_h * grid_w;
-                            if vec.len() < expected {
-                                pca_vec = None;
-                            }
-                        }
-                    }
-                    let probe_preds =
-                        if let (Some(logits), Some(labels)) = (&item.probe_logits, &item.labels) {
-                            let preds = logits
-                                .clone()
-                                .argmax(1)
-                                .to_data()
-                                .convert::<i64>()
-                                .into_vec::<i64>()
-                                .ok();
-                            let labels = labels
-                                .clone()
-                                .to_data()
-                                .convert::<i64>()
-                                .into_vec::<i64>()
-                                .ok();
-                            preds.zip(labels)
-                        } else {
-                            None
-                        };
-
-                    let mut saved = 0usize;
-                    let mut last_mode = self.output_mode;
-                    let batch_limit = batch.min(self.remaining_images);
-                    for batch_idx in 0..batch_limit {
-                        let probe_slices = probe_preds
-                            .as_ref()
-                            .map(|(preds, labels)| (preds.as_slice(), labels.as_slice()));
-                        let Some(frame) = self.build_lejepa_frame(
-                            &views_vec,
-                            patch_vec.as_deref(),
-                            pca_vec.as_deref(),
-                            batch_idx,
-                            view_count,
-                            channels,
-                            height,
-                            width,
-                            grid_h,
-                            grid_w,
-                            probe_slices,
-                        ) else {
-                            continue;
-                        };
-                        let frames = vec![frame];
-                        let outcome = match write_video(
-                            &self.output_dir,
-                            self.output_mode,
-                            self.overwrite,
-                            metadata.iteration,
-                            batch_idx,
-                            &frames,
-                            self.fps,
-                            self.ffmpeg_path.as_deref(),
-                        ) {
-                            Ok(outcome) => outcome,
-                            Err(_) => {
-                                return burn_train::metric::MetricEntry::new(
-                                    Arc::clone(&self.name),
-                                    "video_write_failed".to_string(),
-                                    "0".to_string(),
-                                );
-                            }
-                        };
-                        saved += outcome.saved;
-                        last_mode = outcome.mode;
-                    }
-                    self.remaining_images = self.remaining_images.saturating_sub(batch_limit);
-                    return burn_train::metric::MetricEntry::new(
-                        Arc::clone(&self.name),
-                        format!("saved={saved} mode={last_mode}"),
-                        saved.to_string(),
-                    );
+                    saved += outcome.saved;
+                    last_mode = outcome.mode;
+                }
+                self.remaining_images = self.remaining_images.saturating_sub(batch_limit);
+                return burn_train::metric::MetricEntry::new(
+                    Arc::clone(&self.name),
+                    format!("saved={saved} mode={last_mode}"),
+                    saved.to_string(),
+                );
             }
 
             let frames_tensor = item.frames.as_ref().or(item.views.as_ref());
@@ -1908,6 +2102,8 @@ mod tests {
             frames: None,
             patch_norms: Some(patch_norms),
             pca_rgb: None,
+            patch_norms_steps: None,
+            pca_rgb_steps: None,
             probe_logits: None,
             labels: None,
             legend: Some(vec!["input".to_string()]),
@@ -1942,6 +2138,8 @@ mod tests {
             frames: None,
             patch_norms: Some(patch_norms),
             pca_rgb: None,
+            patch_norms_steps: None,
+            pca_rgb_steps: None,
             probe_logits: None,
             labels: None,
             legend: None,
@@ -1986,6 +2184,8 @@ mod tests {
             frames: None,
             patch_norms: Some(patch_norms),
             pca_rgb: None,
+            patch_norms_steps: None,
+            pca_rgb_steps: None,
             probe_logits: None,
             labels: None,
             legend: None,
@@ -2018,6 +2218,8 @@ mod tests {
             frames: None,
             patch_norms: Some(patch_norms),
             pca_rgb: None,
+            patch_norms_steps: None,
+            pca_rgb_steps: None,
             probe_logits: None,
             labels: None,
             legend: None,
@@ -2061,6 +2263,8 @@ mod tests {
             frames: Some(frames),
             patch_norms: None,
             pca_rgb: None,
+            patch_norms_steps: None,
+            pca_rgb_steps: None,
             probe_logits: None,
             labels: None,
             legend: Some(vec!["frame".to_string()]),
@@ -2106,6 +2310,8 @@ exit /b 0
             frames: Some(frames),
             patch_norms: None,
             pca_rgb: None,
+            patch_norms_steps: None,
+            pca_rgb_steps: None,
             probe_logits: None,
             labels: None,
             legend: Some(vec!["frame".to_string()]),

@@ -15,6 +15,18 @@ use super::state::{LayerState, ModelState};
 
 const LAYER_NORM_EPS: f32 = 1e-5;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RecurrentPositionMode {
+    Sequential,
+    Fixed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RolloutExecutorMode {
+    HostLoop,
+    WgpuFused,
+}
+
 #[derive(Module, Debug)]
 pub struct BDH<B: Backend> {
     n_layer: usize,
@@ -22,6 +34,7 @@ pub struct BDH<B: Backend> {
     n_head: usize,
     mlp_internal_dim_multiplier: usize,
     vocab_size: usize,
+    rollout_fast_steps_per_slow_step: usize,
     kernel: FusedKernelConfig,
     embed: Embedding<B>,
     dropout: Dropout,
@@ -71,6 +84,7 @@ impl<B: Backend> BDH<B> {
             n_head: config.n_head,
             mlp_internal_dim_multiplier: config.mlp_internal_dim_multiplier,
             vocab_size: config.vocab_size,
+            rollout_fast_steps_per_slow_step: config.rollout_fast_steps_per_slow_step,
             kernel: config.fused_kernels,
             embed,
             dropout,
@@ -93,95 +107,20 @@ impl<B: Backend> BDH<B> {
     }
 
     pub fn forward_with_hidden(&self, tokens: Tensor<B, 2, Int>) -> (Tensor<B, 3>, Tensor<B, 3>) {
-        let embedded = self.embed.forward(tokens);
-        let [batch, time, embd] = embedded.shape().dims::<3>();
-        let mut current = embedded.reshape([batch, 1, time, embd]);
-        current = self.layer_norm(current);
-
-        let encoder_raw = self.encoder.val();
-        let [heads, embd_enc, latent] = encoder_raw.shape().dims::<3>();
-        let encoder = encoder_raw.reshape([1, heads, embd_enc, latent]);
-
-        let encoder_v_raw = self.encoder_v.val();
-        let [heads_v, embd_v, latent_v] = encoder_v_raw.shape().dims::<3>();
-        let encoder_v = encoder_v_raw.reshape([1, heads_v, embd_v, latent_v]);
-        let decoder = self.decoder.val();
-        let fused = self.kernel.enabled;
-        let latent_pattern = &self.kernel.block_sparse.latent;
-
-        for _ in 0..self.n_layer {
-            let output = lowrank_residual_step(
-                current,
-                encoder.clone(),
-                encoder_v.clone(),
-                decoder.clone(),
-                &self.dropout,
-                fused,
-                self.kernel.relu_threshold,
-                true,
-                latent_pattern,
-                |query, value| self.attention.forward(query, value),
-                |values| activation::relu(values),
-                |values| self.layer_norm(values),
-            );
-            current = output.next;
-        }
-
-        let [batch, _, time, dim] = current.shape().dims();
-        let hidden = current.reshape([batch, time, dim]);
-        let logits = hidden
-            .clone()
-            .reshape([batch * time, dim])
-            .matmul(self.lm_head.val())
-            .reshape([batch, time, self.vocab_size]);
-
-        (hidden, logits)
+        let mut state = self.init_state();
+        self.forward_with_hidden_and_state(tokens, &mut state)
     }
 
     pub fn embed_tokens(&self, tokens: Tensor<B, 2, Int>) -> Tensor<B, 3> {
         self.embed.forward(tokens)
     }
 
+    pub fn rollout_fast_steps_per_slow_step(&self) -> usize {
+        self.rollout_fast_steps_per_slow_step
+    }
+
     pub fn forward_fast(&self, tokens: Tensor<B, 2, Int>) -> Tensor<B, 3> {
-        let embedded = self.embed.forward(tokens);
-        let [batch, time, embd] = embedded.shape().dims::<3>();
-        let mut current = embedded.reshape([batch, 1, time, embd]);
-        current = self.layer_norm(current);
-
-        let encoder_raw = self.encoder.val();
-        let [heads, embd_enc, latent] = encoder_raw.shape().dims::<3>();
-        let encoder = encoder_raw.reshape([1, heads, embd_enc, latent]);
-
-        let encoder_v_raw = self.encoder_v.val();
-        let [heads_v, embd_v, latent_v] = encoder_v_raw.shape().dims::<3>();
-        let encoder_v = encoder_v_raw.reshape([1, heads_v, embd_v, latent_v]);
-        let decoder = self.decoder.val();
-        let fused = self.kernel.enabled;
-        let latent_pattern = &self.kernel.block_sparse.latent;
-
-        for _ in 0..self.n_layer {
-            let output = lowrank_residual_step(
-                current,
-                encoder.clone(),
-                encoder_v.clone(),
-                decoder.clone(),
-                &self.dropout,
-                fused,
-                self.kernel.relu_threshold,
-                true,
-                latent_pattern,
-                |query, value| self.attention.forward(query, value),
-                |values| activation::relu(values),
-                |values| self.layer_norm(values),
-            );
-            current = output.next;
-        }
-
-        let [batch, _, time, dim] = current.shape().dims();
-        current
-            .reshape([batch * time, dim])
-            .matmul(self.lm_head.val())
-            .reshape([batch, time, self.vocab_size])
+        self.forward(tokens)
     }
 
     pub fn generate(
@@ -272,23 +211,30 @@ impl<B: Backend> BDH<B> {
         ModelState::new(self.n_layer)
     }
 
-    fn recurrent_attention(
+    fn rollout_executor_mode(&self) -> RolloutExecutorMode {
+        if self.kernel.enabled
+            && self.kernel.wgpu_recurrent_kernel
+            && self.kernel.wgpu_rollout_fused
+            && burn_dragon_wgpu::supports_recurrent_backend::<B>()
+        {
+            return RolloutExecutorMode::WgpuFused;
+        }
+        RolloutExecutorMode::HostLoop
+    }
+
+    fn recurrent_attention_reference(
         &self,
         query: Tensor<B, 4>,
         value: Tensor<B, 4>,
-        layer_state: &mut LayerState<B>,
-        position: usize,
-    ) -> Tensor<B, 4> {
-        let query = self.attention.rotate_positions(query, position);
+        rho_state: Option<Tensor<B, 4>>,
+        decay: Option<Tensor<B, 1>>,
+    ) -> (Tensor<B, 4>, Tensor<B, 4>) {
         let [batch, heads, time, latent] = query.shape().dims();
         let n_embd = value.shape().dims::<4>()[3];
         let device = value.device();
-        let decay = self
-            .attention
-            .alibi_decay()
-            .map(|tensor| tensor.reshape([1, heads, 1, 1]));
+        let decay = decay.map(|tensor| tensor.reshape([1, heads, 1, 1]));
 
-        let mut rho = match layer_state.rho.take() {
+        let mut rho = match rho_state {
             Some(existing) => {
                 let dims = existing.shape().dims::<4>();
                 if dims == [batch, heads, latent, n_embd] {
@@ -318,9 +264,53 @@ impl<B: Backend> BDH<B> {
             }
         }
 
-        layer_state.rho = Some(rho);
+        (Tensor::cat(outputs, 2), rho)
+    }
 
-        Tensor::cat(outputs, 2)
+    fn recurrent_attention(
+        &self,
+        query: Tensor<B, 4>,
+        value: Tensor<B, 4>,
+        layer_state: &mut LayerState<B>,
+        position: usize,
+        position_mode: RecurrentPositionMode,
+    ) -> Tensor<B, 4> {
+        let query = match position_mode {
+            RecurrentPositionMode::Sequential => self.attention.rotate_positions(query, position),
+            RecurrentPositionMode::Fixed => self.attention.rotate_positions_fixed(query, position),
+        };
+        let decay = self.attention.alibi_decay();
+        let initial_rho = layer_state.rho.as_ref().cloned();
+
+        if self.kernel.enabled && self.kernel.wgpu_recurrent_kernel {
+            if let Some(output) = burn_dragon_wgpu::try_fused_recurrent_attention_wgpu(
+                &query,
+                &value,
+                initial_rho.as_ref(),
+                decay.as_ref(),
+            ) {
+                if B::ad_enabled() {
+                    // Keep fused forward values while reusing tensor-core backward semantics.
+                    let (reference_context, reference_rho) = self.recurrent_attention_reference(
+                        query.clone(),
+                        value.clone(),
+                        initial_rho,
+                        decay,
+                    );
+                    let context =
+                        reference_context.clone() + output.context - reference_context.detach();
+                    let rho = reference_rho.clone() + output.rho - reference_rho.detach();
+                    layer_state.rho = Some(rho);
+                    return context;
+                }
+                layer_state.rho = Some(output.rho);
+                return output.context;
+            }
+        }
+
+        let (context, rho) = self.recurrent_attention_reference(query, value, initial_rho, decay);
+        layer_state.rho = Some(rho);
+        context
     }
 
     fn forward_with_state_impl(
@@ -337,6 +327,144 @@ impl<B: Backend> BDH<B> {
         embedded: Tensor<B, 3>,
         state: &mut ModelState<B>,
     ) -> (Tensor<B, 3>, Tensor<B, 3>) {
+        if self.rollout_fast_steps_per_slow_step <= 1 {
+            let start_pos = state.position;
+            return self.forward_with_state_from_embedded_single_pass(
+                embedded,
+                state,
+                start_pos,
+                true,
+                RecurrentPositionMode::Sequential,
+            );
+        }
+
+        match self.rollout_executor_mode() {
+            RolloutExecutorMode::HostLoop => {
+                self.forward_with_state_from_embedded_rollout_host_loop(embedded, state)
+            }
+            RolloutExecutorMode::WgpuFused => {
+                self.forward_with_state_from_embedded_rollout_fused(embedded, state)
+            }
+        }
+    }
+
+    fn forward_with_state_from_embedded_rollout_host_loop(
+        &self,
+        embedded: Tensor<B, 3>,
+        state: &mut ModelState<B>,
+    ) -> (Tensor<B, 3>, Tensor<B, 3>) {
+        assert_eq!(
+            state.layers.len(),
+            self.n_layer,
+            "model state layers mismatch"
+        );
+        let [batch, slow_steps, _embd] = embedded.shape().dims::<3>();
+
+        if slow_steps == 0 {
+            let device = embedded.device();
+            let hidden = Tensor::<B, 3>::zeros([batch, 0, self.n_embd], &device);
+            let logits = Tensor::<B, 3>::zeros([batch, 0, self.vocab_size], &device);
+            return (hidden, logits);
+        }
+
+        let mut hidden_slow = Vec::with_capacity(slow_steps);
+        let mut logits_slow = Vec::with_capacity(slow_steps);
+        for slow_idx in 0..slow_steps {
+            let token_embedded = embedded.clone().slice_dim(1, slow_idx..slow_idx + 1);
+            let start_pos = state.position;
+            let mut hidden_last = None;
+            let mut logits_last = None;
+            for _ in 0..self.rollout_fast_steps_per_slow_step {
+                let (hidden, logits) = self.forward_with_state_from_embedded_single_pass(
+                    token_embedded.clone(),
+                    state,
+                    start_pos,
+                    false,
+                    RecurrentPositionMode::Sequential,
+                );
+                hidden_last = Some(hidden);
+                logits_last = Some(logits);
+            }
+            hidden_slow.push(hidden_last.expect("rollout hidden output"));
+            logits_slow.push(logits_last.expect("rollout logits output"));
+            state.position = state.position.saturating_add(1);
+        }
+
+        (Tensor::cat(hidden_slow, 1), Tensor::cat(logits_slow, 1))
+    }
+
+    fn forward_with_state_from_embedded_rollout_fused(
+        &self,
+        embedded: Tensor<B, 3>,
+        state: &mut ModelState<B>,
+    ) -> (Tensor<B, 3>, Tensor<B, 3>) {
+        assert_eq!(
+            state.layers.len(),
+            self.n_layer,
+            "model state layers mismatch"
+        );
+        let [batch, slow_steps, _embd] = embedded.shape().dims::<3>();
+
+        if slow_steps == 0 {
+            let device = embedded.device();
+            let hidden = Tensor::<B, 3>::zeros([batch, 0, self.n_embd], &device);
+            let logits = Tensor::<B, 3>::zeros([batch, 0, self.vocab_size], &device);
+            return (hidden, logits);
+        }
+
+        let fast_steps = self.rollout_fast_steps_per_slow_step;
+        let mut hidden_slow = Vec::with_capacity(slow_steps);
+        let mut logits_slow = Vec::with_capacity(slow_steps);
+
+        for slow_idx in 0..slow_steps {
+            let token_embedded = embedded.clone().slice_dim(1, slow_idx..slow_idx + 1);
+            let rollout_embedded = token_embedded.repeat_dim(1, fast_steps);
+            let start_pos = state.position;
+            let hidden_rollout = self.forward_hidden_with_state_from_embedded_single_pass(
+                rollout_embedded,
+                state,
+                start_pos,
+                false,
+                RecurrentPositionMode::Fixed,
+            );
+            let last = fast_steps - 1;
+            let hidden_last = hidden_rollout.slice_dim(1, last..fast_steps);
+            let logits_last = self.project_hidden_to_logits(hidden_last.clone());
+            hidden_slow.push(hidden_last);
+            logits_slow.push(logits_last);
+            state.position = state.position.saturating_add(1);
+        }
+
+        (Tensor::cat(hidden_slow, 1), Tensor::cat(logits_slow, 1))
+    }
+
+    fn forward_with_state_from_embedded_single_pass(
+        &self,
+        embedded: Tensor<B, 3>,
+        state: &mut ModelState<B>,
+        start_pos: usize,
+        advance_position: bool,
+        position_mode: RecurrentPositionMode,
+    ) -> (Tensor<B, 3>, Tensor<B, 3>) {
+        let hidden = self.forward_hidden_with_state_from_embedded_single_pass(
+            embedded,
+            state,
+            start_pos,
+            advance_position,
+            position_mode,
+        );
+        let logits = self.project_hidden_to_logits(hidden.clone());
+        (hidden, logits)
+    }
+
+    fn forward_hidden_with_state_from_embedded_single_pass(
+        &self,
+        embedded: Tensor<B, 3>,
+        state: &mut ModelState<B>,
+        start_pos: usize,
+        advance_position: bool,
+        position_mode: RecurrentPositionMode,
+    ) -> Tensor<B, 3> {
         assert_eq!(
             state.layers.len(),
             self.n_layer,
@@ -356,7 +484,6 @@ impl<B: Backend> BDH<B> {
         let decoder = self.decoder.val();
         let fused = self.kernel.enabled;
         let latent_pattern = &self.kernel.block_sparse.latent;
-        let start_pos = state.position;
 
         for layer_state in &mut state.layers {
             let output = lowrank_residual_step(
@@ -369,7 +496,9 @@ impl<B: Backend> BDH<B> {
                 self.kernel.relu_threshold,
                 true,
                 latent_pattern,
-                |query, value| self.recurrent_attention(query, value, layer_state, start_pos),
+                |query, value| {
+                    self.recurrent_attention(query, value, layer_state, start_pos, position_mode)
+                },
                 |values| activation::relu(values),
                 |values| self.layer_norm(values),
             );
@@ -437,14 +566,19 @@ impl<B: Backend> BDH<B> {
 
         let [batch, _, time, dim] = current.shape().dims();
         let hidden = current.reshape([batch, time, dim]);
-        let logits = hidden
-            .clone()
+        if advance_position {
+            state.position = state.position.saturating_add(time);
+        }
+
+        hidden
+    }
+
+    fn project_hidden_to_logits(&self, hidden: Tensor<B, 3>) -> Tensor<B, 3> {
+        let [batch, time, dim] = hidden.shape().dims();
+        hidden
             .reshape([batch * time, dim])
             .matmul(self.lm_head.val())
-            .reshape([batch, time, self.vocab_size]);
-        state.position = state.position.saturating_add(time);
-
-        (hidden, logits)
+            .reshape([batch, time, self.vocab_size])
     }
 
     pub fn forward_with_state(

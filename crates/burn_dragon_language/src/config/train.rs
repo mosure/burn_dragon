@@ -5,6 +5,7 @@ use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 use toml::Value;
 
+use burn_dragon_core::BDHConfig;
 use burn_dragon_train::{
     GdpoConfig, GdpoHardGate, LearningRateScheduleConfig, OptimizerConfig, WgpuRuntimeConfig,
 };
@@ -260,6 +261,15 @@ impl TrainingConfig {
         {
             return Err(anyhow!("model.block_size must be > 0 when set"));
         }
+        if let Some(rollout_fast_steps) = self.model.rollout_fast_steps_per_slow_step
+            && !BDHConfig::is_valid_rollout_fast_steps(rollout_fast_steps)
+        {
+            return Err(anyhow!(
+                "model.rollout_fast_steps_per_slow_step must be one of {:?} when set (got {})",
+                BDHConfig::SUPPORTED_ROLLOUT_FAST_STEPS,
+                rollout_fast_steps
+            ));
+        }
 
         if let Some(schedule) = &self.optimizer.lr_schedule {
             match schedule {
@@ -464,6 +474,7 @@ mod tests {
             "mlp_internal_dim_multiplier = 4",
             "dropout = 0.1",
             "fused_kernels = false",
+            "rollout_fast_steps_per_slow_step = 2",
             "rotary_embedding = \"alibi\"",
         ]
         .join("\n");
@@ -485,6 +496,7 @@ mod tests {
             "n_embd = 320",
             "fused_kernels = true",
             "block_size = 256",
+            "rollout_fast_steps_per_slow_step = 8",
         ]
         .join("\n");
         let override_cfg = write_config(dir.path(), "override.toml", &override_contents);
@@ -536,9 +548,44 @@ mod tests {
         assert_eq!(config.model.dropout, Some(0.1));
         assert_eq!(config.model.fused_kernels, Some(true));
         assert_eq!(config.model.block_size, Some(256));
+        assert_eq!(config.model.rollout_fast_steps_per_slow_step, Some(8));
         assert_eq!(
             config.model.rotary_embedding,
             Some(burn_dragon_core::RotaryEmbedding::Alibi)
+        );
+    }
+
+    #[test]
+    fn validate_rejects_invalid_rollout_fast_steps() {
+        let text = r#"
+            [dataset]
+            cache_dir = "data"
+            type = "shakespeare"
+
+            [training]
+            block_size = 32
+            batch_size = 2
+            max_iters = 4
+            log_frequency = 1
+
+            [optimizer]
+            learning_rate = 0.001
+            weight_decay = 0.0
+
+            [generation]
+            prompt = "abc"
+
+            [model]
+            rollout_fast_steps_per_slow_step = 3
+        "#;
+        let config: TrainingConfig = toml::from_str(text).expect("parse training config");
+        let err = config
+            .validate()
+            .expect_err("invalid rollout fast steps should fail validation");
+        assert!(
+            err.to_string()
+                .contains("model.rollout_fast_steps_per_slow_step"),
+            "unexpected error: {err:#}"
         );
     }
 
@@ -599,5 +646,40 @@ mod tests {
             }
             other => panic!("unexpected dataset source: {other:?}"),
         }
+    }
+
+    #[test]
+    fn wgpu_training_and_inference_core_switches_parse() {
+        let text = r#"
+            [dataset]
+            cache_dir = "data"
+            type = "shakespeare"
+
+            [training]
+            block_size = 32
+            batch_size = 2
+            max_iters = 4
+            log_frequency = 1
+
+            [optimizer]
+            learning_rate = 0.001
+            weight_decay = 0.0
+
+            [generation]
+            prompt = "abc"
+
+            [wgpu.training]
+            fused_core_recurrent = true
+            fused_core_rollout = true
+
+            [wgpu.inference]
+            fused_core_recurrent = false
+            fused_core_rollout = false
+        "#;
+        let config: TrainingConfig = toml::from_str(text).expect("parse training config");
+        assert_eq!(config.wgpu.training.fused_core_recurrent, Some(true));
+        assert_eq!(config.wgpu.training.fused_core_rollout, Some(true));
+        assert_eq!(config.wgpu.inference.fused_core_recurrent, Some(false));
+        assert_eq!(config.wgpu.inference.fused_core_rollout, Some(false));
     }
 }

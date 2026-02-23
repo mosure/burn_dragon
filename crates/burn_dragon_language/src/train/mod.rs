@@ -3,12 +3,15 @@
 mod prelude;
 
 pub mod backend;
+pub mod profile;
 pub mod schedule;
 pub mod steps;
 pub mod utils;
 
 #[allow(unused_imports)]
 pub use backend::*;
+#[allow(unused_imports)]
+pub use profile::*;
 #[allow(unused_imports)]
 pub use schedule::*;
 #[allow(unused_imports)]

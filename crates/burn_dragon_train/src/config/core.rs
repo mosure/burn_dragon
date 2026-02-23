@@ -25,10 +25,26 @@ pub enum WgpuMemoryConfig {
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default)]
 #[serde(default)]
+pub struct WgpuInferenceConfig {
+    pub fused_core_recurrent: Option<bool>,
+    pub fused_core_rollout: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default)]
+#[serde(default)]
+pub struct WgpuTrainingConfig {
+    pub fused_core_recurrent: Option<bool>,
+    pub fused_core_rollout: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default)]
+#[serde(default)]
 pub struct WgpuRuntimeConfig {
     pub backend: WgpuBackend,
     pub tasks_max: Option<usize>,
     pub memory: WgpuMemoryConfig,
+    pub training: WgpuTrainingConfig,
+    pub inference: WgpuInferenceConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]

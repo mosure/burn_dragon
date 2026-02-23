@@ -178,6 +178,14 @@ impl<B: Backend> Attention<B> {
         self.rotate(values, start)
     }
 
+    pub(crate) fn rotate_positions_fixed(
+        &self,
+        values: Tensor<B, 4>,
+        position: usize,
+    ) -> Tensor<B, 4> {
+        self.rotate_fixed(values, position)
+    }
+
     pub(crate) fn alibi_decay(&self) -> Option<Tensor<B, 1>> {
         if !self.use_alibi {
             return None;
@@ -336,6 +344,25 @@ impl<B: Backend> Attention<B> {
             .float()
             .reshape([1, 1, time, 1]);
 
+        self.rotate_with_positions(values, positions)
+    }
+
+    fn rotate_fixed(&self, values: Tensor<B, 4>, position: usize) -> Tensor<B, 4> {
+        if self.rotary_embedding == RotaryEmbedding::Alibi {
+            return values;
+        }
+        let time = values.shape().dims::<4>()[2];
+        let device = values.device();
+        let positions = Tensor::<B, 1, Int>::arange(0..time as i64, &device)
+            .float()
+            .mul_scalar(0.0)
+            .add_scalar(position as f32)
+            .reshape([1, 1, time, 1]);
+
+        self.rotate_with_positions(values, positions)
+    }
+
+    fn rotate_with_positions(&self, values: Tensor<B, 4>, positions: Tensor<B, 4>) -> Tensor<B, 4> {
         let raw = positions * self.freqs.clone();
         let phases = (raw.clone() - raw.clone().detach().floor()) * (2.0 * PI);
         match self.rotary_embedding {

@@ -36,6 +36,27 @@ fn sample_tokens<B: Backend>(device: &B::Device) -> (Tensor<B, 2, Int>, Tensor<B
     (inputs, targets)
 }
 
+fn assert_close<const D: usize>(lhs: Tensor<InferBackend, D>, rhs: Tensor<InferBackend, D>) {
+    let lhs = lhs
+        .to_data()
+        .convert::<f32>()
+        .into_vec::<f32>()
+        .expect("lhs vec");
+    let rhs = rhs
+        .to_data()
+        .convert::<f32>()
+        .into_vec::<f32>()
+        .expect("rhs vec");
+    assert_eq!(lhs.len(), rhs.len(), "length mismatch");
+    for (a, b) in lhs.iter().zip(rhs.iter()) {
+        let diff = (*a - *b).abs();
+        assert!(
+            diff <= 1e-5,
+            "difference {diff} exceeds tolerance 1e-5 (lhs={a}, rhs={b})"
+        );
+    }
+}
+
 #[test]
 fn training_paths_run_across_configs() {
     let device = <TrainBackend as Backend>::Device::default();
@@ -47,25 +68,28 @@ fn training_paths_run_across_configs() {
     ];
 
     for (rotary, fused) in configs {
-        let config = build_config(rotary, fused);
-        let model = BDH::<TrainBackend>::new(config, &device);
-        let (inputs, targets) = sample_tokens::<TrainBackend>(&device);
+        for rollout_fast_steps in BDHConfig::SUPPORTED_ROLLOUT_FAST_STEPS {
+            let mut config = build_config(rotary, fused);
+            config.set_rollout_fast_steps_per_slow_step(rollout_fast_steps);
+            let model = BDH::<TrainBackend>::new(config, &device);
+            let (inputs, targets) = sample_tokens::<TrainBackend>(&device);
 
-        let logits_fast = model.forward_fast(inputs.clone());
-        let [batch, time, vocab] = logits_fast.shape().dims();
-        assert_eq!([batch, time, vocab], [2, 4, 32]);
+            let logits_fast = model.forward_fast(inputs.clone());
+            let [batch, time, vocab] = logits_fast.shape().dims();
+            assert_eq!([batch, time, vocab], [2, 4, 32]);
 
-        let loss_fast = language_model_loss::<TrainBackend>(logits_fast, targets.clone());
-        let _ = loss_fast.backward();
+            let loss_fast = language_model_loss::<TrainBackend>(logits_fast, targets.clone());
+            let _ = loss_fast.backward();
 
-        let mut state = model.init_state();
-        let logits_rec = model.forward_with_state(inputs.clone(), &mut state);
-        let [batch, time, vocab] = logits_rec.shape().dims();
-        assert_eq!([batch, time, vocab], [2, 4, 32]);
-        assert_eq!(state.position, 4);
+            let mut state = model.init_state();
+            let logits_rec = model.forward_with_state(inputs.clone(), &mut state);
+            let [batch, time, vocab] = logits_rec.shape().dims();
+            assert_eq!([batch, time, vocab], [2, 4, 32]);
+            assert_eq!(state.position, 4);
 
-        let loss_rec = language_model_loss::<TrainBackend>(logits_rec, targets.clone());
-        let _ = loss_rec.backward();
+            let loss_rec = language_model_loss::<TrainBackend>(logits_rec, targets.clone());
+            let _ = loss_rec.backward();
+        }
     }
 }
 
@@ -80,18 +104,50 @@ fn inference_paths_run_across_configs() {
     ];
 
     for (rotary, fused) in configs {
-        let config = build_config(rotary, fused);
-        let model = BDH::<InferBackend>::new(config, &device);
-        let (inputs, _targets) = sample_tokens::<InferBackend>(&device);
+        for rollout_fast_steps in BDHConfig::SUPPORTED_ROLLOUT_FAST_STEPS {
+            let mut config = build_config(rotary, fused);
+            config.set_rollout_fast_steps_per_slow_step(rollout_fast_steps);
+            let model = BDH::<InferBackend>::new(config, &device);
+            let (inputs, _targets) = sample_tokens::<InferBackend>(&device);
 
-        let logits_fast = model.forward_fast(inputs.clone());
-        let [batch, time, vocab] = logits_fast.shape().dims();
-        assert_eq!([batch, time, vocab], [2, 4, 32]);
+            let logits_fast = model.forward_fast(inputs.clone());
+            let [batch, time, vocab] = logits_fast.shape().dims();
+            assert_eq!([batch, time, vocab], [2, 4, 32]);
 
-        let mut state = model.init_state();
-        let logits_rec = model.forward_with_state(inputs.clone(), &mut state);
-        let [batch, time, vocab] = logits_rec.shape().dims();
-        assert_eq!([batch, time, vocab], [2, 4, 32]);
-        assert_eq!(state.position, 4);
+            let mut state = model.init_state();
+            let logits_rec = model.forward_with_state(inputs.clone(), &mut state);
+            let [batch, time, vocab] = logits_rec.shape().dims();
+            assert_eq!([batch, time, vocab], [2, 4, 32]);
+            assert_eq!(state.position, 4);
+        }
     }
+}
+
+#[test]
+fn rollout_keeps_slow_token_emission_semantics() {
+    let device = <InferBackend as Backend>::Device::default();
+    let mut config = build_config(RotaryEmbedding::Alibi, true);
+    config.set_rollout_fast_steps_per_slow_step(8);
+    let model = BDH::<InferBackend>::new(config, &device);
+
+    let tokens = Tensor::<InferBackend, 2, Int>::from_data(
+        TensorData::new(vec![0, 1, 2, 3, 4, 5], [1, 6]),
+        &device,
+    );
+
+    let logits_full = model.forward(tokens.clone());
+
+    let mut state = model.init_state();
+    let mut streamed = Vec::with_capacity(6);
+    for step in 0..6 {
+        let token_step = tokens.clone().slice_dim(1, step..step + 1);
+        let logits = model.forward_with_state(token_step, &mut state);
+        streamed.push(logits);
+    }
+    let logits_stream = Tensor::cat(streamed, 1);
+
+    let [batch, time, vocab] = logits_stream.shape().dims::<3>();
+    assert_eq!([batch, time, vocab], [1, 6, 32]);
+    assert_eq!(state.position, 6);
+    assert_close(logits_full, logits_stream);
 }

@@ -59,11 +59,38 @@ prompt = "To be or "
 temperature = 1.0
 top_k = 3
 
+[wgpu]
+backend = "auto"
+# tasks_max and memory tuning remain optional.
+
+[wgpu.training]
+# Switches recurrent core implementation for language training on wgpu backends.
+# false: burn tensor-core recurrent path
+# true: fused burn_dragon_wgpu recurrent path
+fused_core_recurrent = false
+# Switches rollout executor when fused_core_recurrent is enabled.
+# false: host-managed per-fast-step loop
+# true: fused per-slow-step rollout executor (device-side fast inner steps)
+fused_core_rollout = false
+
+[wgpu.inference]
+# Switches recurrent core implementation for language inference on wgpu backends.
+# false: burn tensor-core recurrent path
+# true: fused burn_dragon_wgpu recurrent path
+fused_core_recurrent = false
+# Switches rollout executor when fused_core_recurrent is enabled.
+# false: host-managed per-fast-step loop
+# true: fused per-slow-step rollout executor (device-side fast inner steps)
+fused_core_rollout = false
+
 [model]
 n_layer = 4
 n_embd = 256
 n_head = 4
 mlp_internal_dim_multiplier = 4
+# Fast internal recurrent updates per emitted slow token.
+# Supported values: 1, 2, 4, 8, 16.
+rollout_fast_steps_per_slow_step = 1
 # Paper default: standard ReLU threshold (0.0).
 relu_threshold = 0.0
 dropout = 0.1

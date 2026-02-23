@@ -18,14 +18,17 @@ pub use foveation::{
     image_from_nchw, lod_sigma_from_sigma, render_foveated_patch,
     render_foveated_patch_with_radius, sigma_from_unit,
 };
+#[cfg(feature = "train")]
 pub use model::{
     CifarBatch, CifarDataLoader, CifarDataset, CifarSplit, CifarType, DinoFeatureStore,
     ImageNetAugmentations, ImageNetBatch, ImageNetDataLoader, ImageNetDataset,
-    ImageNetDatasetConfig, ImageNetSplit, PatchEmbed, PatchEmbedOutput, PatchGrid,
-    SpatialPositionalEncodingKind, VisionAttentionMode, VisionDragon, VisionDragonConfig,
-    VisionDragonMultiOutput, VisionDragonOutput, VisionLatentActivation, VisionNormalize,
-    VisionPatchEmbedMode, VisionTrmGraphConfig, VisionTrmGridMismatchPolicy, patchify,
-    pool_patch_tokens, unpatchify,
+    ImageNetDatasetConfig, ImageNetSplit, VisionNormalize,
+};
+pub use model::{
+    PatchEmbed, PatchEmbedOutput, PatchGrid, SpatialPositionalEncodingKind, VisionAttentionMode,
+    VisionDragon, VisionDragonConfig, VisionDragonMultiOutput, VisionDragonOutput,
+    VisionLatentActivation, VisionPatchEmbedMode, VisionTrmGraphConfig,
+    VisionTrmGridMismatchPolicy, patchify, pool_patch_tokens, unpatchify,
 };
 
 #[cfg(feature = "train")]

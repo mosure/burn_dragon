@@ -4,6 +4,7 @@ use std::convert::TryFrom;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow};
 use clap::{Parser, ValueEnum};
@@ -15,10 +16,12 @@ use burn::tensor::backend::Backend;
 use burn_dragon::BDH;
 use burn_dragon::language::{
     ContextStrategy, ContextStrategyConfig, GenerationConfig, ModelOverrides, TrainingConfig,
-    build_model_config, generate_text, load_training_config, prefill_state,
-    resolve_context_strategy, sample_next_token,
+    apply_wgpu_fused_core_override, build_model_config, generate_text, generation_profile_reset,
+    generation_profile_snapshot, load_training_config, prefill_state, resolve_context_strategy,
+    sample_next_token,
 };
 use burn_dragon::train::wgpu::init_runtime;
+use burn_dragon_wgpu::{recurrent_profile_reset, recurrent_profile_snapshot};
 use burn_wgpu::Wgpu;
 
 #[cfg(feature = "cuda")]
@@ -73,8 +76,14 @@ fn run() -> Result<()> {
 
     match args.backend {
         BackendArg::Wgpu => {
+            let use_fused_core = config.wgpu.inference.fused_core_recurrent == Some(true);
             #[cfg(feature = "viz")]
             if use_viz {
+                if use_fused_core {
+                    return Err(anyhow!(
+                        "wgpu.inference.fused_core_recurrent=true currently requires --viz off"
+                    ));
+                }
                 let wgpu_config = config.wgpu.clone();
                 return infer_backend_with_viz::<Wgpu<f32>, _>(
                     &config,
@@ -84,7 +93,12 @@ fn run() -> Result<()> {
                 );
             }
             let wgpu_config = config.wgpu.clone();
-            infer_backend::<Wgpu<f32>, _>(&config, &args, "wgpu", move |device| {
+            let backend_name = if use_fused_core {
+                "wgpu-fused-core"
+            } else {
+                "wgpu"
+            };
+            infer_backend::<Wgpu<f32>, _>(&config, &args, backend_name, move |device| {
                 init_runtime(device, &wgpu_config)
             })
         }
@@ -171,6 +185,12 @@ where
     let (checkpoint_base, epoch) = resolve_checkpoint_base(&checkpoint_dir, args.epoch)?;
 
     let mut model_config = build_model_config(&config.model, config.training.block_size);
+    apply_wgpu_fused_core_override(
+        &mut model_config,
+        backend_name,
+        config.wgpu.inference.fused_core_recurrent,
+        config.wgpu.inference.fused_core_rollout,
+    );
     model_config.vocab_size = tokenizer.len();
     let mut model = BDH::<B>::new(model_config, &device);
     let recorder = BinFileRecorder::<FullPrecisionSettings>::new();
@@ -191,6 +211,12 @@ where
         "Loaded epoch {epoch} from {} using {backend_name} backend.",
         format_checkpoint(&checkpoint_base)
     );
+    let stage_profile = std::env::var_os("BDH_STAGE_PROFILE").is_some();
+    if stage_profile {
+        generation_profile_reset();
+        recurrent_profile_reset();
+    }
+    let infer_wall_start = stage_profile.then(Instant::now);
 
     let use_streaming = args.streaming;
 
@@ -319,6 +345,30 @@ where
 
         eprintln!("{status_msg}");
         println!("{output}");
+    }
+
+    if let Some(start) = infer_wall_start {
+        let elapsed_ns = start.elapsed().as_nanos();
+        let generation = generation_profile_snapshot();
+        let recurrent = recurrent_profile_snapshot();
+        eprintln!(
+            "[stage-profile][inference] total_ns={elapsed_ns} prefill_forward_ns={} token_forward_ns={} sample_host_transfer_ns={} sample_cpu_ns={} token_tensor_copy_ns={} token_steps={} prefill_tokens={} host_sync_points={} host_to_device_copy_bytes={} device_to_host_copy_bytes={} recurrent_calls={} recurrent_total_ns={} recurrent_setup_ns={} recurrent_copy_ns={} recurrent_dispatch_ns={}",
+            generation.prefill_forward_ns,
+            generation.token_forward_ns,
+            generation.sample_host_transfer_ns,
+            generation.sample_cpu_ns,
+            generation.token_tensor_copy_ns,
+            generation.token_steps,
+            generation.prefill_tokens,
+            generation.host_sync_points,
+            generation.host_to_device_copy_bytes,
+            generation.device_to_host_copy_bytes,
+            recurrent.calls,
+            recurrent.total_ns,
+            recurrent.setup_ns,
+            recurrent.copy_ns,
+            recurrent.dispatch_ns,
+        );
     }
 
     Ok(())
@@ -565,6 +615,9 @@ fn merge_model_overrides(base: &mut ModelOverrides, incoming: &ModelOverrides) {
     if let Some(value) = incoming.block_size {
         base.block_size = Some(value);
     }
+    if let Some(value) = incoming.rollout_fast_steps_per_slow_step {
+        base.rollout_fast_steps_per_slow_step = Some(value);
+    }
     if let Some(value) = incoming.rotary_embedding {
         base.rotary_embedding = Some(value);
     }
@@ -690,5 +743,65 @@ fn normalize_max_tokens(max_tokens: Option<i64>) -> Option<usize> {
     match max_tokens {
         Some(value) if value >= 0 => Some(value as usize),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::apply_wgpu_fused_core_override;
+    use burn_dragon::BDHConfig;
+
+    #[test]
+    fn wgpu_backend_override_enables_fused_recurrent_path() {
+        let mut model_config = BDHConfig::default();
+        model_config.fused_kernels.enabled = false;
+        model_config.fused_kernels.set_wgpu_recurrent_kernel(false);
+        model_config.fused_kernels.set_wgpu_rollout_fused(false);
+
+        apply_wgpu_fused_core_override(&mut model_config, "wgpu", Some(true), None);
+
+        assert!(
+            model_config.fused_kernels.enabled,
+            "wgpu backend override should enable fused kernels for recurrent path selection"
+        );
+        assert!(
+            model_config.fused_kernels.wgpu_recurrent_kernel,
+            "wgpu recurrent kernel should be enabled by override"
+        );
+        assert!(model_config.fused_kernels.wgpu_rollout_fused);
+    }
+
+    #[test]
+    fn wgpu_backend_override_can_disable_recurrent_kernel_without_disabling_other_fusion() {
+        let mut model_config = BDHConfig::default();
+        model_config.fused_kernels.enabled = true;
+        model_config.fused_kernels.set_wgpu_recurrent_kernel(true);
+        model_config.fused_kernels.set_wgpu_rollout_fused(true);
+
+        apply_wgpu_fused_core_override(&mut model_config, "wgpu", Some(false), None);
+
+        assert!(
+            model_config.fused_kernels.enabled,
+            "disabling recurrent override should preserve other fused kernel settings"
+        );
+        assert!(
+            !model_config.fused_kernels.wgpu_recurrent_kernel,
+            "wgpu recurrent kernel should be disabled by override"
+        );
+        assert!(!model_config.fused_kernels.wgpu_rollout_fused);
+    }
+
+    #[test]
+    fn non_wgpu_backends_ignore_override() {
+        let mut model_config = BDHConfig::default();
+        model_config.fused_kernels.enabled = false;
+        model_config.fused_kernels.set_wgpu_recurrent_kernel(false);
+        model_config.fused_kernels.set_wgpu_rollout_fused(false);
+
+        apply_wgpu_fused_core_override(&mut model_config, "cuda", Some(true), Some(true));
+
+        assert!(!model_config.fused_kernels.enabled);
+        assert!(!model_config.fused_kernels.wgpu_recurrent_kernel);
+        assert!(!model_config.fused_kernels.wgpu_rollout_fused);
     }
 }

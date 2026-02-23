@@ -35,6 +35,8 @@ pub struct ModelOverrides {
     pub dropout: Option<f64>,
     pub fused_kernels: Option<bool>,
     pub block_size: Option<usize>,
+    #[serde(alias = "rollout_fast_steps")]
+    pub rollout_fast_steps_per_slow_step: Option<usize>,
     pub rotary_embedding: Option<RotaryEmbedding>,
 }
 

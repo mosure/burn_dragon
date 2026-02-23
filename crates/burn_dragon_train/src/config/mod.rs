@@ -7,8 +7,8 @@ pub mod optimizer;
 #[cfg(feature = "train")]
 pub use artifacts::VisionArtifactOutputMode;
 pub use core::{
-    GdpoConfig, GdpoHardGate, VisionTeacherVariant, WgpuBackend, WgpuMemoryConfig,
-    WgpuRuntimeConfig,
+    GdpoConfig, GdpoHardGate, VisionTeacherVariant, WgpuBackend, WgpuInferenceConfig,
+    WgpuMemoryConfig, WgpuRuntimeConfig, WgpuTrainingConfig,
 };
 #[cfg(feature = "train")]
 pub use optimizer::{LearningRateScheduleConfig, OptimizerConfig};

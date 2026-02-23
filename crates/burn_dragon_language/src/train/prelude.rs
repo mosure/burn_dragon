@@ -51,7 +51,7 @@ pub(crate) use crate::config::{
 pub(crate) use crate::dataset::{
     Dataset, DatasetSplit, RandomDataLoader, SequenceBatch, build_dataset,
 };
-pub(crate) use crate::inference::build_model_config;
+pub(crate) use crate::inference::{apply_wgpu_fused_core_override, build_model_config};
 pub(crate) use crate::tokenizer::TokenizerConfig;
 pub(crate) use crate::{ContextStrategyConfig, GenerationConfig, ModelOverrides};
 

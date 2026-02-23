@@ -19,7 +19,6 @@ train = [
   "burn_dragon_language/train",
   "burn_dragon_train/train",
   "dep:anyhow",
-  "dep:burn",
   "dep:burn-autodiff",
   "dep:burn-ndarray",
   "dep:burn-train",
@@ -53,7 +52,7 @@ burn_dragon_core = { path = "../burn_dragon_core", version = "0.4.0", default-fe
 burn_dragon_language = { path = "../burn_dragon_language", version = "0.4.0", default-features = false, optional = true }
 burn_dragon_train = { path = "../burn_dragon_train", version = "0.4.0", default-features = false, optional = true }
 anyhow = { version = "1", optional = true }
-burn = { version = "0.19", default-features = false, optional = true, features = ["fusion", "ndarray", "std", "wgpu"] }
+burn = { version = "0.19", default-features = false, features = ["fusion", "ndarray", "std", "wgpu"] }
 burn-autodiff = { version = "0.19", optional = true }
 burn-ndarray = { version = "0.19", optional = true }
 burn-train = { version = "0.19", optional = true, default-features = false, features = ["tui"] }

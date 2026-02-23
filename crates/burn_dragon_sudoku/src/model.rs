@@ -94,6 +94,7 @@ impl SudokuModelConfig {
             mlp_internal_dim_multiplier: self.mlp_internal_dim_multiplier,
             n_expert: 1,
             vocab_size: VOCAB_SIZE,
+            rollout_fast_steps_per_slow_step: 1,
             fused_kernels: fused,
         }
     }

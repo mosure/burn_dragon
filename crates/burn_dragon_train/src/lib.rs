@@ -9,8 +9,8 @@ pub mod wgpu;
 pub mod train;
 
 pub use config::{
-    GdpoConfig, GdpoHardGate, VisionTeacherVariant, WgpuBackend, WgpuMemoryConfig,
-    WgpuRuntimeConfig,
+    GdpoConfig, GdpoHardGate, VisionTeacherVariant, WgpuBackend, WgpuInferenceConfig,
+    WgpuMemoryConfig, WgpuRuntimeConfig, WgpuTrainingConfig,
 };
 #[cfg(feature = "train")]
 pub use config::{LearningRateScheduleConfig, OptimizerConfig, VisionArtifactOutputMode};

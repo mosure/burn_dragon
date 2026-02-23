@@ -13,8 +13,6 @@ pub(crate) mod vision;
 
 #[cfg(feature = "benchmark")]
 pub mod bench;
-#[cfg(feature = "cli")]
-mod cli;
 #[cfg(test)]
 mod lejepa_tests;
 #[cfg(test)]
@@ -31,8 +29,6 @@ pub(crate) use test_utils::init_wgpu_test_runtime;
 pub use burn_dragon_train::train::gdpo::{gdpo_cpu_fallbacks, gdpo_reset_cpu_fallbacks};
 #[cfg(feature = "integration_test")]
 pub use burn_dragon_train::train::metrics::{loss_trace_len, loss_trace_reset, loss_trace_take};
-#[cfg(feature = "cli")]
-pub use cli::run_cli;
 pub use saccade::SaccadeFoveationSampler;
 pub use vision::train::train_vision_backend;
 #[cfg(feature = "integration_test")]

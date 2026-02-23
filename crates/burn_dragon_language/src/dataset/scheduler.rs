@@ -1,5 +1,7 @@
+use std::mem::size_of;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Instant;
 
 use burn::data::dataloader::{DataLoader, DataLoaderIterator, Progress};
 use burn::tensor::backend::Backend;
@@ -74,6 +76,8 @@ pub fn sample_batch<B: Backend, T: TokenSequenceDataset + ?Sized>(
     split: DatasetSplit,
     device: &B::Device,
 ) -> SequenceBatch<B> {
+    let prof_enabled = crate::train::profile::enabled();
+    let cpu_start = prof_enabled.then(Instant::now);
     let tokens = dataset.tokens();
     let (offset, span) = dataset.split_offset_and_span(split);
 
@@ -96,6 +100,11 @@ pub fn sample_batch<B: Backend, T: TokenSequenceDataset + ?Sized>(
         }
     }
 
+    let cpu_ns = cpu_start
+        .map(|start| start.elapsed().as_nanos())
+        .unwrap_or_default();
+
+    let tensor_copy_start = prof_enabled.then(Instant::now);
     let inputs_tensor = Tensor::<B, 2, Int>::from_data(
         TensorData::new(inputs, [dataset.batch_size(), dataset.block_size()]),
         device,
@@ -104,6 +113,15 @@ pub fn sample_batch<B: Backend, T: TokenSequenceDataset + ?Sized>(
         TensorData::new(targets, [dataset.batch_size(), dataset.block_size()]),
         device,
     );
+    let tensor_copy_ns = tensor_copy_start
+        .map(|start| start.elapsed().as_nanos())
+        .unwrap_or_default();
+
+    if prof_enabled {
+        let values = dataset.batch_size().saturating_mul(dataset.block_size());
+        let copy_bytes = (values.saturating_mul(2).saturating_mul(size_of::<i64>())) as u128;
+        crate::train::profile::record_dataloader(cpu_ns, tensor_copy_ns, copy_bytes, 0);
+    }
 
     SequenceBatch::new(inputs_tensor, targets_tensor)
 }

@@ -10,6 +10,8 @@ use crate::positional::RotaryEmbedding;
 #[derive(Clone, Debug)]
 pub struct FusedKernelConfig {
     pub enabled: bool,
+    pub wgpu_recurrent_kernel: bool,
+    pub wgpu_rollout_fused: bool,
     pub block_sparse: BlockSparseConfig,
     pub rope_theta: f32,
     pub relu_threshold: f32,
@@ -21,6 +23,8 @@ impl Default for FusedKernelConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            wgpu_recurrent_kernel: true,
+            wgpu_rollout_fused: false,
             block_sparse: BlockSparseConfig::dense(64, 64),
             rope_theta: 65_536.0,
             relu_threshold: 0.0,
@@ -49,6 +53,14 @@ impl FusedKernelConfig {
 
     pub fn set_rotary_embedding(&mut self, rotary_embedding: RotaryEmbedding) {
         self.rotary_embedding = rotary_embedding;
+    }
+
+    pub fn set_wgpu_recurrent_kernel(&mut self, enabled: bool) {
+        self.wgpu_recurrent_kernel = enabled;
+    }
+
+    pub fn set_wgpu_rollout_fused(&mut self, enabled: bool) {
+        self.wgpu_rollout_fused = enabled;
     }
 }
 
@@ -91,8 +103,10 @@ impl<B: AutodiffBackend> AutodiffModule<B> for FusedKernelConfig {
 impl ModuleDisplayDefault for FusedKernelConfig {
     fn content(&self, content: Content) -> Option<Content> {
         let summary = format!(
-            "enabled={}, rotary_embedding={}, relu_threshold={}, rope_theta={}, latent_block={}, time_block={}, custom_alibi={}",
+            "enabled={}, wgpu_recurrent_kernel={}, wgpu_rollout_fused={}, rotary_embedding={}, relu_threshold={}, rope_theta={}, latent_block={}, time_block={}, custom_alibi={}",
             self.enabled,
+            self.wgpu_recurrent_kernel,
+            self.wgpu_rollout_fused,
             self.rotary_embedding,
             self.relu_threshold,
             self.rope_theta,
@@ -119,6 +133,9 @@ pub struct BDHConfig {
     pub mlp_internal_dim_multiplier: usize,
     pub n_expert: usize,
     pub vocab_size: usize,
+    /// Number of fast internal recurrent updates to run before each slow token emission.
+    /// Valid values: 1, 2, 4, 8, 16.
+    pub rollout_fast_steps_per_slow_step: usize,
     pub fused_kernels: FusedKernelConfig,
 }
 
@@ -132,12 +149,28 @@ impl Default for BDHConfig {
             mlp_internal_dim_multiplier: 4,
             n_expert: 1,
             vocab_size: 256,
+            rollout_fast_steps_per_slow_step: 1,
             fused_kernels: FusedKernelConfig::default(),
         }
     }
 }
 
 impl BDHConfig {
+    pub const SUPPORTED_ROLLOUT_FAST_STEPS: [usize; 5] = [1, 2, 4, 8, 16];
+
+    pub fn is_valid_rollout_fast_steps(value: usize) -> bool {
+        Self::SUPPORTED_ROLLOUT_FAST_STEPS.contains(&value)
+    }
+
+    pub fn set_rollout_fast_steps_per_slow_step(&mut self, value: usize) {
+        assert!(
+            Self::is_valid_rollout_fast_steps(value),
+            "rollout_fast_steps_per_slow_step must be one of {:?} (got {value})",
+            Self::SUPPORTED_ROLLOUT_FAST_STEPS
+        );
+        self.rollout_fast_steps_per_slow_step = value;
+    }
+
     pub fn latent_per_head(&self) -> usize {
         let total = self.mlp_internal_dim_multiplier * self.n_embd;
         assert!(

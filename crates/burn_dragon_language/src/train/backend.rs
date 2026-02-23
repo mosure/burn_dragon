@@ -3,6 +3,7 @@ use crate::train::schedule::{
     TrainEnvironment, resolve_lr_scheduler, resolve_train_schedule, train_with_scheduler,
 };
 use crate::train::utils::write_run_config;
+use std::time::Instant;
 
 pub fn train_backend<B, Init>(
     config: &TrainingConfig,
@@ -15,6 +16,12 @@ where
     B::Device: Clone,
     Init: Fn(&B::Device),
 {
+    let stage_profile = crate::train::profile::enabled();
+    if stage_profile {
+        crate::train::profile::reset();
+    }
+    let train_wall_start = stage_profile.then(Instant::now);
+
     let device = B::Device::default();
     B::seed(&device, 1337);
     init_backend(&device);
@@ -23,6 +30,12 @@ where
     let optimizer_cfg = &config.optimizer;
 
     let mut model_config = build_model_config(&config.model, training.block_size);
+    apply_wgpu_fused_core_override(
+        &mut model_config,
+        backend_name,
+        config.wgpu.training.fused_core_recurrent,
+        config.wgpu.training.fused_core_rollout,
+    );
     let tokenizer = dataset.tokenizer();
     model_config.vocab_size = tokenizer.len();
 
@@ -124,6 +137,21 @@ where
     };
 
     info!("Training complete on {backend_name}");
+
+    if let Some(start) = train_wall_start {
+        let elapsed_ns = start.elapsed().as_nanos();
+        let snapshot = crate::train::profile::snapshot();
+        info!(
+            "[stage-profile][training] total_ns={elapsed_ns} dataloader_cpu_ns={} dataloader_tensor_copy_ns={} dataloader_host_to_device_copy_bytes={} host_sync_points={} forward_ns={} loss_backward_ns={} train_steps={}",
+            snapshot.dataloader_cpu_ns,
+            snapshot.dataloader_tensor_copy_ns,
+            snapshot.dataloader_host_to_device_copy_bytes,
+            snapshot.host_sync_points,
+            snapshot.forward_ns,
+            snapshot.loss_backward_ns,
+            snapshot.train_steps,
+        );
+    }
 
     Ok(())
 }

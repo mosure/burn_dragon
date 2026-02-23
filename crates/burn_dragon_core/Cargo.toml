@@ -42,6 +42,7 @@ web = []
 rand = "0.8"
 serde = { version = "1.0", features = ["derive"] }
 anyhow = "1"
+burn_dragon_wgpu = { path = "../burn_dragon_wgpu", version = "0.4.0" }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"], optional = true }
 
 
@@ -68,7 +69,9 @@ features = [
 
 
 [dev-dependencies]
+burn-autodiff = "0.19"
 burn-ndarray = "0.19"
+burn-wgpu = { version = "0.19", default-features = false, features = ["fusion", "std"] }
 tempfile = "3"
 
 [lib]

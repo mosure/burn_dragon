@@ -2463,10 +2463,13 @@ dependencies = [
  "anyhow",
  "bevy_burn",
  "burn",
+ "burn-autodiff",
  "burn-cuda",
  "burn-ndarray",
  "burn-wgpu",
  "burn_dragon",
+ "burn_dragon_sudoku",
+ "burn_dragon_wgpu",
  "clap 4.5.54",
  "ctrlc",
  "serde",
@@ -2479,8 +2482,11 @@ version = "0.4.0"
 dependencies = [
  "anyhow",
  "burn",
+ "burn-autodiff",
  "burn-cuda",
  "burn-ndarray",
+ "burn-wgpu",
+ "burn_dragon_wgpu",
  "image",
  "rand 0.8.5",
  "serde",
@@ -2642,6 +2648,24 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+]
+
+[[package]]
+name = "burn_dragon_wgpu"
+version = "0.4.0"
+dependencies = [
+ "burn",
+ "burn-autodiff",
+ "burn-cubecl",
+ "burn-fusion",
+ "burn-ndarray",
+ "burn-wgpu",
+ "cubecl",
+ "cubecl-runtime",
+ "pollster",
+ "serde",
+ "serde_json",
+ "wgpu",
 ]
 
 [[package]]

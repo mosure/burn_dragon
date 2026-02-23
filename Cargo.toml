@@ -38,6 +38,7 @@ members = [
   "crates/burn_dragon_language",
   "crates/burn_dragon_sudoku",
   "crates/burn_dragon_train",
+  "crates/burn_dragon_wgpu",
   "crates/burn_dragon_vision",
   "crates/burn_dragon_web",
   "crates/burn_dragon_fovea_viewer",

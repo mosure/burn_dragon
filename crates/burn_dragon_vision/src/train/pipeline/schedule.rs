@@ -3,7 +3,7 @@ use burn_train::metric::IterationSpeedMetric;
 
 pub use burn_dragon_train::train::pipeline::{ResolvedLrScheduler, ScheduleSource, TrainSchedule};
 
-pub struct VisionTrainEnvironment<'a, B>
+pub struct VisionTrainEnvironment<'a, B, TrainBatch, ValidBatch = TrainBatch>
 where
     B: AutodiffBackend + Clone + 'static,
     B::Device: Clone,
@@ -13,8 +13,8 @@ where
     pub backend_name: &'a str,
     pub training: &'a VisionTrainingHyperparameters,
     pub device: &'a B::Device,
-    pub train_loader: Arc<dyn DataLoader<B, ImageNetBatch<B>>>,
-    pub valid_loader: Arc<dyn DataLoader<ValidBackend<B>, ImageNetBatch<ValidBackend<B>>>>,
+    pub train_loader: Arc<dyn DataLoader<B, TrainBatch>>,
+    pub valid_loader: Arc<dyn DataLoader<ValidBackend<B>, ValidBatch>>,
     pub epochs: usize,
 }
 
@@ -46,7 +46,12 @@ impl VisionRollout {
 #[derive(Clone)]
 pub struct VisionDiagnostics {
     pub metric_prefix: String,
+    pub distill: bool,
+    pub distill_rollout: bool,
     pub inv: bool,
+    pub observe: bool,
+    pub mode_separation: bool,
+    pub rollout_horizon_metrics: bool,
     pub sigreg: bool,
     pub recon: bool,
     pub policy: bool,
@@ -61,8 +66,8 @@ pub struct VisionDiagnostics {
     pub ffmpeg_path: Option<PathBuf>,
 }
 
-pub fn train_vision_with_scheduler<B, S, M>(
-    env: &VisionTrainEnvironment<'_, B>,
+pub fn train_vision_with_scheduler<B, S, M, TrainBatch, ValidBatch>(
+    env: &VisionTrainEnvironment<'_, B, TrainBatch, ValidBatch>,
     model: M,
     optimizer: OptimizerAdaptor<AdamW, M, B>,
     scheduler: S,
@@ -71,12 +76,14 @@ pub fn train_vision_with_scheduler<B, S, M>(
 where
     B: AutodiffBackend + Clone + 'static,
     B::Device: Clone,
+    TrainBatch: Send + 'static,
+    ValidBatch: Send + 'static,
     M: AutodiffModule<B>
-        + TrainStep<ImageNetBatch<B>, VisionTrainItem<B>>
+        + TrainStep<Input = TrainBatch, Output = VisionTrainItem<B>>
         + core::fmt::Display
         + Clone
         + 'static,
-    M::InnerModule: ValidStep<ImageNetBatch<ValidBackend<B>>, VisionOutput<ValidBackend<B>>>,
+    M::InnerModule: ValidStep<Input = ValidBatch, Output = VisionOutput<ValidBackend<B>>>,
     S: LrScheduler + 'static,
 {
     fs::create_dir_all(env.run_dir)?;
@@ -90,20 +97,24 @@ where
             env.backend_name
         );
     }
-    let mut builder = LearnerBuilder::new(env.run_dir)
-        .num_epochs(env.epochs)
-        .learning_strategy(LearningStrategy::SingleDevice(env.device.clone()));
+    let mut builder = SupervisedTraining::new(
+        env.run_dir,
+        Arc::clone(&env.train_loader),
+        Arc::clone(&env.valid_loader),
+    )
+    .num_epochs(env.epochs)
+    .with_training_strategy(LearningStrategy::SingleDevice(env.device.clone()));
     if enable_checkpoints {
         builder = builder.with_file_checkpointer(BinFileRecorder::<FullPrecisionSettings>::new());
     }
     builder = builder
         .metric_train_numeric(IterationSpeedMetric::new())
         .metric_train_numeric(
-            ScalarMetric::<ValidBackend<B>, LossValue<ValidBackend<B>>>::new_every(
+            ScalarMetric::<MetricsBackend, LossValue<MetricsBackend>>::new_every(
                 "Loss", loss_every,
             ),
         )
-        .metric_valid_numeric(LossMetric::<ValidBackend<B>>::new())
+        .metric_valid_numeric(LossMetric::<MetricsBackend>::new())
         .metric_train_numeric(LearningRateMetric::new())
         .metric_train(DeviceMetric::new("device", env.backend_name))
         .metric_valid(DeviceMetric::new("device", env.backend_name))
@@ -114,28 +125,38 @@ where
     #[cfg(feature = "integration_test")]
     if env.training.trace_train_loss {
         builder = builder.metric_train(burn_dragon_train::train::metrics::LossTraceMetric::<
-            ValidBackend<B>,
+            MetricsBackend,
         >::new(
             "loss_trace", env.training.trace_train_loss_every
         ));
     }
 
-    let cleanup_iters = env.training.memory_cleanup_iters;
-    if env.training.memory_cleanup_every > 0 || cleanup_iters > 0 {
+    let train_cleanup_every = env.training.memory_cleanup_every;
+    let train_cleanup_iters = env.training.memory_cleanup_iters;
+    let valid_cleanup_every = train_cleanup_every;
+    let valid_cleanup_iters = env.training.memory_cleanup_iters;
+    if train_cleanup_every > 0
+        || train_cleanup_iters > 0
+        || valid_cleanup_every > 0
+        || valid_cleanup_iters > 0
+    {
         let allow_cuda_cleanup = !env.training.disable_cuda_memory_cleanup;
-        builder = builder
-            .metric_train(MemoryCleanupMetric::<B>::new(
+        if train_cleanup_every > 0 || train_cleanup_iters > 0 {
+            builder = builder.metric_train(MemoryCleanupMetric::<B>::new(
                 env.device,
-                env.training.memory_cleanup_every,
-                cleanup_iters,
-                allow_cuda_cleanup,
-            ))
-            .metric_valid(MemoryCleanupMetric::<ValidBackend<B>>::new(
-                env.device,
-                env.training.memory_cleanup_every,
-                cleanup_iters,
+                train_cleanup_every,
+                train_cleanup_iters,
                 allow_cuda_cleanup,
             ));
+        }
+        if valid_cleanup_every > 0 || valid_cleanup_iters > 0 {
+            builder = builder.metric_valid(MemoryCleanupMetric::<ValidBackend<B>>::new(
+                env.device,
+                valid_cleanup_every,
+                valid_cleanup_iters,
+                allow_cuda_cleanup,
+            ));
+        }
     }
 
     let memory_check_every = env.training.device_memory_check_every;
@@ -164,32 +185,696 @@ where
 
     if let Some(diagnostics) = &vision_diagnostics {
         let prefix = diagnostics.metric_prefix.as_str();
+        if diagnostics.distill {
+            let patch_name = format!("{prefix}_patch_loss");
+            let cls_name = format!("{prefix}_cls_loss");
+            builder = builder
+                .metric_train_numeric(
+                    ScalarMetric::<MetricsBackend, InvLossInput<MetricsBackend>>::new_every(
+                        patch_name.as_str(),
+                        metric_every,
+                    ),
+                )
+                .metric_valid_numeric(
+                    ScalarMetric::<MetricsBackend, InvLossInput<MetricsBackend>>::new_every(
+                        patch_name.as_str(),
+                        metric_every,
+                    ),
+                )
+                .metric_train_numeric(ScalarMetric::<
+                    MetricsBackend,
+                    ObserveLossInput<MetricsBackend>,
+                >::new_every(cls_name.as_str(), metric_every))
+                .metric_valid_numeric(ScalarMetric::<
+                    MetricsBackend,
+                    ObserveLossInput<MetricsBackend>,
+                >::new_every(cls_name.as_str(), metric_every));
+        }
+        if diagnostics.distill_rollout {
+            for (index, step) in VISION_ROLLOUT_HORIZON_CAPS.into_iter().enumerate() {
+                let total_name = format!("{prefix}_total_to_s{step}");
+                let patch_name = format!("{prefix}_patch_to_s{step}");
+                let cls_name = format!("{prefix}_cls_to_s{step}");
+                builder = match index {
+                    0 => builder
+                        .metric_train_numeric(ScalarMetric::<
+                            MetricsBackend,
+                            RolloutInvToHorizonInput<MetricsBackend, 0>,
+                        >::new_every(
+                            total_name.as_str(), metric_every
+                        ))
+                        .metric_valid_numeric(ScalarMetric::<
+                            MetricsBackend,
+                            RolloutInvToHorizonInput<MetricsBackend, 0>,
+                        >::new_every(
+                            total_name.as_str(), metric_every
+                        ))
+                        .metric_train_numeric(ScalarMetric::<
+                            MetricsBackend,
+                            RolloutStateNormRatioToHorizonInput<MetricsBackend, 0>,
+                        >::new_every(
+                            patch_name.as_str(), metric_every
+                        ))
+                        .metric_valid_numeric(ScalarMetric::<
+                            MetricsBackend,
+                            RolloutStateNormRatioToHorizonInput<MetricsBackend, 0>,
+                        >::new_every(
+                            patch_name.as_str(), metric_every
+                        ))
+                        .metric_train_numeric(ScalarMetric::<
+                            MetricsBackend,
+                            RolloutStateMotionToHorizonInput<MetricsBackend, 0>,
+                        >::new_every(
+                            cls_name.as_str(), metric_every
+                        ))
+                        .metric_valid_numeric(ScalarMetric::<
+                            MetricsBackend,
+                            RolloutStateMotionToHorizonInput<MetricsBackend, 0>,
+                        >::new_every(
+                            cls_name.as_str(), metric_every
+                        )),
+                    1 => builder
+                        .metric_train_numeric(ScalarMetric::<
+                            MetricsBackend,
+                            RolloutInvToHorizonInput<MetricsBackend, 1>,
+                        >::new_every(
+                            total_name.as_str(), metric_every
+                        ))
+                        .metric_valid_numeric(ScalarMetric::<
+                            MetricsBackend,
+                            RolloutInvToHorizonInput<MetricsBackend, 1>,
+                        >::new_every(
+                            total_name.as_str(), metric_every
+                        ))
+                        .metric_train_numeric(ScalarMetric::<
+                            MetricsBackend,
+                            RolloutStateNormRatioToHorizonInput<MetricsBackend, 1>,
+                        >::new_every(
+                            patch_name.as_str(), metric_every
+                        ))
+                        .metric_valid_numeric(ScalarMetric::<
+                            MetricsBackend,
+                            RolloutStateNormRatioToHorizonInput<MetricsBackend, 1>,
+                        >::new_every(
+                            patch_name.as_str(), metric_every
+                        ))
+                        .metric_train_numeric(ScalarMetric::<
+                            MetricsBackend,
+                            RolloutStateMotionToHorizonInput<MetricsBackend, 1>,
+                        >::new_every(
+                            cls_name.as_str(), metric_every
+                        ))
+                        .metric_valid_numeric(ScalarMetric::<
+                            MetricsBackend,
+                            RolloutStateMotionToHorizonInput<MetricsBackend, 1>,
+                        >::new_every(
+                            cls_name.as_str(), metric_every
+                        )),
+                    2 => builder
+                        .metric_train_numeric(ScalarMetric::<
+                            MetricsBackend,
+                            RolloutInvToHorizonInput<MetricsBackend, 2>,
+                        >::new_every(
+                            total_name.as_str(), metric_every
+                        ))
+                        .metric_valid_numeric(ScalarMetric::<
+                            MetricsBackend,
+                            RolloutInvToHorizonInput<MetricsBackend, 2>,
+                        >::new_every(
+                            total_name.as_str(), metric_every
+                        ))
+                        .metric_train_numeric(ScalarMetric::<
+                            MetricsBackend,
+                            RolloutStateNormRatioToHorizonInput<MetricsBackend, 2>,
+                        >::new_every(
+                            patch_name.as_str(), metric_every
+                        ))
+                        .metric_valid_numeric(ScalarMetric::<
+                            MetricsBackend,
+                            RolloutStateNormRatioToHorizonInput<MetricsBackend, 2>,
+                        >::new_every(
+                            patch_name.as_str(), metric_every
+                        ))
+                        .metric_train_numeric(ScalarMetric::<
+                            MetricsBackend,
+                            RolloutStateMotionToHorizonInput<MetricsBackend, 2>,
+                        >::new_every(
+                            cls_name.as_str(), metric_every
+                        ))
+                        .metric_valid_numeric(ScalarMetric::<
+                            MetricsBackend,
+                            RolloutStateMotionToHorizonInput<MetricsBackend, 2>,
+                        >::new_every(
+                            cls_name.as_str(), metric_every
+                        )),
+                    3 => builder
+                        .metric_train_numeric(ScalarMetric::<
+                            MetricsBackend,
+                            RolloutInvToHorizonInput<MetricsBackend, 3>,
+                        >::new_every(
+                            total_name.as_str(), metric_every
+                        ))
+                        .metric_valid_numeric(ScalarMetric::<
+                            MetricsBackend,
+                            RolloutInvToHorizonInput<MetricsBackend, 3>,
+                        >::new_every(
+                            total_name.as_str(), metric_every
+                        ))
+                        .metric_train_numeric(ScalarMetric::<
+                            MetricsBackend,
+                            RolloutStateNormRatioToHorizonInput<MetricsBackend, 3>,
+                        >::new_every(
+                            patch_name.as_str(), metric_every
+                        ))
+                        .metric_valid_numeric(ScalarMetric::<
+                            MetricsBackend,
+                            RolloutStateNormRatioToHorizonInput<MetricsBackend, 3>,
+                        >::new_every(
+                            patch_name.as_str(), metric_every
+                        ))
+                        .metric_train_numeric(ScalarMetric::<
+                            MetricsBackend,
+                            RolloutStateMotionToHorizonInput<MetricsBackend, 3>,
+                        >::new_every(
+                            cls_name.as_str(), metric_every
+                        ))
+                        .metric_valid_numeric(ScalarMetric::<
+                            MetricsBackend,
+                            RolloutStateMotionToHorizonInput<MetricsBackend, 3>,
+                        >::new_every(
+                            cls_name.as_str(), metric_every
+                        )),
+                    4 => builder
+                        .metric_train_numeric(ScalarMetric::<
+                            MetricsBackend,
+                            RolloutInvToHorizonInput<MetricsBackend, 4>,
+                        >::new_every(
+                            total_name.as_str(), metric_every
+                        ))
+                        .metric_valid_numeric(ScalarMetric::<
+                            MetricsBackend,
+                            RolloutInvToHorizonInput<MetricsBackend, 4>,
+                        >::new_every(
+                            total_name.as_str(), metric_every
+                        ))
+                        .metric_train_numeric(ScalarMetric::<
+                            MetricsBackend,
+                            RolloutStateNormRatioToHorizonInput<MetricsBackend, 4>,
+                        >::new_every(
+                            patch_name.as_str(), metric_every
+                        ))
+                        .metric_valid_numeric(ScalarMetric::<
+                            MetricsBackend,
+                            RolloutStateNormRatioToHorizonInput<MetricsBackend, 4>,
+                        >::new_every(
+                            patch_name.as_str(), metric_every
+                        ))
+                        .metric_train_numeric(ScalarMetric::<
+                            MetricsBackend,
+                            RolloutStateMotionToHorizonInput<MetricsBackend, 4>,
+                        >::new_every(
+                            cls_name.as_str(), metric_every
+                        ))
+                        .metric_valid_numeric(ScalarMetric::<
+                            MetricsBackend,
+                            RolloutStateMotionToHorizonInput<MetricsBackend, 4>,
+                        >::new_every(
+                            cls_name.as_str(), metric_every
+                        )),
+                    5 => builder
+                        .metric_train_numeric(ScalarMetric::<
+                            MetricsBackend,
+                            RolloutInvToHorizonInput<MetricsBackend, 5>,
+                        >::new_every(
+                            total_name.as_str(), metric_every
+                        ))
+                        .metric_valid_numeric(ScalarMetric::<
+                            MetricsBackend,
+                            RolloutInvToHorizonInput<MetricsBackend, 5>,
+                        >::new_every(
+                            total_name.as_str(), metric_every
+                        ))
+                        .metric_train_numeric(ScalarMetric::<
+                            MetricsBackend,
+                            RolloutStateNormRatioToHorizonInput<MetricsBackend, 5>,
+                        >::new_every(
+                            patch_name.as_str(), metric_every
+                        ))
+                        .metric_valid_numeric(ScalarMetric::<
+                            MetricsBackend,
+                            RolloutStateNormRatioToHorizonInput<MetricsBackend, 5>,
+                        >::new_every(
+                            patch_name.as_str(), metric_every
+                        ))
+                        .metric_train_numeric(ScalarMetric::<
+                            MetricsBackend,
+                            RolloutStateMotionToHorizonInput<MetricsBackend, 5>,
+                        >::new_every(
+                            cls_name.as_str(), metric_every
+                        ))
+                        .metric_valid_numeric(ScalarMetric::<
+                            MetricsBackend,
+                            RolloutStateMotionToHorizonInput<MetricsBackend, 5>,
+                        >::new_every(
+                            cls_name.as_str(), metric_every
+                        )),
+                    _ => unreachable!("unexpected distill rollout horizon index"),
+                };
+            }
+        }
         if diagnostics.inv {
             let name = format!("{prefix}_inv_loss");
             builder = builder
                 .metric_train_numeric(
-                    ScalarMetric::<ValidBackend<B>, InvLossInput<ValidBackend<B>>>::new_every(
+                    ScalarMetric::<MetricsBackend, InvLossInput<MetricsBackend>>::new_every(
                         name.as_str(),
                         metric_every,
                     ),
                 )
                 .metric_valid_numeric(
-                    ScalarMetric::<ValidBackend<B>, InvLossInput<ValidBackend<B>>>::new_every(
+                    ScalarMetric::<MetricsBackend, InvLossInput<MetricsBackend>>::new_every(
                         name.as_str(),
                         metric_every,
                     ),
                 );
         }
+        if diagnostics.observe {
+            let name = format!("{prefix}_observe_loss");
+            builder = builder
+                .metric_train_numeric(ScalarMetric::<
+                    MetricsBackend,
+                    ObserveLossInput<MetricsBackend>,
+                >::new_every(name.as_str(), metric_every))
+                .metric_valid_numeric(ScalarMetric::<
+                    MetricsBackend,
+                    ObserveLossInput<MetricsBackend>,
+                >::new_every(name.as_str(), metric_every));
+        }
+        if diagnostics.mode_separation {
+            let name = format!("{prefix}_mode_separation_ratio");
+            builder = builder
+                .metric_train_numeric(ScalarMetric::<
+                    MetricsBackend,
+                    ModeSeparationRatioInput<MetricsBackend>,
+                >::new_every(name.as_str(), metric_every))
+                .metric_valid_numeric(ScalarMetric::<
+                    MetricsBackend,
+                    ModeSeparationRatioInput<MetricsBackend>,
+                >::new_every(name.as_str(), metric_every));
+        }
+        if diagnostics.rollout_horizon_metrics {
+            for (index, horizon) in VISION_ROLLOUT_HORIZON_CAPS.into_iter().enumerate() {
+                let inv_name = format!("{prefix}_rollout_inv_to_h{horizon}");
+                let norm_name = format!("{prefix}_rollout_state_norm_ratio_to_h{horizon}");
+                let motion_name = format!("{prefix}_rollout_state_motion_to_h{horizon}");
+                let long_inv_name = format!("{prefix}_long_rollout_inv_to_h{horizon}");
+                let long_norm_name =
+                    format!("{prefix}_long_rollout_state_norm_ratio_to_h{horizon}");
+                let long_motion_name = format!("{prefix}_long_rollout_state_motion_to_h{horizon}");
+                match index {
+                    0 => {
+                        builder = builder
+                            .metric_train_numeric(ScalarMetric::<
+                                MetricsBackend,
+                                RolloutInvToHorizonInput<MetricsBackend, 0>,
+                            >::new_every(
+                                inv_name.as_str(), metric_every
+                            ))
+                            .metric_valid_numeric(ScalarMetric::<
+                                MetricsBackend,
+                                RolloutInvToHorizonInput<MetricsBackend, 0>,
+                            >::new_every(
+                                inv_name.as_str(), metric_every
+                            ))
+                            .metric_train_numeric(ScalarMetric::<
+                                MetricsBackend,
+                                RolloutStateNormRatioToHorizonInput<MetricsBackend, 0>,
+                            >::new_every(
+                                norm_name.as_str(), metric_every
+                            ))
+                            .metric_valid_numeric(ScalarMetric::<
+                                MetricsBackend,
+                                RolloutStateNormRatioToHorizonInput<MetricsBackend, 0>,
+                            >::new_every(
+                                norm_name.as_str(), metric_every
+                            ))
+                            .metric_train_numeric(ScalarMetric::<
+                                MetricsBackend,
+                                RolloutStateMotionToHorizonInput<MetricsBackend, 0>,
+                            >::new_every(
+                                motion_name.as_str(), metric_every
+                            ))
+                            .metric_valid_numeric(ScalarMetric::<
+                                MetricsBackend,
+                                RolloutStateMotionToHorizonInput<MetricsBackend, 0>,
+                            >::new_every(
+                                motion_name.as_str(), metric_every
+                            ))
+                            .metric_valid_numeric(OptionalScalarMetric::<
+                                MetricsBackend,
+                                LongRolloutInvToHorizonInput<MetricsBackend, 0>,
+                            >::new_every(
+                                long_inv_name.as_str(), metric_every
+                            ))
+                            .metric_valid_numeric(OptionalScalarMetric::<
+                                MetricsBackend,
+                                LongRolloutStateNormRatioToHorizonInput<MetricsBackend, 0>,
+                            >::new_every(
+                                long_norm_name.as_str(), metric_every
+                            ))
+                            .metric_valid_numeric(OptionalScalarMetric::<
+                                MetricsBackend,
+                                LongRolloutStateMotionToHorizonInput<MetricsBackend, 0>,
+                            >::new_every(
+                                long_motion_name.as_str(), metric_every
+                            ));
+                    }
+                    1 => {
+                        builder = builder
+                            .metric_train_numeric(ScalarMetric::<
+                                MetricsBackend,
+                                RolloutInvToHorizonInput<MetricsBackend, 1>,
+                            >::new_every(
+                                inv_name.as_str(), metric_every
+                            ))
+                            .metric_valid_numeric(ScalarMetric::<
+                                MetricsBackend,
+                                RolloutInvToHorizonInput<MetricsBackend, 1>,
+                            >::new_every(
+                                inv_name.as_str(), metric_every
+                            ))
+                            .metric_train_numeric(ScalarMetric::<
+                                MetricsBackend,
+                                RolloutStateNormRatioToHorizonInput<MetricsBackend, 1>,
+                            >::new_every(
+                                norm_name.as_str(), metric_every
+                            ))
+                            .metric_valid_numeric(ScalarMetric::<
+                                MetricsBackend,
+                                RolloutStateNormRatioToHorizonInput<MetricsBackend, 1>,
+                            >::new_every(
+                                norm_name.as_str(), metric_every
+                            ))
+                            .metric_train_numeric(ScalarMetric::<
+                                MetricsBackend,
+                                RolloutStateMotionToHorizonInput<MetricsBackend, 1>,
+                            >::new_every(
+                                motion_name.as_str(), metric_every
+                            ))
+                            .metric_valid_numeric(ScalarMetric::<
+                                MetricsBackend,
+                                RolloutStateMotionToHorizonInput<MetricsBackend, 1>,
+                            >::new_every(
+                                motion_name.as_str(), metric_every
+                            ))
+                            .metric_valid_numeric(OptionalScalarMetric::<
+                                MetricsBackend,
+                                LongRolloutInvToHorizonInput<MetricsBackend, 1>,
+                            >::new_every(
+                                long_inv_name.as_str(), metric_every
+                            ))
+                            .metric_valid_numeric(OptionalScalarMetric::<
+                                MetricsBackend,
+                                LongRolloutStateNormRatioToHorizonInput<MetricsBackend, 1>,
+                            >::new_every(
+                                long_norm_name.as_str(), metric_every
+                            ))
+                            .metric_valid_numeric(OptionalScalarMetric::<
+                                MetricsBackend,
+                                LongRolloutStateMotionToHorizonInput<MetricsBackend, 1>,
+                            >::new_every(
+                                long_motion_name.as_str(), metric_every
+                            ));
+                    }
+                    2 => {
+                        builder = builder
+                            .metric_train_numeric(ScalarMetric::<
+                                MetricsBackend,
+                                RolloutInvToHorizonInput<MetricsBackend, 2>,
+                            >::new_every(
+                                inv_name.as_str(), metric_every
+                            ))
+                            .metric_valid_numeric(ScalarMetric::<
+                                MetricsBackend,
+                                RolloutInvToHorizonInput<MetricsBackend, 2>,
+                            >::new_every(
+                                inv_name.as_str(), metric_every
+                            ))
+                            .metric_train_numeric(ScalarMetric::<
+                                MetricsBackend,
+                                RolloutStateNormRatioToHorizonInput<MetricsBackend, 2>,
+                            >::new_every(
+                                norm_name.as_str(), metric_every
+                            ))
+                            .metric_valid_numeric(ScalarMetric::<
+                                MetricsBackend,
+                                RolloutStateNormRatioToHorizonInput<MetricsBackend, 2>,
+                            >::new_every(
+                                norm_name.as_str(), metric_every
+                            ))
+                            .metric_train_numeric(ScalarMetric::<
+                                MetricsBackend,
+                                RolloutStateMotionToHorizonInput<MetricsBackend, 2>,
+                            >::new_every(
+                                motion_name.as_str(), metric_every
+                            ))
+                            .metric_valid_numeric(ScalarMetric::<
+                                MetricsBackend,
+                                RolloutStateMotionToHorizonInput<MetricsBackend, 2>,
+                            >::new_every(
+                                motion_name.as_str(), metric_every
+                            ))
+                            .metric_valid_numeric(OptionalScalarMetric::<
+                                MetricsBackend,
+                                LongRolloutInvToHorizonInput<MetricsBackend, 2>,
+                            >::new_every(
+                                long_inv_name.as_str(), metric_every
+                            ))
+                            .metric_valid_numeric(OptionalScalarMetric::<
+                                MetricsBackend,
+                                LongRolloutStateNormRatioToHorizonInput<MetricsBackend, 2>,
+                            >::new_every(
+                                long_norm_name.as_str(), metric_every
+                            ))
+                            .metric_valid_numeric(OptionalScalarMetric::<
+                                MetricsBackend,
+                                LongRolloutStateMotionToHorizonInput<MetricsBackend, 2>,
+                            >::new_every(
+                                long_motion_name.as_str(), metric_every
+                            ));
+                    }
+                    3 => {
+                        builder = builder
+                            .metric_train_numeric(ScalarMetric::<
+                                MetricsBackend,
+                                RolloutInvToHorizonInput<MetricsBackend, 3>,
+                            >::new_every(
+                                inv_name.as_str(), metric_every
+                            ))
+                            .metric_valid_numeric(ScalarMetric::<
+                                MetricsBackend,
+                                RolloutInvToHorizonInput<MetricsBackend, 3>,
+                            >::new_every(
+                                inv_name.as_str(), metric_every
+                            ))
+                            .metric_train_numeric(ScalarMetric::<
+                                MetricsBackend,
+                                RolloutStateNormRatioToHorizonInput<MetricsBackend, 3>,
+                            >::new_every(
+                                norm_name.as_str(), metric_every
+                            ))
+                            .metric_valid_numeric(ScalarMetric::<
+                                MetricsBackend,
+                                RolloutStateNormRatioToHorizonInput<MetricsBackend, 3>,
+                            >::new_every(
+                                norm_name.as_str(), metric_every
+                            ))
+                            .metric_train_numeric(ScalarMetric::<
+                                MetricsBackend,
+                                RolloutStateMotionToHorizonInput<MetricsBackend, 3>,
+                            >::new_every(
+                                motion_name.as_str(), metric_every
+                            ))
+                            .metric_valid_numeric(ScalarMetric::<
+                                MetricsBackend,
+                                RolloutStateMotionToHorizonInput<MetricsBackend, 3>,
+                            >::new_every(
+                                motion_name.as_str(), metric_every
+                            ))
+                            .metric_valid_numeric(OptionalScalarMetric::<
+                                MetricsBackend,
+                                LongRolloutInvToHorizonInput<MetricsBackend, 3>,
+                            >::new_every(
+                                long_inv_name.as_str(), metric_every
+                            ))
+                            .metric_valid_numeric(OptionalScalarMetric::<
+                                MetricsBackend,
+                                LongRolloutStateNormRatioToHorizonInput<MetricsBackend, 3>,
+                            >::new_every(
+                                long_norm_name.as_str(), metric_every
+                            ))
+                            .metric_valid_numeric(OptionalScalarMetric::<
+                                MetricsBackend,
+                                LongRolloutStateMotionToHorizonInput<MetricsBackend, 3>,
+                            >::new_every(
+                                long_motion_name.as_str(), metric_every
+                            ));
+                    }
+                    4 => {
+                        builder = builder
+                            .metric_train_numeric(ScalarMetric::<
+                                MetricsBackend,
+                                RolloutInvToHorizonInput<MetricsBackend, 4>,
+                            >::new_every(
+                                inv_name.as_str(), metric_every
+                            ))
+                            .metric_valid_numeric(ScalarMetric::<
+                                MetricsBackend,
+                                RolloutInvToHorizonInput<MetricsBackend, 4>,
+                            >::new_every(
+                                inv_name.as_str(), metric_every
+                            ))
+                            .metric_train_numeric(ScalarMetric::<
+                                MetricsBackend,
+                                RolloutStateNormRatioToHorizonInput<MetricsBackend, 4>,
+                            >::new_every(
+                                norm_name.as_str(), metric_every
+                            ))
+                            .metric_valid_numeric(ScalarMetric::<
+                                MetricsBackend,
+                                RolloutStateNormRatioToHorizonInput<MetricsBackend, 4>,
+                            >::new_every(
+                                norm_name.as_str(), metric_every
+                            ))
+                            .metric_train_numeric(ScalarMetric::<
+                                MetricsBackend,
+                                RolloutStateMotionToHorizonInput<MetricsBackend, 4>,
+                            >::new_every(
+                                motion_name.as_str(), metric_every
+                            ))
+                            .metric_valid_numeric(ScalarMetric::<
+                                MetricsBackend,
+                                RolloutStateMotionToHorizonInput<MetricsBackend, 4>,
+                            >::new_every(
+                                motion_name.as_str(), metric_every
+                            ))
+                            .metric_valid_numeric(OptionalScalarMetric::<
+                                MetricsBackend,
+                                LongRolloutInvToHorizonInput<MetricsBackend, 4>,
+                            >::new_every(
+                                long_inv_name.as_str(), metric_every
+                            ))
+                            .metric_valid_numeric(OptionalScalarMetric::<
+                                MetricsBackend,
+                                LongRolloutStateNormRatioToHorizonInput<MetricsBackend, 4>,
+                            >::new_every(
+                                long_norm_name.as_str(), metric_every
+                            ))
+                            .metric_valid_numeric(OptionalScalarMetric::<
+                                MetricsBackend,
+                                LongRolloutStateMotionToHorizonInput<MetricsBackend, 4>,
+                            >::new_every(
+                                long_motion_name.as_str(), metric_every
+                            ));
+                    }
+                    5 => {
+                        builder = builder
+                            .metric_train_numeric(ScalarMetric::<
+                                MetricsBackend,
+                                RolloutInvToHorizonInput<MetricsBackend, 5>,
+                            >::new_every(
+                                inv_name.as_str(), metric_every
+                            ))
+                            .metric_valid_numeric(ScalarMetric::<
+                                MetricsBackend,
+                                RolloutInvToHorizonInput<MetricsBackend, 5>,
+                            >::new_every(
+                                inv_name.as_str(), metric_every
+                            ))
+                            .metric_train_numeric(ScalarMetric::<
+                                MetricsBackend,
+                                RolloutStateNormRatioToHorizonInput<MetricsBackend, 5>,
+                            >::new_every(
+                                norm_name.as_str(), metric_every
+                            ))
+                            .metric_valid_numeric(ScalarMetric::<
+                                MetricsBackend,
+                                RolloutStateNormRatioToHorizonInput<MetricsBackend, 5>,
+                            >::new_every(
+                                norm_name.as_str(), metric_every
+                            ))
+                            .metric_train_numeric(ScalarMetric::<
+                                MetricsBackend,
+                                RolloutStateMotionToHorizonInput<MetricsBackend, 5>,
+                            >::new_every(
+                                motion_name.as_str(), metric_every
+                            ))
+                            .metric_valid_numeric(ScalarMetric::<
+                                MetricsBackend,
+                                RolloutStateMotionToHorizonInput<MetricsBackend, 5>,
+                            >::new_every(
+                                motion_name.as_str(), metric_every
+                            ))
+                            .metric_valid_numeric(OptionalScalarMetric::<
+                                MetricsBackend,
+                                LongRolloutInvToHorizonInput<MetricsBackend, 5>,
+                            >::new_every(
+                                long_inv_name.as_str(), metric_every
+                            ))
+                            .metric_valid_numeric(OptionalScalarMetric::<
+                                MetricsBackend,
+                                LongRolloutStateNormRatioToHorizonInput<MetricsBackend, 5>,
+                            >::new_every(
+                                long_norm_name.as_str(), metric_every
+                            ))
+                            .metric_valid_numeric(OptionalScalarMetric::<
+                                MetricsBackend,
+                                LongRolloutStateMotionToHorizonInput<MetricsBackend, 5>,
+                            >::new_every(
+                                long_motion_name.as_str(), metric_every
+                            ));
+                    }
+                    _ => unreachable!("unexpected rollout horizon index"),
+                }
+            }
+            let com_name = format!("{prefix}_rollout_com_error_to_h24");
+            let velocity_name = format!("{prefix}_rollout_velocity_error_to_h24");
+            let long_com_name = format!("{prefix}_long_rollout_com_error_to_h24");
+            let long_velocity_name = format!("{prefix}_long_rollout_velocity_error_to_h24");
+            builder = builder
+                .metric_valid_numeric(OptionalScalarMetric::<
+                    MetricsBackend,
+                    RolloutComErrorToH24Input<MetricsBackend>,
+                >::new_every(com_name.as_str(), metric_every))
+                .metric_valid_numeric(OptionalScalarMetric::<
+                    MetricsBackend,
+                    RolloutVelocityErrorToH24Input<MetricsBackend>,
+                >::new_every(
+                    velocity_name.as_str(), metric_every
+                ))
+                .metric_valid_numeric(OptionalScalarMetric::<
+                    MetricsBackend,
+                    LongRolloutComErrorToH24Input<MetricsBackend>,
+                >::new_every(
+                    long_com_name.as_str(), metric_every
+                ))
+                .metric_valid_numeric(OptionalScalarMetric::<
+                    MetricsBackend,
+                    LongRolloutVelocityErrorToH24Input<MetricsBackend>,
+                >::new_every(
+                    long_velocity_name.as_str(), metric_every
+                ));
+        }
         if diagnostics.sigreg {
             let name = format!("{prefix}_sigreg_loss");
             builder = builder
                 .metric_train_numeric(ScalarMetric::<
-                    ValidBackend<B>,
-                    SigRegLossInput<ValidBackend<B>>,
+                    MetricsBackend,
+                    SigRegLossInput<MetricsBackend>,
                 >::new_every(name.as_str(), metric_every))
                 .metric_valid_numeric(ScalarMetric::<
-                    ValidBackend<B>,
-                    SigRegLossInput<ValidBackend<B>>,
+                    MetricsBackend,
+                    SigRegLossInput<MetricsBackend>,
                 >::new_every(name.as_str(), metric_every));
         }
         if diagnostics.recon {
@@ -197,37 +882,41 @@ where
             let psnr_masked = format!("{prefix}_recon_psnr_masked");
             let psnr_full = format!("{prefix}_recon_psnr_full");
             builder = builder
-                .metric_train_numeric(ScalarMetric::<
-                    ValidBackend<B>,
-                    ReconLossInput<ValidBackend<B>>,
-                >::new_every(name.as_str(), metric_every))
-                .metric_valid_numeric(ScalarMetric::<
-                    ValidBackend<B>,
-                    ReconLossInput<ValidBackend<B>>,
-                >::new_every(name.as_str(), metric_every));
+                .metric_train_numeric(
+                    ScalarMetric::<MetricsBackend, ReconLossInput<MetricsBackend>>::new_every(
+                        name.as_str(),
+                        metric_every,
+                    ),
+                )
+                .metric_valid_numeric(
+                    ScalarMetric::<MetricsBackend, ReconLossInput<MetricsBackend>>::new_every(
+                        name.as_str(),
+                        metric_every,
+                    ),
+                );
             builder = builder
                 .metric_train_numeric(ScalarMetric::<
-                    ValidBackend<B>,
-                    ReconPsnrMaskedInput<ValidBackend<B>>,
+                    MetricsBackend,
+                    ReconPsnrMaskedInput<MetricsBackend>,
                 >::new_every(
                     psnr_masked.as_str(), metric_every
                 ))
                 .metric_valid_numeric(ScalarMetric::<
-                    ValidBackend<B>,
-                    ReconPsnrMaskedInput<ValidBackend<B>>,
+                    MetricsBackend,
+                    ReconPsnrMaskedInput<MetricsBackend>,
                 >::new_every(
                     psnr_masked.as_str(), metric_every
                 ));
             builder = builder
                 .metric_train_numeric(ScalarMetric::<
-                    ValidBackend<B>,
-                    ReconPsnrFullInput<ValidBackend<B>>,
+                    MetricsBackend,
+                    ReconPsnrFullInput<MetricsBackend>,
                 >::new_every(
                     psnr_full.as_str(), metric_every
                 ))
                 .metric_valid_numeric(ScalarMetric::<
-                    ValidBackend<B>,
-                    ReconPsnrFullInput<ValidBackend<B>>,
+                    MetricsBackend,
+                    ReconPsnrFullInput<MetricsBackend>,
                 >::new_every(
                     psnr_full.as_str(), metric_every
                 ));
@@ -236,12 +925,12 @@ where
             let name = format!("{prefix}_policy_loss");
             builder = builder
                 .metric_train_numeric(ScalarMetric::<
-                    ValidBackend<B>,
-                    PolicyLossInput<ValidBackend<B>>,
+                    MetricsBackend,
+                    PolicyLossInput<MetricsBackend>,
                 >::new_every(name.as_str(), metric_every))
                 .metric_valid_numeric(ScalarMetric::<
-                    ValidBackend<B>,
-                    PolicyLossInput<ValidBackend<B>>,
+                    MetricsBackend,
+                    PolicyLossInput<MetricsBackend>,
                 >::new_every(name.as_str(), metric_every));
             let adv_abs = format!("{prefix}_advantage_abs_mean");
             let adv_std = format!("{prefix}_advantage_std");
@@ -250,46 +939,46 @@ where
             let clamp_rate = format!("{prefix}_action_clamp_rate");
             builder = builder
                 .metric_train_numeric(ScalarMetric::<
-                    ValidBackend<B>,
-                    AdvantageAbsMeanInput<ValidBackend<B>>,
+                    MetricsBackend,
+                    AdvantageAbsMeanInput<MetricsBackend>,
                 >::new_every(adv_abs.as_str(), metric_every))
                 .metric_valid_numeric(ScalarMetric::<
-                    ValidBackend<B>,
-                    AdvantageAbsMeanInput<ValidBackend<B>>,
+                    MetricsBackend,
+                    AdvantageAbsMeanInput<MetricsBackend>,
                 >::new_every(adv_abs.as_str(), metric_every))
                 .metric_train_numeric(ScalarMetric::<
-                    ValidBackend<B>,
-                    AdvantageStdInput<ValidBackend<B>>,
+                    MetricsBackend,
+                    AdvantageStdInput<MetricsBackend>,
                 >::new_every(adv_std.as_str(), metric_every))
                 .metric_valid_numeric(ScalarMetric::<
-                    ValidBackend<B>,
-                    AdvantageStdInput<ValidBackend<B>>,
+                    MetricsBackend,
+                    AdvantageStdInput<MetricsBackend>,
                 >::new_every(adv_std.as_str(), metric_every))
                 .metric_train_numeric(ScalarMetric::<
-                    ValidBackend<B>,
-                    LogProbMeanInput<ValidBackend<B>>,
+                    MetricsBackend,
+                    LogProbMeanInput<MetricsBackend>,
                 >::new_every(log_prob.as_str(), metric_every))
                 .metric_valid_numeric(ScalarMetric::<
-                    ValidBackend<B>,
-                    LogProbMeanInput<ValidBackend<B>>,
+                    MetricsBackend,
+                    LogProbMeanInput<MetricsBackend>,
                 >::new_every(log_prob.as_str(), metric_every))
                 .metric_train_numeric(ScalarMetric::<
-                    ValidBackend<B>,
-                    PolicyEntropyInput<ValidBackend<B>>,
+                    MetricsBackend,
+                    PolicyEntropyInput<MetricsBackend>,
                 >::new_every(entropy.as_str(), metric_every))
                 .metric_valid_numeric(ScalarMetric::<
-                    ValidBackend<B>,
-                    PolicyEntropyInput<ValidBackend<B>>,
+                    MetricsBackend,
+                    PolicyEntropyInput<MetricsBackend>,
                 >::new_every(entropy.as_str(), metric_every))
                 .metric_train_numeric(ScalarMetric::<
-                    ValidBackend<B>,
-                    ActionClampRateInput<ValidBackend<B>>,
+                    MetricsBackend,
+                    ActionClampRateInput<MetricsBackend>,
                 >::new_every(
                     clamp_rate.as_str(), metric_every
                 ))
                 .metric_valid_numeric(ScalarMetric::<
-                    ValidBackend<B>,
-                    ActionClampRateInput<ValidBackend<B>>,
+                    MetricsBackend,
+                    ActionClampRateInput<MetricsBackend>,
                 >::new_every(
                     clamp_rate.as_str(), metric_every
                 ));
@@ -298,35 +987,35 @@ where
             let probe_loss = format!("{prefix}_probe_loss");
             let probe_acc = format!("{prefix}_probe_acc");
             builder = builder
-                .metric_train_numeric(ScalarMetric::<
-                    ValidBackend<B>,
-                    ProbeLossInput<ValidBackend<B>>,
-                >::new_every(
-                    probe_loss.as_str(), metric_every
-                ))
-                .metric_valid_numeric(ScalarMetric::<
-                    ValidBackend<B>,
-                    ProbeLossInput<ValidBackend<B>>,
-                >::new_every(
-                    probe_loss.as_str(), metric_every
-                ))
-                .metric_train_numeric(ScalarMetric::<
-                    ValidBackend<B>,
-                    ProbeAccInput<ValidBackend<B>>,
-                >::new_every(
-                    probe_acc.as_str(), metric_every
-                ))
-                .metric_valid_numeric(ScalarMetric::<
-                    ValidBackend<B>,
-                    ProbeAccInput<ValidBackend<B>>,
-                >::new_every(
-                    probe_acc.as_str(), metric_every
-                ));
+                .metric_train_numeric(
+                    ScalarMetric::<MetricsBackend, ProbeLossInput<MetricsBackend>>::new_every(
+                        probe_loss.as_str(),
+                        metric_every,
+                    ),
+                )
+                .metric_valid_numeric(
+                    ScalarMetric::<MetricsBackend, ProbeLossInput<MetricsBackend>>::new_every(
+                        probe_loss.as_str(),
+                        metric_every,
+                    ),
+                )
+                .metric_train_numeric(
+                    ScalarMetric::<MetricsBackend, ProbeAccInput<MetricsBackend>>::new_every(
+                        probe_acc.as_str(),
+                        metric_every,
+                    ),
+                )
+                .metric_valid_numeric(
+                    ScalarMetric::<MetricsBackend, ProbeAccInput<MetricsBackend>>::new_every(
+                        probe_acc.as_str(),
+                        metric_every,
+                    ),
+                );
         }
 
         if diagnostics.artifact_every > 0 {
             let artifact_dir = env.run_dir.join("artifacts");
-            builder = builder.metric_valid(VisionArtifactMetric::<ValidBackend<B>>::new(
+            builder = builder.metric_valid(VisionArtifactMetric::<MetricsBackend>::new(
                 artifact_dir,
                 diagnostics.artifact_every,
                 diagnostics.artifact_output,
@@ -340,9 +1029,8 @@ where
         }
     }
 
-    let learner = builder.build(model, optimizer, scheduler);
-
-    let _result = learner.fit(Arc::clone(&env.train_loader), Arc::clone(&env.valid_loader));
+    let learner = burn_train::Learner::new(model, optimizer, scheduler);
+    let _result = builder.launch(learner);
 
     Ok(())
 }

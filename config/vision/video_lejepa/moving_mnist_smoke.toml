@@ -1,0 +1,23 @@
+extends = ["base/moving_mnist_cellular.toml"]
+
+[dataset]
+max_records = 64
+prefetch_batches = 2
+prefetch_workers = 2
+prefetch_to_device = true
+
+[training]
+batch_size = 8
+epochs = 1
+max_iters = 16
+log_frequency = 4
+enable_checkpoints = false
+rollout_min_steps = 2
+rollout_max_steps = 2
+rollout_backprop_steps = 2
+
+[mode]
+artifact_every = 1
+artifact_max_images = 1
+artifact_future_frames = 12
+artifact_upscale = 4

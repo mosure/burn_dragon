@@ -1,0 +1,4 @@
+extends = ["moving_mnist_trm_trainstep_debug_norecon.toml"]
+
+[mode.loss.sigreg]
+enabled = false

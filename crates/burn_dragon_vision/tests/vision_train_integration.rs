@@ -1,6 +1,8 @@
 #![cfg(feature = "integration_test")]
 
-#[cfg(feature = "cuda")]
+#[cfg(feature = "train")]
+use std::collections::HashSet;
+#[cfg(any(feature = "cuda", feature = "train"))]
 use std::fs;
 #[cfg(feature = "cuda")]
 use std::path::Path;
@@ -22,13 +24,21 @@ use serde::Deserialize;
 use burn_autodiff::Autodiff;
 #[cfg(feature = "cuda")]
 use burn_cubecl::CubeBackend;
+#[cfg(feature = "train")]
+use burn_dragon_train::wgpu::init_runtime;
 use burn_dragon_vision::load_vision_training_config;
 #[cfg(feature = "cuda")]
 use burn_dragon_vision::train::{gdpo_cpu_fallbacks, loss_trace_len};
 use burn_dragon_vision::train::{
     gdpo_reset_cpu_fallbacks, loss_trace_reset, loss_trace_take, train_vision_backend_for_test,
 };
+#[cfg(feature = "train")]
+use burn_dragon_vision::train_vision_backend;
 use burn_ndarray::NdArray;
+#[cfg(feature = "train")]
+use burn_wgpu::Wgpu;
+#[cfg(feature = "train")]
+use burn_wgpu::{CubeBackend, WgpuRuntime};
 #[cfg(feature = "cuda")]
 use cubecl::cuda::CudaRuntime;
 
@@ -85,6 +95,91 @@ fn vision_identity_tiny_integration_path() -> PathBuf {
         .join("..")
         .join("config")
         .join("vision/identity/integration.toml")
+}
+
+#[cfg(feature = "train")]
+fn moving_mnist_trm_retention_check_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("config")
+        .join("vision")
+        .join("video_lejepa")
+        .join("moving_mnist_trm_retention_check.toml")
+}
+
+#[cfg(feature = "train")]
+fn vision_run_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("runs")
+        .join("vision")
+}
+
+#[cfg(feature = "train")]
+fn current_run_dirs(root: &std::path::Path) -> HashSet<PathBuf> {
+    fs::read_dir(root)
+        .ok()
+        .into_iter()
+        .flat_map(|entries| entries.filter_map(Result::ok))
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.is_dir() && path.file_name().and_then(|n| n.to_str()) != Some("latest") {
+                Some(path)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+#[cfg(feature = "train")]
+fn newest_added_run_dir(before: &HashSet<PathBuf>, root: &std::path::Path) -> PathBuf {
+    let mut added: Vec<_> = current_run_dirs(root).difference(before).cloned().collect();
+    if added.is_empty() {
+        let latest = root.join("latest");
+        if latest.exists() {
+            return fs::canonicalize(latest).expect("canonicalize latest run");
+        }
+        panic!("no new run directory created under {}", root.display());
+    }
+    added.sort();
+    added.pop().expect("new run dir")
+}
+
+#[cfg(feature = "train")]
+fn parse_device_memory_log(path: &std::path::Path) -> Vec<(f64, f64)> {
+    let contents = fs::read_to_string(path)
+        .unwrap_or_else(|err| panic!("read {} failed: {err}", path.display()));
+    let mut values = Vec::new();
+    for line in contents
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        let metric = line.split(',').next().unwrap_or(line).trim();
+        let mut parts = metric.split('/');
+        let reserved = parts
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .trim_end_matches(" MiB")
+            .parse::<f64>()
+            .unwrap_or_else(|err| panic!("parse reserved from `{metric}` failed: {err}"));
+        let in_use = parts
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .trim_end_matches(" MiB")
+            .parse::<f64>()
+            .unwrap_or_else(|err| panic!("parse in-use from `{metric}` failed: {err}"));
+        values.push((reserved, in_use));
+    }
+    assert!(
+        !values.is_empty(),
+        "no device memory samples in {}",
+        path.display()
+    );
+    values
 }
 
 #[cfg(feature = "cuda")]
@@ -170,6 +265,71 @@ fn cpu_vision_identity_tiny_training_loss_decreases() {
     assert!(
         min_loss < first,
         "expected loss to decrease at least once (initial={first}, min={min_loss})"
+    );
+}
+
+#[cfg(all(feature = "train", not(target_arch = "wasm32")))]
+#[test]
+fn wgpu_video_trm_artifact_validation_memory_stays_bounded() {
+    let config_path = moving_mnist_trm_retention_check_path();
+    let config = load_vision_training_config(&[config_path]).expect("load retention config");
+
+    let run_root = vision_run_root();
+    fs::create_dir_all(&run_root).expect("create run root");
+    let before = current_run_dirs(&run_root);
+
+    type WgpuNoFusion = CubeBackend<WgpuRuntime, f32, i32, u32>;
+    let result =
+        train_vision_backend::<Autodiff<WgpuNoFusion>, _>(&config, "wgpu-nofusion", |device| {
+            init_runtime(device, &config.wgpu)
+        });
+    if let Err(err) = result {
+        panic!("training failed: {err}");
+    }
+
+    let run_dir = newest_added_run_dir(&before, &run_root);
+    let valid_epoch1 = parse_device_memory_log(&run_dir.join("valid/epoch-1/device_memory_mb.log"));
+    let valid_epoch2 = parse_device_memory_log(&run_dir.join("valid/epoch-2/device_memory_mb.log"));
+
+    let epoch1_reserved_max = valid_epoch1
+        .iter()
+        .map(|(reserved, _)| *reserved)
+        .fold(0.0, f64::max);
+    let epoch2_reserved_max = valid_epoch2
+        .iter()
+        .map(|(reserved, _)| *reserved)
+        .fold(0.0, f64::max);
+    let epoch1_in_use_max = valid_epoch1
+        .iter()
+        .map(|(_, in_use)| *in_use)
+        .fold(0.0, f64::max);
+    let epoch2_in_use_max = valid_epoch2
+        .iter()
+        .map(|(_, in_use)| *in_use)
+        .fold(0.0, f64::max);
+
+    let reserved_growth = epoch2_reserved_max - epoch1_reserved_max;
+    let in_use_growth = epoch2_in_use_max - epoch1_in_use_max;
+    assert!(
+        reserved_growth <= 1024.0,
+        "reserved device memory grew by {reserved_growth:.1} MiB across validation epochs; run_dir={}",
+        run_dir.display()
+    );
+    assert!(
+        in_use_growth <= 256.0,
+        "in-use device memory grew by {in_use_growth:.1} MiB across validation epochs; run_dir={}",
+        run_dir.display()
+    );
+
+    let artifact_count = fs::read_dir(run_dir.join("artifacts"))
+        .expect("artifact dir")
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("mp4"))
+        .count();
+    assert!(
+        artifact_count >= 16,
+        "expected at least 16 artifact mp4s, found {artifact_count} in {}",
+        run_dir.display()
     );
 }
 

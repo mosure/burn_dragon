@@ -21,13 +21,15 @@ anyhow = "1"
 clap = { version = "4.5", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-burn = { version = "0.19", default-features = false, features = ["ndarray", "std", "wgpu", "fusion"] }
-burn-autodiff = "0.19"
-burn-wgpu = { version = "0.19", default-features = false, features = ["fusion", "std"] }
-burn-ndarray = "0.19"
+burn = { version = "0.21.0-pre.2", default-features = false, features = ["ndarray", "std", "wgpu", "fusion"] }
+burn-autodiff = "0.21.0-pre.2"
+burn-wgpu = { version = "0.21.0-pre.2", default-features = false, features = ["fusion", "std"] }
+burn-ndarray = "0.21.0-pre.2"
 bevy_burn = { version = "0.4", optional = true }
 ctrlc = { version = "3.4", optional = true }
-burn-cuda = { version = "0.19", optional = true, default-features = false, features = ["std"] }
+burn-cuda = { version = "0.21.0-pre.2", optional = true, default-features = false, features = ["std"] }
 burn_dragon = { path = "../..", version = "0.4.0", default-features = false }
 burn_dragon_wgpu = { path = "../burn_dragon_wgpu", version = "0.4.0", default-features = false }
 burn_dragon_sudoku = { path = "../burn_dragon_sudoku", version = "0.4.0", default-features = false, optional = true }
+pollster = "0.3"
+wgpu = "26"

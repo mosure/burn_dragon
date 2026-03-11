@@ -28,7 +28,6 @@ train = [
   "dep:names",
   "dep:tracing",
   "dep:image",
-  "dep:burn_dino",
 ]
 cuda = ["burn-cuda"]
 integration_test = ["train"]
@@ -42,21 +41,20 @@ serde_json = "1.0"
 clap = { version = "4.5", features = ["derive"], optional = true }
 names = { version = "0.14", optional = true }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"], optional = true }
-burn_dino = { version = "0.6", default-features = false, optional = true }
+burn_dino = { version = "0.7", default-features = false, optional = true }
 tracing = { version = "0.1", optional = true }
 
-burn = { version = "0.19", default-features = false, features = ["fusion", "ndarray", "std", "wgpu"] }
-burn-wgpu = { version = "0.19", default-features = false, features = ["fusion", "std"] }
-burn-ndarray = { version = "0.19", optional = true }
-burn-autodiff = { version = "0.19", optional = true }
-burn-train = { version = "0.19", optional = true, default-features = false, features = ["tui"] }
-burn-cubecl = { version = "0.19", default-features = false, features = ["std", "fusion"] }
-burn-fusion = { version = "0.19", default-features = false, features = ["std"] }
-cubecl = { version = "0.8", default-features = true, features = ["std"] }
-cubecl-runtime = { version = "0.8", default-features = true, features = ["channel-mpsc", "std"] }
-burn-cuda = { version = "0.19", optional = true, default-features = false, features = ["std"] }
+burn = { version = "0.21.0-pre.2", default-features = false, features = ["fusion", "ndarray", "std", "wgpu"] }
+burn-wgpu = { version = "0.21.0-pre.2", default-features = false, features = ["fusion", "std"] }
+burn-ndarray = { version = "0.21.0-pre.2", optional = true }
+burn-autodiff = { version = "0.21.0-pre.2", optional = true }
+burn-train = { version = "0.21.0-pre.2", optional = true, default-features = false, features = ["tui"] }
+burn-cubecl = { version = "0.21.0-pre.2", default-features = false, features = ["std", "fusion"] }
+burn-fusion = { version = "0.21.0-pre.2", default-features = false, features = ["std"] }
+burn-ir = "0.21.0-pre.2"
+burn-cuda = { version = "0.21.0-pre.2", optional = true, default-features = false, features = ["std"] }
 
 [dev-dependencies]
 avirus = "0.2"
-burn-ndarray = "0.19"
+burn-ndarray = "0.21.0-pre.2"
 tempfile = "3"

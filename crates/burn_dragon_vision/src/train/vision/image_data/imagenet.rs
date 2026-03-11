@@ -356,6 +356,14 @@ impl VisionNormalize {
         Self { mean, std }
     }
 
+    pub fn mean(&self) -> [f32; IMAGE_CHANNELS] {
+        self.mean
+    }
+
+    pub fn std(&self) -> [f32; IMAGE_CHANNELS] {
+        self.std
+    }
+
     pub fn apply(&self, image: &RgbImage, buffer: &mut Vec<f32>) {
         let (width, height) = image.dimensions();
         let pixels = (width * height) as usize;

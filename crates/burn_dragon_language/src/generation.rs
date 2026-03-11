@@ -35,9 +35,12 @@ pub struct GenerationProfileSnapshot {
     pub sample_host_transfer_ns: u128,
     pub sample_cpu_ns: u128,
     pub token_tensor_copy_ns: u128,
+    pub chunk_flush_ns: u128,
     pub token_steps: u64,
     pub prefill_tokens: u64,
     pub host_sync_points: u64,
+    pub chunk_flushes: u64,
+    pub chunk_flushed_tokens: u64,
     pub host_to_device_copy_bytes: u128,
     pub device_to_host_copy_bytes: u128,
 }
@@ -49,9 +52,12 @@ struct GenerationProfileState {
     sample_host_transfer_ns: u128,
     sample_cpu_ns: u128,
     token_tensor_copy_ns: u128,
+    chunk_flush_ns: u128,
     token_steps: u64,
     prefill_tokens: u64,
     host_sync_points: u64,
+    chunk_flushes: u64,
+    chunk_flushed_tokens: u64,
     host_to_device_copy_bytes: u128,
     device_to_host_copy_bytes: u128,
 }
@@ -86,9 +92,12 @@ pub fn generation_profile_snapshot() -> GenerationProfileSnapshot {
             sample_host_transfer_ns: state.sample_host_transfer_ns,
             sample_cpu_ns: state.sample_cpu_ns,
             token_tensor_copy_ns: state.token_tensor_copy_ns,
+            chunk_flush_ns: state.chunk_flush_ns,
             token_steps: state.token_steps,
             prefill_tokens: state.prefill_tokens,
             host_sync_points: state.host_sync_points,
+            chunk_flushes: state.chunk_flushes,
+            chunk_flushed_tokens: state.chunk_flushed_tokens,
             host_to_device_copy_bytes: state.host_to_device_copy_bytes,
             device_to_host_copy_bytes: state.device_to_host_copy_bytes,
         };
@@ -152,6 +161,52 @@ fn sample_argmax_token<B: Backend>(logits_temp: Tensor<B, 1>) -> Result<i64> {
         .first()
         .copied()
         .ok_or_else(|| anyhow!("argmax output is empty"))
+}
+
+fn sample_argmax_token_tensor<B: Backend>(logits_temp: Tensor<B, 1>) -> Tensor<B, 2, Int> {
+    logits_temp.argmax(0).reshape([1, 1])
+}
+
+fn flush_pending_token_tensors<B: Backend>(
+    pending: &mut Vec<Tensor<B, 2, Int>>,
+    full_tokens: &mut Vec<i64>,
+    on_chunk: &mut Option<&mut dyn FnMut(&[i64])>,
+) -> Result<()> {
+    if pending.is_empty() {
+        return Ok(());
+    }
+
+    let prof_enabled = generation_profile_enabled();
+    let tokens = Tensor::cat(std::mem::take(pending), 1);
+    let host_start = prof_enabled.then(Instant::now);
+    let chunk = tokens
+        .to_data()
+        .convert::<i64>()
+        .into_vec::<i64>()
+        .map_err(|err| anyhow!("{err:?}"))?;
+    let chunk_len = chunk.len();
+    if let Some(start) = host_start {
+        let elapsed = start.elapsed().as_nanos();
+        generation_profile_record(|profile| {
+            profile.sample_host_transfer_ns =
+                profile.sample_host_transfer_ns.saturating_add(elapsed);
+            profile.chunk_flush_ns = profile.chunk_flush_ns.saturating_add(elapsed);
+            profile.host_sync_points = profile.host_sync_points.saturating_add(1);
+            profile.chunk_flushes = profile.chunk_flushes.saturating_add(1);
+            profile.chunk_flushed_tokens = profile
+                .chunk_flushed_tokens
+                .saturating_add(chunk_len as u64);
+            profile.device_to_host_copy_bytes = profile
+                .device_to_host_copy_bytes
+                .saturating_add((chunk_len.saturating_mul(size_of::<i64>())) as u128);
+        });
+    }
+
+    if let Some(callback) = on_chunk.as_mut() {
+        (**callback)(&chunk);
+    }
+    full_tokens.extend(chunk);
+    Ok(())
 }
 
 pub fn prefill_state<B: Backend>(
@@ -421,6 +476,95 @@ pub fn generate_tokens<B: Backend>(
         }
     }
 
+    Ok(full_tokens)
+}
+
+pub fn generate_tokens_chunked<B: Backend>(
+    model: &BDH<B>,
+    prompt_tokens: Vec<i64>,
+    device: &B::Device,
+    settings: GenerationSettings,
+    chunk_tokens: usize,
+    device_buffer_tokens: usize,
+    mut on_chunk: Option<&mut dyn FnMut(&[i64])>,
+) -> Result<Vec<i64>> {
+    let GenerationSettings {
+        max_new_tokens,
+        temperature,
+        top_k,
+        strategy,
+    } = settings;
+
+    let chunk_tokens = chunk_tokens.max(1);
+    let device_buffer_tokens = device_buffer_tokens.max(chunk_tokens);
+
+    if top_k != Some(1) {
+        let prompt_len = prompt_tokens.len();
+        let full_tokens = generate_tokens(
+            model,
+            prompt_tokens,
+            device,
+            GenerationSettings {
+                max_new_tokens,
+                temperature,
+                top_k,
+                strategy,
+            },
+            None,
+        )?;
+        if let Some(callback) = on_chunk.as_mut() {
+            (**callback)(&full_tokens[prompt_len..]);
+        }
+        return Ok(full_tokens);
+    }
+
+    let mut full_tokens = prompt_tokens;
+    let (mut state, mut last_logits) = prefill_state(model, &full_tokens, device)?;
+    let mut generated = 0usize;
+    let prof_enabled = generation_profile_enabled();
+    let mut pending: Vec<Tensor<B, 2, Int>> =
+        Vec::with_capacity(chunk_tokens.min(device_buffer_tokens));
+
+    if let ContextStrategy::Sliding { window } = strategy
+        && window > 0
+        && state.position > window
+    {
+        state.trim(window);
+    }
+
+    while max_new_tokens.is_none_or(|max| generated < max) {
+        let logits_temp = last_logits.clone().div_scalar(temperature);
+        let next_tensor = sample_argmax_token_tensor(logits_temp);
+
+        let forward_start = prof_enabled.then(Instant::now);
+        let logits = model.forward_with_state(next_tensor.clone(), &mut state);
+        if let Some(start) = forward_start {
+            let elapsed = start.elapsed().as_nanos();
+            generation_profile_record(|profile| {
+                profile.token_forward_ns = profile.token_forward_ns.saturating_add(elapsed);
+                profile.token_steps = profile.token_steps.saturating_add(1);
+            });
+        }
+
+        let [_, time, vocab] = logits.shape().dims::<3>();
+        last_logits = logits.slice_dim(1, (time - 1)..time).reshape([vocab]);
+
+        pending.push(next_tensor);
+        generated = generated.saturating_add(1);
+
+        if pending.len() >= chunk_tokens || pending.len() >= device_buffer_tokens {
+            flush_pending_token_tensors(&mut pending, &mut full_tokens, &mut on_chunk)?;
+        }
+
+        if let ContextStrategy::Sliding { window } = strategy
+            && window > 0
+            && state.position > window
+        {
+            state.trim(window);
+        }
+    }
+
+    flush_pending_token_tensors(&mut pending, &mut full_tokens, &mut on_chunk)?;
     Ok(full_tokens)
 }
 

@@ -98,6 +98,10 @@ impl<B: AutodiffBackend> AutodiffModule<B> for FusedKernelConfig {
     fn valid(&self) -> Self::InnerModule {
         self.clone()
     }
+
+    fn from_inner(module: Self::InnerModule) -> Self {
+        module
+    }
 }
 
 impl ModuleDisplayDefault for FusedKernelConfig {
@@ -193,5 +197,20 @@ impl BDHConfig {
 
     pub fn latent_per_expert(&self) -> usize {
         self.latent_per_head() / self.n_expert
+    }
+
+    /// Dragon Hatchling paper terminology: dense/token value space dimension.
+    pub fn dense_space_dim(&self) -> usize {
+        self.n_embd
+    }
+
+    /// Dragon Hatchling paper terminology: total neuron-space dimension.
+    pub fn neuron_space_dim(&self) -> usize {
+        self.latent_total()
+    }
+
+    /// Dragon Hatchling paper terminology: neuron-space dimension per head.
+    pub fn neuron_space_dim_per_head(&self) -> usize {
+        self.latent_per_head()
     }
 }

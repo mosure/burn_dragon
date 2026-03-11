@@ -1,0 +1,29 @@
+extends = ["base/moving_mnist_pyramid.toml"]
+
+[dataset]
+max_records = 8
+prefetch_batches = 2
+prefetch_workers = 2
+prefetch_to_device = true
+
+[training]
+batch_size = 8
+epochs = 1
+max_iters = 1
+log_frequency = 1
+enable_checkpoints = false
+rollout_min_steps = 2
+rollout_max_steps = 2
+rollout_backprop_steps = 2
+
+[optimizer]
+weight_decay = 0.0
+
+[vision]
+pos_encoding = "learned2d"
+
+[mode]
+artifact_every = 1
+artifact_max_images = 1
+artifact_future_frames = 12
+artifact_upscale = 4

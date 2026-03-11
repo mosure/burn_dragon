@@ -59,8 +59,8 @@ where
         ));
 
     let val_steps_per_epoch = dataset.steps_per_epoch(DatasetSplit::Val);
-    let desired_valid_steps = usize::max(1, total_steps / training.log_frequency.max(1));
-    let valid_steps = desired_valid_steps.min(val_steps_per_epoch).max(1);
+    let valid_steps =
+        resolve_valid_steps_per_epoch(total_steps, training.log_frequency, val_steps_per_epoch);
 
     let valid_device = device.clone();
     let valid_loader: Arc<dyn DataLoader<ValidBackend<B>, SequenceBatch<ValidBackend<B>>>> =
@@ -72,8 +72,12 @@ where
             None,
         ));
 
-    let mut model = Some(BDH::<B>::new(model_config.clone(), &device));
-    let mut optim = Some(adamw_config_from_optimizer(optimizer_cfg).init::<B, BDH<B>>());
+    let mut model = Some(LanguageTrainModel::new(BDH::<B>::new(
+        model_config.clone(),
+        &device,
+    )));
+    let mut optim =
+        Some(adamw_config_from_optimizer(optimizer_cfg).init::<B, LanguageTrainModel<B>>());
     let scheduler_iters = match schedule.source {
         ScheduleSource::Epochs => Some(total_steps),
         ScheduleSource::MaxIters => None,

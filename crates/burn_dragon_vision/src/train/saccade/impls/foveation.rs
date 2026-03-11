@@ -207,7 +207,7 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
             }
         };
         let grid_sample_max_bytes = limit_bytes_from_mb(self.config.grid_sample_max_mb);
-        if B::ad_enabled()
+        if B::ad_enabled(&base_grid.device())
             && let Some(patch) = self.try_foveated_patch_custom_backward(
                 sampling_mode,
                 warp_mode,
@@ -248,7 +248,7 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
                 full_patch_h,
             ),
             VisionFoveaSamplingMode::Cubecl => {
-                if B::ad_enabled() {
+                if B::ad_enabled(&base_grid.device()) {
                     self.foveated_patch_sample_batched(
                         levels,
                         base_grid,
@@ -301,7 +301,7 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
                 }
             }
             VisionFoveaSamplingMode::Wgsl => {
-                if B::ad_enabled() {
+                if B::ad_enabled(&base_grid.device()) {
                     self.foveated_patch_sample_batched(
                         levels,
                         base_grid,
@@ -386,7 +386,7 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
         laplacian_images: Option<&SaccadeLaplacianImages<B>>,
         full_patch_h: usize,
     ) -> Option<Tensor<B, 4>> {
-        if !B::ad_enabled() {
+        if !B::ad_enabled(&base_grid.device()) {
             return None;
         }
         if self.config.fovea_subsamples != SACCADE_FOVEA_SUBSAMPLES {

@@ -8,16 +8,20 @@ use burn::tensor::backend::{AutodiffBackend, Backend};
 use serde::{Deserialize, Serialize};
 use toml::Value;
 
-use crate::loss::VisionDistillationLossConfig;
 use crate::{
-    SpatialPositionalEncodingKind, VisionAttentionMode, VisionDragonConfig, VisionLatentActivation,
-    VisionPatchEmbedMode, VisionTrmGraphConfig, VisionTrmGridMismatchPolicy,
+    SpatialPositionalEncodingKind, VisionAttentionMode, VisionBackboneKind, VisionDragonConfig,
+    VisionLatentActivation, VisionPatchEmbedMode, VisionRhoStreamConfig, VisionTrmGraphConfig,
+    VisionTrmGridMismatchPolicy,
 };
 use burn_dragon_core::FusedKernelConfig;
 use burn_dragon_train::{
-    GdpoConfig, GdpoHardGate, OptimizerConfig, VisionArtifactOutputMode, VisionTeacherVariant,
-    WgpuRuntimeConfig,
+    GdpoConfig, GdpoHardGate, OptimizerConfig, VisionArtifactOutputMode, WgpuRuntimeConfig,
 };
+
+mod distill_config;
+mod training_config;
+pub use distill_config::*;
+pub use training_config::*;
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
@@ -288,206 +292,6 @@ impl ModuleDisplayDefault for VisionSaccadePolicyConfig {
 impl ModuleDisplay for VisionSaccadePolicyConfig {}
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-pub struct VisionTrainingConfig {
-    pub dataset: VisionDatasetConfig,
-    pub training: VisionTrainingHyperparameters,
-    pub optimizer: OptimizerConfig,
-    #[serde(default)]
-    pub wgpu: WgpuRuntimeConfig,
-    pub vision: VisionModelConfig,
-    #[serde(default)]
-    pub augment: VisionAugmentationConfig,
-    #[serde(default)]
-    pub mode: VisionTrainingModeConfig,
-}
-
-impl VisionTrainingConfig {
-    pub fn validate(&self) -> Result<()> {
-        if self.training.batch_size == 0 {
-            return Err(anyhow!("training.batch_size must be > 0"));
-        }
-        if self.training.max_iters == 0 {
-            return Err(anyhow!("training.max_iters must be > 0"));
-        }
-        if self.training.log_frequency == 0 {
-            return Err(anyhow!("training.log_frequency must be > 0"));
-        }
-        if self.training.batch_repeats == 0 {
-            return Err(anyhow!("training.batch_repeats must be > 0"));
-        }
-        if self.training.trace_train_loss_every == 0 {
-            return Err(anyhow!("training.trace_train_loss_every must be > 0"));
-        }
-        if let Some(epochs) = self.training.epochs
-            && epochs == 0
-        {
-            return Err(anyhow!("training.epochs must be > 0"));
-        }
-        self.optimizer.validate()?;
-
-        if self.vision.image_size == 0 {
-            return Err(anyhow!("vision.image_size must be > 0"));
-        }
-        if self.vision.patch_size == 0 {
-            return Err(anyhow!("vision.patch_size must be > 0"));
-        }
-        if self.vision.in_channels == 0 {
-            return Err(anyhow!("vision.in_channels must be > 0"));
-        }
-        if self.vision.embed_dim == 0 {
-            return Err(anyhow!("vision.embed_dim must be > 0"));
-        }
-        if self.vision.steps == 0 {
-            return Err(anyhow!("vision.steps must be > 0"));
-        }
-        if self.vision.cross_eye_steps > self.vision.steps {
-            return Err(anyhow!(
-                "vision.cross_eye_steps ({}) must be <= vision.steps ({})",
-                self.vision.cross_eye_steps,
-                self.vision.steps
-            ));
-        }
-        if self.vision.n_head == 0 {
-            return Err(anyhow!("vision.n_head must be > 0"));
-        }
-        if self.vision.mlp_internal_dim_multiplier == 0 {
-            return Err(anyhow!("vision.mlp_internal_dim_multiplier must be > 0"));
-        }
-        if self.vision.projection_dim == 0 {
-            return Err(anyhow!("vision.projection_dim must be > 0"));
-        }
-        if self.vision.projection_hidden_dim == 0 {
-            return Err(anyhow!("vision.projection_hidden_dim must be > 0"));
-        }
-        if self.vision.num_eyes == 0 {
-            return Err(anyhow!("vision.num_eyes must be > 0"));
-        }
-        if self.vision.cls_sync_alpha < 0.0 || self.vision.cls_sync_alpha > 1.0 {
-            return Err(anyhow!("vision.cls_sync_alpha must be between 0.0 and 1.0"));
-        }
-        if self.vision.dropout < 0.0 {
-            return Err(anyhow!("vision.dropout must be >= 0"));
-        }
-        if matches!(self.vision.pos_max_height, Some(0)) {
-            return Err(anyhow!("vision.pos_max_height must be > 0 when set"));
-        }
-        if matches!(self.vision.pos_max_width, Some(0)) {
-            return Err(anyhow!("vision.pos_max_width must be > 0 when set"));
-        }
-        if !self.vision.allow_softmax_attention
-            && matches!(self.vision.attention_mode, VisionAttentionMode::Softmax)
-        {
-            return Err(anyhow!(
-                "vision.attention_mode=softmax requires vision.allow_softmax_attention=true"
-            ));
-        }
-
-        load_validate::validate_vision_mhc(&self.vision)?;
-        load_validate::validate_vision_trm_graph(&self.vision)?;
-        load_validate::validate_vision_rollout(&self.training, self.vision.steps)?;
-        load_validate::validate_vision_mode(&self.mode, &self.vision)?;
-
-        if self.optimizer.learning_rate <= 0.0 {
-            return Err(anyhow!("optimizer.learning_rate must be > 0"));
-        }
-        if self.optimizer.weight_decay < 0.0 {
-            return Err(anyhow!("optimizer.weight_decay must be >= 0"));
-        }
-
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum VisionTrainingModeConfig {
-    Distill(VisionDistillConfig),
-    Lejepa(VisionLejepaConfig),
-    Mae(VisionMaeConfig),
-    Saccade(Box<VisionSaccadeConfig>),
-}
-
-impl Default for VisionTrainingModeConfig {
-    fn default() -> Self {
-        Self::Distill(VisionDistillConfig::default())
-    }
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-#[serde(default)]
-pub struct VisionDistillConfig {
-    #[serde(default)]
-    pub teacher: VisionTeacherConfig,
-    #[serde(default)]
-    pub loss: VisionDistillationLossConfig,
-}
-
-impl Default for VisionDistillConfig {
-    fn default() -> Self {
-        Self {
-            teacher: VisionTeacherConfig::Features(VisionTeacherFeatureConfig::default()),
-            loss: VisionDistillationLossConfig::default(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum VisionTeacherConfig {
-    Features(VisionTeacherFeatureConfig),
-    Model(VisionTeacherModelConfig),
-}
-
-impl Default for VisionTeacherConfig {
-    fn default() -> Self {
-        Self::Features(VisionTeacherFeatureConfig::default())
-    }
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-#[serde(default)]
-pub struct VisionTeacherFeatureConfig {
-    pub train_cls_path: PathBuf,
-    pub train_patch_path: PathBuf,
-    pub val_cls_path: PathBuf,
-    pub val_patch_path: PathBuf,
-    pub feature_dim: usize,
-    pub patch_tokens: Option<usize>,
-}
-
-impl Default for VisionTeacherFeatureConfig {
-    fn default() -> Self {
-        Self {
-            train_cls_path: PathBuf::from("data/imagenet1k/features/dinov3_small/train_cls.bin"),
-            train_patch_path: PathBuf::from(
-                "data/imagenet1k/features/dinov3_small/train_patch.bin",
-            ),
-            val_cls_path: PathBuf::from("data/imagenet1k/features/dinov3_small/val_cls.bin"),
-            val_patch_path: PathBuf::from("data/imagenet1k/features/dinov3_small/val_patch.bin"),
-            feature_dim: 384,
-            patch_tokens: None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-pub struct VisionTeacherModelConfig {
-    pub checkpoint_path: PathBuf,
-    #[serde(default)]
-    pub variant: VisionTeacherVariant,
-    #[serde(default)]
-    pub image_size: Option<usize>,
-    #[serde(default)]
-    pub patch_size: Option<usize>,
-    #[serde(default)]
-    pub register_tokens: usize,
-    #[serde(default)]
-    pub feature_dim: Option<usize>,
-    #[serde(default)]
-    pub patch_tokens: Option<usize>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
 pub struct VisionLejepaLossConfig {
     pub enabled: bool,
@@ -701,8 +505,76 @@ impl ModuleDisplay for VisionSaccadeCrossViewConfig {}
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
+pub struct VisionMomentumTeacherConfig {
+    pub enabled: bool,
+    pub decay: f32,
+}
+
+impl Default for VisionMomentumTeacherConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            decay: 0.996,
+        }
+    }
+}
+
+impl<B: Backend> Module<B> for VisionMomentumTeacherConfig {
+    type Record = ();
+
+    fn collect_devices(&self, devices: burn::module::Devices<B>) -> burn::module::Devices<B> {
+        devices
+    }
+
+    fn fork(self, _device: &B::Device) -> Self {
+        self
+    }
+
+    fn to_device(self, _device: &B::Device) -> Self {
+        self
+    }
+
+    fn visit<Visitor: burn::module::ModuleVisitor<B>>(&self, _visitor: &mut Visitor) {}
+
+    fn map<Mapper: burn::module::ModuleMapper<B>>(self, _mapper: &mut Mapper) -> Self {
+        self
+    }
+
+    fn load_record(self, _record: Self::Record) -> Self {
+        self
+    }
+
+    fn into_record(self) -> Self::Record {}
+}
+
+impl<B: AutodiffBackend> AutodiffModule<B> for VisionMomentumTeacherConfig {
+    type InnerModule = VisionMomentumTeacherConfig;
+
+    fn valid(&self) -> Self::InnerModule {
+        self.clone()
+    }
+
+    fn from_inner(module: Self::InnerModule) -> Self {
+        module
+    }
+}
+
+impl ModuleDisplayDefault for VisionMomentumTeacherConfig {
+    fn content(&self, content: Content) -> Option<Content> {
+        content
+            .add("enabled", &self.enabled)
+            .add("decay", &self.decay)
+            .optional()
+    }
+}
+
+impl ModuleDisplay for VisionMomentumTeacherConfig {}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(default)]
 pub struct VisionLejepaConfig {
     pub loss: VisionLossConfig,
+    pub teacher_ema: VisionMomentumTeacherConfig,
     pub views: usize,
     pub global_views: usize,
     pub local_views: usize,
@@ -729,6 +601,7 @@ impl Default for VisionLejepaConfig {
     fn default() -> Self {
         Self {
             loss: VisionLossConfig::default(),
+            teacher_ema: VisionMomentumTeacherConfig::default(),
             views: 4,
             global_views: 0,
             local_views: 0,
@@ -783,12 +656,17 @@ impl<B: AutodiffBackend> AutodiffModule<B> for VisionLejepaConfig {
     fn valid(&self) -> Self::InnerModule {
         self.clone()
     }
+
+    fn from_inner(module: Self::InnerModule) -> Self {
+        module
+    }
 }
 
 impl ModuleDisplayDefault for VisionLejepaConfig {
     fn content(&self, content: Content) -> Option<Content> {
         content
             .add("loss", &self.loss)
+            .add("teacher_ema", &self.teacher_ema)
             .add("views", &self.views)
             .add("global_views", &self.global_views)
             .add("local_views", &self.local_views)
@@ -810,6 +688,289 @@ impl ModuleDisplayDefault for VisionLejepaConfig {
 }
 
 impl ModuleDisplay for VisionLejepaConfig {}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(default)]
+pub struct VisionVideoTemporalConfig {
+    pub n_layer: usize,
+    pub n_head: usize,
+    pub mlp_internal_dim_multiplier: usize,
+    pub rollout_fast_steps_per_slow_step: usize,
+    pub predict_backprop_frames: usize,
+    pub mode_embeddings: bool,
+    pub refine_passes: usize,
+    pub fused: bool,
+    pub wgpu_recurrent_kernel: bool,
+    pub wgpu_rollout_fused: bool,
+    pub latent_block_size: usize,
+    pub time_block_size: usize,
+}
+
+impl Default for VisionVideoTemporalConfig {
+    fn default() -> Self {
+        Self {
+            n_layer: 2,
+            n_head: 4,
+            mlp_internal_dim_multiplier: 2,
+            rollout_fast_steps_per_slow_step: 4,
+            predict_backprop_frames: 0,
+            mode_embeddings: true,
+            refine_passes: 0,
+            fused: true,
+            wgpu_recurrent_kernel: true,
+            wgpu_rollout_fused: true,
+            latent_block_size: 8,
+            time_block_size: 8,
+        }
+    }
+}
+
+impl<B: Backend> Module<B> for VisionVideoTemporalConfig {
+    type Record = ();
+
+    fn collect_devices(&self, devices: burn::module::Devices<B>) -> burn::module::Devices<B> {
+        devices
+    }
+
+    fn fork(self, _device: &B::Device) -> Self {
+        self
+    }
+
+    fn to_device(self, _device: &B::Device) -> Self {
+        self
+    }
+
+    fn visit<Visitor: burn::module::ModuleVisitor<B>>(&self, _visitor: &mut Visitor) {}
+
+    fn map<Mapper: burn::module::ModuleMapper<B>>(self, _mapper: &mut Mapper) -> Self {
+        self
+    }
+
+    fn load_record(self, _record: Self::Record) -> Self {
+        self
+    }
+
+    fn into_record(self) -> Self::Record {}
+}
+
+impl<B: AutodiffBackend> AutodiffModule<B> for VisionVideoTemporalConfig {
+    type InnerModule = VisionVideoTemporalConfig;
+
+    fn valid(&self) -> Self::InnerModule {
+        self.clone()
+    }
+
+    fn from_inner(module: Self::InnerModule) -> Self {
+        module
+    }
+}
+
+impl ModuleDisplayDefault for VisionVideoTemporalConfig {
+    fn content(&self, content: Content) -> Option<Content> {
+        content
+            .add("n_layer", &self.n_layer)
+            .add("n_head", &self.n_head)
+            .add(
+                "mlp_internal_dim_multiplier",
+                &self.mlp_internal_dim_multiplier,
+            )
+            .add(
+                "rollout_fast_steps_per_slow_step",
+                &self.rollout_fast_steps_per_slow_step,
+            )
+            .add("predict_backprop_frames", &self.predict_backprop_frames)
+            .add("mode_embeddings", &self.mode_embeddings)
+            .add("refine_passes", &self.refine_passes)
+            .add("fused", &self.fused)
+            .add("wgpu_recurrent_kernel", &self.wgpu_recurrent_kernel)
+            .add("wgpu_rollout_fused", &self.wgpu_rollout_fused)
+            .add("latent_block_size", &self.latent_block_size)
+            .add("time_block_size", &self.time_block_size)
+            .optional()
+    }
+}
+
+impl ModuleDisplay for VisionVideoTemporalConfig {}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(default)]
+pub struct VisionVideoLejepaLossConfig {
+    pub prediction_weight: f32,
+    pub observe_weight: f32,
+    pub cosine_weight: f32,
+    pub probe_weight: f32,
+    pub debug_recon_weight: f32,
+    pub debug_recon_hidden_dim: usize,
+    pub sigreg: VisionLejepaLossConfig,
+}
+
+impl Default for VisionVideoLejepaLossConfig {
+    fn default() -> Self {
+        Self {
+            prediction_weight: 1.0,
+            observe_weight: 1.0,
+            cosine_weight: 0.1,
+            probe_weight: 0.25,
+            debug_recon_weight: 1.0,
+            debug_recon_hidden_dim: 256,
+            sigreg: VisionLejepaLossConfig::default(),
+        }
+    }
+}
+
+impl ModuleDisplayDefault for VisionVideoLejepaLossConfig {
+    fn content(&self, content: Content) -> Option<Content> {
+        content
+            .add("prediction_weight", &self.prediction_weight)
+            .add("observe_weight", &self.observe_weight)
+            .add("cosine_weight", &self.cosine_weight)
+            .add("probe_weight", &self.probe_weight)
+            .add("debug_recon_weight", &self.debug_recon_weight)
+            .add("debug_recon_hidden_dim", &self.debug_recon_hidden_dim)
+            .add("sigreg", &self.sigreg)
+            .optional()
+    }
+}
+
+impl ModuleDisplay for VisionVideoLejepaLossConfig {}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(default)]
+pub struct VisionVideoLejepaConfig {
+    pub context_frames: usize,
+    pub target_frames: usize,
+    pub train_target_frames_min: usize,
+    pub train_target_frames_max: usize,
+    pub train_target_warmup_steps: usize,
+    pub frame_stride: usize,
+    pub predictor_hidden_dim: usize,
+    pub teacher_ema: VisionMomentumTeacherConfig,
+    pub temporal: VisionVideoTemporalConfig,
+    pub loss: VisionVideoLejepaLossConfig,
+    pub artifact_output: VisionArtifactOutputMode,
+    pub artifact_fps: u32,
+    pub artifact_every: usize,
+    pub artifact_max_images: usize,
+    pub artifact_future_frames: usize,
+    pub artifact_upscale: usize,
+    pub artifact_overwrite: bool,
+}
+
+impl Default for VisionVideoLejepaConfig {
+    fn default() -> Self {
+        Self {
+            context_frames: 4,
+            target_frames: 2,
+            train_target_frames_min: 0,
+            train_target_frames_max: 0,
+            train_target_warmup_steps: 0,
+            frame_stride: 1,
+            predictor_hidden_dim: 0,
+            teacher_ema: VisionMomentumTeacherConfig::default(),
+            temporal: VisionVideoTemporalConfig::default(),
+            loss: VisionVideoLejepaLossConfig::default(),
+            artifact_output: VisionArtifactOutputMode::Mp4,
+            artifact_fps: 6,
+            artifact_every: 0,
+            artifact_max_images: 4,
+            artifact_future_frames: 0,
+            artifact_upscale: 4,
+            artifact_overwrite: true,
+        }
+    }
+}
+
+impl<B: Backend> Module<B> for VisionVideoLejepaConfig {
+    type Record = ();
+
+    fn collect_devices(&self, devices: burn::module::Devices<B>) -> burn::module::Devices<B> {
+        devices
+    }
+
+    fn fork(self, _device: &B::Device) -> Self {
+        self
+    }
+
+    fn to_device(self, _device: &B::Device) -> Self {
+        self
+    }
+
+    fn visit<Visitor: burn::module::ModuleVisitor<B>>(&self, _visitor: &mut Visitor) {}
+
+    fn map<Mapper: burn::module::ModuleMapper<B>>(self, _mapper: &mut Mapper) -> Self {
+        self
+    }
+
+    fn load_record(self, _record: Self::Record) -> Self {
+        self
+    }
+
+    fn into_record(self) -> Self::Record {}
+}
+
+impl<B: AutodiffBackend> AutodiffModule<B> for VisionVideoLejepaConfig {
+    type InnerModule = VisionVideoLejepaConfig;
+
+    fn valid(&self) -> Self::InnerModule {
+        self.clone()
+    }
+
+    fn from_inner(module: Self::InnerModule) -> Self {
+        module
+    }
+}
+
+impl ModuleDisplayDefault for VisionVideoLejepaConfig {
+    fn content(&self, content: Content) -> Option<Content> {
+        content
+            .add("context_frames", &self.context_frames)
+            .add("target_frames", &self.target_frames)
+            .add("train_target_frames_min", &self.train_target_frames_min)
+            .add("train_target_frames_max", &self.train_target_frames_max)
+            .add("train_target_warmup_steps", &self.train_target_warmup_steps)
+            .add("frame_stride", &self.frame_stride)
+            .add("predictor_hidden_dim", &self.predictor_hidden_dim)
+            .add("teacher_ema", &self.teacher_ema)
+            .add("temporal", &self.temporal)
+            .add("loss", &self.loss)
+            .add("artifact_output", &self.artifact_output)
+            .add("artifact_fps", &self.artifact_fps)
+            .add("artifact_every", &self.artifact_every)
+            .add("artifact_max_images", &self.artifact_max_images)
+            .add("artifact_future_frames", &self.artifact_future_frames)
+            .add("artifact_upscale", &self.artifact_upscale)
+            .add("artifact_overwrite", &self.artifact_overwrite)
+            .optional()
+    }
+}
+
+impl ModuleDisplay for VisionVideoLejepaConfig {}
+
+impl VisionVideoLejepaConfig {
+    pub fn effective_train_target_frames_min(&self) -> usize {
+        if self.train_target_frames_min == 0 {
+            self.target_frames.max(1)
+        } else {
+            self.train_target_frames_min.max(1)
+        }
+    }
+
+    pub fn effective_train_target_frames_max(&self) -> usize {
+        let min_frames = self.effective_train_target_frames_min();
+        let configured_max = if self.train_target_frames_max == 0 {
+            self.target_frames
+        } else {
+            self.train_target_frames_max
+        };
+        configured_max.max(min_frames)
+    }
+
+    pub fn max_supervised_target_frames(&self) -> usize {
+        self.target_frames
+            .max(self.effective_train_target_frames_max())
+            .max(1)
+    }
+}
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
@@ -883,6 +1044,10 @@ impl<B: AutodiffBackend> AutodiffModule<B> for VisionMaeConfig {
 
     fn valid(&self) -> Self::InnerModule {
         self.clone()
+    }
+
+    fn from_inner(module: Self::InnerModule) -> Self {
+        module
     }
 }
 
@@ -1149,6 +1314,10 @@ impl<B: AutodiffBackend> AutodiffModule<B> for VisionSaccadeConfig {
     fn valid(&self) -> Self::InnerModule {
         self.clone()
     }
+
+    fn from_inner(module: Self::InnerModule) -> Self {
+        module
+    }
 }
 
 impl ModuleDisplayDefault for VisionSaccadeConfig {
@@ -1197,6 +1366,14 @@ pub enum VisionDatasetDownloadConfig {
         #[serde(default)]
         variant: ImagenetteVariant,
     },
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum VisionDatasetSource {
+    #[default]
+    Imagenet,
+    MovingMnist,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Default)]
@@ -1273,14 +1450,65 @@ fn default_mae_pyramid_levels() -> usize {
     1
 }
 
+fn default_moving_mnist_digit_size() -> usize {
+    20
+}
+
+fn default_moving_mnist_min_velocity() -> f32 {
+    0.8
+}
+
+fn default_moving_mnist_max_velocity() -> f32 {
+    2.2
+}
+
+fn default_moving_mnist_train_seed() -> u64 {
+    1337
+}
+
+fn default_moving_mnist_val_seed() -> u64 {
+    7331
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(default)]
+pub struct VisionMovingMnistConfig {
+    #[serde(default = "default_moving_mnist_digit_size")]
+    pub digit_size: usize,
+    #[serde(default = "default_moving_mnist_min_velocity")]
+    pub min_velocity: f32,
+    #[serde(default = "default_moving_mnist_max_velocity")]
+    pub max_velocity: f32,
+    #[serde(default = "default_moving_mnist_train_seed")]
+    pub train_seed: u64,
+    #[serde(default = "default_moving_mnist_val_seed")]
+    pub val_seed: u64,
+}
+
+impl Default for VisionMovingMnistConfig {
+    fn default() -> Self {
+        Self {
+            digit_size: default_moving_mnist_digit_size(),
+            min_velocity: default_moving_mnist_min_velocity(),
+            max_velocity: default_moving_mnist_max_velocity(),
+            train_seed: default_moving_mnist_train_seed(),
+            val_seed: default_moving_mnist_val_seed(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
 pub struct VisionDatasetConfig {
+    #[serde(default)]
+    pub source: VisionDatasetSource,
     pub imagenet_root: PathBuf,
     pub train_dir: String,
     pub val_dir: String,
     pub max_records: Option<usize>,
     pub download: Option<VisionDatasetDownloadConfig>,
+    #[serde(default)]
+    pub moving_mnist: VisionMovingMnistConfig,
     #[serde(default = "default_prefetch_batches")]
     pub prefetch_batches: usize,
     #[serde(default = "default_prefetch_workers")]
@@ -1298,11 +1526,13 @@ pub struct VisionDatasetConfig {
 impl Default for VisionDatasetConfig {
     fn default() -> Self {
         Self {
+            source: VisionDatasetSource::default(),
             imagenet_root: PathBuf::from("data/imagenet1k"),
             train_dir: "train".to_string(),
             val_dir: "val".to_string(),
             max_records: None,
             download: None,
+            moving_mnist: VisionMovingMnistConfig::default(),
             prefetch_batches: default_prefetch_batches(),
             prefetch_workers: default_prefetch_workers(),
             prefetch_to_device: default_prefetch_to_device(),
@@ -1427,6 +1657,8 @@ pub struct VisionModelConfig {
     pub image_size: usize,
     pub patch_size: usize,
     pub patch_embed_mode: VisionPatchEmbedMode,
+    #[serde(default)]
+    pub backbone: Option<VisionBackboneKind>,
     pub in_channels: usize,
     pub embed_dim: usize,
     pub steps: usize,
@@ -1455,6 +1687,7 @@ pub struct VisionModelConfig {
     pub relu_threshold: f32,
     pub mhc: VisionManifoldHyperConnectionsConfig,
     pub trm_graph: VisionTrmGraphConfig,
+    pub rho_stream: VisionRhoStreamConfig,
 }
 
 impl Default for VisionModelConfig {
@@ -1465,6 +1698,7 @@ impl Default for VisionModelConfig {
             image_size,
             patch_size,
             patch_embed_mode: VisionPatchEmbedMode::default(),
+            backbone: None,
             in_channels: 3,
             embed_dim: 256,
             steps: 6,
@@ -1489,12 +1723,53 @@ impl Default for VisionModelConfig {
             relu_threshold: 0.0,
             mhc: VisionManifoldHyperConnectionsConfig::default(),
             trm_graph: VisionTrmGraphConfig::default(),
+            rho_stream: VisionRhoStreamConfig::default(),
         }
     }
 }
 
 impl VisionModelConfig {
+    pub fn resolved_backbone_kind(&self) -> Result<VisionBackboneKind> {
+        let legacy_pyramid = self.trm_graph.enabled;
+        let legacy_cellular = self.rho_stream.enabled;
+
+        if legacy_pyramid && legacy_cellular {
+            return Err(anyhow!(
+                "vision.rho_stream and vision.trm_graph cannot both be enabled"
+            ));
+        }
+
+        let kind = match self.backbone {
+            Some(kind) => kind,
+            None => {
+                if legacy_pyramid {
+                    VisionBackboneKind::Pyramid
+                } else if legacy_cellular {
+                    VisionBackboneKind::Cellular
+                } else {
+                    VisionBackboneKind::Dense
+                }
+            }
+        };
+
+        match kind {
+            VisionBackboneKind::Dense if legacy_pyramid || legacy_cellular => Err(anyhow!(
+                "vision.backbone = \"dense\" conflicts with legacy enabled backbone flags"
+            )),
+            VisionBackboneKind::Pyramid if legacy_cellular => Err(anyhow!(
+                "vision.backbone = \"pyramid\" conflicts with vision.rho_stream.enabled = true"
+            )),
+            VisionBackboneKind::Cellular if legacy_pyramid => Err(anyhow!(
+                "vision.backbone = \"cellular\" conflicts with vision.trm_graph.enabled = true"
+            )),
+            _ => Ok(kind),
+        }
+    }
+
     pub fn build(&self) -> VisionDragonConfig {
+        let backbone = self
+            .resolved_backbone_kind()
+            .expect("vision backbone should be resolved during validation");
         let patch_size = self.patch_size.max(1);
         let grid = self.image_size.div_ceil(patch_size);
         let num_eyes = self.num_eyes.max(1);
@@ -1513,11 +1788,16 @@ impl VisionModelConfig {
             relu_threshold: self.relu_threshold,
             ..Default::default()
         };
+        let mut trm_graph = self.trm_graph.clone();
+        trm_graph.enabled = matches!(backbone, VisionBackboneKind::Pyramid);
+        let mut rho_stream = self.rho_stream.clone();
+        rho_stream.enabled = matches!(backbone, VisionBackboneKind::Cellular);
 
         VisionDragonConfig {
             image_size: self.image_size,
             patch_size: self.patch_size,
             patch_embed_mode: self.patch_embed_mode,
+            backbone,
             in_channels: self.in_channels,
             embed_dim: self.embed_dim,
             steps: self.steps,
@@ -1551,7 +1831,8 @@ impl VisionModelConfig {
                 add_branch_out_to_residual: self.mhc.add_branch_out_to_residual,
                 dropout: self.mhc.dropout,
             },
-            trm_graph: self.trm_graph.clone(),
+            trm_graph,
+            rho_stream,
         }
     }
 }

@@ -16,17 +16,17 @@ benchmark = ["train", "burn_dragon_core/benchmark", "burn_dragon_train/benchmark
 cli = ["train", "dep:clap", "dep:ctrlc", "burn_dragon_train/cli"]
 train = [
   "burn_dragon_core/train",
-  "burn_dragon_language/train",
   "burn_dragon_train/train",
   "dep:anyhow",
   "dep:burn-autodiff",
+  "dep:burn-dataset",
   "dep:burn-ndarray",
   "dep:burn-train",
   "dep:burn-wgpu",
   "dep:burn-cubecl",
   "dep:burn-fusion",
+  "dep:burn-ir",
   "dep:cubecl",
-  "dep:cubecl-runtime",
   "dep:names",
   "dep:toml",
   "dep:ureq",
@@ -37,31 +37,30 @@ train = [
   "dep:image",
   "dep:flate2",
   "dep:tar",
-  "dep:burn_dino",
   "dep:serde_json",
   "dep:serde_yaml",
   "dep:rand",
   "dep:burn_dragon_train",
-  "dep:burn_dragon_language",
 ]
 cuda = ["dep:burn-cuda", "burn_dragon_core/cuda", "burn_dragon_train/cuda"]
 integration_test = ["train", "burn_dragon_train/integration_test"]
 
 [dependencies]
 burn_dragon_core = { path = "../burn_dragon_core", version = "0.4.0", default-features = false }
-burn_dragon_language = { path = "../burn_dragon_language", version = "0.4.0", default-features = false, optional = true }
+burn_dragon_wgpu = { path = "../burn_dragon_wgpu", version = "0.4.0", default-features = false }
 burn_dragon_train = { path = "../burn_dragon_train", version = "0.4.0", default-features = false, optional = true }
 anyhow = { version = "1", optional = true }
-burn = { version = "0.19", default-features = false, features = ["fusion", "ndarray", "std", "wgpu"] }
-burn-autodiff = { version = "0.19", optional = true }
-burn-ndarray = { version = "0.19", optional = true }
-burn-train = { version = "0.19", optional = true, default-features = false, features = ["tui"] }
-burn-wgpu = { version = "0.19", default-features = false, optional = true, features = ["fusion", "std", "template"] }
-burn-cubecl = { version = "0.19", default-features = false, optional = true, features = ["std", "fusion"] }
-burn-fusion = { version = "0.19", default-features = false, optional = true, features = ["std"] }
-burn-cuda = { version = "0.19", optional = true, default-features = false, features = ["std"] }
-cubecl = { version = "0.8", default-features = true, optional = true, features = ["std"] }
-cubecl-runtime = { version = "0.8", default-features = true, optional = true, features = ["channel-mpsc", "std"] }
+burn = { version = "0.21.0-pre.2", default-features = false, features = ["fusion", "ndarray", "std", "wgpu"] }
+burn-autodiff = { version = "0.21.0-pre.2", optional = true }
+burn-dataset = { version = "0.21.0-pre.2", optional = true, features = ["vision"] }
+burn-ndarray = { version = "0.21.0-pre.2", optional = true }
+burn-train = { version = "0.21.0-pre.2", optional = true, default-features = false, features = ["tui"] }
+burn-wgpu = { version = "0.21.0-pre.2", default-features = false, optional = true, features = ["fusion", "std", "template"] }
+burn-cubecl = { version = "0.21.0-pre.2", default-features = false, optional = true, features = ["std", "fusion"] }
+burn-fusion = { version = "0.21.0-pre.2", default-features = false, optional = true, features = ["std"] }
+burn-ir = { version = "0.21.0-pre.2", optional = true }
+burn-cuda = { version = "0.21.0-pre.2", optional = true, default-features = false, features = ["std"] }
+cubecl = { version = "0.10.0-pre.2", default-features = true, optional = true, features = ["std"] }
 names = { version = "0.14", optional = true }
 toml = { version = "0.9", optional = true }
 ureq = { version = "2.9", features = ["tls"], optional = true }
@@ -72,7 +71,7 @@ tracing = { version = "0.1", optional = true }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"], optional = true }
 flate2 = { version = "1.1", optional = true }
 tar = { version = "0.4", optional = true }
-burn_dino = { version = "0.6", default-features = false, optional = true }
+burn_dino = { version = "0.7", default-features = false, optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", optional = true }
 serde_yaml = { version = "0.9", optional = true }
@@ -84,3 +83,8 @@ ctrlc = { version = "3.4", optional = true }
 name = "train"
 path = "src/bin/train.rs"
 required-features = ["cli"]
+
+[dev-dependencies]
+burn_dragon_language = { path = "../burn_dragon_language", version = "0.4.0", default-features = false, features = ["train"] }
+burn-ndarray = { version = "0.21.0-pre.2" }
+tempfile = "3"

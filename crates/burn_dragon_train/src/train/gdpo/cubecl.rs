@@ -3,19 +3,20 @@ use std::any::{Any, TypeId};
 use burn::tensor::Tensor as BurnTensor;
 use burn::tensor::backend::Backend as BackendTrait;
 use burn::tensor::{DType, Shape, TensorPrimitive};
+use burn_cubecl::cubecl;
+#[cfg(feature = "cuda")]
+use burn_cubecl::cubecl::cuda::CudaRuntime;
+use burn_cubecl::cubecl::{calculate_cube_count_elemwise, prelude::*};
 use burn_cubecl::fusion::FusionCubeRuntime;
 use burn_cubecl::kernel::into_contiguous;
 use burn_cubecl::ops::numeric::empty_device;
 use burn_cubecl::tensor::CubeTensor;
 use burn_cubecl::{BoolElement, CubeBackend, CubeRuntime};
-use burn_fusion::FusionTensor;
-use burn_fusion::stream::StreamId;
+use burn_fusion::{FusionTensor, NoOp, stream::OperationStreams};
+use burn_ir::{InitOperationIr, OperationIr, OperationOutput};
 use burn_wgpu::WgpuRuntime;
-#[cfg(feature = "cuda")]
-use cubecl::cuda::CudaRuntime;
-use cubecl::{calculate_cube_count_elemwise, prelude::*};
 
-pub const MAX_GROUP: u32 = 8;
+pub const MAX_GROUP: usize = 8;
 
 pub fn supports_backend<B: BackendTrait>() -> bool
 where
@@ -132,10 +133,19 @@ where
     }
 
     let output = percentile_thresholds_cubecl_runtime::<R>(values, quantile);
-    let shape = output.shape.clone();
+    let shape = output.meta.shape().clone();
     let dtype = output.dtype;
     let handle = output.into();
-    let fusion_out = fusion_client.register_tensor(handle, shape, StreamId::current(), dtype);
+    let desc = InitOperationIr::create(shape, dtype, || {
+        fusion_client.register_tensor_handle(handle)
+    });
+    let fusion_out = fusion_client
+        .register(
+            OperationStreams::default(),
+            OperationIr::Init(desc),
+            NoOp::<CubeBackend<R, f32, i32, BT>>::new(),
+        )
+        .output();
     let out_prim = try_cast_backend::<B, _>(fusion_out)?;
     Some(BurnTensor::<B, 2>::from_primitive(TensorPrimitive::Float(
         out_prim,
@@ -172,21 +182,21 @@ fn percentile_thresholds_cubecl_runtime<R: CubeRuntime>(
     quantile: f32,
 ) -> CubeTensor<R> {
     let values = into_contiguous(values);
-    let [batch, _group] = values.shape.dims::<2>();
+    let [batch, _group] = values.meta.shape.dims::<2>();
 
     let client = values.client.clone();
     let device = values.device.clone();
     let output = empty_device::<R, f32>(client.clone(), device, Shape::new([batch, 1]));
-    let out_elems = output.shape.num_elements();
-    let cube_dim = CubeDim::new(1, 1, 1);
-    let cube_count = calculate_cube_count_elemwise(out_elems, cube_dim);
+    let out_elems = output.meta.shape.num_elements();
+    let cube_dim = CubeDim::new_3d(1, 1, 1);
+    let cube_count = calculate_cube_count_elemwise(&client, out_elems, cube_dim);
 
-    percentile_thresholds_kernel::launch::<R>(
+    let _ = percentile_thresholds_kernel::launch::<R>(
         &client,
         cube_count,
         cube_dim,
-        values.as_tensor_arg::<f32>(1),
-        output.as_tensor_arg::<f32>(1),
+        values.as_tensor_arg(1),
+        output.as_tensor_arg(1),
         ScalarArg::new(quantile),
     );
 
@@ -211,7 +221,7 @@ fn percentile_thresholds_kernel(values: &Tensor<f32>, output: &mut Tensor<f32>, 
 
     let mut scratch = SharedMemory::<f32>::new(MAX_GROUP);
     let base = ABSOLUTE_POS * values.stride(0);
-    let mut i = 0u32;
+    let mut i = 0usize;
     while i < group {
         let idx = base + i * values.stride(1);
         let mut value = values[idx];
@@ -225,15 +235,15 @@ fn percentile_thresholds_kernel(values: &Tensor<f32>, output: &mut Tensor<f32>, 
             };
         }
         scratch[i] = value;
-        i += 1u32;
+        i += 1usize;
     }
 
     let out_idx = ABSOLUTE_POS * output.stride(0);
-    if group == 1u32 {
+    if group == 1usize {
         output[out_idx] = scratch[0];
         terminate!();
     }
-    if group == 2u32 {
+    if group == 2usize {
         let a = scratch[0];
         let b = scratch[1];
         let lo = if a < b { a } else { b };
@@ -242,25 +252,25 @@ fn percentile_thresholds_kernel(values: &Tensor<f32>, output: &mut Tensor<f32>, 
         terminate!();
     }
 
-    let mut i = 1u32;
+    let mut i = 1usize;
     while i < group {
         let mut j = i;
-        while j > 0u32 {
-            let prev = scratch[j - 1u32];
+        while j > 0usize {
+            let prev = scratch[j - 1usize];
             let curr = scratch[j];
             if curr < prev {
-                scratch[j - 1u32] = curr;
+                scratch[j - 1usize] = curr;
                 scratch[j] = prev;
             }
-            j -= 1u32;
+            j -= 1usize;
         }
-        i += 1u32;
+        i += 1usize;
     }
 
-    let pos = (group - 1u32) as f32 * quantile;
-    let lower = pos as u32;
-    let upper = if lower + 1u32 < group {
-        lower + 1u32
+    let pos = (group - 1usize) as f32 * quantile;
+    let lower = pos as usize;
+    let upper = if lower + 1usize < group {
+        lower + 1usize
     } else {
         lower
     };

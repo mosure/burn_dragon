@@ -32,6 +32,15 @@ pub struct TrainSchedule {
     pub source: ScheduleSource,
 }
 
+pub fn resolve_valid_steps_per_epoch(
+    total_steps: usize,
+    log_frequency: usize,
+    val_steps_per_epoch: usize,
+) -> usize {
+    let desired_valid_steps = usize::max(1, total_steps / log_frequency.max(1));
+    desired_valid_steps.min(val_steps_per_epoch.max(1)).max(1)
+}
+
 pub fn resolve_lr_scheduler(
     optimizer_cfg: &OptimizerConfig,
     total_steps: usize,
@@ -243,5 +252,12 @@ mod tests {
         )
         .expect("noam schedule");
         assert!(matches!(noam, ResolvedLrScheduler::Noam(_)));
+    }
+
+    #[test]
+    fn resolve_valid_steps_per_epoch_is_bounded() {
+        assert_eq!(resolve_valid_steps_per_epoch(100, 10, 20), 10);
+        assert_eq!(resolve_valid_steps_per_epoch(100, 1, 5), 5);
+        assert_eq!(resolve_valid_steps_per_epoch(3, 100, 0), 1);
     }
 }

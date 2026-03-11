@@ -21,6 +21,28 @@ pub struct ArtifactFrame {
     pub rgb: Vec<u8>,
 }
 
+impl ArtifactFrame {
+    pub fn upscale_nearest(&self, scale: usize) -> Self {
+        let scale = scale.max(1);
+        if scale == 1 || self.width == 0 || self.height == 0 {
+            return self.clone();
+        }
+        let width = self.width * scale;
+        let height = self.height * scale;
+        let mut rgb = vec![0u8; width * height * 3];
+        for y in 0..height {
+            let src_y = y / scale;
+            for x in 0..width {
+                let src_x = x / scale;
+                let src = (src_y * self.width + src_x) * 3;
+                let dst = (y * width + x) * 3;
+                rgb[dst..dst + 3].copy_from_slice(&self.rgb[src..src + 3]);
+            }
+        }
+        Self { width, height, rgb }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ArtifactWriteOutcome {
     pub saved: usize,
@@ -224,7 +246,7 @@ fn write_avi(
     fps: u32,
     ffmpeg_path: Option<&Path>,
 ) -> Result<()> {
-    if ffmpeg_path.is_some()
+    if resolve_ffmpeg(ffmpeg_path).is_some()
         && let Ok(()) = write_avi_ffmpeg(path, frames, fps, ffmpeg_path)
     {
         return Ok(());

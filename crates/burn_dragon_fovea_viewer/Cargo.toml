@@ -34,8 +34,8 @@ bevy = { version = "0.17", default-features = false, features = [
   "bevy_winit",
 ] }
 bevy_shader = "0.17"
-burn = { version = "0.19", default-features = false, features = ["std", "wgpu"] }
-burn-wgpu = { version = "0.19", default-features = false, features = ["std"] }
+burn = { version = "0.21.0-pre.2", default-features = false, features = ["std", "wgpu"] }
+burn-wgpu = { version = "0.21.0-pre.2", default-features = false, features = ["std"] }
 burn_dragon_vision = { path = "../burn_dragon_vision", version = "0.4.0", default-features = false, features = ["train"] }
 half = "2"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }

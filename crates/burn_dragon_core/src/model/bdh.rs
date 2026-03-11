@@ -8,6 +8,10 @@ use std::cmp::Ordering;
 
 use super::attention::Attention;
 use super::config::{BDHConfig, FusedKernelConfig};
+use super::init::{
+    near_critical_embedding_initializer, near_critical_projection_std,
+    near_critical_residual_output_std,
+};
 use super::residual_stream::lowrank_residual_step;
 #[cfg(feature = "viz")]
 use super::state::LayerVizState;
@@ -47,7 +51,9 @@ pub struct BDH<B: Backend> {
 
 impl<B: Backend> BDH<B> {
     pub fn new(config: BDHConfig, device: &B::Device) -> Self {
-        let embed = EmbeddingConfig::new(config.vocab_size, config.n_embd).init(device);
+        let embed = EmbeddingConfig::new(config.vocab_size, config.n_embd)
+            .with_initializer(near_critical_embedding_initializer(config.n_embd))
+            .init(device);
         let dropout = DropoutConfig::new(config.dropout).init();
 
         let latent_per_head = config.latent_per_head();
@@ -58,25 +64,35 @@ impl<B: Backend> BDH<B> {
             device,
             &config.fused_kernels,
         );
-
-        let weight_init = |shape: [usize; 2]| {
-            Tensor::<B, 2>::random(shape, TensorDistribution::Normal(0.0, 0.02), device)
-        };
+        let residual_depth = config.n_layer.max(1) * config.rollout_fast_steps_per_slow_step.max(1);
+        let encoder_std =
+            near_critical_residual_output_std(config.n_embd, latent_per_head, residual_depth);
+        let decoder_std =
+            near_critical_residual_output_std(latent_total, config.n_embd, residual_depth);
+        let lm_head_std = near_critical_projection_std(config.n_embd, config.vocab_size);
 
         let encoder = Param::from_tensor(Tensor::<B, 3>::random(
             [config.n_head, config.n_embd, latent_per_head],
-            TensorDistribution::Normal(0.0, 0.02),
+            TensorDistribution::Normal(0.0, encoder_std),
             device,
         ));
 
         let encoder_v = Param::from_tensor(Tensor::<B, 3>::random(
             [config.n_head, config.n_embd, latent_per_head],
-            TensorDistribution::Normal(0.0, 0.02),
+            TensorDistribution::Normal(0.0, encoder_std),
             device,
         ));
 
-        let decoder = Param::from_tensor(weight_init([latent_total, config.n_embd]));
-        let lm_head = Param::from_tensor(weight_init([config.n_embd, config.vocab_size]));
+        let decoder = Param::from_tensor(Tensor::<B, 2>::random(
+            [latent_total, config.n_embd],
+            TensorDistribution::Normal(0.0, decoder_std),
+            device,
+        ));
+        let lm_head = Param::from_tensor(Tensor::<B, 2>::random(
+            [config.n_embd, config.vocab_size],
+            TensorDistribution::Normal(0.0, lm_head_std),
+            device,
+        ));
 
         Self {
             n_layer: config.n_layer,
@@ -281,6 +297,7 @@ impl<B: Backend> BDH<B> {
         };
         let decay = self.attention.alibi_decay();
         let initial_rho = layer_state.rho.as_ref().cloned();
+        let device = query.device();
 
         if self.kernel.enabled && self.kernel.wgpu_recurrent_kernel {
             if let Some(output) = burn_dragon_wgpu::try_fused_recurrent_attention_wgpu(
@@ -289,7 +306,7 @@ impl<B: Backend> BDH<B> {
                 initial_rho.as_ref(),
                 decay.as_ref(),
             ) {
-                if B::ad_enabled() {
+                if B::ad_enabled(&device) {
                     // Keep fused forward values while reusing tensor-core backward semantics.
                     let (reference_context, reference_rho) = self.recurrent_attention_reference(
                         query.clone(),
@@ -484,6 +501,11 @@ impl<B: Backend> BDH<B> {
         let decoder = self.decoder.val();
         let fused = self.kernel.enabled;
         let latent_pattern = &self.kernel.block_sparse.latent;
+        let sparse_mask = if fused && latent_pattern.is_sparse() {
+            Some(latent_pattern.mask::<B>(latent, &current.device()))
+        } else {
+            None
+        };
 
         for layer_state in &mut state.layers {
             let output = lowrank_residual_step(
@@ -496,6 +518,7 @@ impl<B: Backend> BDH<B> {
                 self.kernel.relu_threshold,
                 true,
                 latent_pattern,
+                sparse_mask.clone(),
                 |query, value| {
                     self.recurrent_attention(query, value, layer_state, start_pos, position_mode)
                 },
@@ -504,35 +527,35 @@ impl<B: Backend> BDH<B> {
             );
 
             #[cfg(feature = "viz")]
-            let mixed = output.xy_sparse.clone().swap_dims(1, 2);
+            let mixed = output.y_neuron.clone().swap_dims(1, 2);
             #[cfg(feature = "viz")]
             let [batch, time, heads, latent] = mixed.shape().dims();
 
             #[cfg(feature = "viz")]
             if time > 0 {
                 let last = time - 1;
-                let x_last = output
-                    .x_sparse
+                let x_neuron_last = output
+                    .x_neuron
                     .clone()
                     .slice_dim(2, last..time)
                     .reshape([batch, heads, latent])
                     .slice_dim(0, 0..1)
                     .reshape([heads, latent]);
-                let y_last = output
-                    .y_sparse
+                let y_gate_last = output
+                    .y_gate
                     .clone()
                     .slice_dim(2, last..time)
                     .reshape([batch, heads, latent])
                     .slice_dim(0, 0..1)
                     .reshape([heads, latent]);
-                let xy_last = output
-                    .xy_sparse
+                let y_neuron_last = output
+                    .y_neuron
                     .clone()
                     .slice_dim(2, last..time)
                     .reshape([batch, heads, latent])
                     .slice_dim(0, 0..1)
                     .reshape([heads, latent]);
-                let device = x_last.device();
+                let device = x_neuron_last.device();
                 let rho_last = match layer_state.rho.as_ref() {
                     Some(rho) => {
                         let dims = rho.shape().dims::<4>();
@@ -554,9 +577,9 @@ impl<B: Backend> BDH<B> {
                 };
 
                 layer_state.viz = Some(LayerVizState {
-                    x_last,
-                    y_last,
-                    xy_last,
+                    x_neuron_last,
+                    y_gate_last,
+                    y_neuron_last,
                     rho_last,
                 });
             }
@@ -613,5 +636,55 @@ impl<B: Backend> BDH<B> {
         state: &mut ModelState<B>,
     ) -> (Tensor<B, 3>, Tensor<B, 3>) {
         self.forward_with_state_from_embedded(embedded, state)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use burn::tensor::backend::Backend as BackendTrait;
+    use burn_ndarray::NdArray;
+
+    #[test]
+    fn recurrent_attention_reference_matches_outer_product_state_space_contract() {
+        type Backend = NdArray<f32>;
+        let device = <Backend as BackendTrait>::Device::default();
+        let model = BDH::<Backend>::new(
+            BDHConfig {
+                n_layer: 1,
+                n_embd: 2,
+                n_head: 1,
+                mlp_internal_dim_multiplier: 1,
+                vocab_size: 8,
+                dropout: 0.0,
+                ..Default::default()
+            },
+            &device,
+        );
+
+        let query = Tensor::<Backend, 4>::from_data(
+            TensorData::new(vec![2.0, 3.0, 5.0, 7.0], [1, 1, 2, 2]),
+            &device,
+        );
+        let value = Tensor::<Backend, 4>::from_data(
+            TensorData::new(vec![11.0, 13.0, 17.0, 19.0], [1, 1, 2, 2]),
+            &device,
+        );
+
+        let (context, rho) = model.recurrent_attention_reference(query, value, None, None);
+
+        let context_vec = context
+            .to_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .expect("context vec");
+        let rho_vec = rho
+            .to_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .expect("rho vec");
+
+        assert_eq!(context_vec, vec![0.0, 0.0, 341.0, 403.0]);
+        assert_eq!(rho_vec, vec![107.0, 121.0, 152.0, 172.0]);
     }
 }

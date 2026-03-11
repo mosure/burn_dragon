@@ -115,447 +115,59 @@ impl<B: BackendTrait> Adaptor<LossValue<B>> for SudokuOutput<B> {
     }
 }
 
-#[derive(Clone)]
-pub struct SudokuReconLossInput<B: BackendTrait> {
-    value: Tensor<B, 1>,
-}
-
-impl<B: BackendTrait> SudokuReconLossInput<B> {
-    pub fn new(value: Tensor<B, 1>) -> Self {
-        Self { value }
-    }
-}
-
-#[derive(Clone)]
-pub struct SudokuAccInput<B: BackendTrait> {
-    value: Tensor<B, 1>,
-}
-
-impl<B: BackendTrait> SudokuAccInput<B> {
-    pub fn new(value: Tensor<B, 1>) -> Self {
-        Self { value }
-    }
-}
-
-#[derive(Clone)]
-pub struct SudokuExactAccInput<B: BackendTrait> {
-    value: Tensor<B, 1>,
-}
-
-impl<B: BackendTrait> SudokuExactAccInput<B> {
-    pub fn new(value: Tensor<B, 1>) -> Self {
-        Self { value }
-    }
-}
-
-#[derive(Clone)]
-pub struct SudokuSolveRateInput<B: BackendTrait> {
-    value: Tensor<B, 1>,
-}
-
-impl<B: BackendTrait> SudokuSolveRateInput<B> {
-    pub fn new(value: Tensor<B, 1>) -> Self {
-        Self { value }
-    }
-}
-
-#[derive(Clone)]
-pub struct SudokuPolicyLossInput<B: BackendTrait> {
-    value: Tensor<B, 1>,
-}
-
-impl<B: BackendTrait> SudokuPolicyLossInput<B> {
-    pub fn new(value: Tensor<B, 1>) -> Self {
-        Self { value }
-    }
-}
-
-#[derive(Clone)]
-pub struct SudokuHaltLossInput<B: BackendTrait> {
-    value: Tensor<B, 1>,
-}
-
-impl<B: BackendTrait> SudokuHaltLossInput<B> {
-    pub fn new(value: Tensor<B, 1>) -> Self {
-        Self { value }
-    }
-}
-
-#[derive(Clone)]
-pub struct SudokuHaltProbInput<B: BackendTrait> {
-    value: Tensor<B, 1>,
-}
-
-impl<B: BackendTrait> SudokuHaltProbInput<B> {
-    pub fn new(value: Tensor<B, 1>) -> Self {
-        Self { value }
-    }
-}
-
-#[derive(Clone)]
-pub struct SudokuHaltTargetInput<B: BackendTrait> {
-    value: Tensor<B, 1>,
-}
-
-impl<B: BackendTrait> SudokuHaltTargetInput<B> {
-    pub fn new(value: Tensor<B, 1>) -> Self {
-        Self { value }
-    }
-}
-
-#[derive(Clone)]
-pub struct SudokuAdvantageAbsMeanInput<B: BackendTrait> {
-    value: Tensor<B, 1>,
-}
-
-impl<B: BackendTrait> SudokuAdvantageAbsMeanInput<B> {
-    pub fn new(value: Tensor<B, 1>) -> Self {
-        Self { value }
-    }
-}
-
-#[derive(Clone)]
-pub struct SudokuAdvantageStdInput<B: BackendTrait> {
-    value: Tensor<B, 1>,
-}
-
-impl<B: BackendTrait> SudokuAdvantageStdInput<B> {
-    pub fn new(value: Tensor<B, 1>) -> Self {
-        Self { value }
-    }
-}
-
-#[derive(Clone)]
-pub struct SudokuLogProbMeanInput<B: BackendTrait> {
-    value: Tensor<B, 1>,
-}
-
-impl<B: BackendTrait> SudokuLogProbMeanInput<B> {
-    pub fn new(value: Tensor<B, 1>) -> Self {
-        Self { value }
-    }
-}
-
-#[derive(Clone)]
-pub struct SudokuPolicyEntropyInput<B: BackendTrait> {
-    value: Tensor<B, 1>,
-}
-
-impl<B: BackendTrait> SudokuPolicyEntropyInput<B> {
-    pub fn new(value: Tensor<B, 1>) -> Self {
-        Self { value }
-    }
-}
-
-#[derive(Clone)]
-pub struct SudokuPolicyEntropyAlphaInput<B: BackendTrait> {
-    value: Tensor<B, 1>,
-}
-
-impl<B: BackendTrait> SudokuPolicyEntropyAlphaInput<B> {
-    pub fn new(value: Tensor<B, 1>) -> Self {
-        Self { value }
-    }
-}
-
-#[derive(Clone)]
-pub struct SudokuPolicyEntropyTargetInput<B: BackendTrait> {
-    value: Tensor<B, 1>,
-}
-
-impl<B: BackendTrait> SudokuPolicyEntropyTargetInput<B> {
-    pub fn new(value: Tensor<B, 1>) -> Self {
-        Self { value }
-    }
-}
-
-#[derive(Clone)]
-pub struct SudokuHardRewardInput<B: BackendTrait> {
-    value: Tensor<B, 1>,
-}
-
-impl<B: BackendTrait> SudokuHardRewardInput<B> {
-    pub fn new(value: Tensor<B, 1>) -> Self {
-        Self { value }
-    }
-}
-
-#[derive(Clone)]
-pub struct SudokuEasyRewardInput<B: BackendTrait> {
-    value: Tensor<B, 1>,
-}
-
-impl<B: BackendTrait> SudokuEasyRewardInput<B> {
-    pub fn new(value: Tensor<B, 1>) -> Self {
-        Self { value }
-    }
-}
-
-#[derive(Clone)]
-pub struct SudokuShapingConflictInput<B: BackendTrait> {
-    value: Tensor<B, 1>,
-}
-
-impl<B: BackendTrait> SudokuShapingConflictInput<B> {
-    pub fn new(value: Tensor<B, 1>) -> Self {
-        Self { value }
-    }
-}
-
-#[derive(Clone)]
-pub struct SudokuShapingUnknownInput<B: BackendTrait> {
-    value: Tensor<B, 1>,
-}
-
-impl<B: BackendTrait> SudokuShapingUnknownInput<B> {
-    pub fn new(value: Tensor<B, 1>) -> Self {
-        Self { value }
-    }
-}
-
-#[derive(Clone)]
-pub struct SudokuShapingAccuracyInput<B: BackendTrait> {
-    value: Tensor<B, 1>,
-}
-
-impl<B: BackendTrait> SudokuShapingAccuracyInput<B> {
-    pub fn new(value: Tensor<B, 1>) -> Self {
-        Self { value }
-    }
-}
-
-#[derive(Clone)]
-pub struct SudokuShapingIncorrectInput<B: BackendTrait> {
-    value: Tensor<B, 1>,
-}
-
-impl<B: BackendTrait> SudokuShapingIncorrectInput<B> {
-    pub fn new(value: Tensor<B, 1>) -> Self {
-        Self { value }
-    }
-}
-
-#[derive(Clone)]
-pub struct SudokuSaccadeRevisitRateInput<B: BackendTrait> {
-    value: Tensor<B, 1>,
-}
-
-impl<B: BackendTrait> SudokuSaccadeRevisitRateInput<B> {
-    pub fn new(value: Tensor<B, 1>) -> Self {
-        Self { value }
-    }
-}
-
-#[derive(Clone)]
-pub struct SudokuSaccadeRepeatRateInput<B: BackendTrait> {
-    value: Tensor<B, 1>,
-}
-
-impl<B: BackendTrait> SudokuSaccadeRepeatRateInput<B> {
-    pub fn new(value: Tensor<B, 1>) -> Self {
-        Self { value }
-    }
-}
-
-#[derive(Clone)]
-pub struct SudokuSaccadeUnknownFracInput<B: BackendTrait> {
-    value: Tensor<B, 1>,
-}
-
-impl<B: BackendTrait> SudokuSaccadeUnknownFracInput<B> {
-    pub fn new(value: Tensor<B, 1>) -> Self {
-        Self { value }
-    }
-}
-
-#[derive(Clone)]
-pub struct SudokuSaccadeUniqueFracInput<B: BackendTrait> {
-    value: Tensor<B, 1>,
-}
-
-impl<B: BackendTrait> SudokuSaccadeUniqueFracInput<B> {
-    pub fn new(value: Tensor<B, 1>) -> Self {
-        Self { value }
-    }
-}
-
-#[derive(Clone)]
-pub struct SudokuWriteGateMeanInput<B: BackendTrait> {
-    value: Tensor<B, 1>,
-}
-
-impl<B: BackendTrait> SudokuWriteGateMeanInput<B> {
-    pub fn new(value: Tensor<B, 1>) -> Self {
-        Self { value }
-    }
-}
-
-#[derive(Clone)]
-pub struct SudokuWriteRateInput<B: BackendTrait> {
-    value: Tensor<B, 1>,
-}
-
-impl<B: BackendTrait> SudokuWriteRateInput<B> {
-    pub fn new(value: Tensor<B, 1>) -> Self {
-        Self { value }
-    }
-}
-
-impl<B: BackendTrait> Adaptor<SudokuReconLossInput<B>> for SudokuOutput<B> {
-    fn adapt(&self) -> SudokuReconLossInput<B> {
-        SudokuReconLossInput::new(self.recon_loss.clone())
-    }
-}
-
-impl<B: BackendTrait> Adaptor<SudokuAccInput<B>> for SudokuOutput<B> {
-    fn adapt(&self) -> SudokuAccInput<B> {
-        SudokuAccInput::new(self.acc.clone())
-    }
-}
-
-impl<B: BackendTrait> Adaptor<SudokuExactAccInput<B>> for SudokuOutput<B> {
-    fn adapt(&self) -> SudokuExactAccInput<B> {
-        SudokuExactAccInput::new(self.exact_acc.clone())
-    }
-}
-
-impl<B: BackendTrait> Adaptor<SudokuSolveRateInput<B>> for SudokuOutput<B> {
-    fn adapt(&self) -> SudokuSolveRateInput<B> {
-        SudokuSolveRateInput::new(self.solve_rate.clone())
-    }
-}
-
-impl<B: BackendTrait> Adaptor<SudokuPolicyLossInput<B>> for SudokuOutput<B> {
-    fn adapt(&self) -> SudokuPolicyLossInput<B> {
-        SudokuPolicyLossInput::new(self.policy_loss.clone())
-    }
-}
-
-impl<B: BackendTrait> Adaptor<SudokuHaltLossInput<B>> for SudokuOutput<B> {
-    fn adapt(&self) -> SudokuHaltLossInput<B> {
-        SudokuHaltLossInput::new(self.halt_loss.clone())
-    }
-}
-
-impl<B: BackendTrait> Adaptor<SudokuHaltProbInput<B>> for SudokuOutput<B> {
-    fn adapt(&self) -> SudokuHaltProbInput<B> {
-        SudokuHaltProbInput::new(self.halt_prob_mean.clone())
-    }
-}
-
-impl<B: BackendTrait> Adaptor<SudokuHaltTargetInput<B>> for SudokuOutput<B> {
-    fn adapt(&self) -> SudokuHaltTargetInput<B> {
-        SudokuHaltTargetInput::new(self.halt_target_mean.clone())
-    }
-}
-
-impl<B: BackendTrait> Adaptor<SudokuAdvantageAbsMeanInput<B>> for SudokuOutput<B> {
-    fn adapt(&self) -> SudokuAdvantageAbsMeanInput<B> {
-        SudokuAdvantageAbsMeanInput::new(self.advantage_abs_mean.clone())
-    }
-}
-
-impl<B: BackendTrait> Adaptor<SudokuAdvantageStdInput<B>> for SudokuOutput<B> {
-    fn adapt(&self) -> SudokuAdvantageStdInput<B> {
-        SudokuAdvantageStdInput::new(self.advantage_std.clone())
-    }
-}
-
-impl<B: BackendTrait> Adaptor<SudokuLogProbMeanInput<B>> for SudokuOutput<B> {
-    fn adapt(&self) -> SudokuLogProbMeanInput<B> {
-        SudokuLogProbMeanInput::new(self.log_prob_mean.clone())
-    }
-}
-
-impl<B: BackendTrait> Adaptor<SudokuPolicyEntropyInput<B>> for SudokuOutput<B> {
-    fn adapt(&self) -> SudokuPolicyEntropyInput<B> {
-        SudokuPolicyEntropyInput::new(self.policy_entropy.clone())
-    }
-}
-
-impl<B: BackendTrait> Adaptor<SudokuPolicyEntropyAlphaInput<B>> for SudokuOutput<B> {
-    fn adapt(&self) -> SudokuPolicyEntropyAlphaInput<B> {
-        SudokuPolicyEntropyAlphaInput::new(self.policy_entropy_alpha.clone())
-    }
-}
-
-impl<B: BackendTrait> Adaptor<SudokuPolicyEntropyTargetInput<B>> for SudokuOutput<B> {
-    fn adapt(&self) -> SudokuPolicyEntropyTargetInput<B> {
-        SudokuPolicyEntropyTargetInput::new(self.policy_entropy_target.clone())
-    }
-}
-
-impl<B: BackendTrait> Adaptor<SudokuHardRewardInput<B>> for SudokuOutput<B> {
-    fn adapt(&self) -> SudokuHardRewardInput<B> {
-        SudokuHardRewardInput::new(self.hard_reward_mean.clone())
-    }
-}
-
-impl<B: BackendTrait> Adaptor<SudokuEasyRewardInput<B>> for SudokuOutput<B> {
-    fn adapt(&self) -> SudokuEasyRewardInput<B> {
-        SudokuEasyRewardInput::new(self.easy_reward_mean.clone())
-    }
-}
-
-impl<B: BackendTrait> Adaptor<SudokuShapingConflictInput<B>> for SudokuOutput<B> {
-    fn adapt(&self) -> SudokuShapingConflictInput<B> {
-        SudokuShapingConflictInput::new(self.shaping_conflict_mean.clone())
-    }
-}
-
-impl<B: BackendTrait> Adaptor<SudokuShapingUnknownInput<B>> for SudokuOutput<B> {
-    fn adapt(&self) -> SudokuShapingUnknownInput<B> {
-        SudokuShapingUnknownInput::new(self.shaping_unknown_mean.clone())
-    }
-}
-
-impl<B: BackendTrait> Adaptor<SudokuShapingAccuracyInput<B>> for SudokuOutput<B> {
-    fn adapt(&self) -> SudokuShapingAccuracyInput<B> {
-        SudokuShapingAccuracyInput::new(self.shaping_accuracy_mean.clone())
-    }
-}
-
-impl<B: BackendTrait> Adaptor<SudokuShapingIncorrectInput<B>> for SudokuOutput<B> {
-    fn adapt(&self) -> SudokuShapingIncorrectInput<B> {
-        SudokuShapingIncorrectInput::new(self.shaping_incorrect_mean.clone())
-    }
-}
-
-impl<B: BackendTrait> Adaptor<SudokuSaccadeRevisitRateInput<B>> for SudokuOutput<B> {
-    fn adapt(&self) -> SudokuSaccadeRevisitRateInput<B> {
-        SudokuSaccadeRevisitRateInput::new(self.saccade_revisit_rate.clone())
-    }
-}
-
-impl<B: BackendTrait> Adaptor<SudokuSaccadeRepeatRateInput<B>> for SudokuOutput<B> {
-    fn adapt(&self) -> SudokuSaccadeRepeatRateInput<B> {
-        SudokuSaccadeRepeatRateInput::new(self.saccade_repeat_rate.clone())
-    }
-}
-
-impl<B: BackendTrait> Adaptor<SudokuSaccadeUnknownFracInput<B>> for SudokuOutput<B> {
-    fn adapt(&self) -> SudokuSaccadeUnknownFracInput<B> {
-        SudokuSaccadeUnknownFracInput::new(self.saccade_unknown_frac.clone())
-    }
-}
-
-impl<B: BackendTrait> Adaptor<SudokuSaccadeUniqueFracInput<B>> for SudokuOutput<B> {
-    fn adapt(&self) -> SudokuSaccadeUniqueFracInput<B> {
-        SudokuSaccadeUniqueFracInput::new(self.saccade_unique_frac.clone())
-    }
-}
-
-impl<B: BackendTrait> Adaptor<SudokuWriteGateMeanInput<B>> for SudokuOutput<B> {
-    fn adapt(&self) -> SudokuWriteGateMeanInput<B> {
-        SudokuWriteGateMeanInput::new(self.write_gate_mean.clone())
-    }
-}
-
-impl<B: BackendTrait> Adaptor<SudokuWriteRateInput<B>> for SudokuOutput<B> {
-    fn adapt(&self) -> SudokuWriteRateInput<B> {
-        SudokuWriteRateInput::new(self.write_rate.clone())
-    }
-}
+macro_rules! define_sudoku_scalar_input {
+    ($name:ident, $field:ident) => {
+        #[derive(Clone)]
+        pub struct $name<B: BackendTrait> {
+            value: Tensor<B, 1>,
+        }
+
+        impl<B: BackendTrait> $name<B> {
+            pub fn new(value: Tensor<B, 1>) -> Self {
+                Self { value }
+            }
+        }
+
+        impl<B: BackendTrait> Adaptor<$name<B>> for SudokuOutput<B> {
+            fn adapt(&self) -> $name<B> {
+                $name::new(self.$field.clone())
+            }
+        }
+
+        impl<B: BackendTrait> ScalarValue<B> for $name<B> {
+            fn value(&self) -> Tensor<B, 1> {
+                self.value.clone()
+            }
+        }
+    };
+}
+
+define_sudoku_scalar_input!(SudokuReconLossInput, recon_loss);
+define_sudoku_scalar_input!(SudokuAccInput, acc);
+define_sudoku_scalar_input!(SudokuExactAccInput, exact_acc);
+define_sudoku_scalar_input!(SudokuSolveRateInput, solve_rate);
+define_sudoku_scalar_input!(SudokuPolicyLossInput, policy_loss);
+define_sudoku_scalar_input!(SudokuHaltLossInput, halt_loss);
+define_sudoku_scalar_input!(SudokuHaltProbInput, halt_prob_mean);
+define_sudoku_scalar_input!(SudokuHaltTargetInput, halt_target_mean);
+define_sudoku_scalar_input!(SudokuAdvantageAbsMeanInput, advantage_abs_mean);
+define_sudoku_scalar_input!(SudokuAdvantageStdInput, advantage_std);
+define_sudoku_scalar_input!(SudokuLogProbMeanInput, log_prob_mean);
+define_sudoku_scalar_input!(SudokuPolicyEntropyInput, policy_entropy);
+define_sudoku_scalar_input!(SudokuPolicyEntropyAlphaInput, policy_entropy_alpha);
+define_sudoku_scalar_input!(SudokuPolicyEntropyTargetInput, policy_entropy_target);
+define_sudoku_scalar_input!(SudokuHardRewardInput, hard_reward_mean);
+define_sudoku_scalar_input!(SudokuEasyRewardInput, easy_reward_mean);
+define_sudoku_scalar_input!(SudokuShapingConflictInput, shaping_conflict_mean);
+define_sudoku_scalar_input!(SudokuShapingUnknownInput, shaping_unknown_mean);
+define_sudoku_scalar_input!(SudokuShapingAccuracyInput, shaping_accuracy_mean);
+define_sudoku_scalar_input!(SudokuShapingIncorrectInput, shaping_incorrect_mean);
+define_sudoku_scalar_input!(SudokuSaccadeRevisitRateInput, saccade_revisit_rate);
+define_sudoku_scalar_input!(SudokuSaccadeRepeatRateInput, saccade_repeat_rate);
+define_sudoku_scalar_input!(SudokuSaccadeUnknownFracInput, saccade_unknown_frac);
+define_sudoku_scalar_input!(SudokuSaccadeUniqueFracInput, saccade_unique_frac);
+define_sudoku_scalar_input!(SudokuWriteGateMeanInput, write_gate_mean);
+define_sudoku_scalar_input!(SudokuWriteRateInput, write_rate);
 
 pub struct SudokuTrainItem<B: AutodiffBackend> {
     loss: Tensor<B, 1>,
@@ -683,162 +295,6 @@ impl<B: AutodiffBackend> ItemLazy for SudokuTrainItem<B> {
             self.write_gate_mean.detach().inner(),
             self.write_rate.detach().inner(),
         )
-    }
-}
-
-impl<B: BackendTrait> ScalarValue<B> for SudokuReconLossInput<B> {
-    fn value(&self) -> Tensor<B, 1> {
-        self.value.clone()
-    }
-}
-
-impl<B: BackendTrait> ScalarValue<B> for SudokuAccInput<B> {
-    fn value(&self) -> Tensor<B, 1> {
-        self.value.clone()
-    }
-}
-
-impl<B: BackendTrait> ScalarValue<B> for SudokuExactAccInput<B> {
-    fn value(&self) -> Tensor<B, 1> {
-        self.value.clone()
-    }
-}
-
-impl<B: BackendTrait> ScalarValue<B> for SudokuSolveRateInput<B> {
-    fn value(&self) -> Tensor<B, 1> {
-        self.value.clone()
-    }
-}
-
-impl<B: BackendTrait> ScalarValue<B> for SudokuPolicyLossInput<B> {
-    fn value(&self) -> Tensor<B, 1> {
-        self.value.clone()
-    }
-}
-
-impl<B: BackendTrait> ScalarValue<B> for SudokuHaltLossInput<B> {
-    fn value(&self) -> Tensor<B, 1> {
-        self.value.clone()
-    }
-}
-
-impl<B: BackendTrait> ScalarValue<B> for SudokuHaltProbInput<B> {
-    fn value(&self) -> Tensor<B, 1> {
-        self.value.clone()
-    }
-}
-
-impl<B: BackendTrait> ScalarValue<B> for SudokuHaltTargetInput<B> {
-    fn value(&self) -> Tensor<B, 1> {
-        self.value.clone()
-    }
-}
-
-impl<B: BackendTrait> ScalarValue<B> for SudokuAdvantageAbsMeanInput<B> {
-    fn value(&self) -> Tensor<B, 1> {
-        self.value.clone()
-    }
-}
-
-impl<B: BackendTrait> ScalarValue<B> for SudokuAdvantageStdInput<B> {
-    fn value(&self) -> Tensor<B, 1> {
-        self.value.clone()
-    }
-}
-
-impl<B: BackendTrait> ScalarValue<B> for SudokuLogProbMeanInput<B> {
-    fn value(&self) -> Tensor<B, 1> {
-        self.value.clone()
-    }
-}
-
-impl<B: BackendTrait> ScalarValue<B> for SudokuPolicyEntropyInput<B> {
-    fn value(&self) -> Tensor<B, 1> {
-        self.value.clone()
-    }
-}
-
-impl<B: BackendTrait> ScalarValue<B> for SudokuPolicyEntropyAlphaInput<B> {
-    fn value(&self) -> Tensor<B, 1> {
-        self.value.clone()
-    }
-}
-
-impl<B: BackendTrait> ScalarValue<B> for SudokuPolicyEntropyTargetInput<B> {
-    fn value(&self) -> Tensor<B, 1> {
-        self.value.clone()
-    }
-}
-
-impl<B: BackendTrait> ScalarValue<B> for SudokuHardRewardInput<B> {
-    fn value(&self) -> Tensor<B, 1> {
-        self.value.clone()
-    }
-}
-
-impl<B: BackendTrait> ScalarValue<B> for SudokuEasyRewardInput<B> {
-    fn value(&self) -> Tensor<B, 1> {
-        self.value.clone()
-    }
-}
-
-impl<B: BackendTrait> ScalarValue<B> for SudokuShapingConflictInput<B> {
-    fn value(&self) -> Tensor<B, 1> {
-        self.value.clone()
-    }
-}
-
-impl<B: BackendTrait> ScalarValue<B> for SudokuShapingUnknownInput<B> {
-    fn value(&self) -> Tensor<B, 1> {
-        self.value.clone()
-    }
-}
-
-impl<B: BackendTrait> ScalarValue<B> for SudokuShapingAccuracyInput<B> {
-    fn value(&self) -> Tensor<B, 1> {
-        self.value.clone()
-    }
-}
-
-impl<B: BackendTrait> ScalarValue<B> for SudokuShapingIncorrectInput<B> {
-    fn value(&self) -> Tensor<B, 1> {
-        self.value.clone()
-    }
-}
-
-impl<B: BackendTrait> ScalarValue<B> for SudokuSaccadeRevisitRateInput<B> {
-    fn value(&self) -> Tensor<B, 1> {
-        self.value.clone()
-    }
-}
-
-impl<B: BackendTrait> ScalarValue<B> for SudokuSaccadeRepeatRateInput<B> {
-    fn value(&self) -> Tensor<B, 1> {
-        self.value.clone()
-    }
-}
-
-impl<B: BackendTrait> ScalarValue<B> for SudokuSaccadeUnknownFracInput<B> {
-    fn value(&self) -> Tensor<B, 1> {
-        self.value.clone()
-    }
-}
-
-impl<B: BackendTrait> ScalarValue<B> for SudokuSaccadeUniqueFracInput<B> {
-    fn value(&self) -> Tensor<B, 1> {
-        self.value.clone()
-    }
-}
-
-impl<B: BackendTrait> ScalarValue<B> for SudokuWriteGateMeanInput<B> {
-    fn value(&self) -> Tensor<B, 1> {
-        self.value.clone()
-    }
-}
-
-impl<B: BackendTrait> ScalarValue<B> for SudokuWriteRateInput<B> {
-    fn value(&self) -> Tensor<B, 1> {
-        self.value.clone()
     }
 }
 

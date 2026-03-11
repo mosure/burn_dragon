@@ -9,6 +9,7 @@ pub fn teacher_variant_dim(variant: VisionTeacherVariant) -> usize {
     }
 }
 
+#[cfg(feature = "burn_dino")]
 pub fn build_dino_config(
     variant: VisionTeacherVariant,
     image_size: usize,

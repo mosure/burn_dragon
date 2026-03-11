@@ -124,113 +124,10 @@ pub(crate) fn build_sampling_pyramid<B: BackendTrait>(
     levels
 }
 
-impl<B: AutodiffBackend> TrainStep<ImageNetBatch<B>, VisionTrainItem<B>> for VisionDistillModel<B> {
-    fn step(&self, batch: ImageNetBatch<B>) -> TrainOutput<VisionTrainItem<B>> {
-        let ImageNetBatch {
-            images,
-            teacher_patch,
-            teacher_cls,
-            ..
-        } = batch;
+impl<B: AutodiffBackend> TrainStep for VisionLejepaModel<B> {
+    type Input = ImageNetBatch<B>;
+    type Output = VisionTrainItem<B>;
 
-        let (teacher_patch, teacher_cls) = if let Some(teacher) = &self.teacher {
-            let output = teacher.forward(images.clone(), None);
-            (output.x_norm_patchtokens, output.x_norm_clstoken)
-        } else {
-            let teacher_patch = teacher_patch.expect("teacher patch features required");
-            let teacher_cls = teacher_cls.expect("teacher cls features required");
-            (teacher_patch, teacher_cls)
-        };
-
-        let rollout_steps = self.rollout.sample_steps();
-        let backprop_steps = self.rollout.backprop_steps(rollout_steps);
-        let output = self
-            .model
-            .forward_images_steps_rollout(images, rollout_steps, backprop_steps);
-        let loss = vision_distillation_loss(
-            output.patch_tokens,
-            teacher_patch,
-            output.cls_token,
-            teacher_cls,
-            &self.loss,
-        );
-        let zero = Tensor::<B, 1>::zeros([1], &loss.device());
-        let grads = loss.backward();
-
-        TrainOutput::new(
-            self,
-            grads,
-            VisionTrainItem::new(
-                loss,
-                zero.clone(),
-                zero.clone(),
-                zero.clone(),
-                zero.clone(),
-                zero.clone(),
-                zero.clone(),
-                zero.clone(),
-                zero.clone(),
-                zero.clone(),
-                zero.clone(),
-                zero.clone(),
-                zero.clone(),
-                zero,
-            ),
-        )
-    }
-}
-
-impl<B: BackendTrait> ValidStep<ImageNetBatch<B>, VisionOutput<B>> for VisionDistillModel<B> {
-    fn step(&self, batch: ImageNetBatch<B>) -> VisionOutput<B> {
-        let ImageNetBatch {
-            images,
-            teacher_patch,
-            teacher_cls,
-            ..
-        } = batch;
-
-        let (teacher_patch, teacher_cls) = if let Some(teacher) = &self.teacher {
-            let output = teacher.forward(images.clone(), None);
-            (output.x_norm_patchtokens, output.x_norm_clstoken)
-        } else {
-            let teacher_patch = teacher_patch.expect("teacher patch features required");
-            let teacher_cls = teacher_cls.expect("teacher cls features required");
-            (teacher_patch, teacher_cls)
-        };
-
-        let backprop_steps = self.rollout.backprop_steps(self.rollout.max_steps);
-        let output =
-            self.model
-                .forward_images_steps_rollout(images, self.rollout.max_steps, backprop_steps);
-        let loss = vision_distillation_loss(
-            output.patch_tokens,
-            teacher_patch,
-            output.cls_token,
-            teacher_cls,
-            &self.loss,
-        );
-        let zero = Tensor::<B, 1>::zeros([1], &loss.device());
-        VisionOutput::new(
-            loss,
-            zero.clone(),
-            zero.clone(),
-            zero.clone(),
-            zero.clone(),
-            zero.clone(),
-            zero.clone(),
-            zero.clone(),
-            zero.clone(),
-            zero.clone(),
-            zero.clone(),
-            zero.clone(),
-            zero.clone(),
-            zero,
-            None,
-        )
-    }
-}
-
-impl<B: AutodiffBackend> TrainStep<ImageNetBatch<B>, VisionTrainItem<B>> for VisionLejepaModel<B> {
     fn step(&self, batch: ImageNetBatch<B>) -> TrainOutput<VisionTrainItem<B>> {
         let rollout_steps = self.rollout.sample_steps();
         let backprop_steps = self.rollout.backprop_steps(rollout_steps);
@@ -245,6 +142,8 @@ impl<B: AutodiffBackend> TrainStep<ImageNetBatch<B>, VisionTrainItem<B>> for Vis
             VisionTrainItem::new(
                 losses.total,
                 losses.inv,
+                zero.clone(),
+                zero.clone(),
                 losses.sigreg,
                 losses.recon,
                 losses.recon_psnr_masked,
@@ -267,11 +166,14 @@ impl<B: AutodiffBackend> TrainStep<ImageNetBatch<B>, VisionTrainItem<B>> for Vis
         O: burn::optim::Optimizer<Self, BB>,
         Self: AutodiffModule<BB>,
     {
-        optim.step(lr, self, grads)
+        optim.step(lr, self, grads).sync_teacher_from_student()
     }
 }
 
-impl<B: BackendTrait> ValidStep<ImageNetBatch<B>, VisionOutput<B>> for VisionLejepaModel<B> {
+impl<B: BackendTrait> ValidStep for VisionLejepaModel<B> {
+    type Input = ImageNetBatch<B>;
+    type Output = VisionOutput<B>;
+
     fn step(&self, batch: ImageNetBatch<B>) -> VisionOutput<B> {
         let backprop_steps = self.rollout.backprop_steps(self.rollout.max_steps);
         let capture_artifacts = self.config.artifact_every > 0;
@@ -288,6 +190,8 @@ impl<B: BackendTrait> ValidStep<ImageNetBatch<B>, VisionOutput<B>> for VisionLej
         VisionOutput::new(
             losses.total,
             losses.inv,
+            zero.clone(),
+            zero.clone(),
             losses.sigreg,
             losses.recon,
             losses.recon_psnr_masked,
@@ -305,7 +209,10 @@ impl<B: BackendTrait> ValidStep<ImageNetBatch<B>, VisionOutput<B>> for VisionLej
     }
 }
 
-impl<B: AutodiffBackend> TrainStep<ImageNetBatch<B>, VisionTrainItem<B>> for VisionMaeModel<B> {
+impl<B: AutodiffBackend> TrainStep for VisionMaeModel<B> {
+    type Input = ImageNetBatch<B>;
+    type Output = VisionTrainItem<B>;
+
     fn step(&self, batch: ImageNetBatch<B>) -> TrainOutput<VisionTrainItem<B>> {
         let rollout_steps = self.rollout.sample_steps();
         let backprop_steps = self.rollout.backprop_steps(rollout_steps);
@@ -318,6 +225,8 @@ impl<B: AutodiffBackend> TrainStep<ImageNetBatch<B>, VisionTrainItem<B>> for Vis
             grads,
             VisionTrainItem::new(
                 losses.total,
+                zero.clone(),
+                zero.clone(),
                 zero.clone(),
                 zero.clone(),
                 losses.recon,
@@ -336,7 +245,10 @@ impl<B: AutodiffBackend> TrainStep<ImageNetBatch<B>, VisionTrainItem<B>> for Vis
     }
 }
 
-impl<B: BackendTrait> ValidStep<ImageNetBatch<B>, VisionOutput<B>> for VisionMaeModel<B> {
+impl<B: BackendTrait> ValidStep for VisionMaeModel<B> {
+    type Input = ImageNetBatch<B>;
+    type Output = VisionOutput<B>;
+
     fn step(&self, batch: ImageNetBatch<B>) -> VisionOutput<B> {
         let backprop_steps = self.rollout.backprop_steps(self.rollout.max_steps);
         let capture_artifacts = self.config.artifact_every > 0;
@@ -351,6 +263,8 @@ impl<B: BackendTrait> ValidStep<ImageNetBatch<B>, VisionOutput<B>> for VisionMae
         let zero = Tensor::<B, 1>::zeros([1], &losses.total.device());
         VisionOutput::new(
             losses.total,
+            zero.clone(),
+            zero.clone(),
             zero.clone(),
             zero.clone(),
             losses.recon,
@@ -395,7 +309,10 @@ impl<B: AutodiffBackend> VisionSaccadeModel<B> {
     }
 }
 
-impl<B: AutodiffBackend> TrainStep<ImageNetBatch<B>, VisionTrainItem<B>> for VisionSaccadeModel<B> {
+impl<B: AutodiffBackend> TrainStep for VisionSaccadeModel<B> {
+    type Input = ImageNetBatch<B>;
+    type Output = VisionTrainItem<B>;
+
     fn step(&self, batch: ImageNetBatch<B>) -> TrainOutput<VisionTrainItem<B>> {
         let rollout_steps = self.rollout.sample_steps();
         let backprop_steps = self.rollout.backprop_steps(rollout_steps);
@@ -411,6 +328,8 @@ impl<B: AutodiffBackend> TrainStep<ImageNetBatch<B>, VisionTrainItem<B>> for Vis
                 VisionTrainItem::new(
                     losses.total,
                     losses.inv,
+                    zero.clone(),
+                    zero.clone(),
                     losses.sigreg,
                     losses.recon,
                     losses.recon_psnr.clone(),
@@ -532,6 +451,8 @@ impl<B: AutodiffBackend> TrainStep<ImageNetBatch<B>, VisionTrainItem<B>> for Vis
             item: VisionTrainItem::new(
                 total,
                 inv,
+                zero.clone(),
+                zero.clone(),
                 sigreg,
                 recon,
                 recon_psnr.clone(),
@@ -549,7 +470,10 @@ impl<B: AutodiffBackend> TrainStep<ImageNetBatch<B>, VisionTrainItem<B>> for Vis
     }
 }
 
-impl<B: BackendTrait> ValidStep<ImageNetBatch<B>, VisionOutput<B>> for VisionSaccadeModel<B> {
+impl<B: BackendTrait> ValidStep for VisionSaccadeModel<B> {
+    type Input = ImageNetBatch<B>;
+    type Output = VisionOutput<B>;
+
     fn step(&self, batch: ImageNetBatch<B>) -> VisionOutput<B> {
         let backprop_steps = self.rollout.backprop_steps(self.rollout.max_steps);
         let capture_artifacts = self.config.artifact_every > 0;
@@ -565,6 +489,8 @@ impl<B: BackendTrait> ValidStep<ImageNetBatch<B>, VisionOutput<B>> for VisionSac
         VisionOutput::new(
             losses.total,
             losses.inv,
+            zero.clone(),
+            zero.clone(),
             losses.sigreg,
             losses.recon,
             losses.recon_psnr.clone(),

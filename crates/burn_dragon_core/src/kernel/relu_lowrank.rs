@@ -10,6 +10,7 @@ pub fn fused_forward<B: Backend>(
     bias: Option<Tensor<B, 3>>,
     threshold: f32,
     layout: &BlockPattern1d,
+    sparse_mask: Option<Tensor<B, 4>>,
 ) -> Tensor<B, 4> {
     let device = input.device();
     let latent = weight.shape().dims::<4>()[3];
@@ -29,7 +30,7 @@ pub fn fused_forward<B: Backend>(
     let mut activated = activation::relu(projected);
 
     if layout.is_sparse() {
-        let mask = layout.mask::<B>(latent, &device);
+        let mask = sparse_mask.unwrap_or_else(|| layout.mask::<B>(latent, &device));
         activated = activated * mask;
     }
 

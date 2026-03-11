@@ -137,6 +137,33 @@ pub(crate) fn lejepa_invariance_loss<B: BackendTrait>(proj: Tensor<B, 3>) -> Ten
     (proj - mean).powf_scalar(2.0).mean()
 }
 
+pub(crate) fn lejepa_teacher_invariance_loss<B: BackendTrait>(
+    student_proj: Tensor<B, 3>,
+    teacher_proj: Tensor<B, 3>,
+) -> Tensor<B, 1> {
+    let device = student_proj.device();
+    let [student_views, student_batch, student_dim] = student_proj.shape().dims::<3>();
+    let [teacher_views, teacher_batch, teacher_dim] = teacher_proj.shape().dims::<3>();
+    if student_views == 0
+        || student_batch == 0
+        || student_dim == 0
+        || teacher_views == 0
+        || teacher_batch != student_batch
+        || teacher_dim != student_dim
+    {
+        return Tensor::<B, 1>::zeros([1], &device);
+    }
+    let teacher_target = if teacher_views == 1 {
+        teacher_proj
+    } else {
+        teacher_proj
+            .mean_dim(0)
+            .reshape([1, student_batch, student_dim])
+    };
+    let teacher_target = teacher_target.repeat_dim(0, student_views);
+    (student_proj - teacher_target).powf_scalar(2.0).mean()
+}
+
 pub(crate) fn normalize_columns<B: BackendTrait>(matrix: Tensor<B, 2>) -> Tensor<B, 2> {
     let norm = matrix
         .clone()
@@ -576,13 +603,20 @@ pub(crate) fn build_lejepa_artifacts<B: BackendTrait>(
     Some(VisionArtifactInput {
         views: Some(views_tensor),
         frames,
+        debug_recon_frames: None,
         patch_norms,
         pca_rgb,
+        posterior_patch_norms_steps: None,
+        posterior_pca_rgb_steps: None,
         patch_norms_steps,
         pca_rgb_steps,
+        debug_patch_norms_steps: None,
+        debug_pca_rgb_steps: None,
         probe_logits,
         labels,
         legend,
+        artifact_scale: 1,
+        prediction_start: None,
     })
 }
 

@@ -82,6 +82,14 @@ fused_core_recurrent = false
 # false: host-managed per-fast-step loop
 # true: fused per-slow-step rollout executor (device-side fast inner steps)
 fused_core_rollout = false
+# Stream executor for generation:
+# "baseline": per-token host sampling/sync behavior.
+# "rollout_chunked": greedy (top_k=1) device-side token buffering with chunked host flush.
+generation_executor = "baseline"
+# Number of generated tokens to flush to host per chunk when `generation_executor="rollout_chunked"`.
+generation_chunk_tokens = 8
+# Maximum generated tokens buffered on device before forced flush.
+generation_device_buffer_tokens = 64
 
 [model]
 n_layer = 4

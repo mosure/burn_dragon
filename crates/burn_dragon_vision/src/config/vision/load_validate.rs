@@ -1,4 +1,6 @@
 use super::*;
+use crate::loss::VisionDistillationLossConfig;
+use burn_dragon_core::BDHConfig;
 
 pub fn load_vision_training_config(paths: &[PathBuf]) -> Result<VisionTrainingConfig> {
     if paths.is_empty() {
@@ -87,7 +89,10 @@ pub(super) fn validate_vision_mhc(vision: &VisionModelConfig) -> Result<()> {
 }
 
 pub(super) fn validate_vision_trm_graph(vision: &VisionModelConfig) -> Result<()> {
-    if !vision.trm_graph.enabled {
+    if !matches!(
+        vision.resolved_backbone_kind()?,
+        VisionBackboneKind::Pyramid
+    ) {
         return Ok(());
     }
     if vision.trm_graph.rank == 0 {
@@ -132,12 +137,48 @@ pub(super) fn validate_vision_trm_graph(vision: &VisionModelConfig) -> Result<()
     Ok(())
 }
 
+pub(super) fn validate_vision_rho_stream(vision: &VisionModelConfig) -> Result<()> {
+    if !matches!(
+        vision.resolved_backbone_kind()?,
+        VisionBackboneKind::Cellular
+    ) {
+        return Ok(());
+    }
+    if vision.rho_stream.local_radius == 0 {
+        return Err(anyhow!("vision.rho_stream.local_radius must be > 0"));
+    }
+    if !(0.0..=1.0).contains(&vision.rho_stream.decay) {
+        return Err(anyhow!(
+            "vision.rho_stream.decay must be in [0, 1] (got {})",
+            vision.rho_stream.decay
+        ));
+    }
+    if vision.rho_stream.wgpu_rollout_fused && !vision.rho_stream.wgpu_forward_kernel {
+        return Err(anyhow!(
+            "vision.rho_stream.wgpu_rollout_fused requires vision.rho_stream.wgpu_forward_kernel = true"
+        ));
+    }
+    if vision.num_eyes.max(1) > 1 {
+        return Err(anyhow!(
+            "vision.backbone = \"cellular\" currently supports single-stream rollout only; set vision.num_eyes = 1"
+        ));
+    }
+    Ok(())
+}
+
 pub(super) fn validate_vision_mode(
     mode: &VisionTrainingModeConfig,
     vision: &VisionModelConfig,
+    dataset: &VisionDatasetConfig,
+    augment: &VisionAugmentationConfig,
 ) -> Result<()> {
     match mode {
         VisionTrainingModeConfig::Distill(distill) => {
+            if dataset.source != VisionDatasetSource::Imagenet {
+                return Err(anyhow!(
+                    "distill mode currently requires dataset.source = \"imagenet\""
+                ));
+            }
             validate_distill_loss(&distill.loss)?;
             match &distill.teacher {
                 VisionTeacherConfig::Features(config) => {
@@ -146,6 +187,35 @@ pub(super) fn validate_vision_mode(
                     }
                     if matches!(config.patch_tokens, Some(0)) {
                         return Err(anyhow!("mode.teacher.patch_tokens must be > 0 when set"));
+                    }
+                    if distill.rollout_supervision_frames == 0 {
+                        return Err(anyhow!(
+                            "mode.rollout_supervision_frames must be > 0 for distill mode"
+                        ));
+                    }
+                    if distill.rollout_supervision_power < 0.0 {
+                        return Err(anyhow!(
+                            "mode.rollout_supervision_power must be >= 0 for distill mode"
+                        ));
+                    }
+                    if distill.rollout_sampling_power < 0.0 {
+                        return Err(anyhow!(
+                            "mode.rollout_sampling_power must be >= 0 for distill mode"
+                        ));
+                    }
+                    let deterministic_train_features = augment.flip_prob <= 0.0
+                        && augment.color_jitter_prob <= 0.0
+                        && augment.grayscale_prob <= 0.0
+                        && augment.blur_prob <= 0.0
+                        && augment.solarize_prob <= 0.0
+                        && (augment.min_scale - 1.0).abs() <= f32::EPSILON
+                        && (augment.max_scale - 1.0).abs() <= f32::EPSILON
+                        && (augment.min_aspect_ratio - 1.0).abs() <= f32::EPSILON
+                        && (augment.max_aspect_ratio - 1.0).abs() <= f32::EPSILON;
+                    if !deterministic_train_features {
+                        return Err(anyhow!(
+                            "distill mode with feature-file teachers requires deterministic train augmentations so precomputed teacher features match the student view"
+                        ));
                     }
                 }
                 VisionTeacherConfig::Model(config) => {
@@ -161,10 +231,31 @@ pub(super) fn validate_vision_mode(
                     if matches!(config.patch_tokens, Some(0)) {
                         return Err(anyhow!("mode.teacher.patch_tokens must be > 0 when set"));
                     }
+                    if distill.rollout_supervision_frames == 0 {
+                        return Err(anyhow!(
+                            "mode.rollout_supervision_frames must be > 0 for distill mode"
+                        ));
+                    }
+                    if distill.rollout_supervision_power < 0.0 {
+                        return Err(anyhow!(
+                            "mode.rollout_supervision_power must be >= 0 for distill mode"
+                        ));
+                    }
+                    if distill.rollout_sampling_power < 0.0 {
+                        return Err(anyhow!(
+                            "mode.rollout_sampling_power must be >= 0 for distill mode"
+                        ));
+                    }
                 }
             }
         }
         VisionTrainingModeConfig::Lejepa(lejepa) => {
+            if dataset.source != VisionDatasetSource::Imagenet {
+                return Err(anyhow!(
+                    "image LEJEPA currently requires dataset.source = \"imagenet\""
+                ));
+            }
+            validate_momentum_teacher("mode.teacher_ema", &lejepa.teacher_ema)?;
             if lejepa.views == 0 {
                 return Err(anyhow!("mode.views must be > 0"));
             }
@@ -199,8 +290,10 @@ pub(super) fn validate_vision_mode(
             if lejepa.view_overlap_attempts == 0 {
                 return Err(anyhow!("mode.view_overlap_attempts must be > 0"));
             }
-            if vision.trm_graph.enabled
-                && vision.trm_graph.grid_mismatch_policy == VisionTrmGridMismatchPolicy::Error
+            if matches!(
+                vision.resolved_backbone_kind()?,
+                VisionBackboneKind::Pyramid
+            ) && vision.trm_graph.grid_mismatch_policy == VisionTrmGridMismatchPolicy::Error
                 && lejepa.local_views > 0
             {
                 let patch = vision.patch_size.max(1);
@@ -210,14 +303,141 @@ pub(super) fn validate_vision_mode(
                 let local_grid = lejepa.local_image_size.div_ceil(patch);
                 if local_grid != grid_h || local_grid != grid_w {
                     return Err(anyhow!(
-                        "TRM graph strict mode requires local view grid ({local_grid}x{local_grid}) to match vision grid ({grid_h}x{grid_w}); adjust mode.local_image_size / vision.patch_size / vision.pos_max_*, set mode.local_views=0, or set vision.trm_graph.grid_mismatch_policy = \"fallback_default\""
+                        "pyramid backbone strict mode requires local view grid ({local_grid}x{local_grid}) to match vision grid ({grid_h}x{grid_w}); adjust mode.local_image_size / vision.patch_size / vision.pos_max_*, set mode.local_views=0, or set vision.trm_graph.grid_mismatch_policy = \"fallback_default\""
                     ));
                 }
             }
             validate_lejepa_loss(&lejepa.loss.lejepa)?;
             validate_recon_loss("mode.loss.recon", &lejepa.loss.recon)?;
         }
+        VisionTrainingModeConfig::VideoLejepa(video) => {
+            if dataset.source != VisionDatasetSource::MovingMnist {
+                return Err(anyhow!(
+                    "video LEJEPA requires dataset.source = \"moving_mnist\""
+                ));
+            }
+            validate_momentum_teacher("mode.teacher_ema", &video.teacher_ema)?;
+            if !vision.use_cls_token {
+                return Err(anyhow!("video LEJEPA requires vision.use_cls_token = true"));
+            }
+            if vision.in_channels != 3 {
+                return Err(anyhow!(
+                    "video LEJEPA currently requires vision.in_channels = 3"
+                ));
+            }
+            if video.context_frames == 0 {
+                return Err(anyhow!("mode.context_frames must be > 0"));
+            }
+            if video.target_frames == 0 {
+                return Err(anyhow!("mode.target_frames must be > 0"));
+            }
+            if video.train_target_frames_max > 0
+                && video.train_target_frames_min > 0
+                && video.train_target_frames_max < video.train_target_frames_min
+            {
+                return Err(anyhow!(
+                    "mode.train_target_frames_max ({}) must be >= mode.train_target_frames_min ({})",
+                    video.train_target_frames_max,
+                    video.train_target_frames_min
+                ));
+            }
+            if video.frame_stride == 0 {
+                return Err(anyhow!("mode.frame_stride must be > 0"));
+            }
+            if video.temporal.n_layer == 0 {
+                return Err(anyhow!("mode.temporal.n_layer must be > 0"));
+            }
+            if video.temporal.n_head == 0 {
+                return Err(anyhow!("mode.temporal.n_head must be > 0"));
+            }
+            if video.temporal.mlp_internal_dim_multiplier == 0 {
+                return Err(anyhow!(
+                    "mode.temporal.mlp_internal_dim_multiplier must be > 0"
+                ));
+            }
+            if !BDHConfig::is_valid_rollout_fast_steps(
+                video.temporal.rollout_fast_steps_per_slow_step,
+            ) {
+                return Err(anyhow!(
+                    "mode.temporal.rollout_fast_steps_per_slow_step must be one of {:?} (got {})",
+                    BDHConfig::SUPPORTED_ROLLOUT_FAST_STEPS,
+                    video.temporal.rollout_fast_steps_per_slow_step
+                ));
+            }
+            if !vision.embed_dim.is_multiple_of(video.temporal.n_head) {
+                return Err(anyhow!(
+                    "vision.embed_dim ({}) must be divisible by mode.temporal.n_head ({})",
+                    vision.embed_dim,
+                    video.temporal.n_head
+                ));
+            }
+            if video.temporal.latent_block_size == 0 {
+                return Err(anyhow!("mode.temporal.latent_block_size must be > 0"));
+            }
+            if video.temporal.time_block_size == 0 {
+                return Err(anyhow!("mode.temporal.time_block_size must be > 0"));
+            }
+            if video.temporal.wgpu_rollout_fused && !video.temporal.wgpu_recurrent_kernel {
+                return Err(anyhow!(
+                    "mode.temporal.wgpu_rollout_fused requires mode.temporal.wgpu_recurrent_kernel = true"
+                ));
+            }
+            if video.loss.prediction_weight < 0.0 {
+                return Err(anyhow!("mode.loss.prediction_weight must be >= 0"));
+            }
+            if video.loss.observe_weight < 0.0 {
+                return Err(anyhow!("mode.loss.observe_weight must be >= 0"));
+            }
+            if video.loss.cosine_weight < 0.0 {
+                return Err(anyhow!("mode.loss.cosine_weight must be >= 0"));
+            }
+            if video.loss.probe_weight < 0.0 {
+                return Err(anyhow!("mode.loss.probe_weight must be >= 0"));
+            }
+            if video.loss.debug_recon_weight < 0.0 {
+                return Err(anyhow!("mode.loss.debug_recon_weight must be >= 0"));
+            }
+            validate_lejepa_loss(&video.loss.sigreg)?;
+            if video.artifact_upscale == 0 {
+                return Err(anyhow!("mode.artifact_upscale must be > 0"));
+            }
+            if video.artifact_future_frames > 0
+                && video.artifact_future_frames < video.target_frames
+            {
+                return Err(anyhow!(
+                    "mode.artifact_future_frames ({}) must be >= mode.target_frames ({}) when set",
+                    video.artifact_future_frames,
+                    video.target_frames
+                ));
+            }
+            let moving = &dataset.moving_mnist;
+            if moving.digit_size == 0 {
+                return Err(anyhow!("dataset.moving_mnist.digit_size must be > 0"));
+            }
+            if moving.digit_size > vision.image_size {
+                return Err(anyhow!(
+                    "dataset.moving_mnist.digit_size ({}) must be <= vision.image_size ({})",
+                    moving.digit_size,
+                    vision.image_size
+                ));
+            }
+            if moving.min_velocity <= 0.0 {
+                return Err(anyhow!("dataset.moving_mnist.min_velocity must be > 0"));
+            }
+            if moving.max_velocity < moving.min_velocity {
+                return Err(anyhow!(
+                    "dataset.moving_mnist.max_velocity ({}) must be >= min_velocity ({})",
+                    moving.max_velocity,
+                    moving.min_velocity
+                ));
+            }
+        }
         VisionTrainingModeConfig::Mae(mae) => {
+            if dataset.source != VisionDatasetSource::Imagenet {
+                return Err(anyhow!(
+                    "mae mode currently requires dataset.source = \"imagenet\""
+                ));
+            }
             validate_recon_loss("mode.loss.recon", &mae.loss.recon)?;
             if mae.pyramid_levels == 0 {
                 return Err(anyhow!("mode.pyramid_levels must be > 0"));
@@ -279,6 +499,11 @@ pub(super) fn validate_vision_mode(
             }
         }
         VisionTrainingModeConfig::Saccade(saccade) => {
+            if dataset.source != VisionDatasetSource::Imagenet {
+                return Err(anyhow!(
+                    "saccade mode currently requires dataset.source = \"imagenet\""
+                ));
+            }
             let num_eyes = if saccade.num_eyes == 0 {
                 vision.num_eyes
             } else {
@@ -470,6 +695,16 @@ fn validate_recon_loss(label: &str, loss: &VisionReconLossConfig) -> Result<()> 
     Ok(())
 }
 
+fn validate_momentum_teacher(label: &str, teacher: &VisionMomentumTeacherConfig) -> Result<()> {
+    if !(0.0..1.0).contains(&teacher.decay) {
+        return Err(anyhow!(
+            "{label}.decay must be in [0, 1) (got {})",
+            teacher.decay
+        ));
+    }
+    Ok(())
+}
+
 fn validate_lejepa_loss(loss: &VisionLejepaLossConfig) -> Result<()> {
     if loss.enabled {
         if !(0.0..=1.0).contains(&loss.lambda) {
@@ -514,22 +749,92 @@ fn validate_distill_loss(loss: &VisionDistillationLossConfig) -> Result<()> {
 }
 
 fn load_value(path: &Path) -> Result<Value> {
-    let content = fs::read_to_string(path)
-        .with_context(|| format!("failed to read configuration file {}", path.display()))?;
-    let ext = path
+    let mut stack = Vec::new();
+    load_value_recursive(path, &mut stack)
+}
+
+fn load_value_recursive(path: &Path, stack: &mut Vec<PathBuf>) -> Result<Value> {
+    let canonical = fs::canonicalize(path)
+        .with_context(|| format!("failed to canonicalize configuration file {}", path.display()))?;
+    if let Some(idx) = stack.iter().position(|seen| seen == &canonical) {
+        let mut cycle = stack[idx..]
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>();
+        cycle.push(canonical.display().to_string());
+        return Err(anyhow!("config extends cycle detected: {}", cycle.join(" -> ")));
+    }
+
+    stack.push(canonical.clone());
+    let result = (|| {
+        let content = fs::read_to_string(&canonical).with_context(|| {
+            format!("failed to read configuration file {}", canonical.display())
+        })?;
+        let ext = canonical
         .extension()
         .and_then(|value| value.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
-    if ext == "yml" || ext == "yaml" {
-        let value: serde_yaml::Value = serde_yaml::from_str(&content)
-            .with_context(|| format!("failed to parse {} as YAML", path.display()))?;
-        return yaml_to_toml(value)
-            .with_context(|| format!("failed to convert {} from YAML", path.display()));
+        let mut value = if ext == "yml" || ext == "yaml" {
+            let value: serde_yaml::Value = serde_yaml::from_str(&content)
+                .with_context(|| format!("failed to parse {} as YAML", canonical.display()))?;
+            yaml_to_toml(value)
+                .with_context(|| format!("failed to convert {} from YAML", canonical.display()))?
+        } else {
+            let table: toml::value::Table = toml::from_str(&content)
+                .with_context(|| format!("failed to parse {} as TOML", canonical.display()))?;
+            Value::Table(table)
+        };
+
+        let extends = take_extends(&mut value)
+            .with_context(|| format!("failed to parse extends in {}", canonical.display()))?;
+        if let Some(extends) = extends {
+            let base_dir = canonical.parent().unwrap_or_else(|| Path::new("."));
+            let mut merged = Value::Table(toml::value::Table::new());
+            for extend in extends {
+                let extend_path = base_dir.join(extend);
+                let base = load_value_recursive(&extend_path, stack)?;
+                merge_values(&mut merged, base);
+            }
+            merge_values(&mut merged, value);
+            Ok(merged)
+        } else {
+            Ok(value)
+        }
+    })();
+    stack.pop();
+    result
+}
+
+fn take_extends(value: &mut Value) -> Result<Option<Vec<PathBuf>>> {
+    let Value::Table(table) = value else {
+        return Ok(None);
+    };
+    let Some(extends) = table.remove("extends") else {
+        return Ok(None);
+    };
+    match extends {
+        Value::String(path) => Ok(Some(vec![PathBuf::from(path)])),
+        Value::Array(values) => {
+            let mut out = Vec::with_capacity(values.len());
+            for value in values {
+                match value {
+                    Value::String(path) => out.push(PathBuf::from(path)),
+                    other => {
+                        return Err(anyhow!(
+                            "extends entries must be strings, got {}",
+                            other.type_str()
+                        ));
+                    }
+                }
+            }
+            Ok(Some(out))
+        }
+        other => Err(anyhow!(
+            "extends must be a string or array of strings, got {}",
+            other.type_str()
+        )),
     }
-    let table: toml::value::Table = toml::from_str(&content)
-        .with_context(|| format!("failed to parse {} as TOML", path.display()))?;
-    Ok(Value::Table(table))
 }
 
 fn yaml_to_toml(value: serde_yaml::Value) -> Result<Value> {

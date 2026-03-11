@@ -14,6 +14,7 @@ pub enum SpatialPositionalEncodingKind {
     #[default]
     Learned2d,
     SineCosine2d,
+    Rope,
 }
 
 impl core::fmt::Display for SpatialPositionalEncodingKind {
@@ -56,6 +57,10 @@ impl<B: AutodiffBackend> AutodiffModule<B> for SpatialPositionalEncodingKind {
     fn valid(&self) -> Self::InnerModule {
         *self
     }
+
+    fn from_inner(module: Self::InnerModule) -> Self {
+        module
+    }
 }
 
 impl ModuleDisplayDefault for SpatialPositionalEncodingKind {
@@ -85,7 +90,20 @@ pub enum VisionPatchEmbedMode {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, Default)]
 #[serde(rename_all = "snake_case")]
+pub enum VisionBackboneKind {
+    /// Parallel dense-space refinement with no persistent `rho` across calls.
+    #[default]
+    Dense,
+    /// Structured multi-bank recurrent refinement over primary/context/global banks.
+    Pyramid,
+    /// Token-local recurrent `rho` over a bounded neighborhood.
+    Cellular,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "snake_case")]
 pub enum VisionLatentActivation {
+    /// Paper-aligned positive neuron-space activation for `x_neuron`.
     #[default]
     Relu,
     Gelu,
@@ -107,6 +125,12 @@ impl core::fmt::Display for VisionAttentionMode {
 }
 
 impl core::fmt::Display for VisionPatchEmbedMode {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+
+impl core::fmt::Display for VisionBackboneKind {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{self:?}")
     }
@@ -153,6 +177,34 @@ impl<B: Backend> Module<B> for VisionAttentionMode {
 }
 
 impl<B: Backend> Module<B> for VisionPatchEmbedMode {
+    type Record = ();
+
+    fn collect_devices(&self, devices: Devices<B>) -> Devices<B> {
+        devices
+    }
+
+    fn fork(self, _device: &B::Device) -> Self {
+        self
+    }
+
+    fn to_device(self, _device: &B::Device) -> Self {
+        self
+    }
+
+    fn visit<Visitor: ModuleVisitor<B>>(&self, _visitor: &mut Visitor) {}
+
+    fn map<Mapper: ModuleMapper<B>>(self, _mapper: &mut Mapper) -> Self {
+        self
+    }
+
+    fn load_record(self, _record: Self::Record) -> Self {
+        self
+    }
+
+    fn into_record(self) -> Self::Record {}
+}
+
+impl<B: Backend> Module<B> for VisionBackboneKind {
     type Record = ();
 
     fn collect_devices(&self, devices: Devices<B>) -> Devices<B> {
@@ -242,6 +294,10 @@ impl<B: AutodiffBackend> AutodiffModule<B> for VisionAttentionMode {
     fn valid(&self) -> Self::InnerModule {
         *self
     }
+
+    fn from_inner(module: Self::InnerModule) -> Self {
+        module
+    }
 }
 
 impl<B: AutodiffBackend> AutodiffModule<B> for VisionPatchEmbedMode {
@@ -249,6 +305,22 @@ impl<B: AutodiffBackend> AutodiffModule<B> for VisionPatchEmbedMode {
 
     fn valid(&self) -> Self::InnerModule {
         *self
+    }
+
+    fn from_inner(module: Self::InnerModule) -> Self {
+        module
+    }
+}
+
+impl<B: AutodiffBackend> AutodiffModule<B> for VisionBackboneKind {
+    type InnerModule = VisionBackboneKind;
+
+    fn valid(&self) -> Self::InnerModule {
+        *self
+    }
+
+    fn from_inner(module: Self::InnerModule) -> Self {
+        module
     }
 }
 
@@ -258,6 +330,10 @@ impl<B: AutodiffBackend> AutodiffModule<B> for VisionLatentActivation {
     fn valid(&self) -> Self::InnerModule {
         *self
     }
+
+    fn from_inner(module: Self::InnerModule) -> Self {
+        module
+    }
 }
 
 impl<B: AutodiffBackend> AutodiffModule<B> for VisionTrmGridMismatchPolicy {
@@ -265,6 +341,10 @@ impl<B: AutodiffBackend> AutodiffModule<B> for VisionTrmGridMismatchPolicy {
 
     fn valid(&self) -> Self::InnerModule {
         *self
+    }
+
+    fn from_inner(module: Self::InnerModule) -> Self {
+        module
     }
 }
 
@@ -275,6 +355,12 @@ impl ModuleDisplayDefault for VisionAttentionMode {
 }
 
 impl ModuleDisplayDefault for VisionPatchEmbedMode {
+    fn content(&self, content: Content) -> Option<Content> {
+        content.add_formatted(self).optional()
+    }
+}
+
+impl ModuleDisplayDefault for VisionBackboneKind {
     fn content(&self, content: Content) -> Option<Content> {
         content.add_formatted(self).optional()
     }
@@ -295,6 +381,8 @@ impl ModuleDisplayDefault for VisionTrmGridMismatchPolicy {
 impl ModuleDisplay for VisionAttentionMode {}
 
 impl ModuleDisplay for VisionPatchEmbedMode {}
+
+impl ModuleDisplay for VisionBackboneKind {}
 
 impl ModuleDisplay for VisionLatentActivation {}
 
@@ -388,6 +476,95 @@ impl<B: AutodiffBackend> AutodiffModule<B> for VisionTrmGraphConfig {
     fn valid(&self) -> Self::InnerModule {
         self.clone()
     }
+
+    fn from_inner(module: Self::InnerModule) -> Self {
+        module
+    }
+}
+
+impl ModuleDisplayDefault for VisionRhoStreamConfig {
+    fn content(&self, content: Content) -> Option<Content> {
+        content
+            .add("enabled", &self.enabled)
+            .add("local_radius", &self.local_radius)
+            .add("local_diagonals", &self.local_diagonals)
+            .add("local_self", &self.local_self)
+            .add("decay", &self.decay)
+            .add("mode_embeddings", &self.mode_embeddings)
+            .add("wgpu_forward_kernel", &self.wgpu_forward_kernel)
+            .add("wgpu_rollout_fused", &self.wgpu_rollout_fused)
+            .optional()
+    }
+}
+
+impl ModuleDisplay for VisionRhoStreamConfig {}
+
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct VisionRhoStreamConfig {
+    pub enabled: bool,
+    pub local_radius: usize,
+    pub local_diagonals: bool,
+    pub local_self: bool,
+    pub decay: f32,
+    pub mode_embeddings: bool,
+    pub wgpu_forward_kernel: bool,
+    pub wgpu_rollout_fused: bool,
+}
+
+impl Default for VisionRhoStreamConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            local_radius: 1,
+            local_diagonals: true,
+            local_self: true,
+            decay: 0.9,
+            mode_embeddings: true,
+            wgpu_forward_kernel: false,
+            wgpu_rollout_fused: false,
+        }
+    }
+}
+
+impl<B: Backend> Module<B> for VisionRhoStreamConfig {
+    type Record = ();
+
+    fn collect_devices(&self, devices: Devices<B>) -> Devices<B> {
+        devices
+    }
+
+    fn fork(self, _device: &B::Device) -> Self {
+        self
+    }
+
+    fn to_device(self, _device: &B::Device) -> Self {
+        self
+    }
+
+    fn visit<Visitor: ModuleVisitor<B>>(&self, _visitor: &mut Visitor) {}
+
+    fn map<Mapper: ModuleMapper<B>>(self, _mapper: &mut Mapper) -> Self {
+        self
+    }
+
+    fn load_record(self, _record: Self::Record) -> Self {
+        self
+    }
+
+    fn into_record(self) -> Self::Record {}
+}
+
+impl<B: AutodiffBackend> AutodiffModule<B> for VisionRhoStreamConfig {
+    type InnerModule = VisionRhoStreamConfig;
+
+    fn valid(&self) -> Self::InnerModule {
+        self.clone()
+    }
+
+    fn from_inner(module: Self::InnerModule) -> Self {
+        module
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -395,6 +572,7 @@ pub struct VisionDragonConfig {
     pub image_size: usize,
     pub patch_size: usize,
     pub patch_embed_mode: VisionPatchEmbedMode,
+    pub backbone: VisionBackboneKind,
     pub in_channels: usize,
     pub embed_dim: usize,
     pub steps: usize,
@@ -417,6 +595,7 @@ pub struct VisionDragonConfig {
     pub fused_kernels: FusedKernelConfig,
     pub mhc: ManifoldHyperConnectionsConfig,
     pub trm_graph: VisionTrmGraphConfig,
+    pub rho_stream: VisionRhoStreamConfig,
 }
 
 impl Default for VisionDragonConfig {
@@ -428,6 +607,7 @@ impl Default for VisionDragonConfig {
             image_size,
             patch_size,
             patch_embed_mode: VisionPatchEmbedMode::default(),
+            backbone: VisionBackboneKind::default(),
             in_channels: 3,
             embed_dim: 256,
             steps: 6,
@@ -450,6 +630,7 @@ impl Default for VisionDragonConfig {
             fused_kernels: FusedKernelConfig::default(),
             mhc: ManifoldHyperConnectionsConfig::default(),
             trm_graph: VisionTrmGraphConfig::default(),
+            rho_stream: VisionRhoStreamConfig::default(),
         }
     }
 }
@@ -467,7 +648,25 @@ impl VisionDragonConfig {
     pub fn latent_total(&self) -> usize {
         self.latent_per_head() * self.n_head
     }
+
+    /// Dragon Hatchling paper terminology: dense/token value space dimension.
+    pub fn dense_space_dim(&self) -> usize {
+        self.embed_dim
+    }
+
+    /// Dragon Hatchling paper terminology: total neuron-space dimension.
+    pub fn neuron_space_dim(&self) -> usize {
+        self.latent_total()
+    }
+
+    /// Dragon Hatchling paper terminology: neuron-space dimension per head.
+    pub fn neuron_space_dim_per_head(&self) -> usize {
+        self.latent_per_head()
+    }
 }
+
+pub type VisionPyramidConfig = VisionTrmGraphConfig;
+pub type VisionCellularConfig = VisionRhoStreamConfig;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PatchGrid {

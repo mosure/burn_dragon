@@ -68,6 +68,14 @@ pub struct VisionLejepaTrainStepBench<B: AutodiffBackend> {
     backprop_steps: usize,
 }
 
+pub struct VisionVideoLejepaTrainStepBench<B: AutodiffBackend> {
+    model: Option<VisionVideoLejepaModel<B>>,
+    optimizer: OptimizerAdaptor<AdamW, VisionVideoLejepaModel<B>, B>,
+    lr: LearningRate,
+    rollout_steps: usize,
+    backprop_steps: usize,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct FoveaKernelEstimate {
     pub levels: usize,
@@ -559,7 +567,7 @@ impl<B: AutodiffBackend> VisionMaeTrainStepBench<B> {
         );
         let grads = GradientsParams::from_grads(losses.total.clone().backward(), &model);
         let loss = losses.total.detach();
-        model = self.optimizer.step(self.lr, model, grads);
+        model = model.optimize::<B, _>(&mut self.optimizer, self.lr, grads);
         self.model = Some(model);
         loss
     }
@@ -623,9 +631,62 @@ impl<B: AutodiffBackend> VisionLejepaTrainStepBench<B> {
         );
         let grads = GradientsParams::from_grads(losses.total.clone().backward(), &model);
         let loss = losses.total.detach();
-        model = self.optimizer.step(self.lr, model, grads);
+        model = model.optimize::<B, _>(&mut self.optimizer, self.lr, grads);
         self.model = Some(model);
         loss
+    }
+}
+
+impl<B: AutodiffBackend> VisionVideoLejepaTrainStepBench<B> {
+    pub fn new(
+        vision: VisionDragonConfig,
+        video: VisionVideoLejepaConfig,
+        training: &VisionTrainingHyperparameters,
+        optimizer_cfg: &OptimizerConfig,
+        num_classes: usize,
+        device: &B::Device,
+    ) -> Result<Self> {
+        let rollout = resolve_vision_rollout(training, vision.steps)?;
+        let model = VisionDragon::<B>::new(vision.clone(), device);
+        let video =
+            VisionVideoLejepaModel::new(model, video, &vision, rollout, num_classes, device);
+        let rollout_steps = video.rollout.max_steps;
+        let backprop_steps = video.rollout.backprop_steps(rollout_steps);
+        let optimizer =
+            adamw_config_from_optimizer(optimizer_cfg).init::<B, VisionVideoLejepaModel<B>>();
+        let lr = optimizer_cfg.learning_rate;
+        Ok(Self {
+            model: Some(video),
+            optimizer,
+            lr,
+            rollout_steps,
+            backprop_steps,
+        })
+    }
+
+    pub fn train_step(&mut self, batch: VideoClipBatch<B>) -> Tensor<B, 1> {
+        let mut model = self.model.take().expect("video lejepa model");
+        let losses =
+            model.forward_losses(batch, self.rollout_steps, self.backprop_steps, false, false);
+        let total = losses.total.clone()
+            + losses
+                .probe_loss
+                .clone()
+                .mul_scalar(model.config.loss.probe_weight.max(0.0));
+        let grads = GradientsParams::from_grads(total.backward(), &model);
+        let loss = losses.total.detach();
+        model = model.optimize::<B, _>(&mut self.optimizer, self.lr, grads);
+        self.model = Some(model);
+        loss
+    }
+
+    pub fn forward_loss(&self, batch: VideoClipBatch<B>) -> Tensor<B, 1> {
+        self.model
+            .as_ref()
+            .expect("video lejepa model")
+            .forward_losses(batch, self.rollout_steps, self.backprop_steps, false, false)
+            .total
+            .detach()
     }
 }
 

@@ -24,10 +24,43 @@ pub enum WgpuMemoryConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum WgpuGenerationExecutor {
+    #[default]
+    Baseline,
+    RolloutChunked,
+}
+
+fn default_generation_chunk_tokens() -> usize {
+    8
+}
+
+fn default_generation_device_buffer_tokens() -> usize {
+    64
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
 pub struct WgpuInferenceConfig {
     pub fused_core_recurrent: Option<bool>,
     pub fused_core_rollout: Option<bool>,
+    pub generation_executor: WgpuGenerationExecutor,
+    #[serde(default = "default_generation_chunk_tokens")]
+    pub generation_chunk_tokens: usize,
+    #[serde(default = "default_generation_device_buffer_tokens")]
+    pub generation_device_buffer_tokens: usize,
+}
+
+impl Default for WgpuInferenceConfig {
+    fn default() -> Self {
+        Self {
+            fused_core_recurrent: None,
+            fused_core_rollout: None,
+            generation_executor: WgpuGenerationExecutor::Baseline,
+            generation_chunk_tokens: default_generation_chunk_tokens(),
+            generation_device_buffer_tokens: default_generation_device_buffer_tokens(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default)]

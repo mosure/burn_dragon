@@ -17,8 +17,8 @@ viz = ["dep:bevy_dragon"]
 anyhow = "1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-burn = { version = "0.19", default-features = false, features = ["std", "webgpu"] }
-burn-wgpu = { version = "0.19", default-features = false, features = ["webgpu", "std"] }
+burn = { version = "0.21.0-pre.2", default-features = false, features = ["std", "webgpu"] }
+burn-wgpu = { version = "0.21.0-pre.2", default-features = false, features = ["webgpu", "std"] }
 burn_dragon_core = { path = "../burn_dragon_core", version = "0.4.0", default-features = false, features = ["web"] }
 burn_dragon_language = { path = "../burn_dragon_language", version = "0.4.0", default-features = false, features = ["web"] }
 bevy_dragon = { path = "../bevy_dragon", version = "0.4.0", default-features = false, optional = true }

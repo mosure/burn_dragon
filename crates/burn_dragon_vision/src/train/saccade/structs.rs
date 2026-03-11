@@ -85,6 +85,10 @@ impl<B: AutodiffBackend> AutodiffModule<B> for LevelCoordsCache<B> {
     fn valid(&self) -> Self::InnerModule {
         LevelCoordsCache::new(self.max_entries)
     }
+
+    fn from_inner(module: Self::InnerModule) -> Self {
+        LevelCoordsCache::new(module.max_entries)
+    }
 }
 
 impl<B: BackendTrait> ModuleDisplayDefault for LevelCoordsCache<B> {
@@ -240,6 +244,10 @@ impl<B: AutodiffBackend> AutodiffModule<B> for UpsampleWeightsCache<B> {
     fn valid(&self) -> Self::InnerModule {
         UpsampleWeightsCache::new(self.max_entries)
     }
+
+    fn from_inner(module: Self::InnerModule) -> Self {
+        UpsampleWeightsCache::new(module.max_entries)
+    }
 }
 
 impl<B: BackendTrait> ModuleDisplayDefault for UpsampleWeightsCache<B> {
@@ -339,6 +347,10 @@ impl<B: AutodiffBackend> AutodiffModule<B> for FoveaBaseGridCache<B> {
 
     fn valid(&self) -> Self::InnerModule {
         FoveaBaseGridCache::new(self.max_entries)
+    }
+
+    fn from_inner(module: Self::InnerModule) -> Self {
+        FoveaBaseGridCache::new(module.max_entries)
     }
 }
 
@@ -450,6 +462,10 @@ impl<B: AutodiffBackend> AutodiffModule<B> for FoveaJitterCache<B> {
 
     fn valid(&self) -> Self::InnerModule {
         FoveaJitterCache::new(self.max_entries)
+    }
+
+    fn from_inner(module: Self::InnerModule) -> Self {
+        FoveaJitterCache::new(module.max_entries)
     }
 }
 

@@ -15,8 +15,8 @@ cli = []
 viz = []
 
 [dependencies]
-burn = { version = "0.19", default-features = false, features = ["std", "wgpu"] }
-burn-wgpu = { version = "0.19", default-features = false, features = ["fusion", "std"] }
+burn = { version = "0.21.0-pre.2", default-features = false, features = ["std", "wgpu"] }
+burn-wgpu = { version = "0.21.0-pre.2", default-features = false, features = ["fusion", "std"] }
 bevy_burn = "0.4"
 burn_dragon_core = { path = "../burn_dragon_core", version = "0.4.0", default-features = false, features = ["viz"] }
 
@@ -48,7 +48,7 @@ features = [
 ]
 
 [dev-dependencies]
-burn-ndarray = "0.19"
+burn-ndarray = "0.21.0-pre.2"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen-futures = "0.4"

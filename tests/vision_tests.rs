@@ -38,6 +38,7 @@ fn patch_embed_and_model_shapes() {
         fused_kernels: FusedKernelConfig::default(),
         mhc: ManifoldHyperConnectionsConfig::default(),
         trm_graph: Default::default(),
+        rho_stream: Default::default(),
     };
 
     let images = Tensor::<Backend, 4>::random([2, 3, 32, 32], Distribution::Default, &device);
@@ -84,6 +85,7 @@ fn patch_embed_raw_matches_add_position() {
         fused_kernels: FusedKernelConfig::default(),
         mhc: ManifoldHyperConnectionsConfig::default(),
         trm_graph: Default::default(),
+        rho_stream: Default::default(),
     };
 
     let images = Tensor::<Backend, 4>::random([2, 3, 32, 32], Distribution::Default, &device);
@@ -131,6 +133,7 @@ fn vision_forward_steps_shapes() {
         fused_kernels: FusedKernelConfig::default(),
         mhc: ManifoldHyperConnectionsConfig::default(),
         trm_graph: Default::default(),
+        rho_stream: Default::default(),
     };
 
     let images = Tensor::<Backend, 4>::random([2, 3, 32, 32], Distribution::Default, &device);

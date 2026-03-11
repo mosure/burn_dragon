@@ -6,16 +6,16 @@ use burn::tensor::Tensor as BurnTensor;
 use burn::tensor::backend::{AutodiffBackend, Backend as BackendTrait};
 use burn::tensor::{DType, Shape, TensorData, TensorPrimitive};
 use burn_autodiff::Autodiff;
+use burn_cubecl::cubecl::{prelude::*, server::Bindings};
 use burn_cubecl::fusion::FusionCubeRuntime;
 use burn_cubecl::kernel::into_contiguous;
 use burn_cubecl::ops::numeric::empty_device;
 use burn_cubecl::tensor::CubeTensor;
 use burn_cubecl::{BoolElement, CubeRuntime};
 use burn_fusion::FusionTensor;
-use burn_fusion::stream::StreamId;
 use burn_wgpu::{CubeBackend, KernelSource, SourceKernel, SourceTemplate, WgpuRuntime};
-use cubecl::prelude::*;
-use cubecl_runtime::server::Bindings;
+
+use crate::fusion_compat::register_fusion_float_tensor;
 
 const WORKGROUP_SIZE_X: u32 = 64;
 const META_LEN: usize = 6;
@@ -87,10 +87,7 @@ pub fn supports_backend<B: BackendTrait>() -> bool
 where
     B::FloatTensorPrimitive: 'static,
 {
-    matches_type::<B::FloatTensorPrimitive, FusionTensor<FusionCubeRuntime<WgpuRuntime, u32>>>()
-        || matches_type::<B::FloatTensorPrimitive, FusionTensor<FusionCubeRuntime<WgpuRuntime, u8>>>(
-        )
-        || matches_type::<B::FloatTensorPrimitive, CubeTensor<WgpuRuntime>>()
+    matches_type::<B::FloatTensorPrimitive, CubeTensor<WgpuRuntime>>()
         || matches_type::<B::FloatTensorPrimitive, WgpuCubeAutodiffTensor>()
 }
 
@@ -236,21 +233,8 @@ where
     let (context, rho) =
         recurrent_attention_wgsl_runtime::<WgpuRuntime>(query, value, rho, decay, meta);
 
-    let context_shape = context.shape.clone();
-    let context_dtype = context.dtype;
-    let context_handle = context.into();
-    let context_fusion = fusion_client.register_tensor(
-        context_handle,
-        context_shape,
-        StreamId::current(),
-        context_dtype,
-    );
-
-    let rho_shape = rho.shape.clone();
-    let rho_dtype = rho.dtype;
-    let rho_handle = rho.into();
-    let rho_fusion =
-        fusion_client.register_tensor(rho_handle, rho_shape, StreamId::current(), rho_dtype);
+    let context_fusion = register_fusion_float_tensor(&fusion_client, context);
+    let rho_fusion = register_fusion_float_tensor(&fusion_client, rho);
 
     let context_prim = try_cast_backend::<B, _>(context_fusion)?;
     let rho_prim = try_cast_backend::<B, _>(rho_fusion)?;
@@ -389,8 +373,8 @@ fn recurrent_attention_wgsl_runtime<R: CubeRuntime>(
     let decay = into_contiguous(decay);
     let meta = into_contiguous(meta);
 
-    let [batch, heads, time, _latent] = query.shape.dims::<4>();
-    let embd = value.shape.dims::<4>()[3];
+    let [batch, heads, time, _latent] = query.meta.shape.dims::<4>();
+    let embd = value.meta.shape.dims::<4>()[3];
 
     let client = query.client.clone();
     let device = query.device.clone();
@@ -405,7 +389,7 @@ fn recurrent_attention_wgsl_runtime<R: CubeRuntime>(
 
     let kernel = SourceKernel::new(
         RecurrentAttentionKernel,
-        CubeDim::new(WORKGROUP_SIZE_X, 1, 1),
+        CubeDim::new_3d(WORKGROUP_SIZE_X, 1, 1),
     );
     let bindings = Bindings::new().with_buffers(vec![
         query.handle.clone().binding(),
@@ -417,7 +401,9 @@ fn recurrent_attention_wgsl_runtime<R: CubeRuntime>(
     ]);
 
     let dispatch_start = profile_enabled().then(Instant::now);
-    client.execute(Box::new(kernel), count, bindings);
+    client
+        .launch(Box::new(kernel), count, bindings)
+        .expect("launch recurrent attention kernel");
     if let Some(start) = dispatch_start {
         let dispatch_ns = start.elapsed().as_nanos();
         profile_record(|state| {
@@ -459,7 +445,7 @@ impl KernelSource for RecurrentAttentionKernel {
         SourceTemplate::new(RECURRENT_ATTENTION_SHADER)
     }
 
-    fn id(&self) -> KernelId {
+    fn id(&self) -> burn_cubecl::cubecl::prelude::KernelId {
         KernelId::new::<Self>()
     }
 }

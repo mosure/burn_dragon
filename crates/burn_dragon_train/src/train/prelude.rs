@@ -47,7 +47,8 @@ pub(crate) use burn_autodiff::Autodiff;
 pub(crate) use burn_ndarray::NdArrayDevice;
 pub(crate) use burn_train::metric::{LearningRateMetric, LossMetric};
 pub(crate) use burn_train::{
-    LearnerBuilder, LearningStrategy, TrainOutput, TrainStep, TrainingResult, ValidStep,
+    InferenceStep as ValidStep, LearningResult as TrainingResult, SupervisedTraining, TrainOutput,
+    TrainStep, TrainingStrategy as LearningStrategy,
 };
 #[cfg(feature = "cli")]
 pub(crate) use burn_wgpu::Wgpu;
@@ -66,7 +67,9 @@ pub(crate) use crate::{
     GdpoHardGate, LearningRateScheduleConfig, OptimizerConfig, VisionArtifactOutputMode,
     VisionTeacherVariant,
 };
+#[cfg(feature = "burn_dino")]
 pub(crate) use burn_dino::correctness::load_model_from_checkpoint;
+#[cfg(feature = "burn_dino")]
 pub(crate) use burn_dino::model::dino::{DinoVisionTransformer, DinoVisionTransformerConfig};
 pub(crate) use serde::Serialize;
 
@@ -75,9 +78,6 @@ pub(crate) use crate::train::pipeline::*;
 pub(crate) use crate::train::teacher::*;
 
 pub(crate) use crate::train::metrics::{
-    ActionClampRateInput, AdvantageAbsMeanInput, AdvantageStdInput, DeviceMemoryMetric,
-    DeviceMetric, InvLossInput, LogProbMeanInput, LossValue, MemoryCleanupMetric,
-    PolicyEntropyInput, PolicyLossInput, ProbeAccInput, ProbeLossInput, ReconLossInput,
-    ReconPsnrFullInput, ReconPsnrMaskedInput, ScalarMetric, SigRegLossInput, VisionArtifactInput,
-    VisionArtifactMetric, VisionOutput, VisionTrainItem,
+    DeviceMemoryMetric, DeviceMetric, LossValue, MemoryCleanupMetric, MetricsBackend,
+    ScalarMetric,
 };

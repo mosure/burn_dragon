@@ -17,10 +17,10 @@ where
     pub epochs: usize,
 }
 
-pub fn train_with_scheduler<B, S>(
+pub(crate) fn train_with_scheduler<B, S>(
     env: &TrainEnvironment<'_, B>,
-    model: BDH<B>,
-    optimizer: OptimizerAdaptor<AdamW, BDH<B>, B>,
+    model: LanguageTrainModel<B>,
+    optimizer: OptimizerAdaptor<AdamW, LanguageTrainModel<B>, B>,
     scheduler: S,
 ) -> Result<BDH<ValidBackend<B>>>
 where
@@ -31,28 +31,30 @@ where
     fs::create_dir_all(env.run_dir)?;
 
     let metric_every = env.training.log_frequency.max(1);
-    let builder = LearnerBuilder::new(env.run_dir)
-        .num_epochs(env.epochs)
-        .learning_strategy(LearningStrategy::SingleDevice(env.device.clone()))
-        .with_file_checkpointer(BinFileRecorder::<FullPrecisionSettings>::new())
-        .metric_train_numeric(
-            ScalarMetric::<ValidBackend<B>, LossValue<ValidBackend<B>>>::new_every(
-                "Loss",
-                metric_every,
-            ),
-        )
-        .metric_valid_numeric(LossMetric::<ValidBackend<B>>::new())
-        .metric_train_numeric(LearningRateMetric::new())
-        .metric_train(DeviceMetric::new("device", env.backend_name))
-        .metric_valid(DeviceMetric::new("device", env.backend_name))
-        .summary();
+    let builder = SupervisedTraining::new(
+        env.run_dir,
+        Arc::clone(&env.train_loader),
+        Arc::clone(&env.valid_loader),
+    )
+    .num_epochs(env.epochs)
+    .with_training_strategy(LearningStrategy::SingleDevice(env.device.clone()))
+    .with_file_checkpointer(BinFileRecorder::<FullPrecisionSettings>::new())
+    .metric_train_numeric(
+        ScalarMetric::<ValidBackend<B>, LossValue<ValidBackend<B>>>::new_every(
+            "Loss",
+            metric_every,
+        ),
+    )
+    .metric_valid_numeric(LossMetric::<ValidBackend<B>>::new())
+    .metric_train_numeric(LearningRateMetric::new())
+    .metric_train(DeviceMetric::new("device", env.backend_name))
+    .metric_valid(DeviceMetric::new("device", env.backend_name))
+    .summary();
 
     info!("run name: {}", env.run_name);
 
-    let learner = builder.build(model, optimizer, scheduler);
-
-    let TrainingResult { model, .. } =
-        learner.fit(Arc::clone(&env.train_loader), Arc::clone(&env.valid_loader));
+    let learner = burn_train::Learner::new(model, optimizer, scheduler);
+    let TrainingResult { model, .. } = builder.launch(learner);
 
     log_theoretical_profile(
         env.model_config,
@@ -61,7 +63,7 @@ where
         env.backend_name,
     );
 
-    Ok(model)
+    Ok(model.model)
 }
 
 pub fn resolve_lr_scheduler(

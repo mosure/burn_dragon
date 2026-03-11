@@ -1,10 +1,9 @@
 use crate::config::VisionAugmentationConfig;
 use crate::train::prelude::*;
 use crate::{
-    SpatialPositionalEncodingKind, VisionAttentionMode, VisionLatentActivation,
+    SpatialPositionalEncodingKind, VisionAttentionMode, VisionBackboneKind, VisionLatentActivation,
     VisionPatchEmbedMode,
 };
-use burn::optim::Optimizer;
 use burn::tensor::Distribution;
 use burn_autodiff::Autodiff;
 use burn_dragon_core::{FusedKernelConfig, ManifoldHyperConnectionsConfig};
@@ -140,11 +139,158 @@ fn toy_images<B: BackendTrait>(
     )
 }
 
-#[test]
-fn lejepa_recon_psnr_improves_on_toy_batch() {
+fn mean_abs_tensor<B: BackendTrait, const D: usize>(tensor: Tensor<B, D>) -> f32 {
+    tensor
+        .abs()
+        .mean()
+        .to_data()
+        .convert::<f32>()
+        .into_vec::<f32>()
+        .expect("mean abs")[0]
+}
+
+fn run_lejepa_recon_psnr_improves_on_toy_batch(rho_stream_enabled: bool, steps: usize) {
     type Backend = Autodiff<NdArray<f32>>;
     let device = <Backend as BackendTrait>::Device::default();
+    let steps = steps.max(1);
 
+    let image_size: usize = 8;
+    let patch_size: usize = 4;
+    let grid = image_size.div_ceil(patch_size);
+    let mut vision_config = VisionDragonConfig {
+        image_size,
+        patch_size,
+        patch_embed_mode: VisionPatchEmbedMode::default(),
+        backbone: VisionBackboneKind::Dense,
+        in_channels: 3,
+        embed_dim: 32,
+        steps,
+        n_head: 4,
+        mlp_internal_dim_multiplier: 2,
+        dropout: 0.0,
+        projection_dim: 32,
+        projection_hidden_dim: 64,
+        use_cls_token: true,
+        cls_sync_alpha: 0.0,
+        num_eyes: 1,
+        cross_eye_steps: 0,
+        token_state_norm: true,
+        latent_activation: VisionLatentActivation::default(),
+        pos_encoding: SpatialPositionalEncodingKind::Learned2d,
+        pos_max_height: grid,
+        pos_max_width: grid,
+        attention_mode: VisionAttentionMode::RowL1,
+        use_alibi: true,
+        fused_kernels: FusedKernelConfig::default(),
+        mhc: ManifoldHyperConnectionsConfig::default(),
+        trm_graph: Default::default(),
+        rho_stream: Default::default(),
+    };
+    vision_config.rho_stream.enabled = rho_stream_enabled;
+    vision_config.backbone = if rho_stream_enabled {
+        VisionBackboneKind::Cellular
+    } else {
+        VisionBackboneKind::Dense
+    };
+    let mut lejepa_config = VisionLejepaConfig {
+        views: 1,
+        global_views: 0,
+        local_views: 0,
+        artifact_every: 0,
+        artifact_max_images: 0,
+        artifact_max_views: 0,
+        ..Default::default()
+    };
+    lejepa_config.loss.lejepa.enabled = false;
+    lejepa_config.loss.recon.weight = 1.0;
+    lejepa_config.loss.recon.mask_ratio = 0.5;
+    lejepa_config.loss.recon.hidden_dim = 64;
+
+    let rollout = VisionRollout {
+        min_steps: steps,
+        max_steps: steps,
+        backprop_steps: steps,
+    };
+    let recon_patch_dim =
+        vision_config.patch_size * vision_config.patch_size * vision_config.in_channels;
+    let normalize_std = VisionAugmentationConfig::default().normalize_std;
+    let model = VisionDragon::<Backend>::new(vision_config.clone(), &device);
+    let mut lejepa = VisionLejepaModel::new(
+        model,
+        lejepa_config,
+        VisionLejepaInit {
+            embed_dim: vision_config.embed_dim,
+            num_classes: 1,
+            rollout,
+            recon: VisionReconstructionInit {
+                patch_dim: recon_patch_dim,
+                normalize_std,
+                patch_size: vision_config.patch_size,
+                in_channels: vision_config.in_channels,
+            },
+        },
+        &device,
+    );
+
+    let batch_size = 2;
+    let images = toy_images::<Backend>(batch_size, 3, image_size, image_size, &device);
+    let labels = Tensor::<Backend, 1, Int>::zeros([batch_size], &device);
+    let batch = ImageNetBatch::new(images, None, None, None, None, None, labels, None, None);
+    let backprop_steps = steps;
+
+    let initial_psnr = lejepa
+        .forward_losses(batch.clone(), steps, backprop_steps, false, false, false)
+        .recon_psnr_full
+        .to_data()
+        .convert::<f32>()
+        .into_vec::<f32>()
+        .expect("psnr vec")[0];
+
+    let mut optimizer = AdamWConfig::new()
+        .with_weight_decay(0.0)
+        .init::<Backend, VisionLejepaModel<Backend>>();
+    let lr = 0.02;
+    for _ in 0..40 {
+        let losses =
+            lejepa.forward_losses(batch.clone(), steps, backprop_steps, false, false, false);
+        let total = losses.total.clone() + losses.probe_loss.clone();
+        let grads = GradientsParams::from_grads(total.backward(), &lejepa);
+        lejepa = lejepa.optimize::<Backend, _>(&mut optimizer, lr, grads);
+    }
+
+    let final_psnr = lejepa
+        .forward_losses(batch, steps, backprop_steps, false, false, false)
+        .recon_psnr_full
+        .to_data()
+        .convert::<f32>()
+        .into_vec::<f32>()
+        .expect("psnr vec")[0];
+
+    assert!(final_psnr.is_finite());
+    assert!(final_psnr > initial_psnr);
+    let psnr_floor = if steps > 1 { 18.0 } else { 24.0 };
+    assert!(final_psnr > psnr_floor);
+}
+
+#[test]
+fn lejepa_recon_psnr_improves_on_toy_batch() {
+    run_lejepa_recon_psnr_improves_on_toy_batch(false, 1);
+}
+
+#[test]
+fn lejepa_recon_psnr_improves_on_toy_batch_with_rho_stream() {
+    run_lejepa_recon_psnr_improves_on_toy_batch(true, 1);
+}
+
+#[test]
+fn lejepa_recon_psnr_improves_on_toy_batch_with_rho_stream_multistep() {
+    run_lejepa_recon_psnr_improves_on_toy_batch(true, 3);
+}
+
+#[test]
+fn lejepa_teacher_ema_lags_student_after_one_step() {
+    type Backend = Autodiff<NdArray<f32>>;
+    let device = <Backend as BackendTrait>::Device::default();
     let image_size: usize = 8;
     let patch_size: usize = 4;
     let grid = image_size.div_ceil(patch_size);
@@ -152,6 +298,7 @@ fn lejepa_recon_psnr_improves_on_toy_batch() {
         image_size,
         patch_size,
         patch_embed_mode: VisionPatchEmbedMode::default(),
+        backbone: VisionBackboneKind::Dense,
         in_channels: 3,
         embed_dim: 32,
         steps: 1,
@@ -174,6 +321,7 @@ fn lejepa_recon_psnr_improves_on_toy_batch() {
         fused_kernels: FusedKernelConfig::default(),
         mhc: ManifoldHyperConnectionsConfig::default(),
         trm_graph: Default::default(),
+        rho_stream: Default::default(),
     };
     let mut lejepa_config = VisionLejepaConfig {
         views: 1,
@@ -184,10 +332,9 @@ fn lejepa_recon_psnr_improves_on_toy_batch() {
         artifact_max_views: 0,
         ..Default::default()
     };
-    lejepa_config.loss.lejepa.enabled = false;
-    lejepa_config.loss.recon.weight = 1.0;
-    lejepa_config.loss.recon.mask_ratio = 0.5;
-    lejepa_config.loss.recon.hidden_dim = 64;
+    lejepa_config.loss.lejepa.enabled = true;
+    lejepa_config.loss.lejepa.lambda = 1.0;
+    lejepa_config.loss.recon.weight = 0.0;
 
     let rollout = VisionRollout {
         min_steps: 1,
@@ -217,40 +364,121 @@ fn lejepa_recon_psnr_improves_on_toy_batch() {
 
     let batch_size = 2;
     let images = toy_images::<Backend>(batch_size, 3, image_size, image_size, &device);
+    let initial_teacher = lejepa
+        .teacher_proj_for_views(&[images.clone()], 1)
+        .expect("teacher targets");
+    let initial_student = lejepa.forward_view_group(&[images.clone()], 1, 1).proj;
+    assert!(mean_abs_tensor(initial_student - initial_teacher) <= 1e-6);
+
     let labels = Tensor::<Backend, 1, Int>::zeros([batch_size], &device);
-    let batch = ImageNetBatch::new(images, None, None, None, None, None, labels, None, None);
-    let steps = 1;
-    let backprop_steps = 1;
-
-    let initial_psnr = lejepa
-        .forward_losses(batch.clone(), steps, backprop_steps, false, false, false)
-        .recon_psnr_full
-        .to_data()
-        .convert::<f32>()
-        .into_vec::<f32>()
-        .expect("psnr vec")[0];
-
+    let batch = ImageNetBatch::new(
+        images.clone(),
+        None,
+        None,
+        None,
+        None,
+        None,
+        labels,
+        None,
+        None,
+    );
+    let losses = lejepa.forward_losses(batch, 1, 1, false, false, false);
+    let total = losses.total.clone() + losses.probe_loss.clone();
+    let grads = GradientsParams::from_grads(total.backward(), &lejepa);
     let mut optimizer = AdamWConfig::new()
         .with_weight_decay(0.0)
         .init::<Backend, VisionLejepaModel<Backend>>();
-    let lr = 0.02;
-    for _ in 0..40 {
-        let losses =
-            lejepa.forward_losses(batch.clone(), steps, backprop_steps, false, false, false);
-        let total = losses.total.clone() + losses.probe_loss.clone();
-        let grads = GradientsParams::from_grads(total.backward(), &lejepa);
-        lejepa = optimizer.step(lr, lejepa, grads);
-    }
+    lejepa = lejepa.optimize::<Backend, _>(&mut optimizer, 2e-2, grads);
 
-    let final_psnr = lejepa
-        .forward_losses(batch, steps, backprop_steps, false, false, false)
-        .recon_psnr_full
-        .to_data()
-        .convert::<f32>()
-        .into_vec::<f32>()
-        .expect("psnr vec")[0];
+    let teacher = lejepa
+        .teacher_proj_for_views(&[images.clone()], 1)
+        .expect("teacher targets");
+    let student = lejepa.forward_view_group(&[images], 1, 1).proj;
+    let drift = mean_abs_tensor(student - teacher);
+    assert!(drift.is_finite());
+    assert!(drift > 0.0);
+}
 
-    assert!(final_psnr.is_finite());
-    assert!(final_psnr > initial_psnr);
-    assert!(final_psnr > 24.0);
+#[test]
+fn lejepa_load_record_rebuilds_teacher_from_student() {
+    type Backend = NdArray<f32>;
+    let device = <Backend as BackendTrait>::Device::default();
+    let image_size: usize = 8;
+    let patch_size: usize = 4;
+    let grid = image_size.div_ceil(patch_size);
+    let vision_config = VisionDragonConfig {
+        image_size,
+        patch_size,
+        patch_embed_mode: VisionPatchEmbedMode::default(),
+        backbone: VisionBackboneKind::Dense,
+        in_channels: 3,
+        embed_dim: 32,
+        steps: 1,
+        n_head: 4,
+        mlp_internal_dim_multiplier: 2,
+        dropout: 0.0,
+        projection_dim: 32,
+        projection_hidden_dim: 64,
+        use_cls_token: true,
+        cls_sync_alpha: 0.0,
+        num_eyes: 1,
+        cross_eye_steps: 0,
+        token_state_norm: true,
+        latent_activation: VisionLatentActivation::default(),
+        pos_encoding: SpatialPositionalEncodingKind::Learned2d,
+        pos_max_height: grid,
+        pos_max_width: grid,
+        attention_mode: VisionAttentionMode::RowL1,
+        use_alibi: true,
+        fused_kernels: FusedKernelConfig::default(),
+        mhc: ManifoldHyperConnectionsConfig::default(),
+        trm_graph: Default::default(),
+        rho_stream: Default::default(),
+    };
+    let lejepa_config = VisionLejepaConfig {
+        views: 1,
+        global_views: 0,
+        local_views: 0,
+        artifact_every: 0,
+        artifact_max_images: 0,
+        artifact_max_views: 0,
+        ..Default::default()
+    };
+    let rollout = VisionRollout {
+        min_steps: 1,
+        max_steps: 1,
+        backprop_steps: 1,
+    };
+    let recon_patch_dim =
+        vision_config.patch_size * vision_config.patch_size * vision_config.in_channels;
+    let normalize_std = VisionAugmentationConfig::default().normalize_std;
+    let build = || {
+        VisionLejepaModel::new(
+            VisionDragon::<Backend>::new(vision_config.clone(), &device),
+            lejepa_config.clone(),
+            VisionLejepaInit {
+                embed_dim: vision_config.embed_dim,
+                num_classes: 1,
+                rollout,
+                recon: VisionReconstructionInit {
+                    patch_dim: recon_patch_dim,
+                    normalize_std,
+                    patch_size: vision_config.patch_size,
+                    in_channels: vision_config.in_channels,
+                },
+            },
+            &device,
+        )
+    };
+
+    let reference = build();
+    let restored = build().load_record(reference.clone().into_record());
+    assert!(restored.teacher.is_some());
+
+    let images = toy_images::<Backend>(2, 3, image_size, image_size, &device);
+    let teacher = restored
+        .teacher_proj_for_views(&[images.clone()], 1)
+        .expect("teacher targets");
+    let student = restored.forward_view_group(&[images], 1, 1).proj;
+    assert!(mean_abs_tensor(student - teacher) <= 1e-6);
 }

@@ -1,0 +1,100 @@
+[dataset]
+imagenet_root = "data/imagenette2-160"
+train_dir = "train"
+val_dir = "val"
+prefetch_batches = 2
+prefetch_workers = 4
+prefetch_to_device = true
+cache_decoded = true
+cache_capacity = 1024
+cache_preprocessed = true
+
+[dataset.download]
+type = "imagenette"
+variant = "imagenette2-160"
+
+[training]
+batch_size = 64
+epochs = 6
+max_iters = 10000
+log_frequency = 80
+device_memory_check_every = 20
+max_device_memory_mb = 92160
+rollout_min_steps = 1
+rollout_max_steps = 4
+rollout_backprop_steps = 2
+
+[optimizer]
+learning_rate = 0.0004
+weight_decay = 0.02
+grad_clip_norm = 1.0
+
+[optimizer.lr_schedule]
+type = "cosine"
+min_lr = 0.00004
+num_iters = 10000
+
+[vision]
+image_size = 196
+patch_size = 14
+patch_embed_mode = "conv"
+backbone = "dense"
+in_channels = 3
+embed_dim = 128
+steps = 4
+n_head = 4
+mlp_internal_dim_multiplier = 4
+dropout = 0.0
+projection_dim = 384
+projection_hidden_dim = 384
+use_cls_token = true
+cls_sync_alpha = 0.1
+token_state_norm = true
+pos_encoding = "rope"
+attention_mode = "row_l1"
+use_alibi = true
+fused_kernels = true
+
+[mode]
+type = "distill"
+rollout_supervision_frames = 1
+rollout_supervision_power = 1.0
+
+[mode.teacher]
+type = "features"
+train_cls_path = "data/imagenette2-160/features/dinov2_vits14_196/train_cls.bin"
+train_patch_path = "data/imagenette2-160/features/dinov2_vits14_196/train_patch.bin"
+val_cls_path = "data/imagenette2-160/features/dinov2_vits14_196/val_cls.bin"
+val_patch_path = "data/imagenette2-160/features/dinov2_vits14_196/val_patch.bin"
+feature_dim = 384
+patch_tokens = 196
+
+[mode.loss]
+patch_mse_weight = 1.0
+cls_mse_weight = 0.25
+cls_cosine_weight = 1.0
+rel_weight = 0.0
+rel_tau = 0.07
+rel_sample_tokens = 64
+
+[augment]
+image_size = 196
+resize_short = 224
+min_scale = 1.0
+max_scale = 1.0
+min_aspect_ratio = 1.0
+max_aspect_ratio = 1.0
+flip_prob = 0.0
+color_jitter_prob = 0.0
+brightness = 0.0
+contrast = 0.0
+saturation = 0.0
+hue = 0.0
+grayscale_prob = 0.0
+blur_prob = 0.0
+blur_sigma_min = 0.1
+blur_sigma_max = 2.0
+solarize_prob = 0.0
+solarize_threshold = 128
+normalize_mean = [0.485, 0.456, 0.406]
+normalize_std = [0.229, 0.224, 0.225]

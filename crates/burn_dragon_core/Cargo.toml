@@ -47,7 +47,7 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png"]
 
 
 [dependencies.burn]
-version = "0.19"
+version = "0.21.0-pre.2"
 default-features = false
 features = [
   # "autotune",
@@ -60,7 +60,7 @@ features = [
 ]
 
 [dependencies.burn-cuda]
-version = "0.19"
+version = "0.21.0-pre.2"
 optional = true
 default-features = false
 features = [
@@ -69,9 +69,9 @@ features = [
 
 
 [dev-dependencies]
-burn-autodiff = "0.19"
-burn-ndarray = "0.19"
-burn-wgpu = { version = "0.19", default-features = false, features = ["fusion", "std"] }
+burn-autodiff = "0.21.0-pre.2"
+burn-ndarray = "0.21.0-pre.2"
+burn-wgpu = { version = "0.21.0-pre.2", default-features = false, features = ["fusion", "std"] }
 tempfile = "3"
 
 [lib]

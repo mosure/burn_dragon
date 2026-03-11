@@ -13,20 +13,19 @@ readme = "../../README.md"
 default = []
 
 [dependencies]
-burn = { version = "0.19", default-features = false, features = ["fusion", "ndarray", "std", "wgpu"] }
-burn-autodiff = { version = "0.19", default-features = false }
-burn-wgpu = { version = "0.19", default-features = false, features = ["fusion", "std", "template"] }
-burn-cubecl = { version = "0.19", default-features = false, features = ["std", "fusion"] }
-burn-fusion = { version = "0.19", default-features = false, features = ["std"] }
-cubecl = { version = "0.8", default-features = true, features = ["std"] }
-cubecl-runtime = { version = "0.8", default-features = true, features = ["channel-mpsc", "std"] }
+burn = { version = "0.21.0-pre.2", default-features = false, features = ["fusion", "ndarray", "std", "wgpu"] }
+burn-autodiff = { version = "0.21.0-pre.2", default-features = false }
+burn-wgpu = { version = "0.21.0-pre.2", default-features = false, features = ["fusion", "std", "template"] }
+burn-cubecl = { version = "0.21.0-pre.2", default-features = false, features = ["std", "fusion"] }
+burn-fusion = { version = "0.21.0-pre.2", default-features = false, features = ["std"] }
+burn-ir = "0.21.0-pre.2"
 pollster = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 wgpu = "26"
 
 [dev-dependencies]
-burn-ndarray = "0.19"
+burn-ndarray = "0.21.0-pre.2"
 
 [lib]
 path = "src/lib.rs"

@@ -1,0 +1,75 @@
+extends = ["moving_mnist_dataset.toml"]
+
+[optimizer]
+learning_rate = 0.001
+weight_decay = 0.0
+
+[vision]
+image_size = 32
+patch_size = 4
+in_channels = 3
+embed_dim = 64
+steps = 2
+n_head = 8
+mlp_internal_dim_multiplier = 2
+dropout = 0.0
+projection_dim = 32
+projection_hidden_dim = 64
+use_cls_token = true
+cls_sync_alpha = 0.0
+num_eyes = 1
+cross_eye_steps = 0
+token_state_norm = true
+pos_encoding = "learned2d"
+attention_mode = "row_l1"
+use_alibi = true
+fused_kernels = false
+
+[vision.rho_stream]
+enabled = true
+local_radius = 1
+local_diagonals = true
+local_self = true
+decay = 0.9
+wgpu_forward_kernel = false
+wgpu_rollout_fused = false
+
+[mode]
+type = "video_lejepa"
+context_frames = 4
+target_frames = 2
+frame_stride = 1
+predictor_hidden_dim = 64
+artifact_output = "mp4"
+artifact_fps = 6
+artifact_overwrite = true
+
+[mode.teacher_ema]
+enabled = true
+decay = 0.996
+
+[mode.temporal]
+n_layer = 2
+n_head = 8
+mlp_internal_dim_multiplier = 2
+rollout_fast_steps_per_slow_step = 4
+fused = true
+wgpu_recurrent_kernel = true
+wgpu_rollout_fused = true
+latent_block_size = 8
+time_block_size = 8
+
+[mode.loss]
+prediction_weight = 1.0
+observe_weight = 1.0
+cosine_weight = 0.1
+probe_weight = 0.25
+debug_recon_weight = 1.0
+debug_recon_hidden_dim = 256
+
+[mode.loss.sigreg]
+enabled = true
+lambda = 0.02
+sigreg_knots = 9
+sigreg_t_max = 2.0
+sigreg_proj_dim = 32

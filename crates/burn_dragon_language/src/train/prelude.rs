@@ -33,7 +33,8 @@ pub(crate) use burn::tensor::backend::{AutodiffBackend, Backend as BackendTrait}
 pub(crate) use burn::tensor::{Int, Tensor, TensorData};
 pub(crate) use burn_train::metric::{LearningRateMetric, LossMetric};
 pub(crate) use burn_train::{
-    LearnerBuilder, LearningStrategy, TrainOutput, TrainStep, TrainingResult, ValidStep,
+    InferenceStep as ValidStep, LearningResult as TrainingResult, SupervisedTraining, TrainOutput,
+    TrainStep, TrainingStrategy as LearningStrategy,
 };
 pub(crate) use tracing::info;
 
@@ -56,6 +57,7 @@ pub(crate) use crate::tokenizer::TokenizerConfig;
 pub(crate) use crate::{ContextStrategyConfig, GenerationConfig, ModelOverrides};
 
 pub(crate) use crate::loss::language_model_loss;
+pub(crate) use crate::train::steps::LanguageTrainModel;
 pub(crate) use burn_dragon_core::{BDH, BDHConfig};
 pub(crate) use burn_dragon_train::train::constants::{
     FAST_TRAIN, ValidBackend, fast_train_enabled,
@@ -65,7 +67,7 @@ pub(crate) use burn_dragon_train::train::metrics::{
 };
 pub(crate) use burn_dragon_train::train::pipeline::{
     ResolvedLrScheduler, ScheduleSource, TrainSchedule, adamw_config_from_optimizer,
-    create_run_dir, write_latest_run,
+    create_run_dir, resolve_valid_steps_per_epoch, write_latest_run,
 };
 pub(crate) use burn_dragon_train::{
     GdpoConfig, GdpoHardGate, LearningRateScheduleConfig, OptimizerConfig, WgpuRuntimeConfig,

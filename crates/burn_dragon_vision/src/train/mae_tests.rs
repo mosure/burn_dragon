@@ -7,7 +7,7 @@ use crate::config::{VisionTrainingModeConfig, load_vision_training_config};
 use crate::train::pipeline::resolve_vision_rollout;
 use crate::train::prelude::*;
 use crate::{
-    SpatialPositionalEncodingKind, VisionAttentionMode, VisionLatentActivation,
+    SpatialPositionalEncodingKind, VisionAttentionMode, VisionBackboneKind, VisionLatentActivation,
     VisionPatchEmbedMode,
 };
 use burn::optim::Optimizer;
@@ -27,6 +27,7 @@ fn mae_pyramid_recon_loss_is_finite() {
         image_size: 8,
         patch_size: 4,
         patch_embed_mode: VisionPatchEmbedMode::default(),
+        backbone: VisionBackboneKind::default(),
         in_channels: 3,
         embed_dim: 8,
         steps: 2,
@@ -49,6 +50,7 @@ fn mae_pyramid_recon_loss_is_finite() {
         fused_kernels: FusedKernelConfig::default(),
         mhc: ManifoldHyperConnectionsConfig::default(),
         trm_graph: Default::default(),
+        rho_stream: Default::default(),
     };
     let patch_size = vision_config.patch_size;
     let in_channels = vision_config.in_channels;
@@ -110,6 +112,7 @@ fn mae_cross_view_forward_is_finite() {
         image_size: 8,
         patch_size: 4,
         patch_embed_mode: VisionPatchEmbedMode::default(),
+        backbone: VisionBackboneKind::default(),
         in_channels: 3,
         embed_dim: 16,
         steps: 2,
@@ -137,6 +140,7 @@ fn mae_cross_view_forward_is_finite() {
             ..ManifoldHyperConnectionsConfig::default()
         },
         trm_graph: Default::default(),
+        rho_stream: Default::default(),
     };
     let patch_size = vision_config.patch_size;
     let in_channels = vision_config.in_channels;
@@ -407,6 +411,7 @@ fn mae_recon_psnr_improves_on_toy_batch() {
         image_size,
         patch_size,
         patch_embed_mode: VisionPatchEmbedMode::default(),
+        backbone: VisionBackboneKind::default(),
         in_channels: 3,
         embed_dim: 32,
         steps: 1,
@@ -429,6 +434,7 @@ fn mae_recon_psnr_improves_on_toy_batch() {
         fused_kernels: FusedKernelConfig::default(),
         mhc: ManifoldHyperConnectionsConfig::default(),
         trm_graph: Default::default(),
+        rho_stream: Default::default(),
     };
     let mae_config = VisionMaeConfig {
         loss: VisionMaeLossConfig {

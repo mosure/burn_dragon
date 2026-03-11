@@ -1,4 +1,6 @@
 use burn_dragon_core::BDHConfig;
+#[cfg(feature = "train")]
+use burn_dragon_train::wgpu as shared_wgpu;
 
 use crate::ModelOverrides;
 
@@ -42,10 +44,17 @@ pub fn build_model_config(overrides: &ModelOverrides, training_block_size: usize
 }
 
 pub fn is_wgpu_backend_name(backend_name: &str) -> bool {
-    backend_name.eq_ignore_ascii_case("wgpu")
-        || backend_name
-            .get(..5)
-            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("wgpu-"))
+    #[cfg(feature = "train")]
+    {
+        return shared_wgpu::is_wgpu_backend_name(backend_name);
+    }
+    #[cfg(not(feature = "train"))]
+    {
+        backend_name.eq_ignore_ascii_case("wgpu")
+            || backend_name
+                .get(..5)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("wgpu-"))
+    }
 }
 
 pub fn apply_wgpu_fused_core_override(
@@ -54,27 +63,36 @@ pub fn apply_wgpu_fused_core_override(
     fused_core_recurrent: Option<bool>,
     fused_core_rollout: Option<bool>,
 ) {
-    if !is_wgpu_backend_name(backend_name) {
+    #[cfg(feature = "train")]
+    {
+        shared_wgpu::apply_wgpu_fused_core_override(
+            model_config,
+            backend_name,
+            fused_core_recurrent,
+            fused_core_rollout,
+        );
         return;
     }
 
-    if let Some(enabled) = fused_core_recurrent {
-        model_config
-            .fused_kernels
-            .set_wgpu_recurrent_kernel(enabled);
-        if enabled {
-            // Selecting fused recurrent via backend config should work without requiring
-            // an additional model-level fused toggle change.
-            model_config.fused_kernels.enabled = true;
+    #[cfg(not(feature = "train"))]
+    {
+        if !is_wgpu_backend_name(backend_name) {
+            return;
         }
-    }
 
-    let rollout_override = fused_core_rollout.or(match fused_core_recurrent {
-        Some(enabled) => Some(enabled),
-        None => None,
-    });
-    if let Some(enabled) = rollout_override {
-        model_config.fused_kernels.set_wgpu_rollout_fused(enabled);
+        if let Some(enabled) = fused_core_recurrent {
+            model_config
+                .fused_kernels
+                .set_wgpu_recurrent_kernel(enabled);
+            if enabled {
+                model_config.fused_kernels.enabled = true;
+            }
+        }
+
+        let rollout_override = fused_core_rollout.or(fused_core_recurrent);
+        if let Some(enabled) = rollout_override {
+            model_config.fused_kernels.set_wgpu_rollout_fused(enabled);
+        }
     }
 }
 
@@ -94,7 +112,7 @@ mod tests {
     }
 
     #[test]
-    fn wgpu_backend_override_enables_fused_recurrent_path() {
+    fn wgpu_override_wrapper_delegates_to_shared_behavior() {
         let mut model_config = BDHConfig::default();
         model_config.fused_kernels.enabled = false;
         model_config.fused_kernels.set_wgpu_recurrent_kernel(false);
@@ -114,61 +132,6 @@ mod tests {
             model_config.fused_kernels.wgpu_rollout_fused,
             "wgpu rollout fused path should default to recurrent override when unspecified"
         );
-    }
-
-    #[test]
-    fn wgpu_backend_override_can_disable_recurrent_kernel_without_disabling_other_fusion() {
-        let mut model_config = BDHConfig::default();
-        model_config.fused_kernels.enabled = true;
-        model_config.fused_kernels.set_wgpu_recurrent_kernel(true);
-        model_config.fused_kernels.set_wgpu_rollout_fused(true);
-
-        apply_wgpu_fused_core_override(&mut model_config, "wgpu-fused-core", Some(false), None);
-
-        assert!(
-            model_config.fused_kernels.enabled,
-            "disabling recurrent override should preserve other fused kernel settings"
-        );
-        assert!(
-            !model_config.fused_kernels.wgpu_recurrent_kernel,
-            "wgpu recurrent kernel should be disabled by override"
-        );
-        assert!(
-            !model_config.fused_kernels.wgpu_rollout_fused,
-            "rollout override should follow recurrent override when unspecified"
-        );
-    }
-
-    #[test]
-    fn rollout_override_can_be_set_independently() {
-        let mut model_config = BDHConfig::default();
-        model_config.fused_kernels.enabled = true;
-        model_config.fused_kernels.set_wgpu_recurrent_kernel(true);
-        model_config.fused_kernels.set_wgpu_rollout_fused(true);
-
-        apply_wgpu_fused_core_override(
-            &mut model_config,
-            "wgpu-fused-core",
-            Some(true),
-            Some(false),
-        );
-
-        assert!(model_config.fused_kernels.wgpu_recurrent_kernel);
-        assert!(!model_config.fused_kernels.wgpu_rollout_fused);
-    }
-
-    #[test]
-    fn non_wgpu_backends_ignore_override() {
-        let mut model_config = BDHConfig::default();
-        model_config.fused_kernels.enabled = false;
-        model_config.fused_kernels.set_wgpu_recurrent_kernel(false);
-        model_config.fused_kernels.set_wgpu_rollout_fused(false);
-
-        apply_wgpu_fused_core_override(&mut model_config, "cuda", Some(true), Some(true));
-
-        assert!(!model_config.fused_kernels.enabled);
-        assert!(!model_config.fused_kernels.wgpu_recurrent_kernel);
-        assert!(!model_config.fused_kernels.wgpu_rollout_fused);
     }
 
     #[test]

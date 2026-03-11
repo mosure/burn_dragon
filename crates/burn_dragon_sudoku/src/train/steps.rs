@@ -339,9 +339,29 @@ impl<B: AutodiffBackend> AutodiffModule<B> for SudokuTrainer<B> {
             artifact_run_dir: self.artifact_run_dir.clone(),
         }
     }
+
+    fn from_inner(module: Self::InnerModule) -> Self {
+        SudokuTrainer {
+            model: AutodiffModule::from_inner(module.model),
+            training: module.training,
+            total_steps: module.total_steps,
+            step_counter: module.step_counter,
+            gdpo_stats: Arc::new(Mutex::new(GdpoAdvantageStats::default())),
+            entropy_alpha: module.entropy_alpha,
+            entropy_target_ema: module.entropy_target_ema,
+            valid_epoch_counter: module.valid_epoch_counter,
+            valid_epoch: module.valid_epoch,
+            valid_step_counter: module.valid_step_counter,
+            artifacts: module.artifacts,
+            artifact_run_dir: module.artifact_run_dir,
+        }
+    }
 }
 
-impl<B: AutodiffBackend> TrainStep<SudokuBatch<B>, SudokuTrainItem<B>> for SudokuTrainer<B> {
+impl<B: AutodiffBackend> TrainStep for SudokuTrainer<B> {
+    type Input = SudokuBatch<B>;
+    type Output = SudokuTrainItem<B>;
+
     fn step(&self, batch: SudokuBatch<B>) -> TrainOutput<SudokuTrainItem<B>> {
         let step = self.step_counter.fetch_add(1, Ordering::Relaxed);
         let teacher_forcing_prob = schedule_linear(
@@ -484,7 +504,10 @@ impl<B: AutodiffBackend> TrainStep<SudokuBatch<B>, SudokuTrainItem<B>> for Sudok
     }
 }
 
-impl<B: BackendTrait> ValidStep<SudokuBatch<B>, SudokuOutput<B>> for SudokuTrainer<B> {
+impl<B: BackendTrait> ValidStep for SudokuTrainer<B> {
+    type Input = SudokuBatch<B>;
+    type Output = SudokuOutput<B>;
+
     fn step(&self, batch: SudokuBatch<B>) -> SudokuOutput<B> {
         let step_idx = self.valid_step_counter.fetch_add(1, Ordering::Relaxed);
         let train_step = self.step_counter.load(Ordering::Relaxed);

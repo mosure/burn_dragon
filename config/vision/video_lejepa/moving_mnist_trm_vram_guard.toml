@@ -1,0 +1,30 @@
+extends = ["base/moving_mnist_pyramid.toml"]
+
+[dataset]
+max_records = 1024
+prefetch_batches = 8
+prefetch_workers = 8
+prefetch_to_device = false
+
+[training]
+batch_size = 128
+epochs = 4
+log_frequency = 8
+enable_checkpoints = false
+device_memory_check_every = 1
+max_device_memory_mb = 86000
+rollout_min_steps = 2
+rollout_max_steps = 2
+rollout_backprop_steps = 2
+
+[optimizer]
+weight_decay = 0.01
+
+[mode]
+train_target_frames_min = 6
+train_target_frames_max = 6
+train_target_warmup_steps = 0
+artifact_every = 1
+artifact_max_images = 16
+artifact_future_frames = 24
+artifact_upscale = 2

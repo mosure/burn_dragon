@@ -6,9 +6,9 @@ use std::time::{Duration, Instant};
 
 use burn::tensor::backend::Backend as BackendTrait;
 use burn::tensor::{Distribution, Tensor};
+use burn_cubecl::cubecl::Runtime;
 use burn_dragon_wgpu::{RecurrentAttentionOutput, try_fused_recurrent_attention_wgpu};
 use burn_wgpu::{CubeBackend, RuntimeOptions, WgpuRuntime, graphics};
-use cubecl::Runtime;
 use serde::Serialize;
 
 type Backend = CubeBackend<WgpuRuntime, f32, i32, u32>;

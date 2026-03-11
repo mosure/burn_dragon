@@ -1,19 +1,27 @@
 use crate::train::prelude::*;
 
 pub(crate) fn maybe_download_vision_dataset(config: &VisionDatasetConfig) -> Result<()> {
-    let Some(download) = &config.download else {
-        return Ok(());
-    };
+    match config.source {
+        VisionDatasetSource::Imagenet => {
+            let Some(download) = &config.download else {
+                return Ok(());
+            };
 
-    let train_root = config.imagenet_root.join(&config.train_dir);
-    let val_root = config.imagenet_root.join(&config.val_dir);
-    if vision_split_has_images(&train_root)? && vision_split_has_images(&val_root)? {
-        return Ok(());
-    }
+            let train_root = config.imagenet_root.join(&config.train_dir);
+            let val_root = config.imagenet_root.join(&config.val_dir);
+            if vision_split_has_images(&train_root)? && vision_split_has_images(&val_root)? {
+                return Ok(());
+            }
 
-    match download {
-        VisionDatasetDownloadConfig::Imagenette { variant } => {
-            download_imagenette(config, *variant)
+            match download {
+                VisionDatasetDownloadConfig::Imagenette { variant } => {
+                    download_imagenette(config, *variant)
+                }
+            }
+        }
+        VisionDatasetSource::MovingMnist => {
+            MovingMnistVideoDataset::ensure_mnist_downloaded();
+            Ok(())
         }
     }
 }

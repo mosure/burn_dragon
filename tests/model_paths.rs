@@ -4,6 +4,9 @@ use burn_autodiff::Autodiff;
 use burn_ndarray::NdArray;
 
 use burn_dragon::language::loss::language_model_loss;
+use burn_dragon::language::{
+    ContextStrategy, GenerationSettings, generate_tokens, generate_tokens_chunked,
+};
 use burn_dragon::{BDH, BDHConfig, FusedKernelConfig, RotaryEmbedding};
 
 type TrainBackend = Autodiff<NdArray<f32>>;
@@ -150,4 +153,47 @@ fn rollout_keeps_slow_token_emission_semantics() {
     assert_eq!([batch, time, vocab], [1, 6, 32]);
     assert_eq!(state.position, 6);
     assert_close(logits_full, logits_stream);
+}
+
+#[test]
+fn rollout_chunked_generation_matches_baseline_greedy_across_fast_steps() {
+    let device = <InferBackend as Backend>::Device::default();
+    let prompt = vec![0, 1, 2, 3, 4, 5];
+    let settings = GenerationSettings {
+        max_new_tokens: Some(24),
+        temperature: 1.0,
+        top_k: Some(1),
+        strategy: ContextStrategy::Infinite,
+    };
+
+    for rollout_fast_steps in BDHConfig::SUPPORTED_ROLLOUT_FAST_STEPS {
+        let mut config = build_config(RotaryEmbedding::Alibi, true);
+        config.set_rollout_fast_steps_per_slow_step(rollout_fast_steps);
+        config.fused_kernels.set_wgpu_rollout_fused(true);
+        let model = BDH::<InferBackend>::new(config, &device);
+
+        let baseline =
+            generate_tokens(&model, prompt.clone(), &device, settings, None).expect("baseline");
+        let mut streamed = Vec::new();
+        let chunked = generate_tokens_chunked(
+            &model,
+            prompt.clone(),
+            &device,
+            settings,
+            4,
+            16,
+            Some(&mut |chunk: &[i64]| streamed.extend_from_slice(chunk)),
+        )
+        .expect("chunked");
+
+        assert_eq!(
+            baseline, chunked,
+            "chunked generation diverged at rollout_fast_steps={rollout_fast_steps}"
+        );
+        assert_eq!(
+            &chunked[prompt.len()..],
+            streamed.as_slice(),
+            "streamed chunks should reconstruct generated tail at rollout_fast_steps={rollout_fast_steps}"
+        );
+    }
 }

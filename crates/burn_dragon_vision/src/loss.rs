@@ -16,6 +16,14 @@ pub struct VisionDistillationLossConfig {
     pub rel_sample_tokens: Option<usize>,
 }
 
+#[derive(Clone)]
+pub struct VisionDistillationLossTerms<B: Backend> {
+    pub total: Tensor<B, 1>,
+    pub patch: Tensor<B, 1>,
+    pub cls: Tensor<B, 1>,
+    pub relational: Tensor<B, 1>,
+}
+
 impl Default for VisionDistillationLossConfig {
     fn default() -> Self {
         Self {
@@ -63,6 +71,10 @@ impl<B: AutodiffBackend> AutodiffModule<B> for VisionDistillationLossConfig {
     fn valid(&self) -> Self::InnerModule {
         self.clone()
     }
+
+    fn from_inner(module: Self::InnerModule) -> Self {
+        module
+    }
 }
 
 impl ModuleDisplayDefault for VisionDistillationLossConfig {
@@ -87,21 +99,45 @@ pub fn vision_distillation_loss<B: Backend>(
     teacher_cls: Tensor<B, 2>,
     config: &VisionDistillationLossConfig,
 ) -> Tensor<B, 1> {
+    vision_distillation_loss_terms(
+        student_patch,
+        teacher_patch,
+        student_cls,
+        teacher_cls,
+        config,
+    )
+    .total
+}
+
+pub fn vision_distillation_loss_terms<B: Backend>(
+    student_patch: Tensor<B, 3>,
+    teacher_patch: Tensor<B, 3>,
+    student_cls: Tensor<B, 2>,
+    teacher_cls: Tensor<B, 2>,
+    config: &VisionDistillationLossConfig,
+) -> VisionDistillationLossTerms<B> {
     let device = student_patch.device();
     let mut total = Tensor::<B, 1>::zeros([1], &device);
+    let mut patch_total = Tensor::<B, 1>::zeros([1], &device);
+    let mut cls_total = Tensor::<B, 1>::zeros([1], &device);
+    let mut relational_total = Tensor::<B, 1>::zeros([1], &device);
 
     if config.patch_mse_weight > 0.0 {
         let student = feature_layer_norm(student_patch.clone());
         let teacher = feature_layer_norm(teacher_patch.clone().detach());
         let mse = (student - teacher).powf_scalar(2.0).mean();
-        total = total + mse.mul_scalar(config.patch_mse_weight);
+        let weighted = mse.mul_scalar(config.patch_mse_weight);
+        patch_total = patch_total + weighted.clone();
+        total = total + weighted;
     }
 
     if config.cls_mse_weight > 0.0 {
         let student = feature_layer_norm(student_cls.clone());
         let teacher = feature_layer_norm(teacher_cls.clone().detach());
         let mse = (student - teacher).powf_scalar(2.0).mean();
-        total = total + mse.mul_scalar(config.cls_mse_weight);
+        let weighted = mse.mul_scalar(config.cls_mse_weight);
+        cls_total = cls_total + weighted.clone();
+        total = total + weighted;
     }
 
     if config.cls_cosine_weight > 0.0 {
@@ -109,7 +145,9 @@ pub fn vision_distillation_loss<B: Backend>(
         let teacher = l2_normalize(teacher_cls.clone().detach());
         let cosine = student.mul(teacher).sum_dim(1);
         let loss = cosine.mul_scalar(-1.0).add_scalar(1.0).mean();
-        total = total + loss.mul_scalar(config.cls_cosine_weight);
+        let weighted = loss.mul_scalar(config.cls_cosine_weight);
+        cls_total = cls_total + weighted.clone();
+        total = total + weighted;
     }
 
     if config.rel_weight > 0.0 {
@@ -134,10 +172,17 @@ pub fn vision_distillation_loss<B: Backend>(
         let kl = (teacher_prob * (teacher_log - log_student))
             .sum_dim(2)
             .mean();
-        total = total + kl.mul_scalar(config.rel_weight);
+        let weighted = kl.mul_scalar(config.rel_weight);
+        relational_total = relational_total + weighted.clone();
+        total = total + weighted;
     }
 
-    total
+    VisionDistillationLossTerms {
+        total,
+        patch: patch_total,
+        cls: cls_total,
+        relational: relational_total,
+    }
 }
 
 fn feature_layer_norm<const D: usize, B: Backend>(tensor: Tensor<B, D>) -> Tensor<B, D> {

@@ -16,10 +16,11 @@ use burn::tensor::backend::Backend;
 use burn_dragon::BDH;
 use burn_dragon::language::{
     ContextStrategy, ContextStrategyConfig, GenerationConfig, ModelOverrides, TrainingConfig,
-    apply_wgpu_fused_core_override, build_model_config, generate_text, generation_profile_reset,
-    generation_profile_snapshot, load_training_config, prefill_state, resolve_context_strategy,
-    sample_next_token,
+    apply_wgpu_fused_core_override, build_model_config, generate_text, generate_tokens_chunked,
+    generation_profile_reset, generation_profile_snapshot, load_training_config, prefill_state,
+    resolve_context_strategy, sample_next_token,
 };
+use burn_dragon::train::WgpuGenerationExecutor;
 use burn_dragon::train::wgpu::init_runtime;
 use burn_dragon_wgpu::{recurrent_profile_reset, recurrent_profile_snapshot};
 use burn_wgpu::Wgpu;
@@ -245,84 +246,146 @@ where
         let mut generated_ids: Vec<u32> = Vec::new();
         let mut last_print_len = 0usize;
         let mut stream_err: Option<anyhow::Error> = None;
-
-        let (mut state, mut last_logits) = prefill_state::<B>(&model, &prompt_tokens, &device)?;
-
-        if let ContextStrategy::Sliding { window } = strategy
-            && window > 0
-            && state.position > window
-        {
-            state.trim(window);
-        }
-
         let max_tokens = normalize_max_tokens(generation.max_tokens);
-        let mut generated = 0usize;
-        while max_tokens.is_none_or(|max| generated < max) {
+        let settings = burn_dragon::language::GenerationSettings {
+            max_new_tokens: max_tokens,
+            temperature: generation.temperature,
+            top_k: generation.top_k,
+            strategy,
+        };
+
+        let chunked_enabled = is_chunked_streaming_enabled(config, backend_name, &generation) && {
             #[cfg(feature = "viz")]
-            if let Some(viz) = viz_runtime.as_ref()
-                && viz.stop.load(Ordering::Relaxed)
             {
-                break;
+                viz_runtime.is_none()
             }
+            #[cfg(not(feature = "viz"))]
+            {
+                true
+            }
+        };
 
-            let (next, logits) = sample_next_token(
-                &model,
-                &mut state,
-                last_logits,
-                generation.temperature,
-                generation.top_k,
-                &device,
-            )?;
-            last_logits = logits;
-            generated = generated.saturating_add(1);
-
-            if let Ok(token_u32) = u32::try_from(next) {
-                generated_ids.push(token_u32);
-                let decoded = tokenizer.decode(&generated_ids);
-
-                if decoded.len() > last_print_len {
-                    let new_text = &decoded[last_print_len..];
-                    if !new_text.is_empty() {
-                        if let Err(err) = writer.write_all(new_text.as_bytes()) {
-                            stream_err = Some(anyhow!("failed to write streamed token: {err}"));
-                            break;
-                        }
-                        if let Err(err) = writer.flush() {
-                            stream_err =
-                                Some(anyhow!("failed to flush stdout during streaming: {err}"));
-                            break;
-                        }
+        if chunked_enabled {
+            let chunk_tokens = config.wgpu.inference.generation_chunk_tokens.max(1);
+            let buffer_tokens = config
+                .wgpu
+                .inference
+                .generation_device_buffer_tokens
+                .max(chunk_tokens);
+            let mut on_chunk = |chunk: &[i64]| {
+                if stream_err.is_some() {
+                    return;
+                }
+                for &token in chunk {
+                    if let Ok(token_u32) = u32::try_from(token) {
+                        generated_ids.push(token_u32);
                     }
-                    last_print_len = decoded.len();
                 }
-            }
-
-            #[cfg(feature = "viz")]
-            if let Some(viz) = viz_runtime.as_mut() {
-                let token_index = state.position.saturating_sub(1);
-                if viz.encoder.should_capture(token_index) {
-                    let layers = state.take_viz();
-                    let frame = viz.encoder.step(&layers, token_index);
-                    viz.sender.try_send(frame);
+                let decoded = tokenizer.decode(&generated_ids);
+                if decoded.len() <= last_print_len {
+                    return;
                 }
-            }
-
-            if stream_err.is_some() {
-                break;
-            }
-
-            #[cfg(feature = "viz")]
-            if let Some(viz) = viz_runtime.as_ref()
-                && viz.stop.load(Ordering::Relaxed)
-            {
-                break;
-            }
+                let new_text = &decoded[last_print_len..];
+                if new_text.is_empty() {
+                    return;
+                }
+                if let Err(err) = writer.write_all(new_text.as_bytes()) {
+                    stream_err = Some(anyhow!("failed to write streamed chunk: {err}"));
+                    return;
+                }
+                if let Err(err) = writer.flush() {
+                    stream_err = Some(anyhow!("failed to flush stdout during streaming: {err}"));
+                    return;
+                }
+                last_print_len = decoded.len();
+            };
+            let _ = generate_tokens_chunked(
+                &model,
+                prompt_tokens,
+                &device,
+                settings,
+                chunk_tokens,
+                buffer_tokens,
+                Some(&mut on_chunk),
+            )?;
+        } else {
+            let (mut state, mut last_logits) = prefill_state::<B>(&model, &prompt_tokens, &device)?;
 
             if let ContextStrategy::Sliding { window } = strategy
                 && window > 0
                 && state.position > window
             {
                 state.trim(window);
+            }
+
+            let mut generated = 0usize;
+            while max_tokens.is_none_or(|max| generated < max) {
+                #[cfg(feature = "viz")]
+                if let Some(viz) = viz_runtime.as_ref()
+                    && viz.stop.load(Ordering::Relaxed)
+                {
+                    break;
+                }
+
+                let (next, logits) = sample_next_token(
+                    &model,
+                    &mut state,
+                    last_logits,
+                    generation.temperature,
+                    generation.top_k,
+                    &device,
+                )?;
+                last_logits = logits;
+                generated = generated.saturating_add(1);
+
+                if let Ok(token_u32) = u32::try_from(next) {
+                    generated_ids.push(token_u32);
+                    let decoded = tokenizer.decode(&generated_ids);
+
+                    if decoded.len() > last_print_len {
+                        let new_text = &decoded[last_print_len..];
+                        if !new_text.is_empty() {
+                            if let Err(err) = writer.write_all(new_text.as_bytes()) {
+                                stream_err = Some(anyhow!("failed to write streamed token: {err}"));
+                                break;
+                            }
+                            if let Err(err) = writer.flush() {
+                                stream_err =
+                                    Some(anyhow!("failed to flush stdout during streaming: {err}"));
+                                break;
+                            }
+                        }
+                        last_print_len = decoded.len();
+                    }
+                }
+
+                #[cfg(feature = "viz")]
+                if let Some(viz) = viz_runtime.as_mut() {
+                    let token_index = state.position.saturating_sub(1);
+                    if viz.encoder.should_capture(token_index) {
+                        let layers = state.take_viz();
+                        let frame = viz.encoder.step(&layers, token_index);
+                        viz.sender.try_send(frame);
+                    }
+                }
+
+                if stream_err.is_some() {
+                    break;
+                }
+
+                #[cfg(feature = "viz")]
+                if let Some(viz) = viz_runtime.as_ref()
+                    && viz.stop.load(Ordering::Relaxed)
+                {
+                    break;
+                }
+
+                if let ContextStrategy::Sliding { window } = strategy
+                    && window > 0
+                    && state.position > window
+                {
+                    state.trim(window);
+                }
             }
         }
 
@@ -352,15 +415,18 @@ where
         let generation = generation_profile_snapshot();
         let recurrent = recurrent_profile_snapshot();
         eprintln!(
-            "[stage-profile][inference] total_ns={elapsed_ns} prefill_forward_ns={} token_forward_ns={} sample_host_transfer_ns={} sample_cpu_ns={} token_tensor_copy_ns={} token_steps={} prefill_tokens={} host_sync_points={} host_to_device_copy_bytes={} device_to_host_copy_bytes={} recurrent_calls={} recurrent_total_ns={} recurrent_setup_ns={} recurrent_copy_ns={} recurrent_dispatch_ns={}",
+            "[stage-profile][inference] total_ns={elapsed_ns} prefill_forward_ns={} token_forward_ns={} sample_host_transfer_ns={} sample_cpu_ns={} token_tensor_copy_ns={} chunk_flush_ns={} token_steps={} prefill_tokens={} host_sync_points={} chunk_flushes={} chunk_flushed_tokens={} host_to_device_copy_bytes={} device_to_host_copy_bytes={} recurrent_calls={} recurrent_total_ns={} recurrent_setup_ns={} recurrent_copy_ns={} recurrent_dispatch_ns={}",
             generation.prefill_forward_ns,
             generation.token_forward_ns,
             generation.sample_host_transfer_ns,
             generation.sample_cpu_ns,
             generation.token_tensor_copy_ns,
+            generation.chunk_flush_ns,
             generation.token_steps,
             generation.prefill_tokens,
             generation.host_sync_points,
+            generation.chunk_flushes,
+            generation.chunk_flushed_tokens,
             generation.host_to_device_copy_bytes,
             generation.device_to_host_copy_bytes,
             recurrent.calls,
@@ -372,6 +438,23 @@ where
     }
 
     Ok(())
+}
+
+fn is_chunked_streaming_enabled(
+    config: &TrainingConfig,
+    backend_name: &str,
+    generation: &GenerationConfig,
+) -> bool {
+    if !burn_dragon::language::is_wgpu_backend_name(backend_name) {
+        return false;
+    }
+    if !matches!(
+        config.wgpu.inference.generation_executor,
+        WgpuGenerationExecutor::RolloutChunked
+    ) {
+        return false;
+    }
+    generation.top_k == Some(1)
 }
 
 #[cfg(feature = "viz")]

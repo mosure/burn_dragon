@@ -64,6 +64,10 @@ impl<B: AutodiffBackend> AutodiffModule<B> for RotaryEmbedding {
     fn valid(&self) -> Self::InnerModule {
         *self
     }
+
+    fn from_inner(module: Self::InnerModule) -> Self {
+        module
+    }
 }
 
 impl ModuleDisplayDefault for RotaryEmbedding {

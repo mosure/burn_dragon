@@ -1,553 +1,66 @@
 use burn::module::{Module, Param};
-use burn::nn::conv::{Conv2d, Conv2dConfig};
-use burn::nn::{
-    Dropout, DropoutConfig, LayerNorm, LayerNormConfig, Linear, LinearConfig, PaddingConfig2d,
-};
+use burn::nn::{Dropout, DropoutConfig, LayerNorm, LayerNormConfig, Linear, LinearConfig};
 use burn::tensor::backend::Backend;
 use burn::tensor::{Distribution as TensorDistribution, Int, Tensor, TensorData, activation};
 
 use burn_dragon_core::{
-    FusedKernelConfig, ManifoldHyperConnections, lowrank_residual_step, mhc_merge, mhc_split,
+    BankedRhoState, FusedKernelConfig, ManifoldHyperConnections, StructuredBankRole,
+    StructuredRouteOperation, StructuredRoutePattern, StructuredRouteSpec, StructuredRoutingSpec,
+    StructuredStepMode, StructuredTopologyState, lowrank_residual_step, mhc_merge, mhc_split,
+    near_critical_residual_output_std,
+};
+use burn_dragon_wgpu::{
+    LocalGridNeighborhood, LocalGridShape2d, supports_local_grid_rho_backend,
+    try_fused_local_grid_rho_attention_wgpu_head_decay,
 };
 
 const ROW_NORM_EPS: f32 = 1e-6;
 
+mod cellular_state;
 mod config;
-#[cfg(feature = "train")]
-mod datasets;
+mod embedding;
+mod pyramid_ops;
+mod rho_stream;
+mod token_ops;
 
+pub use cellular_state::VisionCellularState;
 pub use config::*;
-#[cfg(feature = "train")]
-pub use datasets::{
-    CifarBatch, CifarDataLoader, CifarDataset, CifarSplit, CifarType, DinoFeatureStore,
-    ImageNetAugmentations, ImageNetBatch, ImageNetDataLoader, ImageNetDataset,
-    ImageNetDatasetConfig, ImageNetSplit, VisionNormalize,
+pub use embedding::{
+    PatchEmbed, PatchEmbedOutput, SpatialPositionalEncoding, VisionProjectionHead, patchify,
+    pool_patch_tokens, unpatchify,
 };
 
-#[derive(Clone)]
-pub struct PatchEmbedOutput<B: Backend> {
-    pub tokens: Tensor<B, 3>,
-    pub grid: PatchGrid,
-}
-
-const PATCH_EMBED_EXPANSION: usize = 4;
-const PATCH_EMBED_BLOCKS_PER_STAGE: usize = 1;
-
-#[derive(Module, Debug)]
-struct PatchConvNeXtBlock<B: Backend> {
-    depthwise: Conv2d<B>,
-    pointwise_in: Conv2d<B>,
-    pointwise_out: Conv2d<B>,
-}
-
-impl<B: Backend> PatchConvNeXtBlock<B> {
-    fn new(channels: usize, expansion: usize, device: &B::Device) -> Self {
-        let expansion = expansion.max(1);
-        let depthwise = Conv2dConfig::new([channels, channels], [3, 3])
-            .with_padding(PaddingConfig2d::Same)
-            .with_groups(channels.max(1))
-            .init(device);
-        let pointwise_in =
-            Conv2dConfig::new([channels, channels.saturating_mul(expansion)], [1, 1]).init(device);
-        let pointwise_out =
-            Conv2dConfig::new([channels.saturating_mul(expansion), channels], [1, 1]).init(device);
-        Self {
-            depthwise,
-            pointwise_in,
-            pointwise_out,
-        }
+fn centered_mode_offset_data(modes: usize, width: usize, scale: f32) -> Vec<f32> {
+    let center = (modes.saturating_sub(1)) as f32 / 2.0;
+    let mut values = Vec::with_capacity(modes.saturating_mul(width));
+    for mode in 0..modes {
+        let offset = (mode as f32 - center) * scale;
+        values.extend(std::iter::repeat_n(offset, width));
     }
-
-    fn forward(&self, x: Tensor<B, 4>) -> Tensor<B, 4> {
-        let residual = x.clone();
-        let x = self.depthwise.forward(x);
-        let x = activation::gelu(x);
-        let x = self.pointwise_in.forward(x);
-        let x = activation::gelu(x);
-        let x = self.pointwise_out.forward(x);
-        x + residual
-    }
-}
-
-#[derive(Module, Debug)]
-struct PatchEmbedStage<B: Backend> {
-    downsample: Conv2d<B>,
-    blocks: Vec<PatchConvNeXtBlock<B>>,
-}
-
-impl<B: Backend> PatchEmbedStage<B> {
-    fn new(
-        in_channels: usize,
-        out_channels: usize,
-        stride: usize,
-        blocks: usize,
-        expansion: usize,
-        device: &B::Device,
-    ) -> Self {
-        let stride = stride.max(1);
-        let kernel = patch_kernel_for_stride(stride);
-        let padding = if stride > 1 {
-            PaddingConfig2d::Valid
-        } else {
-            PaddingConfig2d::Same
-        };
-        let downsample =
-            Conv2dConfig::new([in_channels.max(1), out_channels.max(1)], [kernel, kernel])
-                .with_stride([stride, stride])
-                .with_padding(padding)
-                .init(device);
-        let blocks = (0..blocks.max(1))
-            .map(|_| PatchConvNeXtBlock::new(out_channels.max(1), expansion, device))
-            .collect();
-        Self { downsample, blocks }
-    }
-
-    fn forward(&self, mut x: Tensor<B, 4>) -> Tensor<B, 4> {
-        x = self.downsample.forward(x);
-        for block in &self.blocks {
-            x = block.forward(x);
-        }
-        x
-    }
-}
-
-#[derive(Module, Debug)]
-pub struct PatchEmbed<B: Backend> {
-    #[module(ignore)]
-    mode: VisionPatchEmbedMode,
-    stages: Vec<PatchEmbedStage<B>>,
-    proj: Option<Conv2d<B>>,
-    linear: Option<Linear<B>>,
-    pos_encoding: SpatialPositionalEncoding<B>,
-    patch_size: usize,
-    embed_dim: usize,
-}
-
-impl<B: Backend> PatchEmbed<B> {
-    pub fn new(config: &VisionDragonConfig, device: &B::Device) -> Self {
-        let patch_size = config.patch_size.max(1);
-        let patch_dim = patch_size
-            .saturating_mul(patch_size)
-            .saturating_mul(config.in_channels.max(1));
-        let (stages, proj, linear) = match config.patch_embed_mode {
-            VisionPatchEmbedMode::Conv => {
-                let mut strides = patch_downsample_strides(patch_size);
-                if strides.is_empty() {
-                    strides.push(1);
-                }
-                let hidden_dim = (config.embed_dim / 2).max(16).min(config.embed_dim.max(1));
-                let mut stages = Vec::with_capacity(strides.len());
-                let mut in_channels = config.in_channels.max(1);
-                for stride in strides {
-                    stages.push(PatchEmbedStage::new(
-                        in_channels,
-                        hidden_dim,
-                        stride,
-                        PATCH_EMBED_BLOCKS_PER_STAGE,
-                        PATCH_EMBED_EXPANSION,
-                        device,
-                    ));
-                    in_channels = hidden_dim;
-                }
-                let proj = Conv2dConfig::new([in_channels.max(1), config.embed_dim.max(1)], [1, 1])
-                    .init(device);
-                (stages, Some(proj), None)
-            }
-            VisionPatchEmbedMode::Linear => {
-                let linear =
-                    LinearConfig::new(patch_dim.max(1), config.embed_dim.max(1)).init(device);
-                (Vec::new(), None, Some(linear))
-            }
-            VisionPatchEmbedMode::Identity => {
-                assert!(
-                    patch_dim == config.embed_dim,
-                    "identity patch embed requires embed_dim ({}) to match patch_dim ({})",
-                    config.embed_dim,
-                    patch_dim
-                );
-                (Vec::new(), None, None)
-            }
-        };
-        let pos_encoding = SpatialPositionalEncoding::new(
-            config.pos_encoding,
-            config.pos_max_height,
-            config.pos_max_width,
-            config.embed_dim,
-            device,
-        );
-        Self {
-            mode: config.patch_embed_mode,
-            stages,
-            proj,
-            linear,
-            pos_encoding,
-            patch_size,
-            embed_dim: config.embed_dim,
-        }
-    }
-
-    pub fn forward(&self, images: Tensor<B, 4>) -> PatchEmbedOutput<B> {
-        let output = self.forward_raw(images);
-        let tokens = self.pos_encoding.add_position(output.tokens, output.grid);
-        PatchEmbedOutput {
-            tokens,
-            grid: output.grid,
-        }
-    }
-
-    pub fn forward_raw(&self, images: Tensor<B, 4>) -> PatchEmbedOutput<B> {
-        match self.mode {
-            VisionPatchEmbedMode::Conv => {
-                let [batch, channels, height, width] = images.shape().dims::<4>();
-                let device = images.device();
-                let patch_size = self.patch_size.max(1);
-                let padded_h = height.div_ceil(patch_size) * patch_size;
-                let padded_w = width.div_ceil(patch_size) * patch_size;
-                let mut patches = images;
-                let pad_w = padded_w.saturating_sub(width);
-                let pad_h = padded_h.saturating_sub(height);
-                if pad_w > 0 {
-                    let pad = Tensor::<B, 4>::zeros([batch, channels, height, pad_w], &device);
-                    patches = Tensor::cat(vec![patches, pad], 3);
-                }
-                if pad_h > 0 {
-                    let pad = Tensor::<B, 4>::zeros([batch, channels, pad_h, padded_w], &device);
-                    patches = Tensor::cat(vec![patches, pad], 2);
-                }
-                for stage in &self.stages {
-                    patches = stage.forward(patches);
-                }
-                let proj = self.proj.as_ref().expect("patch embed conv projection");
-                let patches = proj.forward(patches);
-                let [_, _, grid_h, grid_w] = patches.shape().dims::<4>();
-                let tokens = patches
-                    .reshape([batch, self.embed_dim, grid_h * grid_w])
-                    .swap_dims(1, 2);
-
-                PatchEmbedOutput {
-                    tokens,
-                    grid: PatchGrid {
-                        height: grid_h,
-                        width: grid_w,
-                    },
-                }
-            }
-            VisionPatchEmbedMode::Linear => {
-                let [_batch, _, height, width] = images.shape().dims::<4>();
-                let patch_size = self.patch_size.max(1);
-                let grid_h = height.div_ceil(patch_size);
-                let grid_w = width.div_ceil(patch_size);
-                let patches = patchify(images, patch_size);
-                let linear = self.linear.as_ref().expect("patch embed linear projection");
-                let tokens = linear.forward(patches);
-                PatchEmbedOutput {
-                    tokens,
-                    grid: PatchGrid {
-                        height: grid_h,
-                        width: grid_w,
-                    },
-                }
-            }
-            VisionPatchEmbedMode::Identity => {
-                let [_batch, _, height, width] = images.shape().dims::<4>();
-                let patch_size = self.patch_size.max(1);
-                let grid_h = height.div_ceil(patch_size);
-                let grid_w = width.div_ceil(patch_size);
-                let tokens = patchify(images, patch_size);
-                PatchEmbedOutput {
-                    tokens,
-                    grid: PatchGrid {
-                        height: grid_h,
-                        width: grid_w,
-                    },
-                }
-            }
-        }
-    }
-
-    pub fn add_position(&self, tokens: Tensor<B, 3>, grid: PatchGrid) -> Tensor<B, 3> {
-        self.pos_encoding.add_position(tokens, grid)
-    }
-
-    pub fn patch_size(&self) -> usize {
-        self.patch_size
-    }
-}
-
-fn patch_downsample_strides(patch_size: usize) -> Vec<usize> {
-    let mut remaining = patch_size.max(1);
-    let mut strides = Vec::new();
-    while remaining > 1 {
-        if remaining.is_multiple_of(4) {
-            strides.push(4);
-            remaining /= 4;
-        } else if remaining.is_multiple_of(2) {
-            strides.push(2);
-            remaining /= 2;
-        } else {
-            strides.push(remaining);
-            remaining = 1;
-        }
-    }
-    strides
-}
-
-fn patch_kernel_for_stride(stride: usize) -> usize {
-    if stride <= 1 { 3 } else { stride }
-}
-
-pub fn pool_patch_tokens<B: Backend>(
-    tokens: Tensor<B, 3>,
-    grid: PatchGrid,
-) -> (Tensor<B, 3>, PatchGrid) {
-    let [batch, tokens_len, dim] = tokens.shape().dims::<3>();
-    let grid_h = grid.height;
-    let grid_w = grid.width;
-    if grid_h == 0 || grid_w == 0 || grid_h * grid_w != tokens_len {
-        return (tokens, grid);
-    }
-    let even_h = grid_h - (grid_h % 2);
-    let even_w = grid_w - (grid_w % 2);
-    if even_h == 0 || even_w == 0 {
-        return (tokens, grid);
-    }
-    let tokens = tokens.reshape([batch, grid_h, grid_w, dim]);
-    let tokens = tokens.slice_dim(1, 0..even_h).slice_dim(2, 0..even_w);
-    let next_h = even_h / 2;
-    let next_w = even_w / 2;
-    let tokens = tokens
-        .reshape([batch, next_h, 2, next_w, 2, dim])
-        .mean_dim(2)
-        .mean_dim(4)
-        .reshape([batch, next_h * next_w, dim]);
-    (
-        tokens,
-        PatchGrid {
-            height: next_h,
-            width: next_w,
-        },
-    )
-}
-
-pub fn patchify<B: Backend>(images: Tensor<B, 4>, patch_size: usize) -> Tensor<B, 3> {
-    let [batch, channels, height, width] = images.shape().dims::<4>();
-    let patch_size = patch_size.max(1);
-    let grid_h = height.div_ceil(patch_size);
-    let grid_w = width.div_ceil(patch_size);
-    let padded_h = grid_h * patch_size;
-    let padded_w = grid_w * patch_size;
-    let device = images.device();
-    let mut images = images;
-    let pad_w = padded_w.saturating_sub(width);
-    let pad_h = padded_h.saturating_sub(height);
-    if pad_w > 0 {
-        let pad = Tensor::<B, 4>::zeros([batch, channels, height, pad_w], &device);
-        images = Tensor::cat(vec![images, pad], 3);
-    }
-    if pad_h > 0 {
-        let pad = Tensor::<B, 4>::zeros([batch, channels, pad_h, padded_w], &device);
-        images = Tensor::cat(vec![images, pad], 2);
-    }
-    images
-        .reshape([batch, channels, grid_h, patch_size, grid_w, patch_size])
-        .swap_dims(1, 2)
-        .swap_dims(2, 4)
-        .swap_dims(3, 4)
-        .reshape([batch, grid_h * grid_w, channels * patch_size * patch_size])
-}
-
-pub fn unpatchify<B: Backend>(
-    patches: Tensor<B, 3>,
-    patch_size: usize,
-    height: usize,
-    width: usize,
-    channels: usize,
-) -> Tensor<B, 4> {
-    let [batch, tokens, patch_dim] = patches.shape().dims::<3>();
-    assert!(patch_dim > 0, "unpatchify expects non-empty patch dim");
-    let patch_size = patch_size.max(1);
-    let grid_h = height.div_ceil(patch_size);
-    let grid_w = width.div_ceil(patch_size);
-    assert!(
-        grid_h * grid_w == tokens,
-        "unpatchify expects token count to match grid"
-    );
-    let padded_h = grid_h * patch_size;
-    let padded_w = grid_w * patch_size;
-    let image = patches
-        .reshape([batch, grid_h, grid_w, channels, patch_size, patch_size])
-        .swap_dims(3, 4)
-        .swap_dims(2, 4)
-        .swap_dims(1, 2)
-        .reshape([batch, channels, padded_h, padded_w]);
-    if padded_h == height && padded_w == width {
-        image
-    } else {
-        image.slice_dim(2, 0..height).slice_dim(3, 0..width)
-    }
-}
-
-#[derive(Module, Debug)]
-pub struct SpatialPositionalEncoding<B: Backend> {
-    kind: SpatialPositionalEncodingKind,
-    row_embed: Option<Param<Tensor<B, 2>>>,
-    col_embed: Option<Param<Tensor<B, 2>>>,
-    max_height: usize,
-    max_width: usize,
-    dim: usize,
-}
-
-impl<B: Backend> SpatialPositionalEncoding<B> {
-    pub fn new(
-        kind: SpatialPositionalEncodingKind,
-        max_height: usize,
-        max_width: usize,
-        dim: usize,
-        device: &B::Device,
-    ) -> Self {
-        let max_height = max_height.max(1);
-        let max_width = max_width.max(1);
-        let (row_embed, col_embed) = if kind == SpatialPositionalEncodingKind::Learned2d {
-            let row = Tensor::<B, 2>::random(
-                [max_height, dim],
-                TensorDistribution::Normal(0.0, 0.02),
-                device,
-            );
-            let col = Tensor::<B, 2>::random(
-                [max_width, dim],
-                TensorDistribution::Normal(0.0, 0.02),
-                device,
-            );
-            (Some(Param::from_tensor(row)), Some(Param::from_tensor(col)))
-        } else {
-            (None, None)
-        };
-
-        Self {
-            kind,
-            row_embed,
-            col_embed,
-            max_height,
-            max_width,
-            dim,
-        }
-    }
-
-    pub fn add_position(&self, tokens: Tensor<B, 3>, grid: PatchGrid) -> Tensor<B, 3> {
-        match self.kind {
-            SpatialPositionalEncodingKind::None => tokens,
-            SpatialPositionalEncodingKind::Learned2d => tokens + self.learned_positions(grid),
-            SpatialPositionalEncodingKind::SineCosine2d => {
-                let device = tokens.device();
-                tokens + self.sincos_positions(grid, &device)
-            }
-        }
-    }
-
-    fn learned_positions(&self, grid: PatchGrid) -> Tensor<B, 3> {
-        assert!(
-            grid.height <= self.max_height && grid.width <= self.max_width,
-            "positional grid exceeds configured max size"
-        );
-        let row = self
-            .row_embed
-            .as_ref()
-            .expect("row embedding required")
-            .val()
-            .slice_dim(0, 0..grid.height);
-        let col = self
-            .col_embed
-            .as_ref()
-            .expect("col embedding required")
-            .val()
-            .slice_dim(0, 0..grid.width);
-        let row = row.unsqueeze_dim::<3>(1);
-        let col = col.unsqueeze_dim::<3>(0);
-        let pos = row + col;
-        let pos = pos.reshape([grid.height * grid.width, self.dim]);
-        pos.unsqueeze_dim::<3>(0)
-    }
-
-    fn sincos_positions(&self, grid: PatchGrid, device: &B::Device) -> Tensor<B, 3> {
-        assert!(
-            self.dim.is_multiple_of(4),
-            "sine-cosine positional encoding requires dim divisible by 4"
-        );
-        let quarter = self.dim / 4;
-        let mut omega = Vec::with_capacity(quarter);
-        for idx in 0..quarter {
-            let value = 1.0 / 10000.0f32.powf(idx as f32 / quarter as f32);
-            omega.push(value);
-        }
-
-        let mut data = Vec::with_capacity(grid.num_patches() * self.dim);
-        for y in 0..grid.height {
-            for x in 0..grid.width {
-                for omega_value in omega.iter() {
-                    let wy = y as f32 * *omega_value;
-                    let wx = x as f32 * *omega_value;
-                    data.push(wy.sin());
-                    data.push(wy.cos());
-                    data.push(wx.sin());
-                    data.push(wx.cos());
-                }
-            }
-        }
-
-        Tensor::<B, 3>::from_data(
-            TensorData::new(data, [1, grid.num_patches(), self.dim]),
-            device,
-        )
-    }
-}
-
-#[derive(Module, Debug)]
-pub struct VisionProjectionHead<B: Backend> {
-    norm: LayerNorm<B>,
-    fc1: Linear<B>,
-    fc2: Linear<B>,
-    dropout: Dropout,
-}
-
-impl<B: Backend> VisionProjectionHead<B> {
-    pub fn new(
-        input_dim: usize,
-        hidden_dim: usize,
-        output_dim: usize,
-        dropout: f64,
-        device: &B::Device,
-    ) -> Self {
-        let norm = LayerNormConfig::new(input_dim).init(device);
-        let fc1 = LinearConfig::new(input_dim, hidden_dim).init(device);
-        let fc2 = LinearConfig::new(hidden_dim, output_dim).init(device);
-        let dropout = DropoutConfig::new(dropout).init();
-        Self {
-            norm,
-            fc1,
-            fc2,
-            dropout,
-        }
-    }
-
-    pub fn forward<const D: usize>(&self, tokens: Tensor<B, D>) -> Tensor<B, D> {
-        let tokens = self.norm.forward(tokens);
-        let tokens = self.fc1.forward(tokens);
-        let tokens = activation::gelu(tokens);
-        let tokens = self.dropout.forward(tokens);
-        self.fc2.forward(tokens)
-    }
+    values
 }
 
 #[derive(Clone)]
 pub struct VisionDragonOutput<B: Backend> {
+    /// Dense-space patch-token activations after the selected backbone update path.
     pub patch_tokens: Tensor<B, 3>,
+    /// Dense-space global token. In the cellular path this is pooled from patch context rather
+    /// than backed by its own persistent `rho`.
     pub cls_token: Tensor<B, 2>,
 }
 
 #[derive(Clone)]
 pub struct VisionDragonMultiOutput<B: Backend> {
+    /// Dense-space patch-token activations across multiple views/eyes.
     pub patch_tokens: Tensor<B, 4>,
+    /// Dense-space global token across multiple views/eyes.
     pub cls_token: Tensor<B, 3>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RhoStreamRolloutExecutorMode {
+    HostLoop,
+    WgpuFused,
 }
 
 #[derive(Module, Debug)]
@@ -557,6 +70,8 @@ pub struct VisionDragon<B: Backend> {
     embed_dim: usize,
     mlp_internal_dim_multiplier: usize,
     use_cls_token: bool,
+    #[module(ignore)]
+    backbone_kind: VisionBackboneKind,
     attention_mode: VisionAttentionMode,
     use_alibi: bool,
     alibi_slopes: Option<Tensor<B, 1>>,
@@ -564,12 +79,17 @@ pub struct VisionDragon<B: Backend> {
     kernel: FusedKernelConfig,
     #[module(ignore)]
     trm_graph: VisionTrmGraphConfig,
-    trm_x: Option<Linear<B>>,
-    trm_v: Option<Linear<B>>,
-    trm_y: Option<Linear<B>>,
-    trm_enc: Option<Linear<B>>,
-    trm_norm: Option<LayerNorm<B>>,
-    trm_hub_gate: Option<Linear<B>>,
+    #[module(ignore)]
+    rho_stream: VisionRhoStreamConfig,
+    cellular_step_mode_embeddings: Option<Param<Tensor<B, 2>>>,
+    cellular_query_mode_offsets: Option<Param<Tensor<B, 2>>>,
+    cellular_value_mode_offsets: Option<Param<Tensor<B, 2>>>,
+    pyramid_x_neuron_proj: Option<Linear<B>>,
+    pyramid_write_value_proj: Option<Linear<B>>,
+    pyramid_y_gate_proj: Option<Linear<B>>,
+    pyramid_delta_proj: Option<Linear<B>>,
+    pyramid_value_norm: Option<LayerNorm<B>>,
+    pyramid_hub_gate: Option<Linear<B>>,
     grid_height: usize,
     grid_width: usize,
     patch_embed: PatchEmbed<B>,
@@ -589,6 +109,7 @@ pub struct VisionDragon<B: Backend> {
 
 impl<B: Backend> VisionDragon<B> {
     pub fn new(config: VisionDragonConfig, device: &B::Device) -> Self {
+        let backbone_kind = config.backbone;
         let patch_embed = PatchEmbed::new(&config, device);
         let dropout = DropoutConfig::new(config.dropout).init();
         let token_norm = if config.token_state_norm {
@@ -622,20 +143,24 @@ impl<B: Backend> VisionDragon<B> {
 
         let latent_per_head = config.latent_per_head();
         let latent_total = config.latent_total();
+        let encoder_std =
+            near_critical_residual_output_std(config.embed_dim, latent_per_head, config.steps);
+        let decoder_std =
+            near_critical_residual_output_std(latent_total, config.embed_dim, config.steps);
 
         let encoder = Param::from_tensor(Tensor::<B, 3>::random(
             [config.n_head, config.embed_dim, latent_per_head],
-            TensorDistribution::Normal(0.0, 0.02),
+            TensorDistribution::Normal(0.0, encoder_std),
             device,
         ));
         let encoder_v = Param::from_tensor(Tensor::<B, 3>::random(
             [config.n_head, config.embed_dim, latent_per_head],
-            TensorDistribution::Normal(0.0, 0.02),
+            TensorDistribution::Normal(0.0, encoder_std),
             device,
         ));
         let decoder = Param::from_tensor(Tensor::<B, 2>::random(
             [latent_total, config.embed_dim],
-            TensorDistribution::Normal(0.0, 0.02),
+            TensorDistribution::Normal(0.0, decoder_std),
             device,
         ));
 
@@ -648,26 +173,70 @@ impl<B: Backend> VisionDragon<B> {
         );
 
         let trm_graph = config.trm_graph.clone();
-        let (trm_x, trm_v, trm_y, trm_enc, trm_norm, trm_hub_gate) = if trm_graph.enabled {
-            let trm_x = LinearConfig::new(config.embed_dim, trm_graph.rank.max(1)).init(device);
-            let trm_v =
+        let rho_stream = config.rho_stream.clone();
+        let latent_total = config.latent_total();
+        let cellular_mode_enabled =
+            matches!(backbone_kind, VisionBackboneKind::Cellular) && rho_stream.mode_embeddings;
+        let cellular_step_mode_embeddings = if cellular_mode_enabled {
+            Some(Param::from_tensor(Tensor::<B, 2>::random(
+                [StructuredStepMode::COUNT, config.embed_dim],
+                TensorDistribution::Normal(0.0, 0.02),
+                device,
+            )))
+        } else {
+            None
+        };
+        let cellular_query_mode_offsets = if cellular_mode_enabled {
+            Some(Param::from_tensor(Tensor::<B, 2>::from_data(
+                TensorData::new(
+                    centered_mode_offset_data(StructuredStepMode::COUNT, latent_total, 0.05),
+                    [StructuredStepMode::COUNT, latent_total],
+                ),
+                device,
+            )))
+        } else {
+            None
+        };
+        let cellular_value_mode_offsets = if cellular_mode_enabled {
+            Some(Param::from_tensor(Tensor::<B, 2>::from_data(
+                TensorData::new(
+                    centered_mode_offset_data(StructuredStepMode::COUNT, config.embed_dim, 0.05),
+                    [StructuredStepMode::COUNT, config.embed_dim],
+                ),
+                device,
+            )))
+        } else {
+            None
+        };
+        let (
+            pyramid_x_neuron_proj,
+            pyramid_write_value_proj,
+            pyramid_y_gate_proj,
+            pyramid_delta_proj,
+            pyramid_value_norm,
+            pyramid_hub_gate,
+        ) = if matches!(backbone_kind, VisionBackboneKind::Pyramid) {
+            let pyramid_x_neuron_proj =
+                LinearConfig::new(config.embed_dim, trm_graph.rank.max(1)).init(device);
+            let pyramid_write_value_proj =
                 LinearConfig::new(config.embed_dim, trm_graph.value_dim.max(1)).init(device);
-            let trm_y =
+            let pyramid_y_gate_proj =
                 LinearConfig::new(trm_graph.value_dim.max(1), trm_graph.rank.max(1)).init(device);
-            let trm_enc = LinearConfig::new(trm_graph.rank.max(1), config.embed_dim).init(device);
-            let trm_norm = LayerNormConfig::new(trm_graph.value_dim.max(1)).init(device);
-            let trm_hub_gate = if trm_graph.hub_count > 1 && trm_graph.hub_gates {
+            let pyramid_delta_proj =
+                LinearConfig::new(trm_graph.rank.max(1), config.embed_dim).init(device);
+            let pyramid_value_norm = LayerNormConfig::new(trm_graph.value_dim.max(1)).init(device);
+            let pyramid_hub_gate = if trm_graph.hub_count > 1 && trm_graph.hub_gates {
                 Some(LinearConfig::new(config.embed_dim, trm_graph.hub_count).init(device))
             } else {
                 None
             };
             (
-                Some(trm_x),
-                Some(trm_v),
-                Some(trm_y),
-                Some(trm_enc),
-                Some(trm_norm),
-                trm_hub_gate,
+                Some(pyramid_x_neuron_proj),
+                Some(pyramid_write_value_proj),
+                Some(pyramid_y_gate_proj),
+                Some(pyramid_delta_proj),
+                Some(pyramid_value_norm),
+                pyramid_hub_gate,
             )
         } else {
             (None, None, None, None, None, None)
@@ -709,6 +278,7 @@ impl<B: Backend> VisionDragon<B> {
             embed_dim: config.embed_dim,
             mlp_internal_dim_multiplier: config.mlp_internal_dim_multiplier,
             use_cls_token: config.use_cls_token,
+            backbone_kind,
             attention_mode: config.attention_mode,
             use_alibi,
             alibi_slopes,
@@ -728,12 +298,16 @@ impl<B: Backend> VisionDragon<B> {
             cls_sync_alpha: config.cls_sync_alpha,
             cross_eye_steps: config.cross_eye_steps,
             trm_graph,
-            trm_x,
-            trm_v,
-            trm_y,
-            trm_enc,
-            trm_norm,
-            trm_hub_gate,
+            rho_stream,
+            cellular_step_mode_embeddings,
+            cellular_query_mode_offsets,
+            cellular_value_mode_offsets,
+            pyramid_x_neuron_proj,
+            pyramid_write_value_proj,
+            pyramid_y_gate_proj,
+            pyramid_delta_proj,
+            pyramid_value_norm,
+            pyramid_hub_gate,
             grid_height: config.pos_max_height.max(1),
             grid_width: config.pos_max_width.max(1),
         }
@@ -766,6 +340,114 @@ impl<B: Backend> VisionDragon<B> {
         self.projection.forward(tokens)
     }
 
+    pub fn backbone_kind(&self) -> VisionBackboneKind {
+        self.backbone_kind
+    }
+
+    pub fn pyramid_backbone_enabled(&self) -> bool {
+        matches!(self.backbone_kind, VisionBackboneKind::Pyramid)
+    }
+
+    pub fn cellular_backbone_enabled(&self) -> bool {
+        matches!(self.backbone_kind, VisionBackboneKind::Cellular)
+    }
+
+    pub fn trm_graph_enabled(&self) -> bool {
+        self.pyramid_backbone_enabled()
+    }
+
+    pub fn rho_stream_enabled(&self) -> bool {
+        self.cellular_backbone_enabled()
+    }
+
+    pub fn backbone_routing_spec(&self) -> StructuredRoutingSpec {
+        match self.backbone_kind {
+            VisionBackboneKind::Dense => StructuredRoutingSpec::new(),
+            VisionBackboneKind::Cellular => self.cellular_routing_spec(),
+            VisionBackboneKind::Pyramid => self.pyramid_routing_spec(),
+        }
+    }
+
+    pub fn cellular_routing_spec(&self) -> StructuredRoutingSpec {
+        StructuredRoutingSpec::new()
+            .with_route(StructuredRouteSpec::new(
+                StructuredBankRole::Primary,
+                StructuredBankRole::Primary,
+                StructuredRouteOperation::Read,
+                StructuredRoutePattern::Local,
+            ))
+            .with_route(StructuredRouteSpec::new(
+                StructuredBankRole::Primary,
+                StructuredBankRole::Primary,
+                StructuredRouteOperation::Write,
+                StructuredRoutePattern::Identity,
+            ))
+    }
+
+    pub fn pyramid_routing_spec(&self) -> StructuredRoutingSpec {
+        StructuredRoutingSpec::new()
+            .with_route(StructuredRouteSpec::new(
+                StructuredBankRole::Primary,
+                StructuredBankRole::Primary,
+                StructuredRouteOperation::Read,
+                StructuredRoutePattern::Local,
+            ))
+            .with_route(StructuredRouteSpec::new(
+                StructuredBankRole::Context,
+                StructuredBankRole::Context,
+                StructuredRouteOperation::Read,
+                StructuredRoutePattern::Local,
+            ))
+            .with_route(StructuredRouteSpec::new(
+                StructuredBankRole::Context,
+                StructuredBankRole::Primary,
+                StructuredRouteOperation::Read,
+                StructuredRoutePattern::Broadcast,
+            ))
+            .with_route(StructuredRouteSpec::new(
+                StructuredBankRole::Global,
+                StructuredBankRole::Primary,
+                StructuredRouteOperation::Read,
+                StructuredRoutePattern::Broadcast,
+            ))
+            .with_route(StructuredRouteSpec::new(
+                StructuredBankRole::Global,
+                StructuredBankRole::Context,
+                StructuredRouteOperation::Read,
+                StructuredRoutePattern::Broadcast,
+            ))
+            .with_route(StructuredRouteSpec::new(
+                StructuredBankRole::Primary,
+                StructuredBankRole::Primary,
+                StructuredRouteOperation::Write,
+                StructuredRoutePattern::Identity,
+            ))
+            .with_route(StructuredRouteSpec::new(
+                StructuredBankRole::Context,
+                StructuredBankRole::Context,
+                StructuredRouteOperation::Write,
+                StructuredRoutePattern::Identity,
+            ))
+            .with_route(StructuredRouteSpec::new(
+                StructuredBankRole::Primary,
+                StructuredBankRole::Context,
+                StructuredRouteOperation::Write,
+                StructuredRoutePattern::Pool,
+            ))
+            .with_route(StructuredRouteSpec::new(
+                StructuredBankRole::Primary,
+                StructuredBankRole::Global,
+                StructuredRouteOperation::Write,
+                StructuredRoutePattern::Pool,
+            ))
+            .with_route(StructuredRouteSpec::new(
+                StructuredBankRole::Context,
+                StructuredBankRole::Global,
+                StructuredRouteOperation::Write,
+                StructuredRoutePattern::Pool,
+            ))
+    }
+
     pub fn forward_images(&self, images: Tensor<B, 4>) -> VisionDragonOutput<B> {
         let patch = self.patch_embed.forward(images);
         self.forward_tokens(patch.tokens)
@@ -788,6 +470,18 @@ impl<B: Backend> VisionDragon<B> {
     ) -> VisionDragonOutput<B> {
         let patch = self.patch_embed.forward(images);
         self.forward_tokens_steps_rollout(patch.tokens, steps, backprop_steps)
+    }
+
+    /// Same as `forward_images_steps_rollout`, but does not clamp `steps` to `self.steps`.
+    /// Useful for validation-time extrapolation beyond the training rollout depth.
+    pub fn forward_images_steps_rollout_unbounded(
+        &self,
+        images: Tensor<B, 4>,
+        steps: usize,
+        backprop_steps: usize,
+    ) -> VisionDragonOutput<B> {
+        let patch = self.patch_embed.forward(images);
+        self.forward_tokens_steps_rollout_unbounded(patch.tokens, steps, backprop_steps)
     }
 
     pub fn forward_patches(
@@ -836,6 +530,19 @@ impl<B: Backend> VisionDragon<B> {
         self.split_output(projected)
     }
 
+    /// Same as `forward_tokens_steps_rollout`, but does not clamp `steps` to `self.steps`.
+    /// Useful for validation-time extrapolation beyond the training rollout depth.
+    pub fn forward_tokens_steps_rollout_unbounded(
+        &self,
+        tokens: Tensor<B, 3>,
+        steps: usize,
+        backprop_steps: usize,
+    ) -> VisionDragonOutput<B> {
+        let tokens = self.encode_tokens_steps_rollout_unbounded(tokens, steps, backprop_steps);
+        let projected = self.projection.forward(tokens);
+        self.split_output(projected)
+    }
+
     pub fn forward_tokens_embed(&self, tokens: Tensor<B, 3>) -> VisionDragonOutput<B> {
         let tokens = self.encode_tokens(tokens);
         self.split_output(tokens)
@@ -872,6 +579,366 @@ impl<B: Backend> VisionDragon<B> {
         self.split_output(tokens)
     }
 
+    pub fn cellular_state_from_tokens(&self, tokens: Tensor<B, 3>) -> VisionCellularState<B> {
+        assert!(
+            self.cellular_backbone_enabled(),
+            "cellular state requires vision.backbone = \"cellular\""
+        );
+        let token_state = self.prepare_token_state(tokens, true);
+        let rho = self.empty_cellular_rho(&token_state);
+        VisionCellularState {
+            token_state,
+            rho,
+            temporal_position: 0,
+            prediction_age: 0,
+        }
+    }
+
+    pub fn cellular_state_with_tokens(
+        &self,
+        state: VisionCellularState<B>,
+        tokens: Tensor<B, 3>,
+    ) -> VisionCellularState<B> {
+        assert!(
+            self.cellular_backbone_enabled(),
+            "cellular state requires vision.backbone = \"cellular\""
+        );
+        self.validate_cellular_state(&state);
+        let token_state = self.prepare_token_state(tokens, true);
+        self.assert_cellular_rho_matches_tokens(&state.rho, &token_state);
+        VisionCellularState {
+            token_state,
+            rho: state.rho,
+            temporal_position: state.temporal_position,
+            prediction_age: state.prediction_age,
+        }
+    }
+
+    pub fn forward_cellular_state(&self, state: &VisionCellularState<B>) -> VisionDragonOutput<B> {
+        assert!(
+            self.cellular_backbone_enabled(),
+            "cellular state requires vision.backbone = \"cellular\""
+        );
+        self.validate_cellular_state(state);
+        let projected = self.projection.forward(state.token_state.clone());
+        self.split_output(projected)
+    }
+
+    pub fn forward_cellular_state_embed(
+        &self,
+        state: &VisionCellularState<B>,
+    ) -> VisionDragonOutput<B> {
+        assert!(
+            self.cellular_backbone_enabled(),
+            "cellular state requires vision.backbone = \"cellular\""
+        );
+        self.validate_cellular_state(state);
+        self.split_output(state.token_state.clone())
+    }
+
+    /// Rolls the cellular recurrent block forward from an explicit state without clamping to
+    /// `self.steps`. Both `token_state` and `rho` persist across calls; `y_gate` / `y_neuron`
+    /// remain per-step activations and are never stored in the state.
+    pub fn forward_cellular_state_rollout_unbounded(
+        &self,
+        state: VisionCellularState<B>,
+        steps: usize,
+        backprop_steps: usize,
+    ) -> VisionCellularState<B> {
+        self.forward_cellular_state_rollout_mode_unbounded(
+            state,
+            steps,
+            backprop_steps,
+            StructuredStepMode::Predict,
+        )
+    }
+
+    pub fn forward_cellular_state_rollout_mode_unbounded(
+        &self,
+        state: VisionCellularState<B>,
+        steps: usize,
+        backprop_steps: usize,
+        mode: StructuredStepMode,
+    ) -> VisionCellularState<B> {
+        assert!(
+            self.cellular_backbone_enabled(),
+            "cellular state requires vision.backbone = \"cellular\""
+        );
+        self.validate_cellular_state(&state);
+        let steps = steps.max(1);
+        let backprop_steps = backprop_steps.max(1).min(steps);
+        let detach_until = steps.saturating_sub(backprop_steps);
+        self.rollout_cellular_state_unbounded(state, steps, detach_until, mode)
+    }
+
+    pub fn pyramid_state_from_patch_tokens(
+        &self,
+        patch_tokens: Tensor<B, 3>,
+    ) -> StructuredTopologyState<B> {
+        assert!(
+            self.pyramid_backbone_enabled(),
+            "structured pyramid state requires vision.backbone = \"pyramid\""
+        );
+        let [batch, patch_count, _dim] = patch_tokens.shape().dims::<3>();
+        let grid_height = self.grid_height.max(1);
+        let grid_width = self.grid_width.max(1);
+        assert_eq!(
+            patch_count,
+            grid_height * grid_width,
+            "structured pyramid state requires patch count {} to match grid {}x{}",
+            patch_count,
+            grid_height,
+            grid_width
+        );
+        let h8 = self.pyramid_patch_tokens_to_spatial(patch_tokens);
+        let coarse_state = self.pyramid_pool_patch_state(h8.clone());
+        let rank = self.trm_graph.rank.max(1);
+        let value_dim = self.trm_graph.value_dim.max(1);
+        let [_, _, h32_height, h32_width] = coarse_state.shape().dims::<4>();
+        let device = h8.device();
+        StructuredTopologyState {
+            primary_state: h8,
+            context_state: coarse_state,
+            rho: BankedRhoState {
+                primary_rho: Tensor::<B, 5>::zeros(
+                    [batch, rank, value_dim, grid_height, grid_width],
+                    &device,
+                ),
+                context_rho: Tensor::<B, 5>::zeros(
+                    [batch, rank, value_dim, h32_height.max(1), h32_width.max(1)],
+                    &device,
+                ),
+                global_rho: Tensor::<B, 4>::zeros(
+                    [batch, self.trm_graph.hub_count.max(1), rank, value_dim],
+                    &device,
+                ),
+            },
+            temporal_position: 0,
+            prediction_age: 0,
+        }
+    }
+
+    pub fn pyramid_state_with_patch_tokens(
+        &self,
+        mut state: StructuredTopologyState<B>,
+        patch_tokens: Tensor<B, 3>,
+    ) -> StructuredTopologyState<B> {
+        let next_patch = self.pyramid_patch_tokens_to_spatial(patch_tokens);
+        let next_coarse = self.pyramid_pool_patch_state(next_patch.clone());
+        *state.primary_state_mut() = next_patch;
+        *state.context_state_mut() = next_coarse;
+        state
+    }
+
+    pub fn pyramid_patch_tokens(&self, state: &StructuredTopologyState<B>) -> Tensor<B, 3> {
+        self.pyramid_spatial_to_patch_tokens(state.primary_state().clone())
+    }
+
+    pub fn pyramid_summary(&self, state: &StructuredTopologyState<B>) -> Tensor<B, 2> {
+        self.pyramid_patch_tokens(state)
+            .mean_dim(1)
+            .reshape([state.primary_state().shape().dims::<4>()[0], self.embed_dim])
+    }
+
+    fn pyramid_decay_by_rank(
+        &self,
+        rank: usize,
+        temporal_dt: usize,
+        device: &B::Device,
+    ) -> Tensor<B, 1> {
+        if temporal_dt == 0 {
+            return Tensor::<B, 1>::ones([rank.max(1)], device);
+        }
+
+        let base_decay = self.trm_graph.decay.clamp(0.0, 1.0);
+        if base_decay <= 0.0 {
+            return Tensor::<B, 1>::zeros([rank.max(1)], device);
+        }
+        if base_decay >= 1.0 {
+            return Tensor::<B, 1>::ones([rank.max(1)], device);
+        }
+
+        let slopes = if self.use_alibi {
+            burn_dragon_core::kernel::linear_attention::default_alibi_slopes(rank.max(1))
+        } else {
+            vec![1.0; rank.max(1)]
+        };
+        let dt = temporal_dt as f32;
+        let values = slopes
+            .into_iter()
+            .map(|slope| base_decay.powf(slope * dt))
+            .collect::<Vec<_>>();
+        Tensor::<B, 1>::from_data(TensorData::new(values, [rank.max(1)]), device)
+    }
+
+    fn pyramid_apply_decay_5d(&self, memory: Tensor<B, 5>, decay: Tensor<B, 1>) -> Tensor<B, 5> {
+        let rank = memory.shape().dims::<5>()[1];
+        let decay = decay.reshape([1, rank, 1, 1, 1]);
+        memory * decay
+    }
+
+    fn pyramid_apply_decay_4d(&self, memory: Tensor<B, 4>, decay: Tensor<B, 1>) -> Tensor<B, 4> {
+        let rank = memory.shape().dims::<4>()[2];
+        let decay = decay.reshape([1, 1, rank, 1]);
+        memory * decay
+    }
+
+    pub fn forward_pyramid_state_rollout_unbounded(
+        &self,
+        state: StructuredTopologyState<B>,
+        steps: usize,
+        backprop_steps: usize,
+    ) -> StructuredTopologyState<B> {
+        self.forward_pyramid_state_rollout_mode_unbounded(
+            state,
+            steps,
+            backprop_steps,
+            StructuredStepMode::Predict,
+        )
+    }
+
+    pub fn forward_pyramid_state_rollout_mode_unbounded(
+        &self,
+        mut state: StructuredTopologyState<B>,
+        steps: usize,
+        backprop_steps: usize,
+        mode: StructuredStepMode,
+    ) -> StructuredTopologyState<B> {
+        assert!(
+            self.pyramid_backbone_enabled(),
+            "structured pyramid rollout requires vision.backbone = \"pyramid\""
+        );
+        let pyramid_x_neuron_proj = self
+            .pyramid_x_neuron_proj
+            .as_ref()
+            .expect("structured pyramid rollout requires pyramid_x_neuron_proj");
+        let pyramid_write_value_proj = self
+            .pyramid_write_value_proj
+            .as_ref()
+            .expect("structured pyramid rollout requires pyramid_write_value_proj");
+        let pyramid_y_gate_proj = self
+            .pyramid_y_gate_proj
+            .as_ref()
+            .expect("structured pyramid rollout requires pyramid_y_gate_proj");
+        let pyramid_delta_proj = self
+            .pyramid_delta_proj
+            .as_ref()
+            .expect("structured pyramid rollout requires pyramid_delta_proj");
+        let pyramid_value_norm = self
+            .pyramid_value_norm
+            .as_ref()
+            .expect("structured pyramid rollout requires pyramid_value_norm");
+        let steps = steps.max(1);
+        let backprop_steps = backprop_steps.max(1).min(steps);
+        let detach_until = steps.saturating_sub(backprop_steps);
+        let coarse_stride = self.trm_graph.coarse_stride.max(1);
+        let hub_count = self.trm_graph.hub_count.max(1);
+        let rank = self.trm_graph.rank.max(1);
+        let temporal_dt = mode.temporal_dt();
+        let decay = self.pyramid_decay_by_rank(rank, temporal_dt, &state.primary_state().device());
+
+        for step_idx in 0..steps {
+            let h8 = state.primary_state().clone();
+            let h32 = state.context_state().clone();
+            let patch_rho = state.patch_rho().clone();
+            let coarse_rho = state.coarse_rho().clone();
+            let hub_rho = state.hub_rho().clone();
+
+            let x8 = activation::relu(self.project_spatial(h8.clone(), pyramid_x_neuron_proj));
+            let v8 = self.project_spatial(h8.clone(), pyramid_write_value_proj);
+            let x32 = activation::relu(self.project_spatial(h32.clone(), pyramid_x_neuron_proj));
+            let v32 = self.project_spatial(h32.clone(), pyramid_write_value_proj);
+
+            let msg8_local = self.pyramid_local_read(patch_rho.clone(), x8.clone());
+            let msg32_local = self.pyramid_local_read(coarse_rho.clone(), x32.clone());
+            let msg8_down = if coarse_stride > 1 {
+                self.pyramid_cross_scale_read(coarse_rho.clone(), x8.clone(), coarse_stride)
+            } else {
+                self.pyramid_contract(coarse_rho.clone(), x8.clone())
+            };
+
+            let (hub_w8, hub_w32) = self.pyramid_hub_weights(h8.clone(), h32.clone(), hub_count);
+            let msg8_hub = self.pyramid_hub_read(hub_rho.clone(), x8.clone(), hub_w8.clone());
+            let msg32_hub = self.pyramid_hub_read(hub_rho.clone(), x32.clone(), hub_w32.clone());
+
+            let next_patch_state = self.pyramid_update_state(
+                h8,
+                x8.clone(),
+                msg8_local + msg8_down + msg8_hub,
+                pyramid_y_gate_proj,
+                pyramid_delta_proj,
+                pyramid_value_norm,
+            );
+            let next_coarse_state = self.pyramid_update_state(
+                h32,
+                x32.clone(),
+                msg32_local + msg32_hub,
+                pyramid_y_gate_proj,
+                pyramid_delta_proj,
+                pyramid_value_norm,
+            );
+
+            let u8 = self.pyramid_outer_product(x8, v8);
+            let u32 = self.pyramid_outer_product(x32, v32);
+            let u8_pool = if coarse_stride > 1 {
+                self.pyramid_pool_outer(u8.clone(), coarse_stride)
+            } else {
+                u8.clone()
+            };
+            let next_patch_rho = self
+                .pyramid_apply_decay_5d(patch_rho, decay.clone())
+                .add(u8.clone());
+            let next_coarse_rho = self
+                .pyramid_apply_decay_5d(coarse_rho, decay.clone())
+                .add(u32.clone())
+                .add(u8_pool);
+            let next_hub_rho = self.pyramid_update_hub(
+                hub_rho,
+                u8,
+                u32,
+                hub_w8,
+                hub_w32,
+                hub_count,
+                decay.clone(),
+            );
+
+            *state.primary_state_mut() = if step_idx < detach_until {
+                next_patch_state.detach()
+            } else {
+                next_patch_state
+            };
+            *state.context_state_mut() = if step_idx < detach_until {
+                next_coarse_state.detach()
+            } else {
+                next_coarse_state
+            };
+            *state.patch_rho_mut() = if step_idx < detach_until {
+                next_patch_rho.detach()
+            } else {
+                next_patch_rho
+            };
+            *state.coarse_rho_mut() = if step_idx < detach_until {
+                next_coarse_rho.detach()
+            } else {
+                next_coarse_rho
+            };
+            *state.hub_rho_mut() = if step_idx < detach_until {
+                next_hub_rho.detach()
+            } else {
+                next_hub_rho
+            };
+        }
+
+        if temporal_dt > 0 {
+            state.temporal_position = state.temporal_position.saturating_add(temporal_dt);
+            state.prediction_age = state.prediction_age.saturating_add(temporal_dt);
+        } else if mode.resets_prediction_age() {
+            state.prediction_age = 0;
+        }
+
+        state
+    }
+
     pub fn forward_tokens_embed_steps_rollout_multi(
         &self,
         tokens: Tensor<B, 4>,
@@ -880,6 +947,184 @@ impl<B: Backend> VisionDragon<B> {
     ) -> VisionDragonMultiOutput<B> {
         let tokens = self.encode_tokens_steps_rollout_multi(tokens, steps, backprop_steps);
         self.split_output_multi(tokens)
+    }
+
+    fn prepare_token_state(&self, tokens: Tensor<B, 3>, add_cls: bool) -> Tensor<B, 3> {
+        let tokens = if add_cls && self.use_cls_token {
+            self.prepend_cls(tokens)
+        } else {
+            tokens
+        };
+
+        let [batch, time, _] = tokens.shape().dims::<3>();
+        let current = tokens.reshape([batch, 1, time, self.embed_dim]);
+        self.apply_token_norm(current)
+            .reshape([batch, time, self.embed_dim])
+    }
+
+    fn apply_cellular_step_mode(
+        &self,
+        token_state: Tensor<B, 3>,
+        mode: StructuredStepMode,
+    ) -> Tensor<B, 3> {
+        let Some(step_mode_embeddings) = &self.cellular_step_mode_embeddings else {
+            return token_state;
+        };
+        let [batch, time, embed_dim] = token_state.shape().dims::<3>();
+        let bias = step_mode_embeddings
+            .val()
+            .slice_dim(0, mode.index()..mode.index() + 1)
+            .reshape([1, 1, embed_dim])
+            .repeat_dim(0, batch)
+            .repeat_dim(1, time);
+        token_state + bias
+    }
+
+    fn apply_cellular_step_mode_4d(
+        &self,
+        current: Tensor<B, 4>,
+        mode: StructuredStepMode,
+    ) -> Tensor<B, 4> {
+        let [batch, views, time, dim] = current.shape().dims::<4>();
+        let flat = current.reshape([batch * views, time, dim]);
+        let flat = self.apply_cellular_step_mode(flat, mode);
+        flat.reshape([batch, views, time, dim])
+    }
+
+    fn apply_cellular_recurrent_mode(
+        &self,
+        query: Tensor<B, 4>,
+        value: Tensor<B, 4>,
+        mode: StructuredStepMode,
+    ) -> (Tensor<B, 4>, Tensor<B, 4>) {
+        let Some(query_offsets) = &self.cellular_query_mode_offsets else {
+            return (query, value);
+        };
+        let Some(value_offsets) = &self.cellular_value_mode_offsets else {
+            return (query, value);
+        };
+
+        let [_, heads, _, latent] = query.shape().dims::<4>();
+        let [_, _, _, embd] = value.shape().dims::<4>();
+        let query_scale = query_offsets
+            .val()
+            .slice_dim(0, mode.index()..mode.index() + 1)
+            .reshape([1, heads, 1, latent])
+            .add_scalar(1.0);
+        let value_scale = value_offsets
+            .val()
+            .slice_dim(0, mode.index()..mode.index() + 1)
+            .reshape([1, 1, 1, embd])
+            .add_scalar(1.0);
+
+        (query * query_scale, value * value_scale)
+    }
+
+    fn cellular_patch_tokens_from_time(&self, time: usize) -> usize {
+        if self.use_cls_token && time > 1 {
+            time - 1
+        } else {
+            time
+        }
+    }
+
+    fn cellular_rho_expected_shape(&self, token_state: &Tensor<B, 3>) -> [usize; 5] {
+        let [batch, time, embd] = token_state.shape().dims::<3>();
+        let latent = self.encoder.val().shape().dims::<3>()[2];
+        [
+            batch,
+            self.n_head,
+            self.cellular_patch_tokens_from_time(time),
+            latent,
+            embd,
+        ]
+    }
+
+    fn empty_cellular_rho(&self, token_state: &Tensor<B, 3>) -> Tensor<B, 5> {
+        Tensor::<B, 5>::zeros(
+            self.cellular_rho_expected_shape(token_state),
+            &token_state.device(),
+        )
+    }
+
+    fn assert_cellular_rho_matches_tokens(&self, rho: &Tensor<B, 5>, token_state: &Tensor<B, 3>) {
+        let actual = rho.shape().dims::<5>();
+        let expected = self.cellular_rho_expected_shape(token_state);
+        assert_eq!(
+            actual, expected,
+            "cellular rho state shape {:?} does not match token state contract {:?}",
+            actual, expected
+        );
+    }
+
+    fn validate_cellular_state(&self, state: &VisionCellularState<B>) {
+        self.assert_cellular_rho_matches_tokens(&state.rho, &state.token_state);
+    }
+
+    fn scalar_cellular_decay(&self, decay: f32, device: &B::Device) -> Tensor<B, 1> {
+        Tensor::<B, 1>::from_data(
+            TensorData::new(vec![decay; self.n_head.max(1)], [self.n_head.max(1)]),
+            device,
+        )
+    }
+
+    fn cellular_decay_by_mode(&self, mode: StructuredStepMode, device: &B::Device) -> Tensor<B, 1> {
+        let dt = mode.temporal_dt();
+        if dt == 0 {
+            return Tensor::<B, 1>::ones([self.n_head.max(1)], device);
+        }
+        if self.use_alibi
+            && let Some(slopes) = self.alibi_slopes.as_ref()
+        {
+            return slopes.clone().mul_scalar(-(dt as f32)).exp();
+        }
+        self.scalar_cellular_decay(
+            self.rho_stream.decay.clamp(0.0, 1.0).powf(dt as f32),
+            device,
+        )
+    }
+
+    fn rollout_cellular_state_unbounded(
+        &self,
+        mut state: VisionCellularState<B>,
+        steps: usize,
+        detach_until: usize,
+        mode: StructuredStepMode,
+    ) -> VisionCellularState<B> {
+        let decay = self.cellular_decay_by_mode(mode, &state.token_state.device());
+        let [batch, time, _] = state.token_state.shape().dims::<3>();
+        let current = state.token_state.reshape([batch, 1, time, self.embed_dim]);
+        let (current, rho) = match self.rho_stream_rollout_executor_mode() {
+            RhoStreamRolloutExecutorMode::HostLoop => self
+                .rollout_rho_stream_from_current_host_loop(
+                    current,
+                    Some(state.rho),
+                    steps,
+                    detach_until,
+                    decay,
+                    mode,
+                ),
+            RhoStreamRolloutExecutorMode::WgpuFused => self
+                .rollout_rho_stream_from_current_wgpu_rollout_fused(
+                    current,
+                    Some(state.rho),
+                    steps,
+                    detach_until,
+                    decay,
+                    mode,
+                ),
+        };
+
+        state.token_state = current.reshape([batch, time, self.embed_dim]);
+        state.rho = rho.expect("cellular rollout must return rho state");
+        let temporal_dt = mode.temporal_dt();
+        if temporal_dt > 0 {
+            state.temporal_position = state.temporal_position.saturating_add(temporal_dt);
+            state.prediction_age = state.prediction_age.saturating_add(temporal_dt);
+        } else if mode.resets_prediction_age() {
+            state.prediction_age = 0;
+        }
+        state
     }
 
     fn encode_tokens(&self, tokens: Tensor<B, 3>) -> Tensor<B, 3> {
@@ -934,14 +1179,30 @@ impl<B: Backend> VisionDragon<B> {
         detach_until: usize,
         add_cls: bool,
     ) -> Tensor<B, 3> {
-        if self.trm_graph.enabled {
-            return self.encode_tokens_steps_inner_graph(tokens, steps, detach_until, add_cls);
+        match self.backbone_kind {
+            VisionBackboneKind::Cellular => {
+                return self.encode_tokens_steps_inner_rho_stream(
+                    tokens,
+                    steps,
+                    detach_until,
+                    add_cls,
+                );
+            }
+            VisionBackboneKind::Pyramid => {
+                return self.encode_tokens_steps_inner_pyramid(
+                    tokens,
+                    steps,
+                    detach_until,
+                    add_cls,
+                );
+            }
+            VisionBackboneKind::Dense => {}
         }
 
         self.encode_tokens_steps_inner_default(tokens, steps, detach_until, add_cls)
     }
 
-    fn trm_graph_fallback(
+    fn pyramid_backbone_fallback(
         &self,
         tokens: Tensor<B, 3>,
         steps: usize,
@@ -954,7 +1215,7 @@ impl<B: Backend> VisionDragon<B> {
             }
             VisionTrmGridMismatchPolicy::Error => {
                 panic!(
-                    "TRM graph path unavailable: {reason}. Set `vision.trm_graph.grid_mismatch_policy = \"fallback_default\"` to allow explicit fallback."
+                    "pyramid backbone path unavailable: {reason}. Set `vision.trm_graph.grid_mismatch_policy = \"fallback_default\"` to allow explicit fallback."
                 )
             }
         }
@@ -990,6 +1251,11 @@ impl<B: Backend> VisionDragon<B> {
             self.kernel.enabled && matches!(self.latent_activation, VisionLatentActivation::Relu);
         let apply_threshold = matches!(self.latent_activation, VisionLatentActivation::Relu);
         let latent_pattern = &self.kernel.block_sparse.latent;
+        let sparse_mask = if fused && latent_pattern.is_sparse() {
+            Some(latent_pattern.mask::<B>(latent, &current.device()))
+        } else {
+            None
+        };
 
         for step_idx in 0..steps {
             let output = lowrank_residual_step(
@@ -1002,6 +1268,7 @@ impl<B: Backend> VisionDragon<B> {
                 self.kernel.relu_threshold,
                 apply_threshold,
                 latent_pattern,
+                sparse_mask.clone(),
                 |query, value| self.full_attention(query, value),
                 |values| self.apply_latent_activation(values),
                 |values| self.apply_token_norm(values),
@@ -1015,7 +1282,202 @@ impl<B: Backend> VisionDragon<B> {
         current.reshape([batch, time, self.embed_dim])
     }
 
-    fn encode_tokens_steps_inner_graph(
+    fn encode_tokens_steps_inner_rho_stream(
+        &self,
+        tokens: Tensor<B, 3>,
+        steps: usize,
+        detach_until: usize,
+        add_cls: bool,
+    ) -> Tensor<B, 3> {
+        match self.rho_stream_rollout_executor_mode() {
+            RhoStreamRolloutExecutorMode::HostLoop => self
+                .encode_tokens_steps_inner_rho_stream_host_loop(
+                    tokens,
+                    steps,
+                    detach_until,
+                    add_cls,
+                ),
+            RhoStreamRolloutExecutorMode::WgpuFused => self
+                .encode_tokens_steps_inner_rho_stream_wgpu_rollout_fused(
+                    tokens,
+                    steps,
+                    detach_until,
+                    add_cls,
+                ),
+        }
+    }
+
+    fn rollout_rho_stream_from_current_host_loop(
+        &self,
+        mut current: Tensor<B, 4>,
+        mut rho_state: Option<Tensor<B, 5>>,
+        steps: usize,
+        detach_until: usize,
+        decay: Tensor<B, 1>,
+        mode: StructuredStepMode,
+    ) -> (Tensor<B, 4>, Option<Tensor<B, 5>>) {
+        let encoder_raw = self.encoder.val();
+        let [heads, embd_enc, latent] = encoder_raw.shape().dims::<3>();
+        let encoder = encoder_raw.reshape([1, heads, embd_enc, latent]);
+
+        let encoder_v_raw = self.encoder_v.val();
+        let [heads_v, embd_v, latent_v] = encoder_v_raw.shape().dims::<3>();
+        let encoder_v = encoder_v_raw.reshape([1, heads_v, embd_v, latent_v]);
+
+        let decoder = self.decoder.val();
+        let fused =
+            self.kernel.enabled && matches!(self.latent_activation, VisionLatentActivation::Relu);
+        let apply_threshold = matches!(self.latent_activation, VisionLatentActivation::Relu);
+        let latent_pattern = &self.kernel.block_sparse.latent;
+        let sparse_mask = if fused && latent_pattern.is_sparse() {
+            Some(latent_pattern.mask::<B>(latent, &current.device()))
+        } else {
+            None
+        };
+
+        for step_idx in 0..steps {
+            let step_current = self.apply_cellular_step_mode_4d(current, mode);
+            let output = lowrank_residual_step(
+                step_current,
+                encoder.clone(),
+                encoder_v.clone(),
+                decoder.clone(),
+                &self.dropout,
+                fused,
+                self.kernel.relu_threshold,
+                apply_threshold,
+                latent_pattern,
+                sparse_mask.clone(),
+                |query, value| {
+                    self.rho_stream_attention_with_decay(
+                        query,
+                        value,
+                        &mut rho_state,
+                        decay.clone(),
+                        mode,
+                    )
+                },
+                |values| self.apply_latent_activation(values),
+                |values| self.apply_token_norm(values),
+            );
+            current = output.next;
+            if step_idx < detach_until {
+                current = current.detach();
+                rho_state = rho_state.map(|state| state.detach());
+            }
+        }
+
+        (current, rho_state)
+    }
+
+    fn encode_tokens_steps_inner_rho_stream_host_loop(
+        &self,
+        tokens: Tensor<B, 3>,
+        steps: usize,
+        detach_until: usize,
+        add_cls: bool,
+    ) -> Tensor<B, 3> {
+        let current = self.prepare_token_state(tokens, add_cls);
+        let [batch, time, _] = current.shape().dims::<3>();
+        let current = current.reshape([batch, 1, time, self.embed_dim]);
+        let device = current.device();
+        let (current, _) = self.rollout_rho_stream_from_current_host_loop(
+            current,
+            None,
+            steps,
+            detach_until,
+            self.scalar_cellular_decay(self.rho_stream.decay.clamp(0.0, 1.0), &device),
+            StructuredStepMode::Predict,
+        );
+        current.reshape([batch, time, self.embed_dim])
+    }
+
+    fn rollout_rho_stream_from_current_wgpu_rollout_fused(
+        &self,
+        mut current: Tensor<B, 4>,
+        mut rho_state: Option<Tensor<B, 5>>,
+        steps: usize,
+        detach_until: usize,
+        decay: Tensor<B, 1>,
+        mode: StructuredStepMode,
+    ) -> (Tensor<B, 4>, Option<Tensor<B, 5>>) {
+        let encoder_raw = self.encoder.val();
+        let [heads, embd_enc, latent] = encoder_raw.shape().dims::<3>();
+        let encoder = encoder_raw.reshape([1, heads, embd_enc, latent]);
+
+        let encoder_v_raw = self.encoder_v.val();
+        let [heads_v, embd_v, latent_v] = encoder_v_raw.shape().dims::<3>();
+        let encoder_v = encoder_v_raw.reshape([1, heads_v, embd_v, latent_v]);
+
+        let decoder = self.decoder.val();
+        let fused =
+            self.kernel.enabled && matches!(self.latent_activation, VisionLatentActivation::Relu);
+        let apply_threshold = matches!(self.latent_activation, VisionLatentActivation::Relu);
+        let latent_pattern = &self.kernel.block_sparse.latent;
+        let sparse_mask = if fused && latent_pattern.is_sparse() {
+            Some(latent_pattern.mask::<B>(latent, &current.device()))
+        } else {
+            None
+        };
+
+        for step_idx in 0..steps {
+            let step_current = self.apply_cellular_step_mode_4d(current, mode);
+            let output = lowrank_residual_step(
+                step_current,
+                encoder.clone(),
+                encoder_v.clone(),
+                decoder.clone(),
+                &self.dropout,
+                fused,
+                self.kernel.relu_threshold,
+                apply_threshold,
+                latent_pattern,
+                sparse_mask.clone(),
+                |query, value| {
+                    self.rho_stream_attention_fused_with_decay(
+                        query,
+                        value,
+                        &mut rho_state,
+                        decay.clone(),
+                        mode,
+                    )
+                },
+                |values| self.apply_latent_activation(values),
+                |values| self.apply_token_norm(values),
+            );
+            current = output.next;
+            if step_idx < detach_until {
+                current = current.detach();
+                rho_state = rho_state.map(|state| state.detach());
+            }
+        }
+
+        (current, rho_state)
+    }
+
+    fn encode_tokens_steps_inner_rho_stream_wgpu_rollout_fused(
+        &self,
+        tokens: Tensor<B, 3>,
+        steps: usize,
+        detach_until: usize,
+        add_cls: bool,
+    ) -> Tensor<B, 3> {
+        let current = self.prepare_token_state(tokens, add_cls);
+        let [batch, time, _] = current.shape().dims::<3>();
+        let current = current.reshape([batch, 1, time, self.embed_dim]);
+        let device = current.device();
+        let (current, _) = self.rollout_rho_stream_from_current_wgpu_rollout_fused(
+            current,
+            None,
+            steps,
+            detach_until,
+            self.scalar_cellular_decay(self.rho_stream.decay.clamp(0.0, 1.0), &device),
+            StructuredStepMode::Predict,
+        );
+        current.reshape([batch, time, self.embed_dim])
+    }
+
+    fn encode_tokens_steps_inner_pyramid(
         &self,
         tokens: Tensor<B, 3>,
         steps: usize,
@@ -1045,7 +1507,7 @@ impl<B: Backend> VisionDragon<B> {
 
         let patch_len = patch_tokens.shape().dims::<3>()[1];
         if patch_len != patch_count {
-            return self.trm_graph_fallback(
+            return self.pyramid_backbone_fallback(
                 tokens,
                 steps,
                 detach_until,
@@ -1056,58 +1518,58 @@ impl<B: Backend> VisionDragon<B> {
             );
         }
 
-        let trm_x = match self.trm_x.as_ref() {
+        let pyramid_x_neuron_proj = match self.pyramid_x_neuron_proj.as_ref() {
             Some(layer) => layer,
             None => {
-                return self.trm_graph_fallback(
+                return self.pyramid_backbone_fallback(
                     tokens,
                     steps,
                     detach_until,
-                    "missing TRM graph projection layer `trm_x`",
+                    "missing pyramid backbone projection layer `pyramid_x_neuron_proj`",
                 );
             }
         };
-        let trm_v = match self.trm_v.as_ref() {
+        let pyramid_write_value_proj = match self.pyramid_write_value_proj.as_ref() {
             Some(layer) => layer,
             None => {
-                return self.trm_graph_fallback(
+                return self.pyramid_backbone_fallback(
                     tokens,
                     steps,
                     detach_until,
-                    "missing TRM graph projection layer `trm_v`",
+                    "missing pyramid backbone projection layer `pyramid_write_value_proj`",
                 );
             }
         };
-        let trm_y = match self.trm_y.as_ref() {
+        let pyramid_y_gate_proj = match self.pyramid_y_gate_proj.as_ref() {
             Some(layer) => layer,
             None => {
-                return self.trm_graph_fallback(
+                return self.pyramid_backbone_fallback(
                     tokens,
                     steps,
                     detach_until,
-                    "missing TRM graph projection layer `trm_y`",
+                    "missing pyramid backbone projection layer `pyramid_y_gate_proj`",
                 );
             }
         };
-        let trm_enc = match self.trm_enc.as_ref() {
+        let pyramid_delta_proj = match self.pyramid_delta_proj.as_ref() {
             Some(layer) => layer,
             None => {
-                return self.trm_graph_fallback(
+                return self.pyramid_backbone_fallback(
                     tokens,
                     steps,
                     detach_until,
-                    "missing TRM graph projection layer `trm_enc`",
+                    "missing pyramid backbone projection layer `pyramid_delta_proj`",
                 );
             }
         };
-        let trm_norm = match self.trm_norm.as_ref() {
+        let pyramid_value_norm = match self.pyramid_value_norm.as_ref() {
             Some(layer) => layer,
             None => {
-                return self.trm_graph_fallback(
+                return self.pyramid_backbone_fallback(
                     tokens,
                     steps,
                     detach_until,
-                    "missing TRM graph normalization layer `trm_norm`",
+                    "missing pyramid backbone normalization layer `pyramid_value_norm`",
                 );
             }
         };
@@ -1116,7 +1578,9 @@ impl<B: Backend> VisionDragon<B> {
         let rank = self.trm_graph.rank.max(1);
         let value_dim = self.trm_graph.value_dim.max(1);
         let hub_count = self.trm_graph.hub_count.max(1);
-        let decay = self.trm_graph.decay.clamp(0.0, 1.0);
+        let decay = self
+            .pyramid_decay_by_rank(rank, 1, &device)
+            .reshape([1, rank, 1, 1, 1]);
         let coarse_stride = self.trm_graph.coarse_stride.max(1);
 
         let mut h8 = patch_tokens
@@ -1145,57 +1609,78 @@ impl<B: Backend> VisionDragon<B> {
             h8.clone()
         };
 
-        let mut mem8 =
+        let mut patch_rho =
             Tensor::<B, 5>::zeros([batch, rank, value_dim, grid_height, grid_width], &device);
-        let mut mem32 = Tensor::<B, 5>::zeros(
+        let mut coarse_rho = Tensor::<B, 5>::zeros(
             [batch, rank, value_dim, h32_height.max(1), h32_width.max(1)],
             &device,
         );
-        let mut mem_hub = Tensor::<B, 4>::zeros([batch, hub_count, rank, value_dim], &device);
+        let mut hub_rho = Tensor::<B, 4>::zeros([batch, hub_count, rank, value_dim], &device);
 
         for step_idx in 0..steps {
-            let x8 = activation::relu(self.project_spatial(h8.clone(), trm_x));
-            let v8 = self.project_spatial(h8.clone(), trm_v);
-            let x32 = activation::relu(self.project_spatial(h32.clone(), trm_x));
-            let v32 = self.project_spatial(h32.clone(), trm_v);
+            let x8 = activation::relu(self.project_spatial(h8.clone(), pyramid_x_neuron_proj));
+            let v8 = self.project_spatial(h8.clone(), pyramid_write_value_proj);
+            let x32 = activation::relu(self.project_spatial(h32.clone(), pyramid_x_neuron_proj));
+            let v32 = self.project_spatial(h32.clone(), pyramid_write_value_proj);
 
-            let msg8_local = self.trm_local_read(mem8.clone(), x8.clone());
-            let msg32_local = self.trm_local_read(mem32.clone(), x32.clone());
+            let msg8_local = self.pyramid_local_read(patch_rho.clone(), x8.clone());
+            let msg32_local = self.pyramid_local_read(coarse_rho.clone(), x32.clone());
             let msg8_down = if coarse_stride > 1 {
-                self.trm_cross_scale_read(mem32.clone(), x8.clone(), coarse_stride)
+                self.pyramid_cross_scale_read(coarse_rho.clone(), x8.clone(), coarse_stride)
             } else {
-                self.trm_contract(mem32.clone(), x8.clone())
+                self.pyramid_contract(coarse_rho.clone(), x8.clone())
             };
 
-            let (hub_w8, hub_w32) = self.trm_hub_weights(h8.clone(), h32.clone(), hub_count);
-            let msg8_hub = self.trm_hub_read(mem_hub.clone(), x8.clone(), hub_w8.clone());
-            let msg32_hub = self.trm_hub_read(mem_hub.clone(), x32.clone(), hub_w32.clone());
+            let (hub_w8, hub_w32) = self.pyramid_hub_weights(h8.clone(), h32.clone(), hub_count);
+            let msg8_hub = self.pyramid_hub_read(hub_rho.clone(), x8.clone(), hub_w8.clone());
+            let msg32_hub = self.pyramid_hub_read(hub_rho.clone(), x32.clone(), hub_w32.clone());
 
             let msg8 = msg8_local + msg8_down + msg8_hub;
             let msg32 = msg32_local + msg32_hub;
 
-            h8 = self.trm_update_state(h8, x8.clone(), msg8, trm_y, trm_enc, trm_norm);
-            h32 = self.trm_update_state(h32, x32.clone(), msg32, trm_y, trm_enc, trm_norm);
+            h8 = self.pyramid_update_state(
+                h8,
+                x8.clone(),
+                msg8,
+                pyramid_y_gate_proj,
+                pyramid_delta_proj,
+                pyramid_value_norm,
+            );
+            h32 = self.pyramid_update_state(
+                h32,
+                x32.clone(),
+                msg32,
+                pyramid_y_gate_proj,
+                pyramid_delta_proj,
+                pyramid_value_norm,
+            );
 
-            let u8 = self.trm_outer_product(x8, v8);
-            let u32 = self.trm_outer_product(x32, v32);
+            let u8 = self.pyramid_outer_product(x8, v8);
+            let u32 = self.pyramid_outer_product(x32, v32);
             let u8_pool = if coarse_stride > 1 {
-                self.trm_pool_outer(u8.clone(), coarse_stride)
+                self.pyramid_pool_outer(u8.clone(), coarse_stride)
             } else {
                 u8.clone()
             };
-            mem8 = mem8.mul_scalar(decay).add(u8.clone());
-            mem32 = mem32.mul_scalar(decay).add(u32.clone()).add(u8_pool);
+            patch_rho = patch_rho.mul(decay.clone()).add(u8.clone());
+            coarse_rho = coarse_rho.mul(decay.clone()).add(u32.clone()).add(u8_pool);
 
-            mem_hub =
-                self.trm_update_hub(mem_hub, u8.clone(), u32, hub_w8, hub_w32, hub_count, decay);
+            hub_rho = self.pyramid_update_hub(
+                hub_rho,
+                u8.clone(),
+                u32,
+                hub_w8,
+                hub_w32,
+                hub_count,
+                decay.clone().reshape([rank]),
+            );
 
             if step_idx < detach_until {
                 h8 = h8.detach();
                 h32 = h32.detach();
-                mem8 = mem8.detach();
-                mem32 = mem32.detach();
-                mem_hub = mem_hub.detach();
+                patch_rho = patch_rho.detach();
+                coarse_rho = coarse_rho.detach();
+                hub_rho = hub_rho.detach();
             }
         }
 
@@ -1255,6 +1740,11 @@ impl<B: Backend> VisionDragon<B> {
             self.kernel.enabled && matches!(self.latent_activation, VisionLatentActivation::Relu);
         let apply_threshold = matches!(self.latent_activation, VisionLatentActivation::Relu);
         let latent_pattern = &self.kernel.block_sparse.latent;
+        let sparse_mask = if fused && latent_pattern.is_sparse() {
+            Some(latent_pattern.mask::<B>(latent, &current.device()))
+        } else {
+            None
+        };
 
         for step_idx in 0..steps {
             let mhc = self
@@ -1276,6 +1766,7 @@ impl<B: Backend> VisionDragon<B> {
                 self.kernel.relu_threshold,
                 apply_threshold,
                 latent_pattern,
+                sparse_mask.clone(),
                 |query, value| self.full_attention(query, value),
                 |values| self.apply_latent_activation(values),
                 |values| self.apply_token_norm(values),
@@ -1306,442 +1797,7 @@ impl<B: Backend> VisionDragon<B> {
 
         current.reshape([batch, streams, time, self.embed_dim])
     }
-
-    fn apply_embed_norm_spatial(&self, input: Tensor<B, 4>) -> Tensor<B, 4> {
-        match &self.token_norm {
-            Some(norm) => {
-                let [batch, dim, height, width] = input.shape().dims::<4>();
-                if batch == 0 || dim == 0 || height == 0 || width == 0 {
-                    return input;
-                }
-                let flat = input.swap_dims(1, 3).swap_dims(1, 2);
-                let flat = norm.forward(flat);
-                flat.swap_dims(1, 2).swap_dims(1, 3)
-            }
-            None => input,
-        }
-    }
-
-    fn apply_value_norm_spatial(&self, norm: &LayerNorm<B>, input: Tensor<B, 4>) -> Tensor<B, 4> {
-        let [batch, dim, height, width] = input.shape().dims::<4>();
-        if batch == 0 || dim == 0 || height == 0 || width == 0 {
-            return input;
-        }
-        let flat = input.swap_dims(1, 3).swap_dims(1, 2);
-        let flat = norm.forward(flat);
-        flat.swap_dims(1, 2).swap_dims(1, 3)
-    }
-
-    fn project_spatial(&self, input: Tensor<B, 4>, layer: &Linear<B>) -> Tensor<B, 4> {
-        let [batch, dim, height, width] = input.shape().dims::<4>();
-        if batch == 0 || dim == 0 || height == 0 || width == 0 {
-            return input;
-        }
-        let flat = input
-            .swap_dims(1, 3)
-            .swap_dims(1, 2)
-            .reshape([batch * height * width, dim]);
-        let flat = layer.forward(flat);
-        let out_dim = flat.shape().dims::<2>()[1];
-        flat.reshape([batch, height, width, out_dim])
-            .swap_dims(1, 3)
-            .swap_dims(2, 3)
-    }
-
-    fn trm_shift(input: Tensor<B, 4>, dy: isize, dx: isize) -> Tensor<B, 4> {
-        let [batch, channels, height, width] = input.shape().dims::<4>();
-        if height == 0 || width == 0 {
-            return input;
-        }
-        let device = input.device();
-        let mut out = input;
-
-        if dy != 0 {
-            let shift = dy.unsigned_abs();
-            if shift >= height {
-                out = Tensor::<B, 4>::zeros([batch, channels, height, width], &device);
-            } else if dy > 0 {
-                let pad = Tensor::<B, 4>::zeros([batch, channels, shift, width], &device);
-                let cropped = out.slice_dim(2, 0..(height - shift));
-                out = Tensor::cat(vec![pad, cropped], 2);
-            } else {
-                let pad = Tensor::<B, 4>::zeros([batch, channels, shift, width], &device);
-                let cropped = out.slice_dim(2, shift..height);
-                out = Tensor::cat(vec![cropped, pad], 2);
-            }
-        }
-
-        if dx != 0 {
-            let shift = dx.unsigned_abs();
-            if shift >= width {
-                out = Tensor::<B, 4>::zeros([batch, channels, height, width], &device);
-            } else if dx > 0 {
-                let pad = Tensor::<B, 4>::zeros([batch, channels, height, shift], &device);
-                let cropped = out.slice_dim(3, 0..(width - shift));
-                out = Tensor::cat(vec![pad, cropped], 3);
-            } else {
-                let pad = Tensor::<B, 4>::zeros([batch, channels, height, shift], &device);
-                let cropped = out.slice_dim(3, shift..width);
-                out = Tensor::cat(vec![cropped, pad], 3);
-            }
-        }
-
-        out
-    }
-
-    fn trm_contract(&self, memory: Tensor<B, 5>, query: Tensor<B, 4>) -> Tensor<B, 4> {
-        let [batch, rank, value_dim, height, width] = memory.shape().dims::<5>();
-        if batch == 0 || rank == 0 || value_dim == 0 || height == 0 || width == 0 {
-            return Tensor::<B, 4>::zeros(
-                [batch.max(1), value_dim.max(1), height.max(1), width.max(1)],
-                &memory.device(),
-            );
-        }
-        let query = query.unsqueeze_dim::<5>(2);
-        memory.mul(query).sum_dims_squeeze::<4, usize>(&[1])
-    }
-
-    fn trm_local_read(&self, memory: Tensor<B, 5>, query: Tensor<B, 4>) -> Tensor<B, 4> {
-        let [batch, _, value_dim, height, width] = memory.shape().dims::<5>();
-        if batch == 0 || value_dim == 0 || height == 0 || width == 0 {
-            return Tensor::<B, 4>::zeros(
-                [batch.max(1), value_dim.max(1), height.max(1), width.max(1)],
-                &memory.device(),
-            );
-        }
-        let mut acc = Tensor::<B, 4>::zeros([batch, value_dim, height, width], &memory.device());
-        let radius = self.trm_graph.local_radius.max(1) as isize;
-        let allow_diagonals = self.trm_graph.local_diagonals;
-        if self.trm_graph.local_self {
-            acc = acc + self.trm_contract(memory.clone(), query.clone());
-        }
-        for dy in -radius..=radius {
-            for dx in -radius..=radius {
-                if dy == 0 && dx == 0 {
-                    continue;
-                }
-                if !allow_diagonals && dy != 0 && dx != 0 {
-                    continue;
-                }
-                let shifted = Self::trm_shift(query.clone(), dy, dx);
-                let msg = self.trm_contract(memory.clone(), shifted);
-                let msg = Self::trm_shift(msg, -dy, -dx);
-                acc = acc + msg;
-            }
-        }
-        acc
-    }
-
-    fn trm_cross_scale_read(
-        &self,
-        memory: Tensor<B, 5>,
-        query: Tensor<B, 4>,
-        scale: usize,
-    ) -> Tensor<B, 4> {
-        let scale = scale.max(1);
-        if scale == 1 {
-            return self.trm_contract(memory, query);
-        }
-        let mut up = memory.repeat_dim(3, scale).repeat_dim(4, scale);
-        let [_, _, height, width] = query.shape().dims::<4>();
-        let [_, _, _, up_h, up_w] = up.shape().dims::<5>();
-        if up_h != height {
-            up = up.slice_dim(3, 0..height.min(up_h));
-        }
-        if up_w != width {
-            up = up.slice_dim(4, 0..width.min(up_w));
-        }
-        self.trm_contract(up, query)
-    }
-
-    fn trm_outer_product(&self, x: Tensor<B, 4>, v: Tensor<B, 4>) -> Tensor<B, 5> {
-        let x = x.unsqueeze_dim::<5>(2);
-        let v = v.unsqueeze_dim::<5>(1);
-        x.mul(v)
-    }
-
-    fn trm_pool_outer(&self, u: Tensor<B, 5>, scale: usize) -> Tensor<B, 5> {
-        let scale = scale.max(1);
-        if scale == 1 {
-            return u;
-        }
-        let [batch, rank, value_dim, height, width] = u.shape().dims::<5>();
-        let pooled_height = height / scale;
-        let pooled_width = width / scale;
-        if pooled_height == 0 || pooled_width == 0 {
-            return Tensor::<B, 5>::zeros(
-                [
-                    batch,
-                    rank,
-                    value_dim,
-                    pooled_height.max(1),
-                    pooled_width.max(1),
-                ],
-                &u.device(),
-            );
-        }
-        u.reshape([
-            batch,
-            rank,
-            value_dim,
-            pooled_height,
-            scale,
-            pooled_width,
-            scale,
-        ])
-        .sum_dims_squeeze::<5, usize>(&[4, 6])
-    }
-
-    fn trm_update_state(
-        &self,
-        state: Tensor<B, 4>,
-        x: Tensor<B, 4>,
-        msg: Tensor<B, 4>,
-        trm_y: &Linear<B>,
-        trm_enc: &Linear<B>,
-        trm_norm: &LayerNorm<B>,
-    ) -> Tensor<B, 4> {
-        let msg = self.apply_value_norm_spatial(trm_norm, msg);
-        let y = activation::relu(self.project_spatial(msg, trm_y));
-        let u = y.mul(x);
-        let delta = self.project_spatial(u, trm_enc);
-        let next = state + delta;
-        self.apply_embed_norm_spatial(next)
-    }
-
-    fn trm_hub_weights(
-        &self,
-        h8: Tensor<B, 4>,
-        h32: Tensor<B, 4>,
-        hub_count: usize,
-    ) -> (Option<Tensor<B, 4>>, Option<Tensor<B, 4>>) {
-        if hub_count <= 1 {
-            return (None, None);
-        }
-        let hub_gate = self.trm_hub_gate.as_ref();
-        let w8 = self.trm_hub_weights_single(h8, hub_count, hub_gate);
-        let w32 = self.trm_hub_weights_single(h32, hub_count, hub_gate);
-        (Some(w8), Some(w32))
-    }
-
-    fn trm_hub_weights_single(
-        &self,
-        h: Tensor<B, 4>,
-        hub_count: usize,
-        hub_gate: Option<&Linear<B>>,
-    ) -> Tensor<B, 4> {
-        let [batch, _, height, width] = h.shape().dims::<4>();
-        let device = h.device();
-        if let Some(gate) = hub_gate {
-            let weights = self.project_spatial(h, gate);
-            let weights = activation::relu(weights);
-            let denom = weights.clone().sum_dim(1).add_scalar(ROW_NORM_EPS);
-            weights / denom
-        } else {
-            Tensor::<B, 4>::ones([batch, hub_count, height, width], &device)
-                .div_scalar(hub_count as f32)
-        }
-    }
-
-    fn trm_hub_read(
-        &self,
-        hub: Tensor<B, 4>,
-        query: Tensor<B, 4>,
-        weights: Option<Tensor<B, 4>>,
-    ) -> Tensor<B, 4> {
-        let [batch, hubs, rank, value_dim] = hub.shape().dims::<4>();
-        let [_, _, height, width] = query.shape().dims::<4>();
-        if batch == 0 || hubs == 0 || rank == 0 || value_dim == 0 || height == 0 || width == 0 {
-            return Tensor::<B, 4>::zeros(
-                [batch.max(1), value_dim.max(1), height.max(1), width.max(1)],
-                &hub.device(),
-            );
-        }
-        let hub_exp = hub.unsqueeze_dim::<5>(4).unsqueeze_dim::<6>(5);
-        let query_exp = query.unsqueeze_dim::<5>(1).unsqueeze_dim::<6>(3);
-        let msg = hub_exp.mul(query_exp).sum_dims_squeeze::<5, usize>(&[2]);
-        match weights {
-            Some(w) => {
-                let w = w.unsqueeze_dim::<5>(2);
-                msg.mul(w).sum_dims_squeeze::<4, usize>(&[1])
-            }
-            None => {
-                let mut reduced = msg.sum_dims_squeeze::<4, usize>(&[1]);
-                if hubs > 1 {
-                    reduced = reduced.div_scalar(hubs as f32);
-                }
-                reduced
-            }
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn trm_update_hub(
-        &self,
-        hub: Tensor<B, 4>,
-        u8: Tensor<B, 5>,
-        u32: Tensor<B, 5>,
-        hub_w8: Option<Tensor<B, 4>>,
-        hub_w32: Option<Tensor<B, 4>>,
-        hub_count: usize,
-        decay: f32,
-    ) -> Tensor<B, 4> {
-        if hub_count <= 1 {
-            let sum8 = u8.sum_dims_squeeze::<3, usize>(&[3, 4]);
-            let sum32 = u32.sum_dims_squeeze::<3, usize>(&[3, 4]);
-            let delta = (sum8 + sum32).unsqueeze_dim::<4>(1);
-            return hub.mul_scalar(decay).add(delta);
-        }
-
-        let w8 = hub_w8.unwrap_or_else(|| {
-            let [batch, _, _, height, width] = u8.shape().dims::<5>();
-            Tensor::<B, 4>::ones([batch, hub_count, height, width], &u8.device())
-                .div_scalar(hub_count as f32)
-        });
-        let w32 = hub_w32.unwrap_or_else(|| {
-            let [batch, _, _, height, width] = u32.shape().dims::<5>();
-            Tensor::<B, 4>::ones([batch, hub_count, height, width], &u32.device())
-                .div_scalar(hub_count as f32)
-        });
-
-        let delta8 = self.trm_weighted_global_sum(u8, w8);
-        let delta32 = self.trm_weighted_global_sum(u32, w32);
-        let delta = delta8 + delta32;
-        hub.mul_scalar(decay).add(delta)
-    }
-
-    fn trm_weighted_global_sum(&self, u: Tensor<B, 5>, w: Tensor<B, 4>) -> Tensor<B, 4> {
-        let u = u.unsqueeze_dim::<6>(1);
-        let w = w.unsqueeze_dim::<5>(2).unsqueeze_dim::<6>(3);
-        u.mul(w).sum_dims_squeeze::<4, usize>(&[4, 5])
-    }
-
-    fn apply_token_norm<const D: usize>(&self, tokens: Tensor<B, D>) -> Tensor<B, D> {
-        match &self.token_norm {
-            Some(norm) => norm.forward(tokens),
-            None => tokens,
-        }
-    }
-
-    fn apply_latent_activation<const D: usize>(&self, values: Tensor<B, D>) -> Tensor<B, D> {
-        match self.latent_activation {
-            VisionLatentActivation::Relu => activation::relu(values),
-            VisionLatentActivation::Gelu => activation::gelu(values),
-            VisionLatentActivation::Identity => values,
-        }
-    }
-
-    fn sync_cls_tokens_multi(&self, tokens: Tensor<B, 4>) -> Tensor<B, 4> {
-        if !(self.use_cls_token && self.cls_sync_alpha > 0.0) {
-            return tokens;
-        }
-        let [batch, streams, time, dim] = tokens.shape().dims::<4>();
-        if streams <= 1 || time == 0 {
-            return tokens;
-        }
-        let alpha = self.cls_sync_alpha.clamp(0.0, 1.0);
-        let cls = tokens.clone().slice_dim(2, 0..1);
-        let shared = cls
-            .clone()
-            .sum_dim(1)
-            .mul_scalar(1.0 / streams as f32)
-            .reshape([batch, 1, 1, dim])
-            .repeat_dim(1, streams);
-        let blended = cls.mul_scalar(1.0 - alpha) + shared.mul_scalar(alpha);
-        if time <= 1 {
-            return blended;
-        }
-        let rest = tokens.slice_dim(2, 1..time);
-        Tensor::cat(vec![blended, rest], 2)
-    }
-
-    fn full_attention(&self, query: Tensor<B, 4>, value: Tensor<B, 4>) -> Tensor<B, 4> {
-        let latent = query.shape().dims::<4>()[3] as f32;
-        let scale = latent.sqrt().max(1.0);
-        let k = query.clone();
-        let query_scaled = query.clone().div_scalar(scale);
-        let mut scores = query_scaled.matmul(k.swap_dims(2, 3));
-        if self.use_alibi
-            && let Some(slopes) = self.alibi_slopes.as_ref()
-        {
-            let device = query.device();
-            let [_, heads, time, _] = query.shape().dims::<4>();
-            let slopes = slopes.clone().reshape([1, heads, 1, 1]);
-            let pos_row = Tensor::<B, 1, Int>::arange(0..time as i64, &device)
-                .float()
-                .reshape([1, 1, time, 1]);
-            let pos_col = Tensor::<B, 1, Int>::arange(0..time as i64, &device)
-                .float()
-                .reshape([1, 1, 1, time]);
-            let alibi = slopes * (pos_col - pos_row);
-            scores = scores + alibi;
-        }
-        match self.attention_mode {
-            VisionAttentionMode::Softmax => {
-                scores = activation::softmax(scores, 3);
-            }
-            VisionAttentionMode::RowL1 => {
-                let denom = scores.clone().abs().sum_dim(3).add_scalar(ROW_NORM_EPS);
-                scores = scores / denom;
-            }
-        }
-        let value = value.repeat_dim(1, self.n_head);
-        scores.matmul(value)
-    }
-
-    fn prepend_cls(&self, tokens: Tensor<B, 3>) -> Tensor<B, 3> {
-        let [batch, _time, dim] = tokens.shape().dims::<3>();
-        let cls = self
-            .cls_token
-            .as_ref()
-            .expect("cls token enabled")
-            .val()
-            .reshape([1, 1, dim])
-            .repeat_dim(0, batch);
-        let cls = if let Some(cls_pos) = &self.cls_pos {
-            cls + cls_pos.val().reshape([1, 1, dim])
-        } else {
-            cls
-        };
-        Tensor::cat(vec![cls, tokens], 1)
-    }
-
-    fn split_output(&self, tokens: Tensor<B, 3>) -> VisionDragonOutput<B> {
-        let [batch, time, dim] = tokens.shape().dims::<3>();
-        if self.use_cls_token && time > 0 {
-            let cls_token = tokens.clone().slice_dim(1, 0..1).reshape([batch, dim]);
-            let patch_tokens = tokens.slice_dim(1, 1..time);
-            VisionDragonOutput {
-                patch_tokens,
-                cls_token,
-            }
-        } else {
-            let cls_token = tokens.clone().mean_dim(1).reshape([batch, dim]);
-            VisionDragonOutput {
-                patch_tokens: tokens,
-                cls_token,
-            }
-        }
-    }
-
-    fn split_output_multi(&self, tokens: Tensor<B, 4>) -> VisionDragonMultiOutput<B> {
-        let [batch, streams, time, dim] = tokens.shape().dims::<4>();
-        if self.use_cls_token && time > 0 {
-            let cls_token = tokens
-                .clone()
-                .slice_dim(2, 0..1)
-                .reshape([batch, streams, dim]);
-            let patch_tokens = tokens.slice_dim(2, 1..time);
-            VisionDragonMultiOutput {
-                patch_tokens,
-                cls_token,
-            }
-        } else {
-            let cls_token = tokens.clone().mean_dim(2).reshape([batch, streams, dim]);
-            VisionDragonMultiOutput {
-                patch_tokens: tokens,
-                cls_token,
-            }
-        }
-    }
 }
+
+#[cfg(test)]
+mod rho_stream_tests;

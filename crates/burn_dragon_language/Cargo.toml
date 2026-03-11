@@ -50,11 +50,11 @@ tracing = { version = "0.1", optional = true }
 flate2 = { version = "1.1", optional = true }
 tar = { version = "0.4", optional = true }
 
-burn = { version = "0.19", default-features = false, features = ["fusion", "ndarray", "std", "wgpu"] }
-burn-autodiff = { version = "0.19", optional = true }
-burn-ndarray = { version = "0.19", optional = true }
-burn-train = { version = "0.19", optional = true, default-features = false, features = ["tui"] }
-burn-cuda = { version = "0.19", optional = true, default-features = false, features = ["std"] }
+burn = { version = "0.21.0-pre.2", default-features = false, features = ["fusion", "ndarray", "std", "wgpu"] }
+burn-autodiff = { version = "0.21.0-pre.2", optional = true }
+burn-ndarray = { version = "0.21.0-pre.2", optional = true }
+burn-train = { version = "0.21.0-pre.2", optional = true, default-features = false, features = ["tui"] }
+burn-cuda = { version = "0.21.0-pre.2", optional = true, default-features = false, features = ["std"] }
 
 [dev-dependencies]
 tempfile = "3"

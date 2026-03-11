@@ -1,15 +1,15 @@
-pub mod vision;
-
-#[cfg(feature = "train")]
-pub use vision::{
-    CifarBatch, CifarDataLoader, CifarDataset, CifarSplit, CifarType, DinoFeatureStore,
-    ImageNetAugmentations, ImageNetBatch, ImageNetDataLoader, ImageNetDataset,
-    ImageNetDatasetConfig, ImageNetSplit, VisionNormalize,
+pub use burn_dragon_core::{
+    BankedRhoState, StructuredBankRole, StructuredGridState, StructuredRouteOperation,
+    StructuredRoutePattern, StructuredRouteSpec, StructuredRoutingSpec, StructuredStepMode,
+    StructuredTopologyState,
 };
+
+pub mod vision;
 
 pub use vision::{
     PatchEmbed, PatchEmbedOutput, PatchGrid, SpatialPositionalEncodingKind, VisionAttentionMode,
-    VisionDragon, VisionDragonConfig, VisionDragonMultiOutput, VisionDragonOutput,
-    VisionLatentActivation, VisionPatchEmbedMode, VisionTrmGraphConfig,
+    VisionBackboneKind, VisionCellularConfig, VisionCellularState, VisionDragon,
+    VisionDragonConfig, VisionDragonMultiOutput, VisionDragonOutput, VisionLatentActivation,
+    VisionPatchEmbedMode, VisionPyramidConfig, VisionRhoStreamConfig, VisionTrmGraphConfig,
     VisionTrmGridMismatchPolicy, patchify, pool_patch_tokens, unpatchify,
 };

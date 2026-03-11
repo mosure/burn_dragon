@@ -2,8 +2,10 @@ use crate::train::prelude::*;
 use burn::nn::PaddingConfig2d;
 use burn::nn::conv::{Conv2d, Conv2dConfig};
 
+mod distill;
 mod input_projection;
 
+pub(crate) use distill::{DistillTeacherModel, VisionDistillModel};
 pub(crate) use input_projection::VisionSaccadeInputProjection;
 
 type ReconArtifacts<B> = Option<(Vec<Tensor<B, 4>>, Tensor<B, 3>)>;
@@ -161,31 +163,6 @@ fn collect_refinement_artifact_maps<B: BackendTrait>(
 }
 
 #[derive(Module, Debug)]
-pub(crate) struct VisionDistillModel<B: BackendTrait> {
-    pub(crate) model: VisionDragon<B>,
-    pub(crate) loss: VisionDistillationLossConfig,
-    pub(crate) teacher: Option<DinoVisionTransformer<B>>,
-    #[module(ignore)]
-    pub(crate) rollout: VisionRollout,
-}
-
-impl<B: BackendTrait> VisionDistillModel<B> {
-    pub(crate) fn new(
-        model: VisionDragon<B>,
-        loss: VisionDistillationLossConfig,
-        teacher: Option<DinoVisionTransformer<B>>,
-        rollout: VisionRollout,
-    ) -> Self {
-        Self {
-            model,
-            loss,
-            teacher,
-            rollout,
-        }
-    }
-}
-
-#[derive(Module, Debug)]
 pub(crate) struct VisionProbe<B: BackendTrait> {
     pub(crate) norm: LayerNorm<B>,
     pub(crate) head: Linear<B>,
@@ -298,7 +275,7 @@ impl<B: BackendTrait> VisionSaccadeProjection<B> {
     }
 }
 
-#[derive(Module, Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct VisionLejepaModel<B: BackendTrait> {
     pub(crate) model: VisionDragon<B>,
     pub(crate) probe: VisionProbe<B>,
@@ -306,10 +283,19 @@ pub(crate) struct VisionLejepaModel<B: BackendTrait> {
     pub(crate) recon: Option<VisionReconstructionHead<B>>,
     pub(crate) mask_token: Option<Param<Tensor<B, 2>>>,
     pub(crate) config: VisionLejepaConfig,
-    #[module(ignore)]
+    pub(crate) teacher: Option<VisionDragon<B>>,
     pub(crate) denorm_std_patch: Option<Tensor<B, 3>>,
-    #[module(ignore)]
     pub(crate) rollout: VisionRollout,
+}
+
+#[derive(burn::record::Record)]
+pub(crate) struct VisionLejepaModelRecord<B: BackendTrait> {
+    pub(crate) model: <VisionDragon<B> as Module<B>>::Record,
+    pub(crate) probe: <VisionProbe<B> as Module<B>>::Record,
+    pub(crate) probe_loss: <burn::nn::loss::CrossEntropyLoss<B> as Module<B>>::Record,
+    pub(crate) recon: <Option<VisionReconstructionHead<B>> as Module<B>>::Record,
+    pub(crate) mask_token: <Option<Param<Tensor<B, 2>>> as Module<B>>::Record,
+    pub(crate) config: <VisionLejepaConfig as Module<B>>::Record,
 }
 
 pub(crate) struct VisionLejepaLosses<B: BackendTrait> {
@@ -374,6 +360,11 @@ impl<B: BackendTrait> VisionLejepaModel<B> {
         } else {
             None
         };
+        let teacher = if config.loss.lejepa.enabled {
+            init_momentum_teacher::<B, _>(&model, &config.teacher_ema)
+        } else {
+            None
+        };
         Self {
             model,
             probe,
@@ -381,9 +372,28 @@ impl<B: BackendTrait> VisionLejepaModel<B> {
             recon,
             mask_token,
             config,
+            teacher,
             denorm_std_patch,
             rollout,
         }
+    }
+
+    pub(crate) fn sync_teacher_from_student(mut self) -> Self {
+        self.teacher = sync_optional_teacher_from_student::<B, _>(
+            self.teacher.take(),
+            &self.model,
+            self.config.loss.lejepa.enabled && self.config.teacher_ema.enabled,
+            self.config.teacher_ema.decay,
+        );
+        self
+    }
+
+    pub(crate) fn restore_teacher_from_student(mut self) -> Self {
+        self.teacher = restore_optional_teacher_from_student::<B, _>(
+            &self.model,
+            self.config.loss.lejepa.enabled && self.config.teacher_ema.enabled,
+        );
+        self
     }
 
     pub(crate) fn forward_losses(
@@ -531,9 +541,23 @@ impl<B: BackendTrait> VisionLejepaModel<B> {
         } else {
             Tensor::cat(embed_groups, 0)
         };
+        let teacher_proj = if self.config.loss.lejepa.enabled {
+            let teacher_views = if !collected.global.is_empty() {
+                collected.global.as_slice()
+            } else {
+                collected.all.as_slice()
+            };
+            self.teacher_proj_for_views(teacher_views, steps)
+        } else {
+            None
+        };
         let zero = Tensor::<B, 1>::zeros([1], &device);
         let (inv, sigreg, mut total) = if self.config.loss.lejepa.enabled {
-            let inv = lejepa_invariance_loss(proj.clone());
+            let inv = if let Some(teacher_proj) = teacher_proj {
+                lejepa_teacher_invariance_loss(proj.clone(), teacher_proj)
+            } else {
+                lejepa_invariance_loss(proj.clone())
+            };
             let sigreg = lejepa_sigreg_loss(proj.clone(), &self.config.loss.lejepa);
             let lambda = self.config.loss.lejepa.lambda.clamp(0.0, 1.0);
             let total = inv.clone().mul_scalar(1.0 - lambda) + sigreg.clone().mul_scalar(lambda);
@@ -812,13 +836,33 @@ impl<B: BackendTrait> VisionLejepaModel<B> {
         steps: usize,
         backprop_steps: usize,
     ) -> ViewGroupOutput<B> {
+        Self::forward_view_group_with_model(&self.model, views, steps, backprop_steps)
+    }
+
+    pub(crate) fn teacher_proj_for_views(
+        &self,
+        views: &[Tensor<B, 4>],
+        steps: usize,
+    ) -> Option<Tensor<B, 3>> {
+        let teacher = self.teacher.as_ref()?;
+        if views.is_empty() {
+            return None;
+        }
+        Some(Self::forward_view_group_with_model(teacher, views, steps, steps).proj)
+    }
+
+    fn forward_view_group_with_model(
+        model: &VisionDragon<B>,
+        views: &[Tensor<B, 4>],
+        steps: usize,
+        backprop_steps: usize,
+    ) -> ViewGroupOutput<B> {
         let view_count = views.len();
         let [batch, _, _, _] = views[0].shape().dims::<4>();
         let stacked = stack_views(views);
-        let patch = self.model.patch_embed(stacked);
+        let patch = model.patch_embed(stacked);
         let embed_out =
-            self.model
-                .forward_tokens_embed_steps_rollout(patch.tokens, steps, backprop_steps);
+            model.forward_tokens_embed_steps_rollout(patch.tokens, steps, backprop_steps);
         let cls_embed = embed_out.cls_token;
         let patch_tokens = embed_out.patch_tokens;
         let [total, embed_dim] = cls_embed.shape().dims::<2>();
@@ -830,7 +874,7 @@ impl<B: BackendTrait> VisionLejepaModel<B> {
             ],
             1,
         );
-        let proj_tokens = self.model.project_tokens(tokens);
+        let proj_tokens = model.project_tokens(tokens);
         let proj_dim = proj_tokens.shape().dims::<3>()[2];
         let proj_cls = proj_tokens
             .slice_dim(1, 0..1)
@@ -843,6 +887,156 @@ impl<B: BackendTrait> VisionLejepaModel<B> {
         }
     }
 }
+
+impl<B: BackendTrait> Module<B> for VisionLejepaModel<B> {
+    type Record = VisionLejepaModelRecord<B>;
+
+    fn collect_devices(&self, devices: burn::module::Devices<B>) -> burn::module::Devices<B> {
+        let devices = Module::collect_devices(&self.model, devices);
+        let devices = Module::collect_devices(&self.probe, devices);
+        let devices = Module::collect_devices(&self.probe_loss, devices);
+        let devices = Module::collect_devices(&self.recon, devices);
+        let devices = Module::collect_devices(&self.mask_token, devices);
+        let devices = Module::<B>::collect_devices(&self.config, devices);
+        let devices = Module::collect_devices(&self.teacher, devices);
+        Module::collect_devices(&self.denorm_std_patch, devices)
+    }
+
+    fn fork(self, device: &B::Device) -> Self {
+        Self {
+            model: Module::fork(self.model, device),
+            probe: Module::fork(self.probe, device),
+            probe_loss: Module::fork(self.probe_loss, device),
+            recon: Module::fork(self.recon, device),
+            mask_token: Module::fork(self.mask_token, device),
+            config: Module::<B>::fork(self.config, device),
+            teacher: Module::fork(self.teacher, device),
+            denorm_std_patch: Module::fork(self.denorm_std_patch, device),
+            rollout: self.rollout,
+        }
+    }
+
+    fn to_device(self, device: &B::Device) -> Self {
+        Self {
+            model: Module::to_device(self.model, device),
+            probe: Module::to_device(self.probe, device),
+            probe_loss: Module::to_device(self.probe_loss, device),
+            recon: Module::to_device(self.recon, device),
+            mask_token: Module::to_device(self.mask_token, device),
+            config: Module::<B>::to_device(self.config, device),
+            teacher: Module::to_device(self.teacher, device),
+            denorm_std_patch: Module::to_device(self.denorm_std_patch, device),
+            rollout: self.rollout,
+        }
+    }
+
+    fn visit<Visitor: burn::module::ModuleVisitor<B>>(&self, visitor: &mut Visitor) {
+        Module::visit(&self.model, visitor);
+        Module::visit(&self.probe, visitor);
+        Module::visit(&self.probe_loss, visitor);
+        Module::visit(&self.recon, visitor);
+        Module::visit(&self.mask_token, visitor);
+        Module::visit(&self.config, visitor);
+    }
+
+    fn map<Mapper: burn::module::ModuleMapper<B>>(self, mapper: &mut Mapper) -> Self {
+        Self {
+            model: Module::map(self.model, mapper),
+            probe: Module::map(self.probe, mapper),
+            probe_loss: Module::map(self.probe_loss, mapper),
+            recon: Module::map(self.recon, mapper),
+            mask_token: Module::map(self.mask_token, mapper),
+            config: Module::<B>::map(self.config, mapper),
+            teacher: self.teacher,
+            denorm_std_patch: self.denorm_std_patch,
+            rollout: self.rollout,
+        }
+    }
+
+    fn load_record(self, record: Self::Record) -> Self {
+        Self {
+            model: Module::load_record(self.model, record.model),
+            probe: Module::load_record(self.probe, record.probe),
+            probe_loss: Module::load_record(self.probe_loss, record.probe_loss),
+            recon: Module::load_record(self.recon, record.recon),
+            mask_token: Module::load_record(self.mask_token, record.mask_token),
+            config: Module::<B>::load_record(self.config, record.config),
+            teacher: None,
+            denorm_std_patch: self.denorm_std_patch,
+            rollout: self.rollout,
+        }
+        .restore_teacher_from_student()
+    }
+
+    fn into_record(self) -> Self::Record {
+        VisionLejepaModelRecord {
+            model: Module::into_record(self.model),
+            probe: Module::into_record(self.probe),
+            probe_loss: Module::into_record(self.probe_loss),
+            recon: Module::into_record(self.recon),
+            mask_token: Module::into_record(self.mask_token),
+            config: Module::<B>::into_record(self.config),
+        }
+    }
+}
+
+impl<B: AutodiffBackend> AutodiffModule<B> for VisionLejepaModel<B> {
+    type InnerModule = VisionLejepaModel<B::InnerBackend>;
+
+    fn valid(&self) -> Self::InnerModule {
+        VisionLejepaModel {
+            model: AutodiffModule::valid(&self.model),
+            probe: AutodiffModule::valid(&self.probe),
+            probe_loss: AutodiffModule::valid(&self.probe_loss),
+            recon: AutodiffModule::valid(&self.recon),
+            mask_token: AutodiffModule::valid(&self.mask_token),
+            config: AutodiffModule::<B>::valid(&self.config),
+            teacher: AutodiffModule::valid(&self.teacher),
+            denorm_std_patch: AutodiffModule::valid(&self.denorm_std_patch),
+            rollout: self.rollout,
+        }
+    }
+
+    fn from_inner(module: Self::InnerModule) -> Self {
+        VisionLejepaModel {
+            model: AutodiffModule::from_inner(module.model),
+            probe: AutodiffModule::from_inner(module.probe),
+            probe_loss: AutodiffModule::from_inner(module.probe_loss),
+            recon: AutodiffModule::from_inner(module.recon),
+            mask_token: AutodiffModule::from_inner(module.mask_token),
+            config: AutodiffModule::<B>::from_inner(module.config),
+            teacher: AutodiffModule::from_inner(module.teacher),
+            denorm_std_patch: AutodiffModule::from_inner(module.denorm_std_patch),
+            rollout: module.rollout,
+        }
+    }
+}
+
+impl<B: BackendTrait> core::fmt::Display for VisionLejepaModel<B> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(&burn::module::ModuleDisplay::format(
+            self,
+            burn::module::DisplaySettings::default(),
+        ))
+    }
+}
+
+impl<B: BackendTrait> ModuleDisplayDefault for VisionLejepaModel<B> {
+    fn content(&self, content: Content) -> Option<Content> {
+        content
+            .add("model", &self.model)
+            .add("probe", &self.probe)
+            .add("recon", &self.recon)
+            .add("config", &self.config)
+            .optional()
+    }
+
+    fn num_params(&self) -> usize {
+        Module::num_params(self)
+    }
+}
+
+impl<B: BackendTrait> ModuleDisplay for VisionLejepaModel<B> {}
 
 #[derive(Module, Debug)]
 pub(crate) struct VisionMaeModel<B: BackendTrait> {

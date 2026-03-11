@@ -11,9 +11,6 @@ use crate::train::metrics::{
 use crate::train::prelude::*;
 use crate::train::steps::SudokuTrainer;
 use burn_train::metric::IterationSpeedMetric;
-use burn_train::renderer::tui::TuiMetricsRenderer;
-use std::env;
-use std::io::IsTerminal;
 
 pub struct SudokuTrainEnvironment<'a, B>
 where
@@ -28,19 +25,6 @@ where
     pub train_loader: Arc<dyn DataLoader<B, SudokuBatch<B>>>,
     pub valid_loader: Arc<dyn DataLoader<ValidBackend<B>, SudokuBatch<ValidBackend<B>>>>,
     pub epochs: usize,
-}
-
-fn env_flag(name: &str) -> Option<bool> {
-    let value = env::var(name).ok()?;
-    let normalized = value.trim().to_ascii_lowercase();
-    if normalized.is_empty() {
-        return None;
-    }
-    match normalized.as_str() {
-        "1" | "true" | "yes" | "on" => Some(true),
-        "0" | "false" | "no" | "off" => Some(false),
-        _ => None,
-    }
 }
 
 pub fn train_with_scheduler<B, S>(
@@ -61,122 +45,110 @@ where
         env.training.policy.entropy_adaptive || env.training.policy.entropy_weight > 0.0;
     let halt_active = env.training.halt.weight > 0.0;
 
-    let mut builder = LearnerBuilder::new(env.run_dir)
-        .num_epochs(env.epochs)
-        .learning_strategy(LearningStrategy::SingleDevice(env.device.clone()))
-        .with_file_checkpointer(BinFileRecorder::<FullPrecisionSettings>::new())
-        .metric_train_numeric(IterationSpeedMetric::new())
-        .metric_train_numeric(
-            ScalarMetric::<ValidBackend<B>, LossValue<ValidBackend<B>>>::new_every(
-                "Loss",
-                metric_every,
-            ),
-        )
-        .metric_valid_numeric(
-            ScalarMetric::<ValidBackend<B>, LossValue<ValidBackend<B>>>::new_every(
-                "Loss",
-                metric_every,
-            ),
-        )
-        .metric_train_numeric(LearningRateMetric::new())
-        .metric_train(DeviceMetric::new("device", env.backend_name))
-        .metric_valid(DeviceMetric::new("device", env.backend_name))
-        .metric_train_numeric(ScalarMetric::<
-            ValidBackend<B>,
-            SudokuReconLossInput<ValidBackend<B>>,
-        >::new_every("sudoku_recon_loss", metric_every))
-        .metric_valid_numeric(ScalarMetric::<
-            ValidBackend<B>,
-            SudokuReconLossInput<ValidBackend<B>>,
-        >::new_every("sudoku_recon_loss", metric_every))
-        .metric_train_numeric(ScalarMetric::<
-            ValidBackend<B>,
-            SudokuAccInput<ValidBackend<B>>,
-        >::new_every("sudoku_acc", metric_every))
-        .metric_valid_numeric(ScalarMetric::<
-            ValidBackend<B>,
-            SudokuAccInput<ValidBackend<B>>,
-        >::new_every("sudoku_acc", metric_every))
-        .metric_train_numeric(ScalarMetric::<
-            ValidBackend<B>,
-            SudokuExactAccInput<ValidBackend<B>>,
-        >::new_every("sudoku_exact_acc", metric_every))
-        .metric_valid_numeric(ScalarMetric::<
-            ValidBackend<B>,
-            SudokuExactAccInput<ValidBackend<B>>,
-        >::new_every("sudoku_exact_acc", metric_every))
-        .metric_train_numeric(ScalarMetric::<
-            ValidBackend<B>,
-            SudokuSolveRateInput<ValidBackend<B>>,
-        >::new_every("sudoku_solve_rate", metric_every))
-        .metric_valid_numeric(ScalarMetric::<
-            ValidBackend<B>,
-            SudokuSolveRateInput<ValidBackend<B>>,
-        >::new_every("sudoku_solve_rate", metric_every))
-        .metric_train_numeric(ScalarMetric::<
-            ValidBackend<B>,
-            SudokuSaccadeRevisitRateInput<ValidBackend<B>>,
-        >::new_every(
-            "sudoku_saccade_revisit_rate", metric_every
-        ))
-        .metric_valid_numeric(ScalarMetric::<
-            ValidBackend<B>,
-            SudokuSaccadeRevisitRateInput<ValidBackend<B>>,
-        >::new_every(
-            "sudoku_saccade_revisit_rate", metric_every
-        ))
-        .metric_train_numeric(ScalarMetric::<
-            ValidBackend<B>,
-            SudokuSaccadeRepeatRateInput<ValidBackend<B>>,
-        >::new_every(
-            "sudoku_saccade_repeat_rate", metric_every
-        ))
-        .metric_valid_numeric(ScalarMetric::<
-            ValidBackend<B>,
-            SudokuSaccadeRepeatRateInput<ValidBackend<B>>,
-        >::new_every(
-            "sudoku_saccade_repeat_rate", metric_every
-        ))
-        .metric_train_numeric(ScalarMetric::<
-            ValidBackend<B>,
-            SudokuSaccadeUnknownFracInput<ValidBackend<B>>,
-        >::new_every(
-            "sudoku_saccade_unknown_frac", metric_every
-        ))
-        .metric_valid_numeric(ScalarMetric::<
-            ValidBackend<B>,
-            SudokuSaccadeUnknownFracInput<ValidBackend<B>>,
-        >::new_every(
-            "sudoku_saccade_unknown_frac", metric_every
-        ))
-        .metric_train_numeric(ScalarMetric::<
-            ValidBackend<B>,
-            SudokuSaccadeUniqueFracInput<ValidBackend<B>>,
-        >::new_every(
-            "sudoku_saccade_unique_frac", metric_every
-        ))
-        .metric_valid_numeric(ScalarMetric::<
-            ValidBackend<B>,
-            SudokuSaccadeUniqueFracInput<ValidBackend<B>>,
-        >::new_every(
-            "sudoku_saccade_unique_frac", metric_every
-        ))
-        .metric_train_numeric(ScalarMetric::<
-            ValidBackend<B>,
-            SudokuWriteGateMeanInput<ValidBackend<B>>,
-        >::new_every("sudoku_write_gate_mean", metric_every))
-        .metric_valid_numeric(ScalarMetric::<
-            ValidBackend<B>,
-            SudokuWriteGateMeanInput<ValidBackend<B>>,
-        >::new_every("sudoku_write_gate_mean", metric_every))
-        .metric_train_numeric(ScalarMetric::<
-            ValidBackend<B>,
-            SudokuWriteRateInput<ValidBackend<B>>,
-        >::new_every("sudoku_write_rate", metric_every))
-        .metric_valid_numeric(ScalarMetric::<
-            ValidBackend<B>,
-            SudokuWriteRateInput<ValidBackend<B>>,
-        >::new_every("sudoku_write_rate", metric_every));
+    let mut builder = SupervisedTraining::new(
+        env.run_dir,
+        Arc::clone(&env.train_loader),
+        Arc::clone(&env.valid_loader),
+    )
+    .num_epochs(env.epochs)
+    .with_training_strategy(LearningStrategy::SingleDevice(env.device.clone()))
+    .with_file_checkpointer(BinFileRecorder::<FullPrecisionSettings>::new())
+    .metric_train_numeric(IterationSpeedMetric::new())
+    .metric_train_numeric(
+        ScalarMetric::<ValidBackend<B>, LossValue<ValidBackend<B>>>::new_every(
+            "Loss",
+            metric_every,
+        ),
+    )
+    .metric_valid_numeric(
+        ScalarMetric::<ValidBackend<B>, LossValue<ValidBackend<B>>>::new_every(
+            "Loss",
+            metric_every,
+        ),
+    )
+    .metric_train_numeric(LearningRateMetric::new())
+    .metric_train(DeviceMetric::new("device", env.backend_name))
+    .metric_valid(DeviceMetric::new("device", env.backend_name))
+    .metric_train_numeric(ScalarMetric::<
+        ValidBackend<B>,
+        SudokuReconLossInput<ValidBackend<B>>,
+    >::new_every("sudoku_recon_loss", metric_every))
+    .metric_valid_numeric(ScalarMetric::<
+        ValidBackend<B>,
+        SudokuReconLossInput<ValidBackend<B>>,
+    >::new_every("sudoku_recon_loss", metric_every))
+    .metric_train_numeric(ScalarMetric::<
+        ValidBackend<B>,
+        SudokuAccInput<ValidBackend<B>>,
+    >::new_every("sudoku_acc", metric_every))
+    .metric_valid_numeric(ScalarMetric::<
+        ValidBackend<B>,
+        SudokuAccInput<ValidBackend<B>>,
+    >::new_every("sudoku_acc", metric_every))
+    .metric_train_numeric(ScalarMetric::<
+        ValidBackend<B>,
+        SudokuExactAccInput<ValidBackend<B>>,
+    >::new_every("sudoku_exact_acc", metric_every))
+    .metric_valid_numeric(ScalarMetric::<
+        ValidBackend<B>,
+        SudokuExactAccInput<ValidBackend<B>>,
+    >::new_every("sudoku_exact_acc", metric_every))
+    .metric_train_numeric(ScalarMetric::<
+        ValidBackend<B>,
+        SudokuSolveRateInput<ValidBackend<B>>,
+    >::new_every("sudoku_solve_rate", metric_every))
+    .metric_valid_numeric(ScalarMetric::<
+        ValidBackend<B>,
+        SudokuSolveRateInput<ValidBackend<B>>,
+    >::new_every("sudoku_solve_rate", metric_every))
+    .metric_train_numeric(ScalarMetric::<
+        ValidBackend<B>,
+        SudokuSaccadeRevisitRateInput<ValidBackend<B>>,
+    >::new_every("sudoku_saccade_revisit_rate", metric_every))
+    .metric_valid_numeric(ScalarMetric::<
+        ValidBackend<B>,
+        SudokuSaccadeRevisitRateInput<ValidBackend<B>>,
+    >::new_every("sudoku_saccade_revisit_rate", metric_every))
+    .metric_train_numeric(ScalarMetric::<
+        ValidBackend<B>,
+        SudokuSaccadeRepeatRateInput<ValidBackend<B>>,
+    >::new_every("sudoku_saccade_repeat_rate", metric_every))
+    .metric_valid_numeric(ScalarMetric::<
+        ValidBackend<B>,
+        SudokuSaccadeRepeatRateInput<ValidBackend<B>>,
+    >::new_every("sudoku_saccade_repeat_rate", metric_every))
+    .metric_train_numeric(ScalarMetric::<
+        ValidBackend<B>,
+        SudokuSaccadeUnknownFracInput<ValidBackend<B>>,
+    >::new_every("sudoku_saccade_unknown_frac", metric_every))
+    .metric_valid_numeric(ScalarMetric::<
+        ValidBackend<B>,
+        SudokuSaccadeUnknownFracInput<ValidBackend<B>>,
+    >::new_every("sudoku_saccade_unknown_frac", metric_every))
+    .metric_train_numeric(ScalarMetric::<
+        ValidBackend<B>,
+        SudokuSaccadeUniqueFracInput<ValidBackend<B>>,
+    >::new_every("sudoku_saccade_unique_frac", metric_every))
+    .metric_valid_numeric(ScalarMetric::<
+        ValidBackend<B>,
+        SudokuSaccadeUniqueFracInput<ValidBackend<B>>,
+    >::new_every("sudoku_saccade_unique_frac", metric_every))
+    .metric_train_numeric(ScalarMetric::<
+        ValidBackend<B>,
+        SudokuWriteGateMeanInput<ValidBackend<B>>,
+    >::new_every("sudoku_write_gate_mean", metric_every))
+    .metric_valid_numeric(ScalarMetric::<
+        ValidBackend<B>,
+        SudokuWriteGateMeanInput<ValidBackend<B>>,
+    >::new_every("sudoku_write_gate_mean", metric_every))
+    .metric_train_numeric(ScalarMetric::<
+        ValidBackend<B>,
+        SudokuWriteRateInput<ValidBackend<B>>,
+    >::new_every("sudoku_write_rate", metric_every))
+    .metric_valid_numeric(ScalarMetric::<
+        ValidBackend<B>,
+        SudokuWriteRateInput<ValidBackend<B>>,
+    >::new_every("sudoku_write_rate", metric_every));
 
     if gdpo_active {
         builder = builder
@@ -281,17 +253,6 @@ where
             ));
     }
 
-    let force_tui = env_flag("BURN_TUI").unwrap_or(false);
-    if force_tui {
-        let interrupter = builder.interrupter();
-        builder = builder.renderer(TuiMetricsRenderer::new(interrupter, None));
-        info!("burn-train renderer forced to TUI via BURN_TUI=1");
-    } else if !std::io::stdout().is_terminal() {
-        info!("burn-train renderer set to CLI because stdout is not a terminal");
-    }
-
-    let builder = builder.summary();
-
     info!("sudoku run name: {}", env.run_name);
 
     #[cfg(feature = "integration_test")]
@@ -312,9 +273,10 @@ where
             ),
         );
 
-    let learner = builder.build(model, optimizer, scheduler);
-    let TrainingResult { model, .. } =
-        learner.fit(Arc::clone(&env.train_loader), Arc::clone(&env.valid_loader));
+    let builder = builder.summary();
+
+    let learner = burn_train::Learner::new(model, optimizer, scheduler);
+    let TrainingResult { model, .. } = builder.launch(learner);
 
     Ok(model)
 }

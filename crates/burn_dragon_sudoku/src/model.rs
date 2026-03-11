@@ -7,6 +7,8 @@ use std::f32::consts::PI;
 use burn_dragon_core::{
     BDH, BDHConfig, FusedKernelConfig, HaltHead, ManifoldHyperConnections, ModelState,
 };
+use burn_dragon_train::WgpuRuntimeConfig;
+use burn_dragon_train::wgpu::apply_wgpu_fused_core_override;
 
 use crate::config::{
     SudokuCacheUpdateMode, SudokuGridPositional, SudokuModelConfig, SudokuPolicyHead,
@@ -19,6 +21,13 @@ const POLICY_HEAD_SUMMARY_POS: u8 = 1;
 const POLICY_HEAD_SUMMARY_MLP: u8 = 2;
 const WRITE_GATE_INIT: f32 = -6.0;
 
+/// Sudoku task adapter over the shared BDH Dragon core.
+///
+/// Paper mapping:
+/// - the shared `core` owns the paper-faithful `x_neuron`, `y_gate`, `y_neuron`, and per-layer
+///   `rho` contract
+/// - the remaining heads, cache updates, and summary tokens are task-specific dense-space adapters
+///   for Sudoku policy/value/reconstruction behavior
 #[derive(Module, Debug)]
 pub struct SudokuSaccadeModel<B: Backend> {
     pub core: BDH<B>,
@@ -78,6 +87,30 @@ pub struct SudokuSaccadeModel<B: Backend> {
 }
 
 impl SudokuModelConfig {
+    /// Dragon Hatchling paper terminology: dense/value-space dimension carried by the Sudoku
+    /// adapter before and after the shared BDH core.
+    pub fn dense_space_dim(&self) -> usize {
+        self.n_embd.max(1)
+    }
+
+    /// Dragon Hatchling paper terminology: total neuron-space width used inside the shared BDH
+    /// core.
+    pub fn neuron_space_dim(&self) -> usize {
+        self.dense_space_dim() * self.mlp_internal_dim_multiplier.max(1)
+    }
+
+    /// Dragon Hatchling paper terminology: per-head neuron-space width used by the shared BDH
+    /// core.
+    pub fn neuron_space_dim_per_head(&self) -> usize {
+        let total = self.neuron_space_dim();
+        let heads = self.n_head.max(1);
+        assert!(
+            total.is_multiple_of(heads),
+            "Sudoku neuron space must be divisible by the number of heads"
+        );
+        total / heads
+    }
+
     pub fn to_bdh_config(&self) -> BDHConfig {
         let mut fused = FusedKernelConfig {
             enabled: self.fused_kernels,
@@ -98,11 +131,33 @@ impl SudokuModelConfig {
             fused_kernels: fused,
         }
     }
+
+    pub fn to_bdh_config_for_backend(
+        &self,
+        backend_name: &str,
+        wgpu: &WgpuRuntimeConfig,
+    ) -> BDHConfig {
+        let mut config = self.to_bdh_config();
+        apply_wgpu_fused_core_override(
+            &mut config,
+            backend_name,
+            wgpu.training.fused_core_recurrent,
+            wgpu.training.fused_core_rollout,
+        );
+        config
+    }
 }
 
 impl<B: Backend> SudokuSaccadeModel<B> {
     pub fn new(config: &SudokuModelConfig, device: &B::Device) -> Self {
-        let model_config = config.to_bdh_config();
+        Self::new_with_bdh_config(config, config.to_bdh_config(), device)
+    }
+
+    pub fn new_with_bdh_config(
+        config: &SudokuModelConfig,
+        model_config: BDHConfig,
+        device: &B::Device,
+    ) -> Self {
         let core = BDH::new(model_config.clone(), device);
         let row_embed = EmbeddingConfig::new(GRID_SIDE, model_config.n_embd).init(device);
         let col_embed = EmbeddingConfig::new(GRID_SIDE, model_config.n_embd).init(device);
@@ -736,6 +791,7 @@ mod tests {
     use super::*;
     use crate::config::{SudokuCacheMhcConfig, SudokuCacheUpdateConfig};
     use burn::tensor::backend::Backend as BackendTrait;
+    use burn_dragon_train::WgpuRuntimeConfig;
     use burn_ndarray::NdArray;
 
     #[test]
@@ -772,5 +828,37 @@ mod tests {
             assert_eq!(out_batch, batch);
             assert_eq!(out_grid, GRID_LEN);
         }
+    }
+
+    #[test]
+    fn wgpu_backend_override_enables_fused_core_contract() {
+        let config = SudokuModelConfig {
+            fused_kernels: false,
+            ..SudokuModelConfig::default()
+        };
+        let mut wgpu = WgpuRuntimeConfig::default();
+        wgpu.training.fused_core_recurrent = Some(true);
+        wgpu.training.fused_core_rollout = None;
+
+        let resolved = config.to_bdh_config_for_backend("wgpu", &wgpu);
+
+        assert!(resolved.fused_kernels.enabled);
+        assert!(resolved.fused_kernels.wgpu_recurrent_kernel);
+        assert!(resolved.fused_kernels.wgpu_rollout_fused);
+    }
+
+    #[test]
+    fn sudoku_model_config_exposes_paper_dimension_aliases() {
+        let config = SudokuModelConfig {
+            n_layer: 1,
+            n_embd: 48,
+            n_head: 3,
+            mlp_internal_dim_multiplier: 4,
+            ..SudokuModelConfig::default()
+        };
+
+        assert_eq!(config.dense_space_dim(), 48);
+        assert_eq!(config.neuron_space_dim(), 192);
+        assert_eq!(config.neuron_space_dim_per_head(), 64);
     }
 }

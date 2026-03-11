@@ -1,0 +1,49 @@
+[package]
+name = "burn_dragon_graph"
+description = "graph/topology adapters for burn dragon structured recurrent state"
+version = "0.4.0"
+edition = "2024"
+authors = ["mosure <mitchell@mosure.me>"]
+license = "MIT OR Apache-2.0"
+keywords = [
+  "burn",
+  "graph",
+  "bdh",
+  "machine-learning",
+]
+categories = [
+  "compression",
+  "science",
+]
+homepage = "https://github.com/mosure/burn_bdh"
+repository = "https://github.com/mosure/burn_bdh"
+readme = "../../README.md"
+
+[features]
+default = []
+benchmark = ["dep:burn-wgpu", "dep:pollster", "dep:wgpu"]
+
+[dependencies]
+burn_dragon_core = { path = "../burn_dragon_core", version = "0.4.0" }
+burn_dragon_wgpu = { path = "../burn_dragon_wgpu", version = "0.4.0" }
+burn-wgpu = { version = "0.21.0-pre.2", default-features = false, features = ["fusion", "std"], optional = true }
+pollster = { version = "0.3", optional = true }
+wgpu = { version = "26", optional = true }
+
+[dependencies.burn]
+version = "0.21.0-pre.2"
+default-features = false
+features = ["fusion", "ndarray", "std", "wgpu"]
+
+[dev-dependencies]
+burn-ndarray = "0.21.0-pre.2"
+burn-wgpu = { version = "0.21.0-pre.2", default-features = false, features = ["fusion", "std"] }
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["rlib", "cdylib"]
+
+[[bin]]
+name = "graph_step_bench"
+path = "src/bin/graph_step_bench.rs"
+required-features = ["benchmark"]

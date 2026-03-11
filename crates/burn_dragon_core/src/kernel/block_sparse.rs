@@ -222,6 +222,10 @@ impl<B: AutodiffBackend> AutodiffModule<B> for BlockPattern1d {
     fn valid(&self) -> Self::InnerModule {
         self.clone()
     }
+
+    fn from_inner(module: Self::InnerModule) -> Self {
+        module
+    }
 }
 
 impl ModuleDisplayDefault for BlockPattern1d {
@@ -251,6 +255,10 @@ impl<B: AutodiffBackend> AutodiffModule<B> for BlockPattern2d {
     fn valid(&self) -> Self::InnerModule {
         self.clone()
     }
+
+    fn from_inner(module: Self::InnerModule) -> Self {
+        module
+    }
 }
 
 impl ModuleDisplayDefault for BlockPattern2d {
@@ -279,6 +287,10 @@ impl<B: AutodiffBackend> AutodiffModule<B> for BlockSparseConfig {
 
     fn valid(&self) -> Self::InnerModule {
         self.clone()
+    }
+
+    fn from_inner(module: Self::InnerModule) -> Self {
+        module
     }
 }
 

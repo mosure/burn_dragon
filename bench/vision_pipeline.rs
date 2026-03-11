@@ -270,6 +270,8 @@ mod vision_bench {
                 use_alibi: true,
                 fused_kernels: burn_dragon::FusedKernelConfig::default(),
                 mhc: ManifoldHyperConnectionsConfig::default(),
+                trm_graph: Default::default(),
+                rho_stream: Default::default(),
             };
             let saccade_base = VisionSaccadeConfig {
                 num_eyes: 2,
@@ -444,6 +446,8 @@ mod vision_bench {
                 use_alibi: true,
                 fused_kernels: burn_dragon::FusedKernelConfig::default(),
                 mhc: ManifoldHyperConnectionsConfig::default(),
+                trm_graph: Default::default(),
+                rho_stream: Default::default(),
             };
             let grid = (cfg.image_size / cfg.patch_size).max(1);
             let out_tokens = grid * grid;

@@ -147,14 +147,14 @@ impl<B: Backend> VizEncoder<B> {
                     .slice_assign([gap_start..gap_end, cursor..cursor + 1, 0..4], gap.clone());
             }
 
-            let (x_last, y_last, xy_last, rho_last) = layers
+            let (x_neuron_last, y_gate_last, y_neuron_last, rho_last) = layers
                 .get(source_idx)
                 .and_then(|layer| layer.as_ref())
                 .map(|layer| {
                     (
-                        layer.x_last.clone(),
-                        layer.y_last.clone(),
-                        layer.xy_last.clone(),
+                        layer.x_neuron_last.clone(),
+                        layer.y_gate_last.clone(),
+                        layer.y_neuron_last.clone(),
                         layer.rho_last.clone(),
                     )
                 })
@@ -167,9 +167,9 @@ impl<B: Backend> VizEncoder<B> {
                     )
                 });
 
-            let x_flat = x_last.reshape([self.latent_total]);
-            let y_flat = y_last.reshape([self.latent_total]);
-            let xy_flat = xy_last.reshape([self.latent_total]);
+            let x_flat = x_neuron_last.reshape([self.latent_total]);
+            let y_flat = y_gate_last.reshape([self.latent_total]);
+            let xy_flat = y_neuron_last.reshape([self.latent_total]);
             let rho_flat = rho_last.reshape([self.latent_total]);
 
             let units_x_col = self.encode_units(
@@ -338,11 +338,11 @@ mod tests {
 
         for layer in layers {
             let layer = layer.expect("expected viz state per layer");
-            let dims = layer.x_last.shape().dims::<2>();
+            let dims = layer.x_neuron_last.shape().dims::<2>();
             assert_eq!(dims[0], config.n_head);
             assert_eq!(dims[1], config.latent_per_head());
-            assert_eq!(layer.y_last.shape().dims::<2>(), dims);
-            assert_eq!(layer.xy_last.shape().dims::<2>(), dims);
+            assert_eq!(layer.y_gate_last.shape().dims::<2>(), dims);
+            assert_eq!(layer.y_neuron_last.shape().dims::<2>(), dims);
             assert_eq!(layer.rho_last.shape().dims::<2>(), dims);
         }
     }
@@ -361,15 +361,15 @@ mod tests {
         let mut encoder = VizEncoder::<Backend>::new(config, 2, 2, 2, &device);
 
         let layer0 = LayerVizState {
-            x_last: Tensor::<Backend, 2>::from_data(
+            x_neuron_last: Tensor::<Backend, 2>::from_data(
                 TensorData::new(vec![1.0, 0.0, 0.0, 0.0], [2, 2]),
                 &device,
             ),
-            y_last: Tensor::<Backend, 2>::from_data(
+            y_gate_last: Tensor::<Backend, 2>::from_data(
                 TensorData::new(vec![0.0, 1.0, 0.0, 0.0], [2, 2]),
                 &device,
             ),
-            xy_last: Tensor::<Backend, 2>::from_data(
+            y_neuron_last: Tensor::<Backend, 2>::from_data(
                 TensorData::new(vec![0.5, 0.0, 0.0, 0.0], [2, 2]),
                 &device,
             ),
@@ -379,9 +379,9 @@ mod tests {
             ),
         };
         let layer1 = LayerVizState {
-            x_last: Tensor::<Backend, 2>::zeros([2, 2], &device),
-            y_last: Tensor::<Backend, 2>::zeros([2, 2], &device),
-            xy_last: Tensor::<Backend, 2>::zeros([2, 2], &device),
+            x_neuron_last: Tensor::<Backend, 2>::zeros([2, 2], &device),
+            y_gate_last: Tensor::<Backend, 2>::zeros([2, 2], &device),
+            y_neuron_last: Tensor::<Backend, 2>::zeros([2, 2], &device),
             rho_last: Tensor::<Backend, 2>::zeros([2, 2], &device),
         };
 

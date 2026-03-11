@@ -1,0 +1,47 @@
+extends = ["base/moving_mnist_cellular.toml"]
+
+[dataset]
+max_records = 4
+prefetch_batches = 1
+prefetch_workers = 1
+prefetch_to_device = true
+
+[training]
+batch_size = 1
+epochs = 1
+max_iters = 1
+log_frequency = 1
+enable_checkpoints = false
+rollout_min_steps = 1
+rollout_max_steps = 1
+rollout_backprop_steps = 1
+
+[vision]
+embed_dim = 32
+steps = 1
+n_head = 4
+projection_dim = 16
+projection_hidden_dim = 32
+
+[mode]
+context_frames = 3
+target_frames = 1
+predictor_hidden_dim = 32
+artifact_every = 1
+artifact_max_images = 1
+artifact_future_frames = 6
+artifact_upscale = 4
+
+[mode.temporal]
+n_layer = 1
+n_head = 4
+rollout_fast_steps_per_slow_step = 2
+fused = false
+wgpu_recurrent_kernel = false
+wgpu_rollout_fused = false
+
+[mode.loss]
+debug_recon_hidden_dim = 64
+
+[mode.loss.sigreg]
+sigreg_proj_dim = 16

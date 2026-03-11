@@ -4,6 +4,7 @@ mod prelude;
 
 pub(crate) mod constants;
 pub(crate) mod gdpo;
+pub(crate) mod metrics;
 pub(crate) mod pipeline;
 
 pub(crate) mod foveation;
@@ -23,7 +24,7 @@ mod test_utils;
 mod tests;
 
 #[cfg(test)]
-pub(crate) use test_utils::init_wgpu_test_runtime;
+pub(crate) use test_utils::{init_wgpu_test_runtime, wgpu_test_guard};
 
 #[cfg(feature = "integration_test")]
 pub use burn_dragon_train::train::gdpo::{gdpo_cpu_fallbacks, gdpo_reset_cpu_fallbacks};
@@ -33,3 +34,11 @@ pub use saccade::SaccadeFoveationSampler;
 pub use vision::train::train_vision_backend;
 #[cfg(feature = "integration_test")]
 pub use vision::train::train_vision_backend_for_test;
+pub use vision::{
+    CifarBatch, CifarDataLoader, CifarDataset, CifarSplit, CifarType, DinoFeatureStore,
+    ImageNetAugmentations, ImageNetBatch, ImageNetDataLoader, ImageNetDataset,
+    ImageNetDatasetConfig, ImageNetSplit, MovingMnistSplit, MovingMnistVideoDataLoader,
+    MovingMnistVideoDataset, MovingMnistVideoDatasetConfig, VideoClipBatch,
+    VideoTargetHorizonCurriculum, VisionNormalize,
+};
+pub use vision::{VisionDistillCheckpointEvalSummary, eval_vision_distill_checkpoint_backend};

@@ -1,7 +1,7 @@
 use crate::config::VisionLocationEmbeddingMode;
 use crate::train::prelude::*;
 use crate::{
-    SpatialPositionalEncodingKind, VisionAttentionMode, VisionLatentActivation,
+    SpatialPositionalEncodingKind, VisionAttentionMode, VisionBackboneKind, VisionLatentActivation,
     VisionPatchEmbedMode,
 };
 use burn::tensor::Distribution;
@@ -18,6 +18,7 @@ fn make_saccade_model<B: BackendTrait>(
         image_size: 32,
         patch_size: 16,
         patch_embed_mode: VisionPatchEmbedMode::default(),
+        backbone: VisionBackboneKind::Dense,
         in_channels: 3,
         embed_dim: 16,
         steps: 1,
@@ -40,6 +41,7 @@ fn make_saccade_model<B: BackendTrait>(
         fused_kernels: FusedKernelConfig::default(),
         mhc: ManifoldHyperConnectionsConfig::default(),
         trm_graph: Default::default(),
+        rho_stream: Default::default(),
     };
     let model = VisionDragon::<B>::new(vision_config.clone(), device);
     let mut saccade_config = VisionSaccadeConfig {

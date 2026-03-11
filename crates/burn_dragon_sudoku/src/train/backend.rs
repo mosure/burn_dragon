@@ -5,13 +5,19 @@ use crate::train::schedule::{
 };
 use crate::train::steps::SudokuTrainer;
 use crate::train::utils::{prepare_dataset, write_run_config};
-
+use burn_dragon_core::BDHConfig;
 type TrainBackendResult<B> = (
     SudokuTrainer<ValidBackend<B>>,
     PathBuf,
     Arc<SudokuDataset>,
     <B as BackendTrait>::Device,
 );
+
+fn resolved_core_config(config: &SudokuTrainingConfig, backend_name: &str) -> BDHConfig {
+    config
+        .model
+        .to_bdh_config_for_backend(backend_name, &config.wgpu)
+}
 
 pub fn train_backend<B, Init>(
     config: &SudokuTrainingConfig,
@@ -96,8 +102,8 @@ where
         ));
 
     let val_steps_per_epoch = dataset.steps_per_epoch(SudokuSplit::Val);
-    let desired_valid_steps = usize::max(1, total_steps / training.log_frequency.max(1));
-    let valid_steps = desired_valid_steps.min(val_steps_per_epoch).max(1);
+    let valid_steps =
+        resolve_valid_steps_per_epoch(total_steps, training.log_frequency, val_steps_per_epoch);
 
     let valid_device = device.clone();
     let valid_loader: Arc<dyn DataLoader<ValidBackend<B>, SudokuBatch<ValidBackend<B>>>> =
@@ -109,7 +115,8 @@ where
             None,
         ));
 
-    let model = SudokuSaccadeModel::<B>::new(&config.model, &device);
+    let core_config = resolved_core_config(config, backend_name);
+    let model = SudokuSaccadeModel::<B>::new_with_bdh_config(&config.model, core_config, &device);
     let mut trainer = SudokuTrainer::new(model, training.clone(), total_steps);
     let optimizer = adamw_config_from_optimizer(optimizer_cfg).init::<B, SudokuTrainer<B>>();
 
@@ -168,4 +175,56 @@ where
     info!("Sudoku training complete on {backend_name}");
 
     Ok((trained, run_dir, dataset, device))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolved_core_config;
+    use crate::config::{SudokuModelConfig, load_training_config};
+    use std::path::PathBuf;
+
+    fn load_tiny_config() -> crate::config::SudokuTrainingConfig {
+        let config_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../config/sudoku/saccade/tiny.toml");
+        load_training_config(&[config_path]).expect("load tiny sudoku config")
+    }
+
+    #[test]
+    fn wgpu_core_override_enables_fused_recurrent_and_rollout() {
+        let mut config = load_tiny_config();
+        config.model = SudokuModelConfig {
+            fused_kernels: false,
+            ..SudokuModelConfig::default()
+        };
+        config.wgpu.training.fused_core_recurrent = Some(true);
+        config.wgpu.training.fused_core_rollout = Some(true);
+
+        let core = resolved_core_config(&config, "wgpu");
+        assert!(core.fused_kernels.enabled);
+        assert!(core.fused_kernels.wgpu_recurrent_kernel);
+        assert!(core.fused_kernels.wgpu_rollout_fused);
+    }
+
+    #[test]
+    fn non_wgpu_backend_keeps_model_default_fused_flags() {
+        let mut config = load_tiny_config();
+        config.model = SudokuModelConfig {
+            fused_kernels: false,
+            ..SudokuModelConfig::default()
+        };
+        config.wgpu.training.fused_core_recurrent = Some(true);
+        config.wgpu.training.fused_core_rollout = Some(true);
+
+        let baseline = config.model.to_bdh_config();
+        let core = resolved_core_config(&config, "cpu");
+        assert_eq!(core.fused_kernels.enabled, baseline.fused_kernels.enabled);
+        assert_eq!(
+            core.fused_kernels.wgpu_recurrent_kernel,
+            baseline.fused_kernels.wgpu_recurrent_kernel
+        );
+        assert_eq!(
+            core.fused_kernels.wgpu_rollout_fused,
+            baseline.fused_kernels.wgpu_rollout_fused
+        );
+    }
 }

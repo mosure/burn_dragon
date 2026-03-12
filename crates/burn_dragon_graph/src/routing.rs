@@ -201,7 +201,6 @@ impl GraphCsrAdjacency {
             .iter()
             .copied()
             .enumerate()
-            .map(|(source, target)| (source, target))
             .collect::<Vec<_>>();
         Self::try_from_edges(assignments.len(), target_count, &edges)
     }

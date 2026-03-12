@@ -8,21 +8,25 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow};
 use clap::{Parser, ValueEnum};
-use serde::Deserialize;
 
 use burn::module::Module;
 use burn::record::{BinFileRecorder, FullPrecisionSettings, Recorder};
 use burn::tensor::backend::Backend;
-use burn_dragon::BDH;
+use burn_dragon::checkpoint::{
+    BurnpackLoadPolicy, BurnpackPrecisionPreference, burnpack_parts_manifest_path,
+    candidate_burnpack_paths, try_load_model_from_burnpack_candidates,
+};
+use burn_dragon::core::BDH;
 use burn_dragon::language::{
-    ContextStrategy, ContextStrategyConfig, GenerationConfig, ModelOverrides, TrainingConfig,
+    ContextStrategy, ContextStrategyConfig, GenerationConfig, TrainingConfig,
     apply_wgpu_fused_core_override, build_model_config, generate_text, generate_tokens_chunked,
-    generation_profile_reset, generation_profile_snapshot, load_training_config, prefill_state,
-    resolve_context_strategy, sample_next_token,
+    default_checkpoint_dir, generation_profile_reset, generation_profile_snapshot,
+    load_training_config_for_checkpoint, prefill_state, resolve_context_strategy,
+    sample_next_token,
 };
 use burn_dragon::train::WgpuGenerationExecutor;
 use burn_dragon::train::wgpu::init_runtime;
-use burn_dragon_wgpu::{recurrent_profile_reset, recurrent_profile_snapshot};
+use burn_dragon_wgpu::api::recurrent::{recurrent_profile_reset, recurrent_profile_snapshot};
 use burn_wgpu::Wgpu;
 
 #[cfg(feature = "cuda")]
@@ -56,17 +60,8 @@ fn run() -> Result<()> {
     let args = Args::parse();
     let mut config_paths = vec![PathBuf::from("config/language/base.toml")];
     config_paths.extend(args.config.clone());
-    let mut config = load_training_config(&config_paths)?;
-    if args.config.is_empty() {
-        let backend_name = backend_name(args.backend);
-        if let Some(config_path) = resolve_run_config_path(args.checkpoint.as_ref(), backend_name) {
-            let contents = fs::read_to_string(&config_path)
-                .with_context(|| format!("failed to read run config {}", config_path.display()))?;
-            let run_config: RunConfigJson = serde_json::from_str(&contents)
-                .with_context(|| format!("failed to parse {}", config_path.display()))?;
-            apply_run_config(&mut config, &run_config);
-        }
-    }
+    let config =
+        load_training_config_for_checkpoint(&config_paths, args.checkpoint.as_ref(), backend_name(args.backend))?;
 
     #[cfg(feature = "viz")]
     let use_viz = args.viz;
@@ -193,24 +188,39 @@ where
         config.wgpu.inference.fused_core_rollout,
     );
     model_config.vocab_size = tokenizer.len();
-    let mut model = BDH::<B>::new(model_config, &device);
-    let recorder = BinFileRecorder::<FullPrecisionSettings>::new();
-    let record = recorder
-        .load::<<BDH<B> as Module<B>>::Record>(checkpoint_base.clone(), &device)
-        .with_context(|| {
-            format!(
-                "failed to load checkpoint {}",
-                format_checkpoint(&checkpoint_base)
-            )
-        })?;
-    model = model.load_record(record);
+    let burnpack_policy =
+        BurnpackLoadPolicy::default().with_precision(BurnpackPrecisionPreference::PreferF16);
+    let burnpack_candidates = candidate_burnpack_paths(&checkpoint_base, burnpack_policy);
+    let (model, checkpoint_display) = if let Some((model, _result)) =
+        try_load_model_from_burnpack_candidates(
+            &burnpack_candidates,
+            "BDH model",
+            true,
+            || BDH::<B>::new(model_config.clone(), &device),
+        )
+        .map_err(|err| anyhow!(err))?
+    {
+        (model, format_burnpack_checkpoint(&burnpack_candidates))
+    } else {
+        let mut model = BDH::<B>::new(model_config, &device);
+        let recorder = BinFileRecorder::<FullPrecisionSettings>::new();
+        let record = recorder
+            .load::<<BDH<B> as Module<B>>::Record>(checkpoint_base.clone(), &device)
+            .with_context(|| {
+                format!(
+                    "failed to load checkpoint {}",
+                    format_checkpoint(&checkpoint_base)
+                )
+            })?;
+        model = model.load_record(record);
+        (model, format_checkpoint(&checkpoint_base))
+    };
 
     let mut generation = config.generation.clone();
     apply_generation_overrides(&mut generation, args, config.training.block_size);
 
     let status_msg = format!(
-        "Loaded epoch {epoch} from {} using {backend_name} backend.",
-        format_checkpoint(&checkpoint_base)
+        "Loaded epoch {epoch} from {checkpoint_display} using {backend_name} backend.",
     );
     let stage_profile = std::env::var_os("BDH_STAGE_PROFILE").is_some();
     if stage_profile {
@@ -571,13 +581,7 @@ fn resolve_checkpoint_base(path: &Path, epoch: Option<usize>) -> Result<(PathBuf
         return Ok((base, target_epoch));
     }
 
-    let mut base = if path.extension().is_some() {
-        let mut without_ext = path.to_path_buf();
-        without_ext.set_extension("");
-        without_ext
-    } else {
-        path.to_path_buf()
-    };
+    let mut base = strip_checkpoint_extension(path);
 
     let detected_epoch = parse_epoch_from_stem(&base);
     let target_epoch = match (epoch, detected_epoch) {
@@ -616,7 +620,20 @@ fn ensure_checkpoint_exists(base: &Path) -> Result<()> {
         return Ok(());
     }
 
-    Err(anyhow!("checkpoint file {}.bin not found", base.display()))
+    let burnpack_candidates = candidate_burnpack_paths(
+        base,
+        BurnpackLoadPolicy::default().with_precision(BurnpackPrecisionPreference::PreferF16),
+    );
+    for candidate in burnpack_candidates {
+        if candidate.is_file() || burnpack_parts_manifest_path(candidate.as_path()).is_file() {
+            return Ok(());
+        }
+    }
+
+    Err(anyhow!(
+        "checkpoint weights not found for {} (.bin, .bpk, or .bpk.parts.json)",
+        base.display()
+    ))
 }
 
 fn find_latest_epoch(dir: &Path) -> Result<usize> {
@@ -644,6 +661,7 @@ fn find_latest_epoch(dir: &Path) -> Result<usize> {
 fn parse_epoch_from_stem(path: &Path) -> Option<usize> {
     let stem = path.file_name()?.to_string_lossy();
     let stem = stem.strip_suffix(".bin").unwrap_or(&stem);
+    let stem = stem.strip_suffix(".bpk").unwrap_or(stem);
     let epoch_part = stem.strip_prefix("model-")?;
     epoch_part.parse().ok()
 }
@@ -654,107 +672,37 @@ fn format_checkpoint(base: &Path) -> String {
     path.display().to_string()
 }
 
-#[derive(Debug, Deserialize, Default)]
-struct RunConfigJson {
-    #[serde(default)]
-    block_size: Option<usize>,
-    #[serde(default)]
-    overrides: ModelOverrides,
-}
-
-fn apply_run_config(config: &mut TrainingConfig, run_config: &RunConfigJson) {
-    let block_override = run_config
-        .block_size
-        .or(run_config.overrides.block_size)
-        .map(|value| value.max(1));
-    if let Some(block_size) = block_override {
-        config.training.block_size = block_size;
-    }
-    merge_model_overrides(&mut config.model, &run_config.overrides);
-}
-
-fn merge_model_overrides(base: &mut ModelOverrides, incoming: &ModelOverrides) {
-    if let Some(value) = incoming.n_layer {
-        base.n_layer = Some(value);
-    }
-    if let Some(value) = incoming.n_embd {
-        base.n_embd = Some(value);
-    }
-    if let Some(value) = incoming.n_head {
-        base.n_head = Some(value);
-    }
-    if let Some(value) = incoming.mlp_internal_dim_multiplier {
-        base.mlp_internal_dim_multiplier = Some(value);
-    }
-    if let Some(value) = incoming.relu_threshold {
-        base.relu_threshold = Some(value);
-    }
-    if let Some(value) = incoming.dropout {
-        base.dropout = Some(value);
-    }
-    if let Some(value) = incoming.fused_kernels {
-        base.fused_kernels = Some(value);
-    }
-    if let Some(value) = incoming.block_size {
-        base.block_size = Some(value);
-    }
-    if let Some(value) = incoming.rollout_fast_steps_per_slow_step {
-        base.rollout_fast_steps_per_slow_step = Some(value);
-    }
-    if let Some(value) = incoming.rotary_embedding {
-        base.rotary_embedding = Some(value);
-    }
-}
-
-fn resolve_run_config_path(checkpoint: Option<&PathBuf>, backend_name: &str) -> Option<PathBuf> {
-    let checkpoint_path = checkpoint
-        .cloned()
-        .unwrap_or_else(|| default_checkpoint_dir(backend_name));
-    let mut candidates = Vec::new();
-
-    if checkpoint_path.is_dir() {
-        candidates.push(checkpoint_path.join("config.json"));
-        if checkpoint_path
-            .file_name()
-            .is_some_and(|name| name == "checkpoint")
-            && let Some(parent) = checkpoint_path.parent()
-        {
-            candidates.push(parent.join("config.json"));
+fn format_burnpack_checkpoint(candidates: &[PathBuf]) -> String {
+    for candidate in candidates {
+        let manifest = burnpack_parts_manifest_path(candidate.as_path());
+        if manifest.is_file() {
+            return manifest.display().to_string();
         }
-    } else if let Some(parent) = checkpoint_path.parent() {
-        candidates.push(parent.join("config.json"));
-        if parent.file_name().is_some_and(|name| name == "checkpoint")
-            && let Some(grandparent) = parent.parent()
-        {
-            candidates.push(grandparent.join("config.json"));
+        if candidate.is_file() {
+            return candidate.display().to_string();
         }
     }
-
-    candidates.into_iter().find(|path| path.is_file())
+    candidates
+        .first()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "<missing burnpack>".to_string())
 }
 
-fn default_checkpoint_dir(backend_name: &str) -> PathBuf {
-    resolve_latest_run_dir(backend_name)
-        .map(|dir| dir.join("checkpoint"))
-        .unwrap_or_else(|| PathBuf::from("runs").join("checkpoint"))
-}
-
-fn resolve_latest_run_dir(backend_name: &str) -> Option<PathBuf> {
-    let run_root = PathBuf::from("runs");
-    resolve_latest_run_dir_from(&run_root).or_else(|| {
-        let device_root = run_root.join(backend_name);
-        resolve_latest_run_dir_from(&device_root)
-    })
-}
-
-fn resolve_latest_run_dir_from(run_root: &Path) -> Option<PathBuf> {
-    let latest_path = run_root.join("latest");
-    let contents = fs::read_to_string(&latest_path).ok()?;
-    let name = contents.trim();
-    if name.is_empty() {
-        return None;
+fn strip_checkpoint_extension(path: &Path) -> PathBuf {
+    let display = path.to_string_lossy();
+    if let Some(stripped) = display.strip_suffix(".parts.json") {
+        let mut base = PathBuf::from(stripped);
+        if base.extension().is_some() {
+            base.set_extension("");
+        }
+        return base;
     }
-    Some(run_root.join(name))
+
+    let mut base = path.to_path_buf();
+    if base.extension().is_some() {
+        base.set_extension("");
+    }
+    base
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -832,7 +780,7 @@ fn normalize_max_tokens(max_tokens: Option<i64>) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::apply_wgpu_fused_core_override;
-    use burn_dragon::BDHConfig;
+    use burn_dragon::core::BDHConfig;
 
     #[test]
     fn wgpu_backend_override_enables_fused_recurrent_path() {

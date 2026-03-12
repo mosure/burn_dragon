@@ -1,5 +1,7 @@
 use super::*;
 #[cfg(all(feature = "train", not(target_arch = "wasm32")))]
+use burn::optim::{AdamWConfig, GradientsParams, LearningRate, Optimizer};
+#[cfg(all(feature = "train", not(target_arch = "wasm32")))]
 use burn::tensor::Distribution;
 use burn::tensor::backend::Backend as BackendTrait;
 #[cfg(all(feature = "train", not(target_arch = "wasm32")))]
@@ -10,6 +12,17 @@ use burn_dragon_core::{FusedKernelConfig, ManifoldHyperConnectionsConfig};
 use burn_ndarray::NdArray;
 #[cfg(all(feature = "train", not(target_arch = "wasm32")))]
 use burn_wgpu::WgpuRuntime;
+
+#[derive(Clone, Copy)]
+struct RhoStreamTestConfig {
+    use_cls_token: bool,
+    local_diagonals: bool,
+    local_self: bool,
+    wgpu_forward_kernel: bool,
+    wgpu_rollout_fused: bool,
+    mode_embeddings: bool,
+    decay: f32,
+}
 
 fn make_rho_stream_model<B: BackendTrait>(
     device: &B::Device,
@@ -22,25 +35,21 @@ fn make_rho_stream_model<B: BackendTrait>(
 ) -> VisionDragon<B> {
     make_rho_stream_model_with_decay(
         device,
-        use_cls_token,
-        local_diagonals,
-        local_self,
-        wgpu_forward_kernel,
-        wgpu_rollout_fused,
-        mode_embeddings,
-        0.9,
+        RhoStreamTestConfig {
+            use_cls_token,
+            local_diagonals,
+            local_self,
+            wgpu_forward_kernel,
+            wgpu_rollout_fused,
+            mode_embeddings,
+            decay: 0.9,
+        },
     )
 }
 
 fn make_rho_stream_model_with_decay<B: BackendTrait>(
     device: &B::Device,
-    use_cls_token: bool,
-    local_diagonals: bool,
-    local_self: bool,
-    wgpu_forward_kernel: bool,
-    wgpu_rollout_fused: bool,
-    mode_embeddings: bool,
-    decay: f32,
+    config: RhoStreamTestConfig,
 ) -> VisionDragon<B> {
     let config = VisionDragonConfig {
         image_size: 4,
@@ -55,7 +64,7 @@ fn make_rho_stream_model_with_decay<B: BackendTrait>(
         dropout: 0.0,
         projection_dim: 4,
         projection_hidden_dim: 8,
-        use_cls_token,
+        use_cls_token: config.use_cls_token,
         cls_sync_alpha: 0.0,
         num_eyes: 1,
         cross_eye_steps: 0,
@@ -72,18 +81,25 @@ fn make_rho_stream_model_with_decay<B: BackendTrait>(
         rho_stream: VisionRhoStreamConfig {
             enabled: true,
             local_radius: 1,
-            local_diagonals,
-            local_self,
-            decay,
-            mode_embeddings,
-            wgpu_forward_kernel,
-            wgpu_rollout_fused,
+            local_diagonals: config.local_diagonals,
+            local_self: config.local_self,
+            decay: config.decay,
+            mode_embeddings: config.mode_embeddings,
+            wgpu_forward_kernel: config.wgpu_forward_kernel,
+            wgpu_rollout_fused: config.wgpu_rollout_fused,
         },
     };
     VisionDragon::<B>::new(config, device)
 }
 
 fn make_pyramid_model<B: BackendTrait>(device: &B::Device) -> VisionDragon<B> {
+    make_pyramid_model_with_kernel(device, false)
+}
+
+fn make_pyramid_model_with_kernel<B: BackendTrait>(
+    device: &B::Device,
+    kernel_enabled: bool,
+) -> VisionDragon<B> {
     let config = VisionDragonConfig {
         image_size: 4,
         patch_size: 2,
@@ -108,7 +124,10 @@ fn make_pyramid_model<B: BackendTrait>(device: &B::Device) -> VisionDragon<B> {
         pos_max_width: 2,
         attention_mode: VisionAttentionMode::RowL1,
         use_alibi: false,
-        fused_kernels: FusedKernelConfig::default(),
+        fused_kernels: FusedKernelConfig {
+            enabled: kernel_enabled,
+            ..FusedKernelConfig::default()
+        },
         mhc: ManifoldHyperConnectionsConfig::default(),
         trm_graph: VisionTrmGraphConfig {
             enabled: true,
@@ -408,7 +427,16 @@ fn cellular_mode_embeddings_make_refine_and_predict_distinct_when_decay_is_one()
     type Backend = NdArray<f32>;
     let device = <Backend as BackendTrait>::Device::default();
     let model = make_rho_stream_model_with_decay::<Backend>(
-        &device, false, true, true, false, false, true, 1.0,
+        &device,
+        RhoStreamTestConfig {
+            use_cls_token: false,
+            local_diagonals: true,
+            local_self: true,
+            wgpu_forward_kernel: false,
+            wgpu_rollout_fused: false,
+            mode_embeddings: true,
+            decay: 1.0,
+        },
     );
     let tokens = Tensor::<Backend, 3>::zeros([1, 4, 4], &device);
     let state = model.cellular_state_from_tokens(tokens);
@@ -446,7 +474,16 @@ fn cellular_recurrent_mode_gates_make_reference_attention_mode_dependent_when_de
     type Backend = NdArray<f32>;
     let device = <Backend as BackendTrait>::Device::default();
     let model = make_rho_stream_model_with_decay::<Backend>(
-        &device, false, true, true, false, false, true, 1.0,
+        &device,
+        RhoStreamTestConfig {
+            use_cls_token: false,
+            local_diagonals: true,
+            local_self: true,
+            wgpu_forward_kernel: false,
+            wgpu_rollout_fused: false,
+            mode_embeddings: true,
+            decay: 1.0,
+        },
     );
     let query = Tensor::<Backend, 4>::ones([1, 1, 4, 4], &device);
     let value = Tensor::<Backend, 4>::ones([1, 1, 4, 4], &device);
@@ -500,7 +537,16 @@ fn cellular_without_mode_embeddings_refine_and_predict_match_when_decay_is_one()
     type Backend = NdArray<f32>;
     let device = <Backend as BackendTrait>::Device::default();
     let model = make_rho_stream_model_with_decay::<Backend>(
-        &device, false, true, true, false, false, false, 1.0,
+        &device,
+        RhoStreamTestConfig {
+            use_cls_token: false,
+            local_diagonals: true,
+            local_self: true,
+            wgpu_forward_kernel: false,
+            wgpu_rollout_fused: false,
+            mode_embeddings: false,
+            decay: 1.0,
+        },
     );
     let tokens = Tensor::<Backend, 3>::zeros([1, 4, 4], &device);
     let state = model.cellular_state_from_tokens(tokens);
@@ -539,7 +585,16 @@ fn cellular_without_mode_embeddings_reference_attention_matches_across_modes_whe
     type Backend = NdArray<f32>;
     let device = <Backend as BackendTrait>::Device::default();
     let model = make_rho_stream_model_with_decay::<Backend>(
-        &device, false, true, true, false, false, false, 1.0,
+        &device,
+        RhoStreamTestConfig {
+            use_cls_token: false,
+            local_diagonals: true,
+            local_self: true,
+            wgpu_forward_kernel: false,
+            wgpu_rollout_fused: false,
+            mode_embeddings: false,
+            decay: 1.0,
+        },
     );
     let query = Tensor::<Backend, 4>::ones([1, 1, 4, 4], &device);
     let value = Tensor::<Backend, 4>::ones([1, 1, 4, 4], &device);
@@ -692,6 +747,345 @@ fn pyramid_state_uses_banked_rho_contract() {
 }
 
 #[test]
+fn cellular_mode_helpers_share_observe_refine_predict_contract() {
+    type Backend = NdArray<f32>;
+    let device = <Backend as BackendTrait>::Device::default();
+    let model = make_rho_stream_model::<Backend>(&device, true, true, true, false, false, true);
+    let tokens_a = Tensor::<Backend, 3>::zeros([1, 4, 4], &device);
+    let tokens_b = Tensor::<Backend, 3>::ones([1, 4, 4], &device);
+
+    let state = model.cellular_state_from_tokens(tokens_a);
+    let predicted = model.predict_cellular_state(state, 1, 1);
+    assert_eq!(predicted.temporal_position, 1);
+    assert_eq!(predicted.prediction_age, 1);
+
+    let refined = model.refine_cellular_state(predicted.clone(), 1, 1);
+    assert_eq!(refined.temporal_position, 1);
+    assert_eq!(refined.prediction_age, 1);
+
+    let observed = model.observe_cellular_state(refined, tokens_b, 1, 1);
+    assert_eq!(observed.temporal_position, 1);
+    assert_eq!(observed.prediction_age, 0);
+    assert_eq!(observed.rho.shape().dims(), [1, 1, 4, 4, 4]);
+}
+
+#[test]
+fn pyramid_mode_helpers_share_observe_refine_predict_contract() {
+    type Backend = NdArray<f32>;
+    let device = <Backend as BackendTrait>::Device::default();
+    let model = make_pyramid_model::<Backend>(&device);
+    let tokens_a = Tensor::<Backend, 3>::zeros([1, 4, 4], &device);
+    let tokens_b = Tensor::<Backend, 3>::ones([1, 4, 4], &device);
+
+    let state = model.pyramid_state_from_patch_tokens(tokens_a);
+    let predicted = model.predict_pyramid_state(state, 1, 1);
+    assert_eq!(predicted.temporal_position, 1);
+    assert_eq!(predicted.prediction_age, 1);
+
+    let refined = model.refine_pyramid_state(predicted.clone(), 1, 1);
+    assert_eq!(refined.temporal_position, 1);
+    assert_eq!(refined.prediction_age, 1);
+
+    let observed = model.observe_pyramid_state(refined, tokens_b, 1, 1);
+    assert_eq!(observed.temporal_position, 1);
+    assert_eq!(observed.prediction_age, 0);
+    assert_eq!(observed.patch_rho().shape().dims(), [1, 2, 4, 2, 2]);
+    assert_eq!(observed.coarse_rho().shape().dims(), [1, 2, 4, 1, 1]);
+    assert_eq!(observed.hub_rho().shape().dims(), [1, 2, 2, 4]);
+}
+
+#[test]
+fn pyramid_observe_preserves_local_and_global_rho_banks() {
+    type Backend = NdArray<f32>;
+    let device = <Backend as BackendTrait>::Device::default();
+    let model = make_pyramid_model::<Backend>(&device);
+    let tokens_a = Tensor::<Backend, 3>::zeros([1, 4, 4], &device);
+    let tokens_b = Tensor::<Backend, 3>::ones([1, 4, 4], &device);
+
+    let mut state = model.pyramid_state_from_patch_tokens(tokens_a);
+    *state.patch_rho_mut() = Tensor::<Backend, 5>::from_data(
+        TensorData::new(vec![1.0; 16], [1, 2, 4, 2, 2]),
+        &device,
+    );
+    *state.coarse_rho_mut() = Tensor::<Backend, 5>::from_data(
+        TensorData::new(vec![2.0; 8], [1, 2, 4, 1, 1]),
+        &device,
+    );
+    *state.hub_rho_mut() = Tensor::<Backend, 4>::from_data(
+        TensorData::new(vec![3.0; 16], [1, 2, 2, 4]),
+        &device,
+    );
+    state.temporal_position = 5;
+    state.prediction_age = 2;
+
+    let observed = model.pyramid_state_with_patch_tokens(state.clone(), tokens_b);
+    assert_eq!(observed.temporal_position, 5);
+    assert_eq!(observed.prediction_age, 2);
+    assert_eq!(
+        observed
+            .patch_rho()
+            .clone()
+            .to_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .expect("patch rho"),
+        state
+            .patch_rho()
+            .clone()
+            .to_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .expect("patch rho reference")
+    );
+    assert_eq!(
+        observed
+            .coarse_rho()
+            .clone()
+            .to_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .expect("coarse rho"),
+        state
+            .coarse_rho()
+            .clone()
+            .to_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .expect("coarse rho reference")
+    );
+    assert_eq!(
+        observed
+            .hub_rho()
+            .clone()
+            .to_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .expect("hub rho"),
+        state
+            .hub_rho()
+            .clone()
+            .to_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .expect("hub rho reference")
+    );
+}
+
+#[test]
+fn pyramid_hub_bank_produces_nonzero_patch_readout() {
+    type Backend = NdArray<f32>;
+    let device = <Backend as BackendTrait>::Device::default();
+    let model = make_pyramid_model::<Backend>(&device);
+    let tokens = Tensor::<Backend, 3>::from_data(
+        TensorData::new(vec![1.0; 16], [1, 4, 4]),
+        &device,
+    );
+
+    let state = model.pyramid_state_from_patch_tokens(tokens);
+    let h8 = state.patch_state().clone();
+    let h32 = state.coarse_state().clone();
+    let x8 = activation::relu(model.project_spatial(
+        h8.clone(),
+        model
+            .pyramid_x_neuron_proj
+            .as_ref()
+            .expect("pyramid x projection"),
+    ));
+    let (hub_w8, _) = model.pyramid_hub_weights(h8, h32, model.trm_graph.hub_count.max(1));
+    let zero_hub = Tensor::<Backend, 4>::zeros([1, 2, 2, 4], &device);
+    let ones_hub = Tensor::<Backend, 4>::from_data(
+        TensorData::new(vec![1.0; 16], [1, 2, 2, 4]),
+        &device,
+    );
+    let zero_vec = model
+        .pyramid_hub_read(zero_hub, x8.clone(), hub_w8.clone())
+        .clone()
+        .to_data()
+        .convert::<f32>()
+        .into_vec::<f32>()
+        .expect("zero hub read");
+    let hub_vec = model
+        .pyramid_hub_read(ones_hub, x8, hub_w8)
+        .clone()
+        .to_data()
+        .convert::<f32>()
+        .into_vec::<f32>()
+        .expect("hub read");
+    let max_diff = zero_vec
+        .iter()
+        .zip(hub_vec.iter())
+        .map(|(lhs, rhs)| (lhs - rhs).abs())
+        .fold(0.0_f32, f32::max);
+
+    assert!(max_diff > 1e-6, "hub bank should influence patch readout");
+}
+
+#[test]
+fn pyramid_project_spatial_pair_matches_individual_projection() {
+    type Backend = NdArray<f32>;
+    let device = <Backend as BackendTrait>::Device::default();
+    let model = make_pyramid_model::<Backend>(&device);
+    let tokens = Tensor::<Backend, 3>::from_data(
+        TensorData::new(vec![1.0; 16], [1, 4, 4]),
+        &device,
+    );
+
+    let state = model.pyramid_state_from_patch_tokens(tokens);
+    let h8 = state.patch_state().clone();
+    let h32 = state.coarse_state().clone();
+    let layer = model
+        .pyramid_x_neuron_proj
+        .as_ref()
+        .expect("pyramid x projection");
+
+    let single_h8 = model.project_spatial(h8.clone(), layer);
+    let single_h32 = model.project_spatial(h32.clone(), layer);
+    let (pair_h8, pair_h32) = model.project_spatial_pair(h8, h32, layer);
+
+    assert_eq!(
+        single_h8
+            .into_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .expect("single patch projection"),
+        pair_h8
+            .into_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .expect("pair patch projection")
+    );
+    assert_eq!(
+        single_h32
+            .into_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .expect("single coarse projection"),
+        pair_h32
+            .into_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .expect("pair coarse projection")
+    );
+}
+
+#[test]
+fn pyramid_update_states_matches_individual_updates() {
+    type Backend = NdArray<f32>;
+    let device = <Backend as BackendTrait>::Device::default();
+    let model = make_pyramid_model::<Backend>(&device);
+    let tokens = Tensor::<Backend, 3>::from_data(
+        TensorData::new(vec![1.0; 16], [1, 4, 4]),
+        &device,
+    );
+
+    let state = model.pyramid_state_from_patch_tokens(tokens);
+    let h8 = state.patch_state().clone();
+    let h32 = state.coarse_state().clone();
+    let x_proj = model
+        .pyramid_x_neuron_proj
+        .as_ref()
+        .expect("pyramid x projection");
+    let v_proj = model
+        .pyramid_write_value_proj
+        .as_ref()
+        .expect("pyramid value projection");
+    let y_gate_proj = model
+        .pyramid_y_gate_proj
+        .as_ref()
+        .expect("pyramid y gate projection");
+    let delta_proj = model
+        .pyramid_delta_proj
+        .as_ref()
+        .expect("pyramid delta projection");
+    let value_norm = model
+        .pyramid_value_norm
+        .as_ref()
+        .expect("pyramid value norm");
+
+    let x8 = activation::relu(model.project_spatial(h8.clone(), x_proj));
+    let msg8 = model.project_spatial(h8.clone(), v_proj);
+    let x32 = activation::relu(model.project_spatial(h32.clone(), x_proj));
+    let msg32 = model.project_spatial(h32.clone(), v_proj);
+
+    let single_h8 = model.pyramid_update_state(
+        h8.clone(),
+        x8.clone(),
+        msg8.clone(),
+        y_gate_proj,
+        delta_proj,
+        value_norm,
+    );
+    let single_h32 = model.pyramid_update_state(
+        h32.clone(),
+        x32.clone(),
+        msg32.clone(),
+        y_gate_proj,
+        delta_proj,
+        value_norm,
+    );
+    let (pair_h8, pair_h32) = model.pyramid_update_states(
+        h8,
+        x8,
+        msg8,
+        h32,
+        x32,
+        msg32,
+        y_gate_proj,
+        delta_proj,
+        value_norm,
+    );
+
+    assert_eq!(
+        single_h8
+            .into_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .expect("single patch update"),
+        pair_h8
+            .into_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .expect("pair patch update")
+    );
+    assert_eq!(
+        single_h32
+            .into_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .expect("single coarse update"),
+        pair_h32
+            .into_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .expect("pair coarse update")
+    );
+}
+
+#[test]
+fn pyramid_predict_writes_patch_activity_into_hub_bank() {
+    type Backend = NdArray<f32>;
+    let device = <Backend as BackendTrait>::Device::default();
+    let model = make_pyramid_model::<Backend>(&device);
+    let tokens = Tensor::<Backend, 3>::from_data(
+        TensorData::new(vec![1.0; 16], [1, 4, 4]),
+        &device,
+    );
+
+    let state = model.pyramid_state_from_patch_tokens(tokens);
+    let predicted = model.predict_pyramid_state(state, 1, 1);
+    let hub_vec = predicted
+        .hub_rho()
+        .clone()
+        .to_data()
+        .convert::<f32>()
+        .into_vec::<f32>()
+        .expect("hub rho");
+    let max_abs = hub_vec.iter().map(|value| value.abs()).fold(0.0_f32, f32::max);
+
+    assert!(max_abs > 1e-6, "predict should write patch/coarse activity into hub rho");
+}
+
+#[test]
 #[should_panic(expected = "cellular rho state shape")]
 fn cellular_state_with_tokens_rejects_patch_count_mismatch() {
     type Backend = NdArray<f32>;
@@ -827,6 +1221,63 @@ fn assert_close<const D: usize>(
 }
 
 #[cfg(all(feature = "train", not(target_arch = "wasm32")))]
+fn max_abs_diff<B: BackendTrait, const D: usize>(lhs: Tensor<B, D>, rhs: Tensor<B, D>) -> f32 {
+    let lhs = lhs
+        .to_data()
+        .convert::<f32>()
+        .into_vec::<f32>()
+        .expect("lhs vec");
+    let rhs = rhs
+        .to_data()
+        .convert::<f32>()
+        .into_vec::<f32>()
+        .expect("rhs vec");
+
+    lhs.iter()
+        .zip(rhs.iter())
+        .map(|(lhs_value, rhs_value)| (*lhs_value - *rhs_value).abs())
+        .fold(0.0_f32, f32::max)
+}
+
+#[cfg(all(feature = "train", not(target_arch = "wasm32")))]
+fn pyramid_rollout_loss<B: burn::tensor::backend::AutodiffBackend>(
+    model: &VisionDragon<B>,
+    tokens: Tensor<B, 3>,
+) -> Tensor<B, 1> {
+    let state = model.pyramid_state_from_patch_tokens(tokens);
+    let state = model.forward_pyramid_state_rollout_mode_unbounded(
+        state,
+        3,
+        3,
+        StructuredStepMode::Predict,
+    );
+
+    state.primary_state().clone().tanh().powf_scalar(2.0).mean()
+        + state.context_state().clone().tanh().powf_scalar(2.0).mean()
+        + state.patch_rho().clone().tanh().powf_scalar(2.0).mean()
+        + state.coarse_rho().clone().tanh().powf_scalar(2.0).mean()
+        + state.hub_rho().clone().tanh().powf_scalar(2.0).mean()
+}
+
+#[cfg(all(feature = "train", not(target_arch = "wasm32")))]
+fn pyramid_mode_sequence_loss<B: burn::tensor::backend::AutodiffBackend>(
+    model: &VisionDragon<B>,
+    tokens_a: Tensor<B, 3>,
+    tokens_b: Tensor<B, 3>,
+) -> Tensor<B, 1> {
+    let state = model.pyramid_state_from_patch_tokens(tokens_a);
+    let state = model.predict_pyramid_state(state, 2, 2);
+    let state = model.observe_pyramid_state(state, tokens_b, 1, 1);
+    let state = model.refine_pyramid_state(state, 1, 1);
+
+    state.primary_state().clone().tanh().powf_scalar(2.0).mean()
+        + state.context_state().clone().tanh().powf_scalar(2.0).mean()
+        + state.patch_rho().clone().tanh().powf_scalar(2.0).mean()
+        + state.coarse_rho().clone().tanh().powf_scalar(2.0).mean()
+        + state.hub_rho().clone().tanh().powf_scalar(2.0).mean()
+}
+
+#[cfg(all(feature = "train", not(target_arch = "wasm32")))]
 #[test]
 fn rho_stream_wgpu_forward_matches_reference_contract_with_cls() {
     let _guard = crate::train::wgpu_test_guard();
@@ -897,7 +1348,266 @@ fn rho_stream_wgpu_forward_matches_reference_over_multiple_calls_with_cls() {
 }
 
 #[cfg(all(feature = "train", not(target_arch = "wasm32")))]
+#[test]
+fn pyramid_wgpu_rollout_matches_reference_public_state_path_with_hub_gates() {
+    let _guard = crate::train::wgpu_test_guard();
+    let device = <WgpuBackend as BackendTrait>::Device::default();
+    crate::train::init_wgpu_test_runtime(&device);
+    <WgpuBackend as BackendTrait>::seed(&device, 6_060);
+
+    let reference = make_pyramid_model_with_kernel::<WgpuBackend>(&device, false);
+    let fused = make_pyramid_model_with_kernel::<WgpuBackend>(&device, true)
+        .load_record(reference.clone().into_record());
+    assert!(supports_structured_pyramid_rho_backend::<WgpuBackend>());
+
+    let tokens =
+        Tensor::<WgpuBackend, 3>::random([2, 4, 4], Distribution::Normal(0.0, 1.0), &device);
+    let reference_state = reference.pyramid_state_from_patch_tokens(tokens.clone());
+    let fused_state = fused.pyramid_state_from_patch_tokens(tokens);
+
+    let reference_state = reference.forward_pyramid_state_rollout_mode_unbounded(
+        reference_state,
+        3,
+        3,
+        StructuredStepMode::Predict,
+    );
+    let fused_state =
+        fused.forward_pyramid_state_rollout_mode_unbounded(fused_state, 3, 3, StructuredStepMode::Predict);
+
+    let primary_diff = max_abs_diff(
+        fused_state.primary_state().clone(),
+        reference_state.primary_state().clone(),
+    );
+    let context_diff = max_abs_diff(
+        fused_state.context_state().clone(),
+        reference_state.context_state().clone(),
+    );
+    let patch_rho_diff = max_abs_diff(
+        fused_state.patch_rho().clone(),
+        reference_state.patch_rho().clone(),
+    );
+    let coarse_rho_diff = max_abs_diff(
+        fused_state.coarse_rho().clone(),
+        reference_state.coarse_rho().clone(),
+    );
+    let hub_rho_diff = max_abs_diff(
+        fused_state.hub_rho().clone(),
+        reference_state.hub_rho().clone(),
+    );
+
+    assert!(
+        primary_diff <= 5e-3,
+        "primary dense-state drift {primary_diff} exceeds 5e-3"
+    );
+    assert!(
+        context_diff <= 5e-3,
+        "context dense-state drift {context_diff} exceeds 5e-3"
+    );
+    assert!(
+        patch_rho_diff <= 5e-4,
+        "patch rho drift {patch_rho_diff} exceeds 5e-4"
+    );
+    assert!(
+        coarse_rho_diff <= 5e-4,
+        "coarse rho drift {coarse_rho_diff} exceeds 5e-4"
+    );
+    assert!(
+        hub_rho_diff <= 5e-4,
+        "hub rho drift {hub_rho_diff} exceeds 5e-4"
+    );
+}
+
+#[cfg(all(feature = "train", not(target_arch = "wasm32")))]
 type WgpuAutodiffBackend = Autodiff<WgpuBackend>;
+
+#[cfg(all(feature = "train", not(target_arch = "wasm32")))]
+#[test]
+fn pyramid_wgpu_autodiff_matches_reference_after_one_step() {
+    let _guard = crate::train::wgpu_test_guard();
+    let device = <WgpuAutodiffBackend as BackendTrait>::Device::default();
+    crate::train::init_wgpu_test_runtime(&device);
+    <WgpuAutodiffBackend as BackendTrait>::seed(&device, 7_171);
+
+    let reference = make_pyramid_model_with_kernel::<WgpuAutodiffBackend>(&device, false);
+    let fused = make_pyramid_model_with_kernel::<WgpuAutodiffBackend>(&device, true)
+        .load_record(reference.clone().into_record());
+    let tokens = Tensor::<WgpuAutodiffBackend, 3>::random(
+        [2, 4, 4],
+        Distribution::Normal(0.0, 1.0),
+        &device,
+    );
+    let mut reference_optimizer = AdamWConfig::new()
+        .with_weight_decay(0.0)
+        .init::<WgpuAutodiffBackend, VisionDragon<WgpuAutodiffBackend>>();
+    let mut fused_optimizer = AdamWConfig::new()
+        .with_weight_decay(0.0)
+        .init::<WgpuAutodiffBackend, VisionDragon<WgpuAutodiffBackend>>();
+    let lr: LearningRate = 1e-3;
+
+    let reference_loss = pyramid_rollout_loss(&reference, tokens.clone());
+    let reference_loss_value = reference_loss
+        .clone()
+        .to_data()
+        .convert::<f32>()
+        .into_vec::<f32>()
+        .expect("reference loss")[0];
+    let reference_grads = GradientsParams::from_grads(reference_loss.backward(), &reference);
+    let reference = reference_optimizer.step(lr, reference, reference_grads);
+
+    let fused_loss = pyramid_rollout_loss(&fused, tokens.clone());
+    let fused_loss_value = fused_loss
+        .clone()
+        .to_data()
+        .convert::<f32>()
+        .into_vec::<f32>()
+        .expect("fused loss")[0];
+    let fused_grads = GradientsParams::from_grads(fused_loss.backward(), &fused);
+    let fused = fused_optimizer.step(lr, fused, fused_grads);
+
+    assert!((reference_loss_value - fused_loss_value).abs() <= 8e-2);
+
+    let reference_state = reference.forward_pyramid_state_rollout_mode_unbounded(
+        reference.pyramid_state_from_patch_tokens(tokens.clone()),
+        3,
+        3,
+        StructuredStepMode::Predict,
+    );
+    let fused_state = fused.forward_pyramid_state_rollout_mode_unbounded(
+        fused.pyramid_state_from_patch_tokens(tokens),
+        3,
+        3,
+        StructuredStepMode::Predict,
+    );
+
+    assert!(
+        max_abs_diff(
+            fused_state.primary_state().clone(),
+            reference_state.primary_state().clone(),
+        ) <= 1.5e-1
+    );
+    assert!(
+        max_abs_diff(
+            fused_state.context_state().clone(),
+            reference_state.context_state().clone(),
+        ) <= 1.5e-1
+    );
+    assert!(
+        max_abs_diff(fused_state.patch_rho().clone(), reference_state.patch_rho().clone())
+            <= 5e-2
+    );
+    assert!(
+        max_abs_diff(
+            fused_state.coarse_rho().clone(),
+            reference_state.coarse_rho().clone(),
+        ) <= 5e-2
+    );
+    assert!(
+        max_abs_diff(fused_state.hub_rho().clone(), reference_state.hub_rho().clone()) <= 5e-2
+    );
+}
+
+#[cfg(all(feature = "train", not(target_arch = "wasm32")))]
+#[test]
+fn pyramid_wgpu_autodiff_matches_reference_on_observe_refine_predict_sequence() {
+    let _guard = crate::train::wgpu_test_guard();
+    let device = <WgpuAutodiffBackend as BackendTrait>::Device::default();
+    crate::train::init_wgpu_test_runtime(&device);
+    <WgpuAutodiffBackend as BackendTrait>::seed(&device, 8_181);
+
+    let reference = make_pyramid_model_with_kernel::<WgpuAutodiffBackend>(&device, false);
+    let fused = make_pyramid_model_with_kernel::<WgpuAutodiffBackend>(&device, true)
+        .load_record(reference.clone().into_record());
+    let tokens_a = Tensor::<WgpuAutodiffBackend, 3>::random(
+        [2, 4, 4],
+        Distribution::Normal(0.0, 1.0),
+        &device,
+    );
+    let tokens_b = Tensor::<WgpuAutodiffBackend, 3>::random(
+        [2, 4, 4],
+        Distribution::Normal(0.0, 1.0),
+        &device,
+    );
+    let mut reference_optimizer = AdamWConfig::new()
+        .with_weight_decay(0.0)
+        .init::<WgpuAutodiffBackend, VisionDragon<WgpuAutodiffBackend>>();
+    let mut fused_optimizer = AdamWConfig::new()
+        .with_weight_decay(0.0)
+        .init::<WgpuAutodiffBackend, VisionDragon<WgpuAutodiffBackend>>();
+    let lr: LearningRate = 1e-3;
+
+    let reference_loss = pyramid_mode_sequence_loss(&reference, tokens_a.clone(), tokens_b.clone());
+    let reference_loss_value = reference_loss
+        .clone()
+        .to_data()
+        .convert::<f32>()
+        .into_vec::<f32>()
+        .expect("reference mode-sequence loss")[0];
+    let reference_grads = GradientsParams::from_grads(reference_loss.backward(), &reference);
+    let reference = reference_optimizer.step(lr, reference, reference_grads);
+
+    let fused_loss = pyramid_mode_sequence_loss(&fused, tokens_a.clone(), tokens_b.clone());
+    let fused_loss_value = fused_loss
+        .clone()
+        .to_data()
+        .convert::<f32>()
+        .into_vec::<f32>()
+        .expect("fused mode-sequence loss")[0];
+    let fused_grads = GradientsParams::from_grads(fused_loss.backward(), &fused);
+    let fused = fused_optimizer.step(lr, fused, fused_grads);
+
+    assert!((reference_loss_value - fused_loss_value).abs() <= 1e-1);
+
+    let reference_state = reference.refine_pyramid_state(
+        reference.observe_pyramid_state(
+            reference.predict_pyramid_state(
+                reference.pyramid_state_from_patch_tokens(tokens_a.clone()),
+                2,
+                2,
+            ),
+            tokens_b.clone(),
+            1,
+            1,
+        ),
+        1,
+        1,
+    );
+    let fused_state = fused.refine_pyramid_state(
+        fused.observe_pyramid_state(
+            fused.predict_pyramid_state(fused.pyramid_state_from_patch_tokens(tokens_a), 2, 2),
+            tokens_b,
+            1,
+            1,
+        ),
+        1,
+        1,
+    );
+
+    assert!(
+        max_abs_diff(
+            fused_state.primary_state().clone(),
+            reference_state.primary_state().clone(),
+        ) <= 2e-1
+    );
+    assert!(
+        max_abs_diff(
+            fused_state.context_state().clone(),
+            reference_state.context_state().clone(),
+        ) <= 2e-1
+    );
+    assert!(
+        max_abs_diff(fused_state.patch_rho().clone(), reference_state.patch_rho().clone())
+            <= 8e-2
+    );
+    assert!(
+        max_abs_diff(
+            fused_state.coarse_rho().clone(),
+            reference_state.coarse_rho().clone(),
+        ) <= 8e-2
+    );
+    assert!(
+        max_abs_diff(fused_state.hub_rho().clone(), reference_state.hub_rho().clone()) <= 8e-2
+    );
+}
 
 #[cfg(all(feature = "train", not(target_arch = "wasm32")))]
 #[test]

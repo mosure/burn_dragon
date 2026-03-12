@@ -5,7 +5,7 @@ use burn::tensor::{Int, Tensor, TensorData};
 use burn_autodiff::Autodiff;
 use burn_ndarray::NdArray;
 
-use burn_dragon::BDH;
+use burn_dragon::core::BDH;
 use burn_dragon::language::loss::language_model_loss;
 use burn_dragon::language::{build_model_config, load_training_config};
 

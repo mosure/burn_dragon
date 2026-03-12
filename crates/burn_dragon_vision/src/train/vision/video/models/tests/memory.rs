@@ -1,4 +1,5 @@
 use super::*;
+use crate::train::vision::video::dataset::MovingMnistVideoLoaderConfig;
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
@@ -299,18 +300,20 @@ fn wgpu_video_trm_dataloader_step_optimize_memory_stays_bounded() {
     );
     let loader = MovingMnistVideoDataLoader::<Backend>::new(
         dataset,
-        64,
         &device,
-        32,
-        Some(32),
-        None,
-        0,
-        0,
-        false,
-        false,
-        0,
-        0,
-        0,
+        MovingMnistVideoLoaderConfig {
+            batch_size: 64,
+            steps_per_epoch: 32,
+            total_steps: Some(32),
+            target_horizon_curriculum: None,
+            prefetch_batches: 0,
+            prefetch_workers: 0,
+            prefetch_to_device: false,
+            sequential: false,
+            artifact_capture_every: 0,
+            artifact_capture_images: 0,
+            artifact_extra_future_frames: 0,
+        },
     );
     let mut iterator = loader.iter();
 

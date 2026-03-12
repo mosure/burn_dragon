@@ -1,6 +1,68 @@
 use super::*;
+use burn_dragon_core::{
+    target_major_decay_add, target_major_identity_read, target_major_outer_product,
+};
 
+// Retain the older pyramid helper surface for debug/reference use while the
+// active recurrent path migrates onto the shared structured-pyramid executor.
+#[allow(dead_code)]
 impl<B: Backend> VisionDragon<B> {
+    pub(super) fn pyramid_tokens_target_major(input: Tensor<B, 4>) -> Tensor<B, 3> {
+        let [batch, channels, height, width] = input.shape().dims::<4>();
+        input
+            .swap_dims(1, 3)
+            .swap_dims(1, 2)
+            .reshape([batch, height * width, channels])
+    }
+
+    pub(super) fn pyramid_tokens_from_target_major(
+        input: Tensor<B, 3>,
+        height: usize,
+        width: usize,
+    ) -> Tensor<B, 4> {
+        let [batch, tokens, channels] = input.shape().dims::<3>();
+        assert_eq!(
+            tokens,
+            height * width,
+            "target-major token count {} does not match spatial grid {}x{}",
+            tokens,
+            height,
+            width
+        );
+        input
+            .reshape([batch, height, width, channels])
+            .swap_dims(1, 3)
+            .swap_dims(2, 3)
+    }
+
+    pub(super) fn pyramid_rho_to_target_major(memory: Tensor<B, 5>) -> Tensor<B, 4> {
+        let [batch, rank, value_dim, height, width] = memory.shape().dims::<5>();
+        memory
+            .swap_dims(1, 3)
+            .swap_dims(2, 4)
+            .reshape([batch, height * width, rank, value_dim])
+    }
+
+    pub(super) fn pyramid_rho_from_target_major(
+        memory: Tensor<B, 4>,
+        height: usize,
+        width: usize,
+    ) -> Tensor<B, 5> {
+        let [batch, tokens, rank, value_dim] = memory.shape().dims::<4>();
+        assert_eq!(
+            tokens,
+            height * width,
+            "target-major rho token count {} does not match spatial grid {}x{}",
+            tokens,
+            height,
+            width
+        );
+        memory
+            .reshape([batch, height, width, rank, value_dim])
+            .swap_dims(2, 4)
+            .swap_dims(1, 3)
+    }
+
     pub(super) fn apply_embed_norm_spatial(&self, input: Tensor<B, 4>) -> Tensor<B, 4> {
         match &self.token_norm {
             Some(norm) => {
@@ -16,18 +78,64 @@ impl<B: Backend> VisionDragon<B> {
         }
     }
 
-    pub(super) fn apply_value_norm_spatial(
+    pub(super) fn apply_embed_norm_spatial_pair(
         &self,
-        norm: &LayerNorm<B>,
-        input: Tensor<B, 4>,
-    ) -> Tensor<B, 4> {
-        let [batch, dim, height, width] = input.shape().dims::<4>();
-        if batch == 0 || dim == 0 || height == 0 || width == 0 {
-            return input;
+        left: Tensor<B, 4>,
+        right: Tensor<B, 4>,
+    ) -> (Tensor<B, 4>, Tensor<B, 4>) {
+        match &self.token_norm {
+            Some(norm) => {
+                let [left_batch, left_dim, left_height, left_width] = left.shape().dims::<4>();
+                let [right_batch, right_dim, right_height, right_width] = right.shape().dims::<4>();
+                if left_batch == 0
+                    || left_dim == 0
+                    || left_height == 0
+                    || left_width == 0
+                    || right_batch == 0
+                    || right_dim == 0
+                    || right_height == 0
+                    || right_width == 0
+                {
+                    return (left, right);
+                }
+                assert_eq!(
+                    left_batch, right_batch,
+                    "paired embed norm requires matching batch dimensions"
+                );
+                assert_eq!(
+                    left_dim, right_dim,
+                    "paired embed norm requires matching channel dimensions"
+                );
+                let left_tokens = left_height * left_width;
+                let right_tokens = right_height * right_width;
+                let left = left
+                    .swap_dims(1, 3)
+                    .swap_dims(1, 2)
+                    .reshape([left_batch, left_tokens, left_dim]);
+                let right = right
+                    .swap_dims(1, 3)
+                    .swap_dims(1, 2)
+                    .reshape([right_batch, right_tokens, right_dim]);
+                let tokens = Tensor::cat(
+                    vec![left, right],
+                    1,
+                );
+                let tokens = norm.forward(tokens);
+                let left = tokens
+                    .clone()
+                    .slice_dim(1, 0..left_tokens)
+                    .reshape([left_batch, left_height, left_width, left_dim])
+                    .swap_dims(1, 3)
+                    .swap_dims(2, 3);
+                let right = tokens
+                    .slice_dim(1, left_tokens..left_tokens + right_tokens)
+                    .reshape([right_batch, right_height, right_width, right_dim])
+                    .swap_dims(1, 3)
+                    .swap_dims(2, 3);
+                (left, right)
+            }
+            None => (left, right),
         }
-        let flat = input.swap_dims(1, 3).swap_dims(1, 2);
-        let flat = norm.forward(flat);
-        flat.swap_dims(1, 2).swap_dims(1, 3)
     }
 
     pub(super) fn project_spatial(&self, input: Tensor<B, 4>, layer: &Linear<B>) -> Tensor<B, 4> {
@@ -44,6 +152,68 @@ impl<B: Backend> VisionDragon<B> {
         flat.reshape([batch, height, width, out_dim])
             .swap_dims(1, 3)
             .swap_dims(2, 3)
+    }
+
+    pub(super) fn project_spatial_pair(
+        &self,
+        left: Tensor<B, 4>,
+        right: Tensor<B, 4>,
+        layer: &Linear<B>,
+    ) -> (Tensor<B, 4>, Tensor<B, 4>) {
+        let [left_batch, left_dim, left_height, left_width] = left.shape().dims::<4>();
+        let [right_batch, right_dim, right_height, right_width] = right.shape().dims::<4>();
+        if left_batch == 0
+            || left_dim == 0
+            || left_height == 0
+            || left_width == 0
+            || right_batch == 0
+            || right_dim == 0
+            || right_height == 0
+            || right_width == 0
+        {
+            return (
+                self.project_spatial(left, layer),
+                self.project_spatial(right, layer),
+            );
+        }
+        assert_eq!(
+            left_batch, right_batch,
+            "paired spatial projection requires matching batch dimensions"
+        );
+        assert_eq!(
+            left_dim, right_dim,
+            "paired spatial projection requires matching channel dimensions"
+        );
+        let left_tokens = left_height * left_width;
+        let right_tokens = right_height * right_width;
+        let left = left
+            .swap_dims(1, 3)
+            .swap_dims(1, 2)
+            .reshape([left_batch, left_tokens, left_dim]);
+        let right = right
+            .swap_dims(1, 3)
+            .swap_dims(1, 2)
+            .reshape([right_batch, right_tokens, right_dim]);
+        let tokens = Tensor::cat(
+            vec![left, right],
+            1,
+        );
+        let flat = tokens.reshape([left_batch * (left_tokens + right_tokens), left_dim]);
+        let flat = layer.forward(flat);
+        let out_dim = flat.shape().dims::<2>()[1];
+        let tokens = flat.reshape([left_batch, left_tokens + right_tokens, out_dim]);
+        let left = tokens
+            .clone()
+            .slice_dim(1, 0..left_tokens)
+            .reshape([left_batch, left_height, left_width, out_dim])
+            .swap_dims(1, 3)
+            .swap_dims(2, 3);
+        let right = tokens
+            .slice_dim(1, left_tokens..left_tokens + right_tokens)
+            .reshape([right_batch, right_height, right_width, out_dim])
+            .swap_dims(1, 3)
+            .swap_dims(2, 3);
+        (left, right)
     }
 
     pub(super) fn pyramid_patch_tokens_to_spatial(
@@ -156,8 +326,12 @@ impl<B: Backend> VisionDragon<B> {
                 &memory.device(),
             );
         }
-        let query = query.unsqueeze_dim::<5>(2);
-        memory.mul(query).sum_dims_squeeze::<4, usize>(&[1])
+        let memory = Self::pyramid_rho_to_target_major(memory);
+        let query = Self::pyramid_tokens_target_major(query);
+        let read = target_major_identity_read(query, memory);
+        Self::pyramid_tokens_from_target_major(read, height, width).reshape([
+            batch, value_dim, height, width,
+        ])
     }
 
     pub(super) fn pyramid_local_read(
@@ -218,9 +392,11 @@ impl<B: Backend> VisionDragon<B> {
     }
 
     pub(super) fn pyramid_outer_product(&self, x: Tensor<B, 4>, v: Tensor<B, 4>) -> Tensor<B, 5> {
-        let x = x.unsqueeze_dim::<5>(2);
-        let v = v.unsqueeze_dim::<5>(1);
-        x.mul(v)
+        let [_, _, height, width] = x.shape().dims::<4>();
+        let x = Self::pyramid_tokens_target_major(x);
+        let v = Self::pyramid_tokens_target_major(v);
+        let update = target_major_outer_product(x, v);
+        Self::pyramid_rho_from_target_major(update, height, width)
     }
 
     pub(super) fn pyramid_pool_outer(&self, u: Tensor<B, 5>, scale: usize) -> Tensor<B, 5> {
@@ -265,12 +441,163 @@ impl<B: Backend> VisionDragon<B> {
         pyramid_delta_proj: &Linear<B>,
         pyramid_value_norm: &LayerNorm<B>,
     ) -> Tensor<B, 4> {
-        let msg = self.apply_value_norm_spatial(pyramid_value_norm, msg);
-        let y = activation::relu(self.project_spatial(msg, pyramid_y_gate_proj));
-        let u = y.mul(x);
-        let delta = self.project_spatial(u, pyramid_delta_proj);
+        let [batch, dense_dim, height, width] = state.shape().dims::<4>();
+        let [x_batch, rank, x_height, x_width] = x.shape().dims::<4>();
+        let [msg_batch, value_dim, msg_height, msg_width] = msg.shape().dims::<4>();
+        assert_eq!(x_batch, batch, "pyramid x batch must match state batch");
+        assert_eq!(msg_batch, batch, "pyramid msg batch must match state batch");
+        assert_eq!(x_height, height, "pyramid x height must match state height");
+        assert_eq!(x_width, width, "pyramid x width must match state width");
+        assert_eq!(msg_height, height, "pyramid msg height must match state height");
+        assert_eq!(msg_width, width, "pyramid msg width must match state width");
+
+        let x_tokens = x
+            .swap_dims(1, 3)
+            .swap_dims(1, 2)
+            .reshape([batch, height * width, rank]);
+        let msg_tokens = msg
+            .swap_dims(1, 3)
+            .swap_dims(1, 2)
+            .reshape([batch, height * width, value_dim]);
+        let delta = structured_dense_update_tokens(
+            x_tokens,
+            msg_tokens,
+            pyramid_y_gate_proj,
+            pyramid_delta_proj,
+            Some(pyramid_value_norm),
+        )
+        .delta_dense
+        .reshape([batch, height, width, dense_dim])
+        .swap_dims(1, 3)
+        .swap_dims(2, 3);
         let next = state + delta;
         self.apply_embed_norm_spatial(next)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn pyramid_update_states(
+        &self,
+        patch_state: Tensor<B, 4>,
+        patch_x: Tensor<B, 4>,
+        patch_msg: Tensor<B, 4>,
+        coarse_state: Tensor<B, 4>,
+        coarse_x: Tensor<B, 4>,
+        coarse_msg: Tensor<B, 4>,
+        pyramid_y_gate_proj: &Linear<B>,
+        pyramid_delta_proj: &Linear<B>,
+        pyramid_value_norm: &LayerNorm<B>,
+    ) -> (Tensor<B, 4>, Tensor<B, 4>) {
+        let [batch, dense_dim, patch_height, patch_width] = patch_state.shape().dims::<4>();
+        let [coarse_batch, coarse_dense_dim, coarse_height, coarse_width] =
+            coarse_state.shape().dims::<4>();
+        let [patch_x_batch, rank, patch_x_height, patch_x_width] = patch_x.shape().dims::<4>();
+        let [coarse_x_batch, coarse_rank, coarse_x_height, coarse_x_width] =
+            coarse_x.shape().dims::<4>();
+        let [patch_msg_batch, value_dim, patch_msg_height, patch_msg_width] =
+            patch_msg.shape().dims::<4>();
+        let [coarse_msg_batch, coarse_value_dim, coarse_msg_height, coarse_msg_width] =
+            coarse_msg.shape().dims::<4>();
+        assert_eq!(coarse_batch, batch, "coarse batch must match patch batch");
+        assert_eq!(
+            coarse_dense_dim, dense_dim,
+            "coarse dense dim must match patch dense dim"
+        );
+        assert_eq!(patch_x_batch, batch, "patch x batch must match state batch");
+        assert_eq!(coarse_x_batch, batch, "coarse x batch must match state batch");
+        assert_eq!(patch_msg_batch, batch, "patch msg batch must match state batch");
+        assert_eq!(coarse_msg_batch, batch, "coarse msg batch must match state batch");
+        assert_eq!(coarse_rank, rank, "coarse rank must match patch rank");
+        assert_eq!(
+            coarse_value_dim, value_dim,
+            "coarse value dim must match patch value dim"
+        );
+        assert_eq!(
+            patch_x_height, patch_height,
+            "patch x height must match patch state height"
+        );
+        assert_eq!(
+            patch_x_width, patch_width,
+            "patch x width must match patch state width"
+        );
+        assert_eq!(
+            patch_msg_height, patch_height,
+            "patch msg height must match patch state height"
+        );
+        assert_eq!(
+            patch_msg_width, patch_width,
+            "patch msg width must match patch state width"
+        );
+        assert_eq!(
+            coarse_x_height, coarse_height,
+            "coarse x height must match coarse state height"
+        );
+        assert_eq!(
+            coarse_x_width, coarse_width,
+            "coarse x width must match coarse state width"
+        );
+        assert_eq!(
+            coarse_msg_height, coarse_height,
+            "coarse msg height must match coarse state height"
+        );
+        assert_eq!(
+            coarse_msg_width, coarse_width,
+            "coarse msg width must match coarse state width"
+        );
+
+        let patch_tokens = patch_height * patch_width;
+        let coarse_tokens = coarse_height * coarse_width;
+        let x_tokens = Tensor::cat(
+            vec![
+                patch_x
+                    .swap_dims(1, 3)
+                    .swap_dims(1, 2)
+                    .reshape([batch, patch_tokens, rank]),
+                coarse_x
+                    .swap_dims(1, 3)
+                    .swap_dims(1, 2)
+                    .reshape([batch, coarse_tokens, rank]),
+            ],
+            1,
+        );
+        let msg_tokens = Tensor::cat(
+            vec![
+                patch_msg
+                    .swap_dims(1, 3)
+                    .swap_dims(1, 2)
+                    .reshape([batch, patch_tokens, value_dim]),
+                coarse_msg
+                    .swap_dims(1, 3)
+                    .swap_dims(1, 2)
+                    .reshape([batch, coarse_tokens, value_dim]),
+            ],
+            1,
+        );
+
+        let delta_tokens = structured_dense_update_tokens(
+            x_tokens,
+            msg_tokens,
+            pyramid_y_gate_proj,
+            pyramid_delta_proj,
+            Some(pyramid_value_norm),
+        )
+        .delta_dense;
+
+        let patch_delta = delta_tokens
+            .clone()
+            .slice_dim(1, 0..patch_tokens)
+            .reshape([batch, patch_height, patch_width, dense_dim])
+            .swap_dims(1, 3)
+            .swap_dims(2, 3);
+        let coarse_delta = delta_tokens
+            .slice_dim(1, patch_tokens..patch_tokens + coarse_tokens)
+            .reshape([batch, coarse_height, coarse_width, coarse_dense_dim])
+            .swap_dims(1, 3)
+            .swap_dims(2, 3);
+
+        self.apply_embed_norm_spatial_pair(
+            patch_state + patch_delta,
+            coarse_state + coarse_delta,
+        )
     }
 
     pub(super) fn pyramid_hub_weights(
@@ -363,12 +690,11 @@ impl<B: Backend> VisionDragon<B> {
         hub_count: usize,
         decay: Tensor<B, 1>,
     ) -> Tensor<B, 4> {
-        let decayed_hub = self.pyramid_apply_decay_4d(hub, decay);
         if hub_count <= 1 {
             let sum8 = u8.sum_dims_squeeze::<3, usize>(&[3, 4]);
             let sum32 = u32.sum_dims_squeeze::<3, usize>(&[3, 4]);
             let delta = (sum8 + sum32).unsqueeze_dim::<4>(1);
-            return decayed_hub.add(delta);
+            return target_major_decay_add(hub, delta, decay);
         }
 
         let w8 = hub_w8.unwrap_or_else(|| {
@@ -384,8 +710,7 @@ impl<B: Backend> VisionDragon<B> {
 
         let delta8 = self.trm_weighted_global_sum(u8, w8);
         let delta32 = self.trm_weighted_global_sum(u32, w32);
-        let delta = delta8 + delta32;
-        decayed_hub.add(delta)
+        target_major_decay_add(hub, delta8 + delta32, decay)
     }
 
     pub(super) fn trm_weighted_global_sum(&self, u: Tensor<B, 5>, w: Tensor<B, 4>) -> Tensor<B, 4> {

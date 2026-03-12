@@ -5,8 +5,11 @@ use std::time::Instant;
 use burn::tensor::backend::Backend as BackendTrait;
 use burn::tensor::{Distribution, Tensor};
 use burn_dragon_graph::{
-    CompiledGraphRouting, GraphCsrAdjacency, GraphDragon, GraphDragonConfig, GraphTopologyRouting,
-    StructuredStepMode,
+    GraphCsrAdjacency, GraphDragon, GraphDragonConfig, GraphTopologyRouting, StructuredStepMode,
+};
+use burn_dragon_graph::api::expert::CompiledGraphRouting;
+use burn_dragon_wgpu::api::graph::{
+    sparse_graph_rho_profile_reset, sparse_graph_rho_profile_snapshot,
 };
 use burn_wgpu::{CubeBackend, RuntimeOptions, WgpuRuntime, graphics};
 
@@ -41,9 +44,10 @@ struct ErrorMetrics {
     mean_abs: f32,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct CaseResult {
     case: BenchCase,
+    problem_shape: String,
     compile_ms: f64,
     baseline_ms: f64,
     wrapped_fused_ms: f64,
@@ -59,6 +63,11 @@ struct CaseResult {
     persistent_vs_wrapped_speedup_x: f64,
     edges_per_step: usize,
     persistent_fused_edges_per_sec: f64,
+    persistent_fused_kernel_calls: u64,
+    persistent_fused_kernel_launches: u64,
+    persistent_fused_kernel_dispatch_ms: f64,
+    persistent_fused_metadata_reuse_bytes: u64,
+    persistent_fused_transient_allocations: u64,
     node_error: ErrorMetrics,
     cluster_rho_error: ErrorMetrics,
     global_rho_error: ErrorMetrics,
@@ -332,6 +341,7 @@ fn run_case(case: BenchCase, device: &Device, args: Args) -> CaseResult {
         }
         rollout_sync_tensor(&state)
     });
+    sparse_graph_rho_profile_reset();
     let persistent_fused_ms = timed_rollout_ms(args.repetitions, || {
         let state = model
             .rollout_compiled(
@@ -343,6 +353,7 @@ fn run_case(case: BenchCase, device: &Device, args: Args) -> CaseResult {
             .expect("persistent fused rollout");
         rollout_sync_tensor(&state)
     });
+    let persistent_profile = sparse_graph_rho_profile_snapshot();
 
     let total_steps = (args.repetitions * args.steps) as f64;
     let baseline_step_ms = baseline_ms / total_steps;
@@ -357,6 +368,17 @@ fn run_case(case: BenchCase, device: &Device, args: Args) -> CaseResult {
 
     CaseResult {
         case,
+        problem_shape: format!(
+            "b{} n{} c{} g{} deg{} embd{} rank{} value{}",
+            case.batch,
+            case.node_count,
+            case.cluster_count,
+            case.global_count,
+            case.avg_degree,
+            case.embed_dim,
+            case.rank,
+            case.value_dim
+        ),
         compile_ms,
         baseline_ms,
         wrapped_fused_ms,
@@ -372,6 +394,11 @@ fn run_case(case: BenchCase, device: &Device, args: Args) -> CaseResult {
         persistent_vs_wrapped_speedup_x: wrapped_fused_ms / persistent_fused_ms.max(f64::EPSILON),
         edges_per_step,
         persistent_fused_edges_per_sec,
+        persistent_fused_kernel_calls: persistent_profile.calls,
+        persistent_fused_kernel_launches: persistent_profile.launches,
+        persistent_fused_kernel_dispatch_ms: persistent_profile.dispatch_ns as f64 / 1e6,
+        persistent_fused_metadata_reuse_bytes: persistent_profile.metadata_reuse_bytes,
+        persistent_fused_transient_allocations: persistent_profile.transient_allocations,
         node_error,
         cluster_rho_error,
         global_rho_error,
@@ -491,18 +518,18 @@ fn format_markdown(adapter: &str, args: Args, results: &[CaseResult]) -> String 
     writeln!(&mut out).unwrap();
     writeln!(
         &mut out,
-        "| case | graph | dims | compile ms | baseline step ms | wrapped fused step ms | persistent fused step ms | wrapped speedup | persistent speedup | persistent/wrapped | persistent fused steps/s | persistent fused edges/s | node max abs | cluster rho max abs | global rho max abs |"
+        "| case | graph | dims | compile ms | baseline step ms | wrapped fused step ms | persistent fused step ms | wrapped speedup | persistent speedup | persistent/wrapped | persistent fused steps/s | persistent fused edges/s | launches | dispatch ms | node max abs | cluster rho max abs | global rho max abs |"
     )
     .unwrap();
     writeln!(
         &mut out,
-        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
+        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
     )
     .unwrap();
     for result in results {
         writeln!(
             &mut out,
-            "| {} | b{} n{} c{} g{} deg{} | e{} r{} v{} | {:.2} | {:.4} | {:.4} | {:.4} | {:.2}x | {:.2}x | {:.2}x | {:.1} | {:.0} | {:.2e} | {:.2e} | {:.2e} |",
+            "| {} | b{} n{} c{} g{} deg{} | e{} r{} v{} | {:.2} | {:.4} | {:.4} | {:.4} | {:.2}x | {:.2}x | {:.2}x | {:.1} | {:.0} | {} | {:.2} | {:.2e} | {:.2e} | {:.2e} |",
             result.case.name,
             result.case.batch,
             result.case.node_count,
@@ -521,6 +548,8 @@ fn format_markdown(adapter: &str, args: Args, results: &[CaseResult]) -> String 
             result.persistent_vs_wrapped_speedup_x,
             result.persistent_fused_steps_per_sec,
             result.persistent_fused_edges_per_sec,
+            result.persistent_fused_kernel_launches,
+            result.persistent_fused_kernel_dispatch_ms,
             result.node_error.max_abs,
             result.cluster_rho_error.max_abs,
             result.global_rho_error.max_abs,
@@ -532,13 +561,14 @@ fn format_markdown(adapter: &str, args: Args, results: &[CaseResult]) -> String 
 
 fn format_csv(results: &[CaseResult]) -> String {
     let mut out = String::from(
-        "case,batch,node_count,cluster_count,global_count,avg_degree,embed_dim,rank,value_dim,compile_ms,baseline_ms,wrapped_fused_ms,persistent_fused_ms,baseline_step_ms,wrapped_fused_step_ms,persistent_fused_step_ms,baseline_steps_per_sec,wrapped_fused_steps_per_sec,persistent_fused_steps_per_sec,wrapped_speedup_x,persistent_speedup_x,persistent_vs_wrapped_speedup_x,edges_per_step,persistent_fused_edges_per_sec,node_max_abs,node_mean_abs,cluster_rho_max_abs,cluster_rho_mean_abs,global_rho_max_abs,global_rho_mean_abs\n",
+        "case,problem_shape,batch,node_count,cluster_count,global_count,avg_degree,embed_dim,rank,value_dim,compile_ms,baseline_ms,wrapped_fused_ms,persistent_fused_ms,baseline_step_ms,wrapped_fused_step_ms,persistent_fused_step_ms,baseline_steps_per_sec,wrapped_fused_steps_per_sec,persistent_fused_steps_per_sec,wrapped_speedup_x,persistent_speedup_x,persistent_vs_wrapped_speedup_x,edges_per_step,persistent_fused_edges_per_sec,persistent_fused_kernel_calls,persistent_fused_kernel_launches,persistent_fused_kernel_dispatch_ms,persistent_fused_metadata_reuse_bytes,persistent_fused_transient_allocations,node_max_abs,node_mean_abs,cluster_rho_max_abs,cluster_rho_mean_abs,global_rho_max_abs,global_rho_mean_abs\n",
     );
     for result in results {
         writeln!(
             &mut out,
-            "{},{},{},{},{},{},{},{},{},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{},{:.6},{:.8},{:.8},{:.8},{:.8},{:.8},{:.8}",
+            "{},{},{},{},{},{},{},{},{},{},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{},{:.6},{},{},{:.6},{},{},{:.8},{:.8},{:.8},{:.8},{:.8},{:.8}",
             result.case.name,
+            result.problem_shape,
             result.case.batch,
             result.case.node_count,
             result.case.cluster_count,
@@ -562,6 +592,11 @@ fn format_csv(results: &[CaseResult]) -> String {
             result.persistent_vs_wrapped_speedup_x,
             result.edges_per_step,
             result.persistent_fused_edges_per_sec,
+            result.persistent_fused_kernel_calls,
+            result.persistent_fused_kernel_launches,
+            result.persistent_fused_kernel_dispatch_ms,
+            result.persistent_fused_metadata_reuse_bytes,
+            result.persistent_fused_transient_allocations,
             result.node_error.max_abs,
             result.node_error.mean_abs,
             result.cluster_rho_error.max_abs,

@@ -1,5 +1,23 @@
 use super::*;
 
+type RolloutHorizonMetricArray<B> = [Tensor<B, 1>; VISION_ROLLOUT_HORIZON_COUNT];
+type RolloutHorizonMetricArrays<B> = (
+    RolloutHorizonMetricArray<B>,
+    RolloutHorizonMetricArray<B>,
+    RolloutHorizonMetricArray<B>,
+);
+
+pub(super) struct VideoDebugReconInput<B: BackendTrait> {
+    pub clip_frames: Tensor<B, 5>,
+    pub frame_patch_tokens: Tensor<B, 4>,
+    pub future_patch_tokens: Tensor<B, 4>,
+    pub context_len: usize,
+    pub target_len: usize,
+    pub future_len_all: usize,
+    pub steps: usize,
+    pub capture_artifacts: bool,
+}
+
 impl<B: BackendTrait> VisionVideoLejepaModel<B> {
     pub(super) fn reconstruct_patch_values_from_patch_tokens(
         &self,
@@ -700,15 +718,18 @@ impl<B: BackendTrait> VisionVideoLejepaModel<B> {
 
     pub(super) fn debug_reconstruction_outputs_from_patch_tokens(
         &self,
-        clip_frames: Tensor<B, 5>,
-        frame_patch_tokens: Tensor<B, 4>,
-        future_patch_tokens: Tensor<B, 4>,
-        context_len: usize,
-        target_len: usize,
-        future_len_all: usize,
-        steps: usize,
-        capture_artifacts: bool,
+        input: VideoDebugReconInput<B>,
     ) -> VisionVideoDebugRecon<B> {
+        let VideoDebugReconInput {
+            clip_frames,
+            frame_patch_tokens,
+            future_patch_tokens,
+            context_len,
+            target_len,
+            future_len_all,
+            steps,
+            capture_artifacts,
+        } = input;
         let forward = VisionVideoForward {
             predicted_proj: Tensor::<B, 3>::zeros(
                 [
@@ -1225,11 +1246,7 @@ impl<B: BackendTrait> VisionVideoLejepaModel<B> {
     pub(super) fn rollout_horizon_metrics(
         &self,
         forward: &VisionVideoForward<B>,
-    ) -> (
-        [Tensor<B, 1>; VISION_ROLLOUT_HORIZON_COUNT],
-        [Tensor<B, 1>; VISION_ROLLOUT_HORIZON_COUNT],
-        [Tensor<B, 1>; VISION_ROLLOUT_HORIZON_COUNT],
-    ) {
+    ) -> RolloutHorizonMetricArrays<B> {
         self.rollout_horizon_metrics_from_tensors(
             forward.predicted_proj_all.clone(),
             forward.target_proj_all.clone(),
@@ -1246,11 +1263,7 @@ impl<B: BackendTrait> VisionVideoLejepaModel<B> {
         frame_patch_tokens: Tensor<B, 4>,
         future_patch_tokens: Tensor<B, 4>,
         context_len: usize,
-    ) -> (
-        [Tensor<B, 1>; VISION_ROLLOUT_HORIZON_COUNT],
-        [Tensor<B, 1>; VISION_ROLLOUT_HORIZON_COUNT],
-        [Tensor<B, 1>; VISION_ROLLOUT_HORIZON_COUNT],
-    ) {
+    ) -> RolloutHorizonMetricArrays<B> {
         let device = future_patch_tokens.device();
         let zero = Tensor::<B, 1>::zeros([1], &device);
         let mut rollout_inv_to_horizon = core::array::from_fn(|_| zero.clone());

@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use burn_dragon_core::ManifoldHyperConnectionCoefficientPolicy;
 use burn_dragon_train::WgpuGenerationExecutor;
 use tempfile::tempdir;
 
@@ -90,6 +91,8 @@ fn load_merges_in_order() {
         TrainingHyperparameters {
             block_size: 256,
             batch_size: 16,
+            gradient_accumulation_steps: 1,
+            target_effective_batch_size: None,
             epochs: None,
             max_iters: 2000,
             log_frequency: 50,
@@ -147,6 +150,8 @@ fn validate_rejects_invalid_rollout_fast_steps() {
         [training]
         block_size = 32
         batch_size = 2
+        gradient_accumulation_steps = 3
+        target_effective_batch_size = 48
         max_iters = 4
         log_frequency = 1
 
@@ -241,6 +246,8 @@ fn wgpu_training_and_inference_core_switches_parse() {
         [training]
         block_size = 32
         batch_size = 2
+        gradient_accumulation_steps = 3
+        target_effective_batch_size = 48
         max_iters = 4
         log_frequency = 1
 
@@ -255,6 +262,14 @@ fn wgpu_training_and_inference_core_switches_parse() {
         fused_core_recurrent = true
         fused_core_rollout = true
 
+        [wgpu.training.startup_autotune]
+        enabled = true
+        target_device_memory_mb = 4096
+        min_batch_size = 4
+        max_batch_size = 64
+        probe_steps = 2
+        binary_search = false
+
         [wgpu.inference]
         fused_core_recurrent = false
         fused_core_rollout = false
@@ -265,6 +280,14 @@ fn wgpu_training_and_inference_core_switches_parse() {
     let config: TrainingConfig = toml::from_str(text).expect("parse training config");
     assert_eq!(config.wgpu.training.fused_core_recurrent, Some(true));
     assert_eq!(config.wgpu.training.fused_core_rollout, Some(true));
+    assert_eq!(config.training.gradient_accumulation_steps, 3);
+    assert_eq!(config.training.target_effective_batch_size, Some(48));
+    assert!(config.wgpu.training.startup_autotune.enabled);
+    assert_eq!(config.wgpu.training.startup_autotune.target_device_memory_mb, 4096);
+    assert_eq!(config.wgpu.training.startup_autotune.min_batch_size, 4);
+    assert_eq!(config.wgpu.training.startup_autotune.max_batch_size, Some(64));
+    assert_eq!(config.wgpu.training.startup_autotune.probe_steps, 2);
+    assert!(!config.wgpu.training.startup_autotune.binary_search);
     assert_eq!(config.wgpu.inference.fused_core_recurrent, Some(false));
     assert_eq!(config.wgpu.inference.fused_core_rollout, Some(false));
     assert_eq!(
@@ -273,6 +296,247 @@ fn wgpu_training_and_inference_core_switches_parse() {
     );
     assert_eq!(config.wgpu.inference.generation_chunk_tokens, 16);
     assert_eq!(config.wgpu.inference.generation_device_buffer_tokens, 96);
+}
+
+#[test]
+fn validate_rejects_invalid_wgpu_startup_autotune_config() {
+    let text = r#"
+        [dataset]
+        cache_dir = "data"
+        type = "shakespeare"
+
+        [training]
+        block_size = 32
+        batch_size = 2
+        gradient_accumulation_steps = 0
+        max_iters = 4
+        log_frequency = 1
+
+        [optimizer]
+        learning_rate = 0.001
+        weight_decay = 0.0
+
+        [generation]
+        prompt = "abc"
+
+        [wgpu.training.startup_autotune]
+        enabled = true
+        target_device_memory_mb = 0
+        min_batch_size = 8
+        max_batch_size = 4
+        probe_steps = 0
+    "#;
+    let config: TrainingConfig = toml::from_str(text).expect("parse training config");
+    let error = config.validate().expect_err("invalid autotune config should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("training.gradient_accumulation_steps must be > 0")
+    );
+}
+
+#[test]
+fn mhc_override_parses_and_validates_for_language_bdh() {
+    let text = r#"
+        [dataset]
+        cache_dir = "data"
+        type = "shakespeare"
+
+        [training]
+        block_size = 32
+        batch_size = 2
+        max_iters = 4
+        log_frequency = 1
+
+        [optimizer]
+        learning_rate = 0.001
+        weight_decay = 0.0
+
+        [generation]
+        prompt = "abc"
+
+        [model.mhc]
+        enabled = true
+        num_streams = 1
+        num_views = 4
+        coefficient_policy = "static_sinkhorn"
+        mhc_iters = 8
+        mhc_tau = 0.1
+        add_branch_out_to_residual = true
+        dropout = 0.0
+    "#;
+    let config: TrainingConfig = toml::from_str(text).expect("parse training config");
+    config.validate().expect("language mHC config should validate");
+    let mhc = config.model.mhc.expect("mHC override");
+    assert!(mhc.enabled);
+    assert_eq!(mhc.num_streams, 1);
+    assert_eq!(mhc.num_views, 4);
+    assert_eq!(
+        mhc.coefficient_policy,
+        ManifoldHyperConnectionCoefficientPolicy::StaticSinkhorn
+    );
+}
+
+#[test]
+fn y_neuron_recurrence_override_parses_and_validates_for_language_bdh() {
+    let text = r#"
+        [dataset]
+        cache_dir = "data"
+        type = "shakespeare"
+
+        [training]
+        block_size = 32
+        batch_size = 2
+        max_iters = 4
+        log_frequency = 1
+
+        [optimizer]
+        learning_rate = 0.001
+        weight_decay = 0.0
+
+        [generation]
+        prompt = "abc"
+
+        [model.y_neuron_recurrence]
+        enabled = true
+        carry_in_scale = 0.125
+        last_layers = 1
+        chunk_tokens = 4
+        state_decay = 0.5
+        state_update_scale = 1.5
+        state_rms_cap = 0.75
+    "#;
+    let config: TrainingConfig = toml::from_str(text).expect("parse training config");
+    config.validate().expect("language y_neuron recurrence should validate");
+    let recurrence = config
+        .model
+        .y_neuron_recurrence
+        .expect("y_neuron recurrence override");
+    assert!(recurrence.enabled);
+    assert_eq!(recurrence.carry_in_scale, 0.125);
+    assert_eq!(recurrence.last_layers, Some(1));
+    assert_eq!(recurrence.chunk_tokens, 4);
+    assert_eq!(recurrence.state_decay, 0.5);
+    assert_eq!(recurrence.state_update_scale, 1.5);
+    assert_eq!(recurrence.state_rms_cap, Some(0.75));
+}
+
+#[test]
+fn y_sparse_recurrence_alias_parses_into_y_neuron_recurrence() {
+    let text = r#"
+        [dataset]
+        cache_dir = "data"
+        type = "shakespeare"
+
+        [training]
+        block_size = 32
+        batch_size = 2
+        max_iters = 4
+        log_frequency = 1
+
+        [optimizer]
+        learning_rate = 0.001
+        weight_decay = 0.0
+
+        [generation]
+        prompt = "abc"
+
+        [model.y_sparse_recurrence]
+        enabled = true
+        carry_in_scale = 0.2
+        last_layers = 2
+        chunk_tokens = 8
+        state_decay = 0.25
+        state_update_scale = 2.0
+        state_rms_cap = 0.5
+    "#;
+    let config: TrainingConfig = toml::from_str(text).expect("parse training config");
+    config.validate().expect("legacy y_sparse alias should validate");
+    let recurrence = config
+        .model
+        .y_neuron_recurrence
+        .expect("aliased y_neuron recurrence override");
+    assert!(recurrence.enabled);
+    assert_eq!(recurrence.carry_in_scale, 0.2);
+    assert_eq!(recurrence.last_layers, Some(2));
+    assert_eq!(recurrence.chunk_tokens, 8);
+    assert_eq!(recurrence.state_decay, 0.25);
+    assert_eq!(recurrence.state_update_scale, 2.0);
+    assert_eq!(recurrence.state_rms_cap, Some(0.5));
+}
+
+#[test]
+fn validate_rejects_zero_last_layers_for_y_neuron_recurrence() {
+    let text = r#"
+        [dataset]
+        cache_dir = "data"
+        type = "shakespeare"
+
+        [training]
+        block_size = 32
+        batch_size = 2
+        max_iters = 4
+        log_frequency = 1
+
+        [optimizer]
+        learning_rate = 0.001
+        weight_decay = 0.0
+
+        [generation]
+        prompt = "abc"
+
+        [model.y_neuron_recurrence]
+        enabled = true
+        last_layers = 0
+        chunk_tokens = 4
+        state_decay = 0.5
+        state_update_scale = 1.0
+    "#;
+    let config: TrainingConfig = toml::from_str(text).expect("parse training config");
+    let err = config.validate().expect_err("zero last_layers should be rejected");
+    assert!(
+        err.to_string().contains("last_layers"),
+        "expected last_layers validation error, got {err}"
+    );
+}
+
+#[test]
+fn validate_rejects_language_mhc_multi_streams_for_now() {
+    let text = r#"
+        [dataset]
+        cache_dir = "data"
+        type = "shakespeare"
+
+        [training]
+        block_size = 32
+        batch_size = 2
+        max_iters = 4
+        log_frequency = 1
+
+        [optimizer]
+        learning_rate = 0.001
+        weight_decay = 0.0
+
+        [generation]
+        prompt = "abc"
+
+        [model.mhc]
+        enabled = true
+        num_streams = 2
+        num_views = 2
+        mhc_iters = 8
+        mhc_tau = 0.1
+        add_branch_out_to_residual = true
+        dropout = 0.0
+    "#;
+    let config: TrainingConfig = toml::from_str(text).expect("parse training config");
+    let err = config
+        .validate()
+        .expect_err("language multi-stream mHC should fail validation for now");
+    assert!(
+        err.to_string().contains("model.mhc.num_streams"),
+        "unexpected error: {err:#}"
+    );
 }
 
 #[test]

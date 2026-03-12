@@ -7,7 +7,7 @@ use crate::tokenizer::SharedTokenizer;
 
 pub use factory::build_dataset;
 pub use huggingface::HuggingFaceDataset;
-pub use scheduler::{RandomDataLoader, SequenceBatch, TokenSequenceDataset};
+pub use scheduler::{RandomDataLoader, SequenceBatch, TokenSequenceDataset, sample_batch_with_shape};
 pub use shakespeare::ShakespeareDataset;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

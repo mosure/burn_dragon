@@ -1,4 +1,5 @@
 use crate::artifacts::write_validation_artifacts;
+use crate::checkpoint::write_training_snapshot;
 use crate::train::prelude::*;
 use crate::train::schedule::{
     SudokuTrainEnvironment, resolve_lr_scheduler, resolve_train_schedule, train_with_scheduler,
@@ -132,6 +133,7 @@ where
     write_latest_run(&run_root, &run_name)?;
     if write_config {
         write_run_config(config, &run_dir, &run_name)?;
+        write_training_snapshot(config, &run_dir)?;
     }
 
     if config.artifacts.max_samples > 0 {

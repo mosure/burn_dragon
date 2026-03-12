@@ -33,6 +33,7 @@ exclude = [
 members = [
   ".",
   "crates/bevy_dragon",
+  "crates/burn_dragon_checkpoint",
   "crates/burn_dragon_core",
   "crates/burn_dragon_cli",
   "crates/burn_dragon_language",
@@ -51,6 +52,8 @@ default = ["cli", "cuda"]
 benchmark = [
   "train",
   "burn_dragon_core/benchmark",
+  "burn_dragon_graph/benchmark",
+  "burn_dragon_sudoku/benchmark",
   "burn_dragon_train/benchmark",
   "burn_dragon_vision/benchmark",
 ]
@@ -62,12 +65,14 @@ cli = [
 train = [
   "burn_dragon_core/train",
   "burn_dragon_language/train",
+  "burn_dragon_sudoku/train",
   "burn_dragon_train/train",
   "burn_dragon_vision/train",
 ]
 cuda = [
   "burn_dragon_core/cuda",
   "burn_dragon_language/cuda",
+  "burn_dragon_sudoku/cuda",
   "burn_dragon_train/cuda",
   "burn_dragon_vision/cuda",
 ]
@@ -82,9 +87,13 @@ viz = ["burn_dragon_core/viz", "burn_dragon_language/viz", "bevy_dragon/viz", "b
 
 [dependencies]
 burn_dragon_core = { path = "crates/burn_dragon_core", version = "0.4.0", default-features = false }
+burn_dragon_checkpoint = { path = "crates/burn_dragon_checkpoint", version = "0.4.0", default-features = false }
+burn_dragon_graph = { path = "crates/burn_dragon_graph", version = "0.4.0", default-features = false }
 burn_dragon_language = { path = "crates/burn_dragon_language", version = "0.4.0", default-features = false }
+burn_dragon_sudoku = { path = "crates/burn_dragon_sudoku", version = "0.4.0", default-features = false }
 burn_dragon_train = { path = "crates/burn_dragon_train", version = "0.4.0", default-features = false, optional = true }
 burn_dragon_vision = { path = "crates/burn_dragon_vision", version = "0.4.0", default-features = false }
+burn_dragon_wgpu = { path = "crates/burn_dragon_wgpu", version = "0.4.0", default-features = false }
 bevy_dragon = { path = "crates/bevy_dragon", version = "0.4.0", default-features = false, optional = true }
 burn_dragon_web = { path = "crates/burn_dragon_web", version = "0.4.0", default-features = false, optional = true }
 

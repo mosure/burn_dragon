@@ -2,7 +2,11 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 
 use burn::prelude::*;
-use burn_dragon_core::StructuredStepMode;
+use burn::tensor::TensorData;
+use burn_dragon_core::{
+    StructuredStepMode, structured_predict_decay, target_major_decay_add,
+    target_major_identity_read, target_major_identity_write, target_major_outer_product,
+};
 
 use crate::{
     GraphCsrAdjacency, GraphRoutingError, GraphTopologyRouting, GraphTopologyState,
@@ -95,11 +99,7 @@ impl Default for GraphRhoStepConfig {
 
 impl GraphRhoStepConfig {
     fn decay_for_mode(self, mode: StructuredStepMode) -> f32 {
-        if mode.temporal_dt() == 0 {
-            1.0
-        } else {
-            self.predict_decay.clamp(0.0, 1.0)
-        }
+        structured_predict_decay(mode, self.predict_decay)
     }
 }
 
@@ -247,9 +247,15 @@ pub fn graph_reference_step<B: Backend>(
     });
 
     let decay = config.decay_for_mode(mode);
-    let next_node_rho = identity_write(node_rho, &inputs.node_query, &inputs.node_value, decay);
+    let decay_tensor =
+        Tensor::<B, 1>::from_data(TensorData::new(vec![decay], [1]), &inputs.node_query.device());
+    let next_node_rho = target_major_identity_write(
+        node_rho,
+        inputs.node_query.clone(),
+        inputs.node_value.clone(),
+        decay_tensor.clone(),
+    );
     let next_cluster_rho = {
-        let decayed = cluster_rho.mul_scalar(decay);
         let self_update = direct_outer(&inputs.cluster_query, &inputs.cluster_value);
         let node_update = routing
             .node_to_cluster()
@@ -270,26 +276,31 @@ pub fn graph_reference_step<B: Backend>(
                     inputs.cluster_query.shape().dims::<3>()[0],
                 )
             });
-        decayed.add(self_update).add(node_update)
+        target_major_decay_add(
+            cluster_rho,
+            self_update.add(node_update),
+            decay_tensor.clone(),
+        )
     };
     let next_global_rho = {
         let [batch, global_count, rank, value_dim] = global_rho.shape().dims::<4>();
-        let mut next = global_rho.mul_scalar(decay);
+        let mut update = Tensor::<B, 4>::zeros([batch, global_count, rank, value_dim], &global_rho.device());
         if let Some(route) = routing.node_to_global() {
-            let update =
+            let node_update =
                 sparse_write_aggregate(&inputs.node_query, &inputs.node_value, route, global_count);
-            next = next.add(update);
+            update = update.add(node_update);
         }
         if let Some(route) = routing.cluster_to_global() {
-            let update = sparse_write_aggregate(
+            let cluster_update = sparse_write_aggregate(
                 &inputs.cluster_query,
                 &inputs.cluster_value,
                 route,
                 global_count,
             );
-            next = next.add(update);
+            update = update.add(cluster_update);
         }
-        next.reshape([batch, global_count, rank, value_dim])
+        target_major_decay_add(global_rho, update, decay_tensor.clone())
+            .reshape([batch, global_count, rank, value_dim])
     };
 
     let mut next_state = GraphTopologyState::from_parts(
@@ -605,9 +616,7 @@ fn sparse_read<B: Backend>(
         if let Some(targets) = adjacency.neighbors(source) {
             for &target in targets {
                 let source_state = memory.clone().slice_dim(1, target..target + 1);
-                let msg = source_state
-                    .mul(q_s.clone().unsqueeze_dim::<4>(3))
-                    .sum_dims_squeeze::<3, usize>(&[2]);
+                let msg = target_major_identity_read(q_s.clone(), source_state);
                 context = context + msg;
             }
         }
@@ -621,20 +630,8 @@ fn sparse_read<B: Backend>(
     }
 }
 
-fn identity_write<B: Backend>(
-    memory: Tensor<B, 4>,
-    query: &Tensor<B, 3>,
-    value: &Tensor<B, 3>,
-    decay: f32,
-) -> Tensor<B, 4> {
-    memory.mul_scalar(decay).add(direct_outer(query, value))
-}
-
 fn direct_outer<B: Backend>(query: &Tensor<B, 3>, value: &Tensor<B, 3>) -> Tensor<B, 4> {
-    query
-        .clone()
-        .unsqueeze_dim::<4>(3)
-        .mul(value.clone().unsqueeze_dim::<4>(2))
+    target_major_outer_product(query.clone(), value.clone())
 }
 
 fn sparse_write_aggregate<B: Backend>(
@@ -662,14 +659,11 @@ fn sparse_write_aggregate<B: Backend>(
                 }
                 let outer = query
                     .clone()
-                    .slice_dim(1, source..source + 1)
-                    .unsqueeze_dim::<4>(3)
-                    .mul(
-                        value
-                            .clone()
-                            .slice_dim(1, source..source + 1)
-                            .unsqueeze_dim::<4>(2),
-                    );
+                    .slice_dim(1, source..source + 1);
+                let outer = target_major_outer_product(
+                    outer,
+                    value.clone().slice_dim(1, source..source + 1),
+                );
                 update = update + outer;
             }
         }

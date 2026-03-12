@@ -1,4 +1,5 @@
-use super::distill_runtime::build_distill_datasets_and_teacher;
+use super::distill_runtime::{DistillDatasetRequest, build_distill_datasets_and_teacher};
+use super::video::dataset::MovingMnistVideoLoaderConfig;
 use crate::train::prelude::*;
 
 pub fn train_vision_backend<B, Init>(
@@ -120,17 +121,18 @@ where
 
     let (train_dataset, val_dataset, mode) = match &config.mode {
         VisionTrainingModeConfig::Distill(_distill) => {
-            let (train_dataset, val_dataset, teacher) = build_distill_datasets_and_teacher::<B>(
-                config,
-                &vision_config,
-                normalize,
-                train_aug,
-                val_aug,
-                &train_root,
-                &val_root,
-                student_patch_tokens,
-                &device,
-            )?;
+            let (train_dataset, val_dataset, teacher) =
+                build_distill_datasets_and_teacher::<B>(DistillDatasetRequest {
+                    config,
+                    vision_config: &vision_config,
+                    normalize,
+                    train_aug,
+                    val_aug,
+                    train_root: &train_root,
+                    val_root: &val_root,
+                    student_patch_tokens,
+                    device: &device,
+                })?;
 
             (
                 train_dataset,
@@ -567,6 +569,7 @@ where
     let run_root = PathBuf::from("runs").join("vision");
     let (run_dir, run_name) = create_run_dir(&run_root)?;
     write_latest_run(&run_root, &run_name)?;
+    crate::write_training_snapshot(config, &run_dir)?;
     info!("vision run name: {run_name}");
     let context = VisionTrainEnvironment {
         run_dir: &run_dir,
@@ -1011,18 +1014,20 @@ where
     let train_loader: Arc<dyn DataLoader<B, VideoClipBatch<B>>> =
         Arc::new(MovingMnistVideoDataLoader::<B>::new(
             Arc::clone(&train_dataset),
-            training.batch_size,
             device,
-            steps_per_epoch,
-            Some(total_steps),
-            target_horizon_curriculum,
-            config.dataset.prefetch_batches,
-            config.dataset.prefetch_workers,
-            config.dataset.prefetch_to_device,
-            false,
-            0,
-            0,
-            0,
+            MovingMnistVideoLoaderConfig {
+                batch_size: training.batch_size,
+                steps_per_epoch,
+                total_steps: Some(total_steps),
+                target_horizon_curriculum,
+                prefetch_batches: config.dataset.prefetch_batches,
+                prefetch_workers: config.dataset.prefetch_workers,
+                prefetch_to_device: config.dataset.prefetch_to_device,
+                sequential: false,
+                artifact_capture_every: 0,
+                artifact_capture_images: 0,
+                artifact_extra_future_frames: 0,
+            },
         ));
 
     let long_rollout_validation =
@@ -1054,18 +1059,20 @@ where
     let valid_loader: Arc<dyn DataLoader<ValidBackend<B>, VideoClipBatch<ValidBackend<B>>>> =
         Arc::new(MovingMnistVideoDataLoader::<ValidBackend<B>>::new(
             Arc::clone(&val_dataset),
-            valid_batch_size,
             &valid_device,
-            valid_steps,
-            None,
-            None,
-            config.dataset.prefetch_batches,
-            config.dataset.prefetch_workers,
-            false,
-            true,
-            artifact_capture_every,
-            artifact_capture_images,
-            artifact_extra_future_frames,
+            MovingMnistVideoLoaderConfig {
+                batch_size: valid_batch_size,
+                steps_per_epoch: valid_steps,
+                total_steps: None,
+                target_horizon_curriculum: None,
+                prefetch_batches: config.dataset.prefetch_batches,
+                prefetch_workers: config.dataset.prefetch_workers,
+                prefetch_to_device: false,
+                sequential: true,
+                artifact_capture_every,
+                artifact_capture_images,
+                artifact_extra_future_frames,
+            },
         ));
     info!(
         "video valid loader: batch_size={valid_batch_size}, steps_per_epoch={val_steps_per_epoch}, long_rollout_validation={long_rollout_validation}"
@@ -1081,6 +1088,7 @@ where
     let run_root = PathBuf::from("runs").join("vision");
     let (run_dir, run_name) = create_run_dir(&run_root)?;
     write_latest_run(&run_root, &run_name)?;
+    crate::write_training_snapshot(config, &run_dir)?;
     info!("vision run name: {run_name}");
 
     let context = VisionTrainEnvironment {

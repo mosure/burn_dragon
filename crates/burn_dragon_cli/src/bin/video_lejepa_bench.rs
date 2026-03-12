@@ -12,13 +12,13 @@ mod real {
 
     use burn::tensor::backend::Backend as BackendTrait;
     use burn_autodiff::Autodiff;
+    use burn_dragon::core::{FusedKernelConfig, ManifoldHyperConnectionsConfig};
     use burn_dragon::vision::train::bench::VisionVideoLejepaTrainStepBench;
     use burn_dragon::vision::{
         MovingMnistSplit, MovingMnistVideoDataset, MovingMnistVideoDatasetConfig,
         SpatialPositionalEncodingKind, VisionAttentionMode, VisionBackboneKind, VisionDragonConfig,
         VisionLatentActivation, VisionNormalize, VisionPatchEmbedMode, VisionVideoLejepaConfig,
     };
-    use burn_dragon::{FusedKernelConfig, ManifoldHyperConnectionsConfig};
     use burn_wgpu::{CubeBackend, RuntimeOptions, WgpuRuntime, graphics};
     use clap::Parser;
     use serde::Serialize;
@@ -352,9 +352,11 @@ mod real {
     }
 
     fn build_video_config(case: BenchCase, fused_temporal: bool) -> VisionVideoLejepaConfig {
-        let mut video = VisionVideoLejepaConfig::default();
-        video.context_frames = case.context_frames;
-        video.target_frames = case.target_frames;
+        let mut video = VisionVideoLejepaConfig {
+            context_frames: case.context_frames,
+            target_frames: case.target_frames,
+            ..VisionVideoLejepaConfig::default()
+        };
         video.teacher_ema.enabled = true;
         video.teacher_ema.decay = 0.996;
         video.loss.probe_weight = 0.25;

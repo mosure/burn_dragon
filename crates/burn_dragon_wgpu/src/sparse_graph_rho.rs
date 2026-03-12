@@ -1,8 +1,9 @@
 use std::any::{Any, TypeId};
+use std::time::Instant;
 
 use burn::tensor::Tensor as BurnTensor;
 use burn::tensor::backend::{AutodiffBackend, Backend as BackendTrait};
-use burn::tensor::{DType, Shape, TensorData, TensorPrimitive};
+use burn::tensor::{DType, Int, Shape, TensorData, TensorPrimitive};
 use burn_autodiff::Autodiff;
 use burn_cubecl::cubecl::{prelude::*, server::Bindings};
 use burn_cubecl::fusion::FusionCubeRuntime;
@@ -14,6 +15,10 @@ use burn_fusion::FusionTensor;
 use burn_wgpu::{CubeBackend, KernelSource, SourceKernel, SourceTemplate, WgpuRuntime};
 
 use crate::fusion_compat::register_fusion_float_tensor;
+use crate::profiling::{
+    KernelProfileSite, KernelProfileSnapshot, profile_enabled, profile_record, profile_reset,
+    profile_snapshot,
+};
 
 const WORKGROUP_SIZE_X: u32 = 8;
 const WORKGROUP_SIZE_Y: u32 = 8;
@@ -21,6 +26,10 @@ const META_LEN: usize = 5;
 const SPARSE_GRAPH_RHO_SHADER: &str = include_str!("sparse_graph_rho.wgsl");
 type WgpuCubeAutodiffBackend = Autodiff<CubeBackend<WgpuRuntime, f32, i32, u32>>;
 type WgpuCubeAutodiffTensor = <WgpuCubeAutodiffBackend as BackendTrait>::FloatTensorPrimitive;
+type WgpuCubeAutodiffIntTensor = <WgpuCubeAutodiffBackend as BackendTrait>::IntTensorPrimitive;
+static SPARSE_GRAPH_RHO_PROFILE: KernelProfileSite = KernelProfileSite::new();
+
+pub type SparseGraphRhoProfileSnapshot = KernelProfileSnapshot;
 
 #[derive(Debug)]
 pub struct SparseGraphRhoAttentionOutput<B: BackendTrait> {
@@ -28,12 +37,20 @@ pub struct SparseGraphRhoAttentionOutput<B: BackendTrait> {
     pub rho: BurnTensor<B, 4>,
 }
 
+pub fn sparse_graph_rho_profile_reset() {
+    profile_reset(&SPARSE_GRAPH_RHO_PROFILE);
+}
+
+pub fn sparse_graph_rho_profile_snapshot() -> SparseGraphRhoProfileSnapshot {
+    profile_snapshot(&SPARSE_GRAPH_RHO_PROFILE)
+}
+
 #[derive(Clone, Debug)]
 pub struct SparseGraphCsr<B: BackendTrait> {
-    source_offsets: BurnTensor<B, 1>,
-    source_indices: BurnTensor<B, 1>,
-    incoming_offsets: BurnTensor<B, 1>,
-    incoming_indices: BurnTensor<B, 1>,
+    source_offsets: BurnTensor<B, 1, Int>,
+    source_indices: BurnTensor<B, 1, Int>,
+    incoming_offsets: BurnTensor<B, 1, Int>,
+    incoming_indices: BurnTensor<B, 1, Int>,
 }
 
 impl<B: BackendTrait> SparseGraphCsr<B> {
@@ -45,41 +62,41 @@ impl<B: BackendTrait> SparseGraphCsr<B> {
         device: &B::Device,
     ) -> Self {
         Self {
-            source_offsets: BurnTensor::<B, 1>::from_data(
+            source_offsets: BurnTensor::<B, 1, Int>::from_data(
                 TensorData::new(
                     source_offsets
                         .iter()
-                        .map(|&value| value as f32)
+                        .map(|&value| value as i32)
                         .collect::<Vec<_>>(),
                     [source_offsets.len()],
                 ),
                 device,
             ),
-            source_indices: BurnTensor::<B, 1>::from_data(
+            source_indices: BurnTensor::<B, 1, Int>::from_data(
                 TensorData::new(
                     source_indices
                         .iter()
-                        .map(|&value| value as f32)
+                        .map(|&value| value as i32)
                         .collect::<Vec<_>>(),
                     [source_indices.len()],
                 ),
                 device,
             ),
-            incoming_offsets: BurnTensor::<B, 1>::from_data(
+            incoming_offsets: BurnTensor::<B, 1, Int>::from_data(
                 TensorData::new(
                     incoming_offsets
                         .iter()
-                        .map(|&value| value as f32)
+                        .map(|&value| value as i32)
                         .collect::<Vec<_>>(),
                     [incoming_offsets.len()],
                 ),
                 device,
             ),
-            incoming_indices: BurnTensor::<B, 1>::from_data(
+            incoming_indices: BurnTensor::<B, 1, Int>::from_data(
                 TensorData::new(
                     incoming_indices
                         .iter()
-                        .map(|&value| value as f32)
+                        .map(|&value| value as i32)
                         .collect::<Vec<_>>(),
                     [incoming_indices.len()],
                 ),
@@ -89,10 +106,10 @@ impl<B: BackendTrait> SparseGraphCsr<B> {
     }
 
     pub fn from_tensors(
-        source_offsets: BurnTensor<B, 1>,
-        source_indices: BurnTensor<B, 1>,
-        incoming_offsets: BurnTensor<B, 1>,
-        incoming_indices: BurnTensor<B, 1>,
+        source_offsets: BurnTensor<B, 1, Int>,
+        source_indices: BurnTensor<B, 1, Int>,
+        incoming_offsets: BurnTensor<B, 1, Int>,
+        incoming_indices: BurnTensor<B, 1, Int>,
     ) -> Result<Self, SparseGraphRhoAttentionError> {
         let csr = Self {
             source_offsets,
@@ -104,19 +121,19 @@ impl<B: BackendTrait> SparseGraphCsr<B> {
         Ok(csr)
     }
 
-    pub fn source_offsets(&self) -> &BurnTensor<B, 1> {
+    pub fn source_offsets(&self) -> &BurnTensor<B, 1, Int> {
         &self.source_offsets
     }
 
-    pub fn source_indices(&self) -> &BurnTensor<B, 1> {
+    pub fn source_indices(&self) -> &BurnTensor<B, 1, Int> {
         &self.source_indices
     }
 
-    pub fn incoming_offsets(&self) -> &BurnTensor<B, 1> {
+    pub fn incoming_offsets(&self) -> &BurnTensor<B, 1, Int> {
         &self.incoming_offsets
     }
 
-    pub fn incoming_indices(&self) -> &BurnTensor<B, 1> {
+    pub fn incoming_indices(&self) -> &BurnTensor<B, 1, Int> {
         &self.incoming_indices
     }
 
@@ -159,6 +176,7 @@ pub enum SparseGraphRhoAttentionError {
 pub fn supports_sparse_graph_rho_backend<B: BackendTrait>() -> bool
 where
     B::FloatTensorPrimitive: 'static,
+    B::IntTensorPrimitive: 'static,
 {
     matches_type::<B::FloatTensorPrimitive, CubeTensor<WgpuRuntime>>()
         || matches_type::<B::FloatTensorPrimitive, WgpuCubeAutodiffTensor>()
@@ -174,10 +192,13 @@ pub fn fused_sparse_graph_rho_attention_wgpu<B: BackendTrait>(
 where
     B::FloatTensorPrimitive: 'static,
 {
+    let prof_enabled = profile_enabled();
+    let total_start = prof_enabled.then(Instant::now);
     if !supports_sparse_graph_rho_backend::<B>() {
         return Err(SparseGraphRhoAttentionError::UnsupportedBackend);
     }
 
+    let setup_start = prof_enabled.then(Instant::now);
     let [batch, source_count, latent] = query.shape().dims::<3>();
     let [value_batch, value_count, embd] = value.shape().dims::<3>();
     if batch == 0 || source_count == 0 || latent == 0 || embd == 0 {
@@ -211,6 +232,11 @@ where
     );
     let decay = BurnTensor::<B, 1>::from_data(TensorData::new(vec![decay], [1]), &device);
 
+    let setup_ns = setup_start
+        .map(|start| start.elapsed().as_nanos())
+        .unwrap_or_default();
+
+    let copy_start = prof_enabled.then(Instant::now);
     let query_copy = query.clone();
     let value_copy = value.clone();
     let rho_copy = rho.add_scalar(0.0);
@@ -220,8 +246,11 @@ where
     let incoming_indices_copy = csr.incoming_indices().clone();
     let decay_copy = decay.clone();
     let meta_copy = meta.clone();
+    let copy_ns = copy_start
+        .map(|start| start.elapsed().as_nanos())
+        .unwrap_or_default();
 
-    try_fusion_path_wgpu::<B, u32>(
+    let output = try_fusion_path_wgpu::<B, u32>(
         &query_copy,
         &value_copy,
         &rho_copy,
@@ -270,8 +299,30 @@ where
             &decay_copy,
             &meta_copy,
         )
-    })
-    .ok_or(SparseGraphRhoAttentionError::UnsupportedBackend)
+    });
+
+    if let Some(start) = total_start {
+        profile_record(&SPARSE_GRAPH_RHO_PROFILE, |state| {
+            state.calls = state.calls.saturating_add(u64::from(output.is_some()));
+            state.total_ns = state.total_ns.saturating_add(start.elapsed().as_nanos());
+            state.setup_ns = state.setup_ns.saturating_add(setup_ns);
+            state.copy_ns = state.copy_ns.saturating_add(copy_ns);
+            state.transient_allocations = state.transient_allocations.saturating_add(9);
+            state.metadata_reuse_hits = state.metadata_reuse_hits.saturating_add(4);
+            state.metadata_reuse_bytes = state.metadata_reuse_bytes.saturating_add(
+                ((csr.source_offsets().shape().dims::<1>()[0]
+                    + csr.source_indices().shape().dims::<1>()[0]
+                    + csr.incoming_offsets().shape().dims::<1>()[0]
+                    + csr.incoming_indices().shape().dims::<1>()[0])
+                    * core::mem::size_of::<i32>()) as u64,
+            );
+            state.metadata_upload_bytes = state
+                .metadata_upload_bytes
+                .saturating_add((META_LEN * core::mem::size_of::<f32>()) as u64);
+        });
+    }
+
+    output.ok_or(SparseGraphRhoAttentionError::UnsupportedBackend)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -279,14 +330,15 @@ pub fn try_fused_sparse_graph_rho_attention_wgpu<B: BackendTrait>(
     query: &BurnTensor<B, 3>,
     value: &BurnTensor<B, 3>,
     rho: Option<&BurnTensor<B, 4>>,
-    source_offsets: &BurnTensor<B, 1>,
-    source_indices: &BurnTensor<B, 1>,
-    incoming_offsets: &BurnTensor<B, 1>,
-    incoming_indices: &BurnTensor<B, 1>,
+    source_offsets: &BurnTensor<B, 1, Int>,
+    source_indices: &BurnTensor<B, 1, Int>,
+    incoming_offsets: &BurnTensor<B, 1, Int>,
+    incoming_indices: &BurnTensor<B, 1, Int>,
     decay: f32,
 ) -> Option<SparseGraphRhoAttentionOutput<B>>
 where
     B::FloatTensorPrimitive: 'static,
+    B::IntTensorPrimitive: 'static,
 {
     let csr = SparseGraphCsr::from_tensors(
         source_offsets.clone(),
@@ -303,16 +355,17 @@ fn try_fusion_path_wgpu<B, BT>(
     query: &BurnTensor<B, 3>,
     value: &BurnTensor<B, 3>,
     rho: &BurnTensor<B, 4>,
-    source_offsets: &BurnTensor<B, 1>,
-    source_indices: &BurnTensor<B, 1>,
-    incoming_offsets: &BurnTensor<B, 1>,
-    incoming_indices: &BurnTensor<B, 1>,
+    source_offsets: &BurnTensor<B, 1, Int>,
+    source_indices: &BurnTensor<B, 1, Int>,
+    incoming_offsets: &BurnTensor<B, 1, Int>,
+    incoming_indices: &BurnTensor<B, 1, Int>,
     decay: &BurnTensor<B, 1>,
     meta: &BurnTensor<B, 1>,
 ) -> Option<SparseGraphRhoAttentionOutput<B>>
 where
     B: BackendTrait,
     B::FloatTensorPrimitive: 'static,
+    B::IntTensorPrimitive: 'static,
     BT: BoolElement + 'static,
 {
     if !matches_type::<B::FloatTensorPrimitive, FusionTensor<FusionCubeRuntime<WgpuRuntime, BT>>>()
@@ -332,10 +385,10 @@ where
 
     let value = resolve_fusion_tensor_wgpu::<B, BT, 3>(value)?;
     let rho = resolve_fusion_tensor_wgpu::<B, BT, 4>(rho)?;
-    let source_offsets = resolve_fusion_tensor_wgpu::<B, BT, 1>(source_offsets)?;
-    let source_indices = resolve_fusion_tensor_wgpu::<B, BT, 1>(source_indices)?;
-    let incoming_offsets = resolve_fusion_tensor_wgpu::<B, BT, 1>(incoming_offsets)?;
-    let incoming_indices = resolve_fusion_tensor_wgpu::<B, BT, 1>(incoming_indices)?;
+    let source_offsets = resolve_fusion_int_tensor_wgpu::<B, BT, 1>(source_offsets)?;
+    let source_indices = resolve_fusion_int_tensor_wgpu::<B, BT, 1>(source_indices)?;
+    let incoming_offsets = resolve_fusion_int_tensor_wgpu::<B, BT, 1>(incoming_offsets)?;
+    let incoming_indices = resolve_fusion_int_tensor_wgpu::<B, BT, 1>(incoming_indices)?;
     let decay = resolve_fusion_tensor_wgpu::<B, BT, 1>(decay)?;
     let meta = resolve_fusion_tensor_wgpu::<B, BT, 1>(meta)?;
 
@@ -368,15 +421,16 @@ fn try_direct_path<B: BackendTrait>(
     query: &BurnTensor<B, 3>,
     value: &BurnTensor<B, 3>,
     rho: &BurnTensor<B, 4>,
-    source_offsets: &BurnTensor<B, 1>,
-    source_indices: &BurnTensor<B, 1>,
-    incoming_offsets: &BurnTensor<B, 1>,
-    incoming_indices: &BurnTensor<B, 1>,
+    source_offsets: &BurnTensor<B, 1, Int>,
+    source_indices: &BurnTensor<B, 1, Int>,
+    incoming_offsets: &BurnTensor<B, 1, Int>,
+    incoming_indices: &BurnTensor<B, 1, Int>,
     decay: &BurnTensor<B, 1>,
     meta: &BurnTensor<B, 1>,
 ) -> Option<SparseGraphRhoAttentionOutput<B>>
 where
     B::FloatTensorPrimitive: 'static,
+    B::IntTensorPrimitive: 'static,
 {
     let prim_query = query.clone().into_primitive().tensor();
     let query: CubeTensor<WgpuRuntime> = try_cast_primitive::<B, _>(prim_query)?;
@@ -393,26 +447,28 @@ where
     if rho.dtype != DType::F32 {
         return None;
     }
-    let prim_source_offsets = source_offsets.clone().into_primitive().tensor();
-    let source_offsets: CubeTensor<WgpuRuntime> = try_cast_primitive::<B, _>(prim_source_offsets)?;
-    if source_offsets.dtype != DType::F32 {
+    let prim_source_offsets = source_offsets.clone().into_primitive();
+    let source_offsets: CubeTensor<WgpuRuntime> =
+        try_cast_int_primitive::<B, _>(prim_source_offsets)?;
+    if source_offsets.dtype != DType::I32 {
         return None;
     }
-    let prim_source_indices = source_indices.clone().into_primitive().tensor();
-    let source_indices: CubeTensor<WgpuRuntime> = try_cast_primitive::<B, _>(prim_source_indices)?;
-    if source_indices.dtype != DType::F32 {
+    let prim_source_indices = source_indices.clone().into_primitive();
+    let source_indices: CubeTensor<WgpuRuntime> =
+        try_cast_int_primitive::<B, _>(prim_source_indices)?;
+    if source_indices.dtype != DType::I32 {
         return None;
     }
-    let prim_incoming_offsets = incoming_offsets.clone().into_primitive().tensor();
+    let prim_incoming_offsets = incoming_offsets.clone().into_primitive();
     let incoming_offsets: CubeTensor<WgpuRuntime> =
-        try_cast_primitive::<B, _>(prim_incoming_offsets)?;
-    if incoming_offsets.dtype != DType::F32 {
+        try_cast_int_primitive::<B, _>(prim_incoming_offsets)?;
+    if incoming_offsets.dtype != DType::I32 {
         return None;
     }
-    let prim_incoming_indices = incoming_indices.clone().into_primitive().tensor();
+    let prim_incoming_indices = incoming_indices.clone().into_primitive();
     let incoming_indices: CubeTensor<WgpuRuntime> =
-        try_cast_primitive::<B, _>(prim_incoming_indices)?;
-    if incoming_indices.dtype != DType::F32 {
+        try_cast_int_primitive::<B, _>(prim_incoming_indices)?;
+    if incoming_indices.dtype != DType::I32 {
         return None;
     }
     let prim_decay = decay.clone().into_primitive().tensor();
@@ -452,10 +508,10 @@ fn try_direct_path_autodiff_wgpu_cube<B: BackendTrait>(
     query: &BurnTensor<B, 3>,
     value: &BurnTensor<B, 3>,
     rho: &BurnTensor<B, 4>,
-    source_offsets: &BurnTensor<B, 1>,
-    source_indices: &BurnTensor<B, 1>,
-    incoming_offsets: &BurnTensor<B, 1>,
-    incoming_indices: &BurnTensor<B, 1>,
+    source_offsets: &BurnTensor<B, 1, Int>,
+    source_indices: &BurnTensor<B, 1, Int>,
+    incoming_offsets: &BurnTensor<B, 1, Int>,
+    incoming_indices: &BurnTensor<B, 1, Int>,
     decay: &BurnTensor<B, 1>,
     meta: &BurnTensor<B, 1>,
 ) -> Option<SparseGraphRhoAttentionOutput<B>>
@@ -482,36 +538,32 @@ where
     if rho.dtype != DType::F32 {
         return None;
     }
-    let prim_source_offsets = source_offsets.clone().into_primitive().tensor();
-    let source_offsets_ad: WgpuCubeAutodiffTensor =
-        try_cast_primitive::<B, _>(prim_source_offsets)?;
-    let source_offsets: CubeTensor<WgpuRuntime> =
-        <WgpuCubeAutodiffBackend as AutodiffBackend>::inner(source_offsets_ad);
-    if source_offsets.dtype != DType::F32 {
+    let prim_source_offsets = source_offsets.clone().into_primitive();
+    let source_offsets_ad: WgpuCubeAutodiffIntTensor =
+        try_cast_int_primitive::<B, _>(prim_source_offsets)?;
+    let source_offsets: CubeTensor<WgpuRuntime> = source_offsets_ad;
+    if source_offsets.dtype != DType::I32 {
         return None;
     }
-    let prim_source_indices = source_indices.clone().into_primitive().tensor();
-    let source_indices_ad: WgpuCubeAutodiffTensor =
-        try_cast_primitive::<B, _>(prim_source_indices)?;
-    let source_indices: CubeTensor<WgpuRuntime> =
-        <WgpuCubeAutodiffBackend as AutodiffBackend>::inner(source_indices_ad);
-    if source_indices.dtype != DType::F32 {
+    let prim_source_indices = source_indices.clone().into_primitive();
+    let source_indices_ad: WgpuCubeAutodiffIntTensor =
+        try_cast_int_primitive::<B, _>(prim_source_indices)?;
+    let source_indices: CubeTensor<WgpuRuntime> = source_indices_ad;
+    if source_indices.dtype != DType::I32 {
         return None;
     }
-    let prim_incoming_offsets = incoming_offsets.clone().into_primitive().tensor();
-    let incoming_offsets_ad: WgpuCubeAutodiffTensor =
-        try_cast_primitive::<B, _>(prim_incoming_offsets)?;
-    let incoming_offsets: CubeTensor<WgpuRuntime> =
-        <WgpuCubeAutodiffBackend as AutodiffBackend>::inner(incoming_offsets_ad);
-    if incoming_offsets.dtype != DType::F32 {
+    let prim_incoming_offsets = incoming_offsets.clone().into_primitive();
+    let incoming_offsets_ad: WgpuCubeAutodiffIntTensor =
+        try_cast_int_primitive::<B, _>(prim_incoming_offsets)?;
+    let incoming_offsets: CubeTensor<WgpuRuntime> = incoming_offsets_ad;
+    if incoming_offsets.dtype != DType::I32 {
         return None;
     }
-    let prim_incoming_indices = incoming_indices.clone().into_primitive().tensor();
-    let incoming_indices_ad: WgpuCubeAutodiffTensor =
-        try_cast_primitive::<B, _>(prim_incoming_indices)?;
-    let incoming_indices: CubeTensor<WgpuRuntime> =
-        <WgpuCubeAutodiffBackend as AutodiffBackend>::inner(incoming_indices_ad);
-    if incoming_indices.dtype != DType::F32 {
+    let prim_incoming_indices = incoming_indices.clone().into_primitive();
+    let incoming_indices_ad: WgpuCubeAutodiffIntTensor =
+        try_cast_int_primitive::<B, _>(prim_incoming_indices)?;
+    let incoming_indices: CubeTensor<WgpuRuntime> = incoming_indices_ad;
+    if incoming_indices.dtype != DType::I32 {
         return None;
     }
     let prim_decay = decay.clone().into_primitive().tensor();
@@ -612,9 +664,16 @@ fn sparse_graph_rho_attention_wgsl_runtime<R: CubeRuntime>(
         rho_next.handle.clone().binding(),
         meta.handle.clone().binding(),
     ]);
+    let dispatch_start = profile_enabled().then(Instant::now);
     client
         .launch(Box::new(kernel), count, bindings)
         .expect("launch sparse graph rho kernel");
+    if let Some(start) = dispatch_start {
+        profile_record(&SPARSE_GRAPH_RHO_PROFILE, |state| {
+            state.launches = state.launches.saturating_add(1);
+            state.dispatch_ns = state.dispatch_ns.saturating_add(start.elapsed().as_nanos());
+        });
+    }
 
     (context, rho_next)
 }
@@ -637,6 +696,25 @@ where
     let client = fusion.client.clone();
     let cube = client.resolve_tensor_float::<CubeBackend<WgpuRuntime, f32, i32, BT>>(fusion);
     if cube.dtype != DType::F32 {
+        return None;
+    }
+    Some(cube)
+}
+
+fn resolve_fusion_int_tensor_wgpu<B, BT, const D: usize>(
+    tensor: &BurnTensor<B, D, Int>,
+) -> Option<CubeTensor<WgpuRuntime>>
+where
+    B: BackendTrait,
+    B::IntTensorPrimitive: 'static,
+    BT: BoolElement + 'static,
+{
+    let prim = tensor.clone().into_primitive();
+    let fusion: FusionTensor<FusionCubeRuntime<WgpuRuntime, BT>> =
+        try_cast_int_primitive::<B, _>(prim)?;
+    let client = fusion.client.clone();
+    let cube = client.resolve_tensor_int::<CubeBackend<WgpuRuntime, f32, i32, BT>>(fusion);
+    if cube.dtype != DType::I32 {
         return None;
     }
     Some(cube)
@@ -666,6 +744,14 @@ where
     boxed.downcast::<T>().ok().map(|boxed| *boxed)
 }
 
+fn try_cast_int_primitive<B: BackendTrait, T: 'static>(value: B::IntTensorPrimitive) -> Option<T>
+where
+    B::IntTensorPrimitive: 'static,
+{
+    let boxed: Box<dyn Any> = Box::new(value);
+    boxed.downcast::<T>().ok().map(|boxed| *boxed)
+}
+
 fn try_cast_backend<B: BackendTrait, T: 'static>(value: T) -> Option<B::FloatTensorPrimitive>
 where
     B::FloatTensorPrimitive: 'static,
@@ -684,6 +770,12 @@ mod tests {
     use burn_wgpu::{CubeBackend, RuntimeOptions, graphics};
 
     type Backend = CubeBackend<WgpuRuntime, f32, i32, u32>;
+    type GraphRouteTensors = (
+        Tensor<Backend, 1, Int>,
+        Tensor<Backend, 1, Int>,
+        Tensor<Backend, 1, Int>,
+        Tensor<Backend, 1, Int>,
+    );
 
     fn init_runtime(device: &<Backend as BackendTrait>::Device) {
         static INIT: std::sync::Once = std::sync::Once::new();
@@ -747,8 +839,11 @@ mod tests {
         for source in 0..source_count {
             let q_s = query.clone().slice_dim(1, source..source + 1);
             let mut acc = Tensor::<Backend, 3>::zeros([batch, 1, embd], &query.device());
-            for edge in source_offsets[source]..source_offsets[source + 1] {
-                let target = source_indices[edge];
+            for &target in source_indices
+                .iter()
+                .take(source_offsets[source + 1])
+                .skip(source_offsets[source])
+            {
                 if target >= target_count {
                     continue;
                 }
@@ -763,8 +858,11 @@ mod tests {
 
         for target in 0..target_count {
             let mut update = Tensor::<Backend, 4>::zeros([batch, 1, latent, embd], &query.device());
-            for edge in incoming_offsets[target]..incoming_offsets[target + 1] {
-                let source = incoming_indices[edge];
+            for &source in incoming_indices
+                .iter()
+                .take(incoming_offsets[target + 1])
+                .skip(incoming_offsets[target])
+            {
                 if source >= source_count {
                     continue;
                 }
@@ -793,41 +891,36 @@ mod tests {
         source_indices: &[usize],
         incoming_offsets: &[usize],
         incoming_indices: &[usize],
-    ) -> (
-        Tensor<Backend, 1>,
-        Tensor<Backend, 1>,
-        Tensor<Backend, 1>,
-        Tensor<Backend, 1>,
-    ) {
-        let source_offsets = Tensor::<Backend, 1>::from_data(
+    ) -> GraphRouteTensors {
+        let source_offsets = Tensor::<Backend, 1, Int>::from_data(
             TensorData::new(
-                source_offsets.iter().map(|&x| x as f32).collect::<Vec<_>>(),
+                source_offsets.iter().map(|&x| x as i32).collect::<Vec<_>>(),
                 [source_offsets.len()],
             ),
             device,
         );
-        let source_indices = Tensor::<Backend, 1>::from_data(
+        let source_indices = Tensor::<Backend, 1, Int>::from_data(
             TensorData::new(
-                source_indices.iter().map(|&x| x as f32).collect::<Vec<_>>(),
+                source_indices.iter().map(|&x| x as i32).collect::<Vec<_>>(),
                 [source_indices.len()],
             ),
             device,
         );
-        let incoming_offsets = Tensor::<Backend, 1>::from_data(
+        let incoming_offsets = Tensor::<Backend, 1, Int>::from_data(
             TensorData::new(
                 incoming_offsets
                     .iter()
-                    .map(|&x| x as f32)
+                    .map(|&x| x as i32)
                     .collect::<Vec<_>>(),
                 [incoming_offsets.len()],
             ),
             device,
         );
-        let incoming_indices = Tensor::<Backend, 1>::from_data(
+        let incoming_indices = Tensor::<Backend, 1, Int>::from_data(
             TensorData::new(
                 incoming_indices
                     .iter()
-                    .map(|&x| x as f32)
+                    .map(|&x| x as i32)
                     .collect::<Vec<_>>(),
                 [incoming_indices.len()],
             ),

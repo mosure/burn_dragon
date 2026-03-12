@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use burn_dragon_core::RotaryEmbedding;
+use burn_dragon_core::{ManifoldHyperConnectionsConfig, RotaryEmbedding, YNeuronRecurrenceConfig};
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct GenerationConfig {
@@ -38,6 +38,9 @@ pub struct ModelOverrides {
     #[serde(alias = "rollout_fast_steps")]
     pub rollout_fast_steps_per_slow_step: Option<usize>,
     pub rotary_embedding: Option<RotaryEmbedding>,
+    #[serde(alias = "y_sparse_recurrence")]
+    pub y_neuron_recurrence: Option<YNeuronRecurrenceConfig>,
+    pub mhc: Option<ManifoldHyperConnectionsConfig>,
 }
 
 fn default_context_strategy() -> ContextStrategyConfig {

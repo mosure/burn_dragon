@@ -39,6 +39,12 @@ pub fn build_model_config(overrides: &ModelOverrides, training_block_size: usize
             .fused_kernels
             .set_rotary_embedding(rotary_embedding);
     }
+    if let Some(y_neuron_recurrence) = &overrides.y_neuron_recurrence {
+        model_config.y_neuron_recurrence = y_neuron_recurrence.clone();
+    }
+    if let Some(mhc) = &overrides.mhc {
+        model_config.mhc = mhc.clone();
+    }
 
     model_config
 }
@@ -46,7 +52,7 @@ pub fn build_model_config(overrides: &ModelOverrides, training_block_size: usize
 pub fn is_wgpu_backend_name(backend_name: &str) -> bool {
     #[cfg(feature = "train")]
     {
-        return shared_wgpu::is_wgpu_backend_name(backend_name);
+        shared_wgpu::is_wgpu_backend_name(backend_name)
     }
     #[cfg(not(feature = "train"))]
     {
@@ -71,7 +77,6 @@ pub fn apply_wgpu_fused_core_override(
             fused_core_recurrent,
             fused_core_rollout,
         );
-        return;
     }
 
     #[cfg(not(feature = "train"))]
@@ -136,8 +141,10 @@ mod tests {
 
     #[test]
     fn model_override_applies_rollout_fast_steps() {
-        let mut overrides = ModelOverrides::default();
-        overrides.rollout_fast_steps_per_slow_step = Some(8);
+        let overrides = ModelOverrides {
+            rollout_fast_steps_per_slow_step: Some(8),
+            ..ModelOverrides::default()
+        };
 
         let config = build_model_config(&overrides, 32);
         assert_eq!(config.rollout_fast_steps_per_slow_step, 8);

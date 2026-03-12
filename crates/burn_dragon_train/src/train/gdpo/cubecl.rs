@@ -68,7 +68,7 @@ where
             &values.device(),
         ));
     }
-    if group > MAX_GROUP as usize {
+    if group > MAX_GROUP {
         return None;
     }
     let quantile = if quantile.is_nan() {

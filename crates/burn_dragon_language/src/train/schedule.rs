@@ -37,6 +37,7 @@ where
         Arc::clone(&env.valid_loader),
     )
     .num_epochs(env.epochs)
+    .grads_accumulation(env.training.gradient_accumulation_steps.max(1))
     .with_training_strategy(LearningStrategy::SingleDevice(env.device.clone()))
     .with_file_checkpointer(BinFileRecorder::<FullPrecisionSettings>::new())
     .metric_train_numeric(
@@ -58,7 +59,9 @@ where
 
     log_theoretical_profile(
         env.model_config,
-        env.training.batch_size,
+        env.training
+            .batch_size
+            .saturating_mul(env.training.gradient_accumulation_steps.max(1)),
         env.training.block_size,
         env.backend_name,
     );

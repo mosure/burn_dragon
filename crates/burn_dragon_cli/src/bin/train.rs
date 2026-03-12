@@ -38,7 +38,7 @@ use burn_dragon_sudoku::config::{
 #[cfg(feature = "train")]
 use burn_dragon_sudoku::train::train_backend as train_sudoku_backend;
 #[cfg(feature = "train")]
-use burn_dragon_wgpu::{recurrent_profile_reset, recurrent_profile_snapshot};
+use burn_dragon_wgpu::api::recurrent::{recurrent_profile_reset, recurrent_profile_snapshot};
 #[cfg(feature = "train")]
 use burn_ndarray::NdArray;
 #[cfg(feature = "train")]
@@ -198,10 +198,13 @@ fn run_language(args: LanguageArgs) -> Result<()> {
             let backend_name = if config.wgpu.training.fused_core_recurrent == Some(true) {
                 "wgpu-fused-core"
             } else {
-                "wgpu"
+                "wgpu-nofusion"
             };
+            eprintln!(
+                "language training: routing --backend wgpu through CubeBackend (backend={backend_name}) for the best measured Shakespeare training throughput"
+            );
             let result =
-                train_language::<Autodiff<Wgpu<f32>>, _>(&config, backend_name, move |device| {
+                train_language::<Autodiff<WgpuNoFusion>, _>(&config, backend_name, move |device| {
                     init_runtime(device, &wgpu_config)
                 });
             if stage_profile {

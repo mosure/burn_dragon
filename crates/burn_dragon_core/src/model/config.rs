@@ -3,8 +3,10 @@ use burn::module::{
     ModuleVisitor,
 };
 use burn::tensor::backend::{AutodiffBackend, Backend};
+use serde::{Deserialize, Serialize};
 
 use crate::kernel::{BlockPattern1d, BlockPattern2d, BlockSparseConfig};
+use crate::model::mhc::ManifoldHyperConnectionsConfig;
 use crate::positional::RotaryEmbedding;
 
 #[derive(Clone, Debug)]
@@ -128,6 +130,124 @@ impl ModuleDisplayDefault for FusedKernelConfig {
 
 impl ModuleDisplay for FusedKernelConfig {}
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct YNeuronRecurrenceConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_y_neuron_carry_in_scale")]
+    pub carry_in_scale: f32,
+    #[serde(default)]
+    pub last_layers: Option<usize>,
+    #[serde(default = "default_y_neuron_chunk_tokens")]
+    pub chunk_tokens: usize,
+    #[serde(default = "default_y_neuron_state_decay")]
+    pub state_decay: f32,
+    #[serde(default = "default_y_neuron_state_update_scale")]
+    pub state_update_scale: f32,
+    #[serde(default = "default_y_neuron_state_rms_cap")]
+    pub state_rms_cap: Option<f32>,
+}
+
+impl Default for YNeuronRecurrenceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            carry_in_scale: default_y_neuron_carry_in_scale(),
+            last_layers: None,
+            chunk_tokens: default_y_neuron_chunk_tokens(),
+            state_decay: default_y_neuron_state_decay(),
+            state_update_scale: default_y_neuron_state_update_scale(),
+            state_rms_cap: default_y_neuron_state_rms_cap(),
+        }
+    }
+}
+
+fn default_y_neuron_carry_in_scale() -> f32 {
+    0.125
+}
+
+fn default_y_neuron_chunk_tokens() -> usize {
+    1
+}
+
+fn default_y_neuron_state_decay() -> f32 {
+    0.5
+}
+
+fn default_y_neuron_state_update_scale() -> f32 {
+    1.0
+}
+
+fn default_y_neuron_state_rms_cap() -> Option<f32> {
+    Some(1.0)
+}
+
+impl<B: Backend> Module<B> for YNeuronRecurrenceConfig {
+    type Record = ();
+
+    fn collect_devices(&self, devices: Devices<B>) -> Devices<B> {
+        devices
+    }
+
+    fn fork(self, _device: &B::Device) -> Self {
+        self
+    }
+
+    fn to_device(self, _device: &B::Device) -> Self {
+        self
+    }
+
+    fn visit<Visitor: ModuleVisitor<B>>(&self, _visitor: &mut Visitor) {}
+
+    fn map<Mapper: ModuleMapper<B>>(self, _mapper: &mut Mapper) -> Self {
+        self
+    }
+
+    fn load_record(self, _record: Self::Record) -> Self {
+        self
+    }
+
+    fn into_record(self) -> Self::Record {}
+}
+
+impl<B: AutodiffBackend> AutodiffModule<B> for YNeuronRecurrenceConfig {
+    type InnerModule = YNeuronRecurrenceConfig;
+
+    fn valid(&self) -> Self::InnerModule {
+        self.clone()
+    }
+
+    fn from_inner(module: Self::InnerModule) -> Self {
+        module
+    }
+}
+
+impl ModuleDisplayDefault for YNeuronRecurrenceConfig {
+    fn content(&self, content: Content) -> Option<Content> {
+        let summary = format!(
+            "enabled={}, carry_in_scale={}, last_layers={}, chunk_tokens={}, state_decay={}, state_update_scale={}, state_rms_cap={}",
+            self.enabled,
+            self.carry_in_scale,
+            self.last_layers
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "all".to_string()),
+            self.chunk_tokens,
+            self.state_decay,
+            self.state_update_scale,
+            self.state_rms_cap
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "none".to_string())
+        );
+
+        content
+            .set_top_level_type("YNeuronRecurrenceConfig")
+            .add_formatted(&summary)
+            .optional()
+    }
+}
+
+impl ModuleDisplay for YNeuronRecurrenceConfig {}
+
 #[derive(Clone, Debug)]
 pub struct BDHConfig {
     pub n_layer: usize,
@@ -141,6 +261,8 @@ pub struct BDHConfig {
     /// Valid values: 1, 2, 4, 8, 16.
     pub rollout_fast_steps_per_slow_step: usize,
     pub fused_kernels: FusedKernelConfig,
+    pub mhc: ManifoldHyperConnectionsConfig,
+    pub y_neuron_recurrence: YNeuronRecurrenceConfig,
 }
 
 impl Default for BDHConfig {
@@ -155,6 +277,8 @@ impl Default for BDHConfig {
             vocab_size: 256,
             rollout_fast_steps_per_slow_step: 1,
             fused_kernels: FusedKernelConfig::default(),
+            mhc: ManifoldHyperConnectionsConfig::default(),
+            y_neuron_recurrence: YNeuronRecurrenceConfig::default(),
         }
     }
 }

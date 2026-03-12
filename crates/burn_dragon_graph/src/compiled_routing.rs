@@ -1,5 +1,7 @@
 use burn::prelude::*;
-use burn_dragon_wgpu::SparseGraphCsr;
+use burn::tensor::Int;
+use burn::tensor::TensorData;
+use burn_dragon_wgpu::api::graph::SparseGraphCsr;
 
 use crate::{GraphCsrAdjacency, GraphTopologyRouting};
 
@@ -7,13 +9,18 @@ use crate::{GraphCsrAdjacency, GraphTopologyRouting};
 pub struct CompiledGraphRoute<B: Backend> {
     adjacency: GraphCsrAdjacency,
     incoming_adjacency: GraphCsrAdjacency,
+    incoming_pool_weights: Tensor<B, 3>,
+    assignment_targets: Option<Tensor<B, 1, Int>>,
     csr: SparseGraphCsr<B>,
 }
 
 impl<B: Backend> CompiledGraphRoute<B> {
     fn new(adjacency: GraphCsrAdjacency, device: &B::Device) -> Self {
         let incoming = adjacency.transpose();
+        let assignment_targets = assignment_route_targets(&adjacency, device);
         Self {
+            incoming_pool_weights: incoming_pool_weights(&incoming, device),
+            assignment_targets,
             csr: SparseGraphCsr::from_usize_slices(
                 adjacency.offsets(),
                 adjacency.indices(),
@@ -32,6 +39,14 @@ impl<B: Backend> CompiledGraphRoute<B> {
 
     pub fn incoming_adjacency(&self) -> &GraphCsrAdjacency {
         &self.incoming_adjacency
+    }
+
+    pub fn incoming_pool_weights(&self) -> &Tensor<B, 3> {
+        &self.incoming_pool_weights
+    }
+
+    pub fn assignment_targets(&self) -> Option<&Tensor<B, 1, Int>> {
+        self.assignment_targets.as_ref()
     }
 
     pub fn csr(&self) -> &SparseGraphCsr<B> {
@@ -119,6 +134,58 @@ fn identity_adjacency(count: usize) -> GraphCsrAdjacency {
     GraphCsrAdjacency::try_from_edges(count, count, &edges).expect("identity graph adjacency")
 }
 
+fn incoming_pool_weights<B: Backend>(
+    incoming: &GraphCsrAdjacency,
+    device: &B::Device,
+) -> Tensor<B, 3> {
+    let source_count = incoming.target_count();
+    let target_count = incoming.source_count();
+    let mut weights = vec![0.0_f32; source_count * target_count];
+
+    for target in 0..target_count {
+        if let Some(sources) = incoming.neighbors(target) {
+            if sources.is_empty() {
+                continue;
+            }
+            let weight = 1.0_f32 / sources.len() as f32;
+            for &source in sources {
+                weights[source * target_count + target] = weight;
+            }
+        }
+    }
+
+    Tensor::<B, 3>::from_data(
+        TensorData::new(weights, [1, source_count, target_count]),
+        device,
+    )
+}
+
+fn assignment_route_targets<B: Backend>(
+    adjacency: &GraphCsrAdjacency,
+    device: &B::Device,
+) -> Option<Tensor<B, 1, Int>> {
+    if !(0..adjacency.source_count()).all(|source| adjacency.degree(source) == Some(1)) {
+        return None;
+    }
+
+    let source_count = adjacency.source_count();
+    let mut targets = vec![0_i64; source_count];
+
+    for (source, target_slot) in targets.iter_mut().enumerate().take(source_count) {
+        let target = adjacency
+            .neighbors(source)
+            .and_then(|neighbors| neighbors.first().copied())
+            .expect("assignment route requires one target per source");
+        *target_slot = target as i64;
+    }
+
+    Some(Tensor::<B, 1, Int>::from_data(
+        TensorData::new(targets, [source_count]),
+        device,
+    ))
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -182,5 +249,16 @@ mod tests {
                 .dims::<1>(),
             [3]
         );
+        assert_eq!(
+            compiled
+                .node_to_cluster()
+                .expect("node/cluster route")
+                .assignment_targets()
+                .expect("assignment targets")
+                .shape()
+                .dims::<1>(),
+            [3]
+        );
     }
+
 }

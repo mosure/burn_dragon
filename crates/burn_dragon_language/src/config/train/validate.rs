@@ -13,11 +13,51 @@ impl TrainingConfig {
         if self.training.batch_size == 0 {
             return Err(anyhow!("training.batch_size must be > 0"));
         }
+        if self.training.gradient_accumulation_steps == 0 {
+            return Err(anyhow!(
+                "training.gradient_accumulation_steps must be > 0"
+            ));
+        }
+        if matches!(self.training.target_effective_batch_size, Some(0)) {
+            return Err(anyhow!(
+                "training.target_effective_batch_size must be > 0 when set"
+            ));
+        }
         if self.training.max_iters == 0 {
             return Err(anyhow!("training.max_iters must be > 0"));
         }
         if self.training.log_frequency == 0 {
             return Err(anyhow!("training.log_frequency must be > 0"));
+        }
+        if self.wgpu.training.startup_autotune.enabled {
+            let autotune = &self.wgpu.training.startup_autotune;
+            if autotune.target_device_memory_mb == 0 {
+                return Err(anyhow!(
+                    "wgpu.training.startup_autotune.target_device_memory_mb must be > 0 when enabled"
+                ));
+            }
+            if autotune.min_batch_size == 0 {
+                return Err(anyhow!(
+                    "wgpu.training.startup_autotune.min_batch_size must be > 0 when enabled"
+                ));
+            }
+            if matches!(autotune.max_batch_size, Some(0)) {
+                return Err(anyhow!(
+                    "wgpu.training.startup_autotune.max_batch_size must be > 0 when set"
+                ));
+            }
+            if autotune.probe_steps == 0 {
+                return Err(anyhow!(
+                    "wgpu.training.startup_autotune.probe_steps must be > 0 when enabled"
+                ));
+            }
+            if let Some(max_batch_size) = autotune.max_batch_size
+                && max_batch_size < autotune.min_batch_size
+            {
+                return Err(anyhow!(
+                    "wgpu.training.startup_autotune.max_batch_size must be >= min_batch_size"
+                ));
+            }
         }
         if let Some(epochs) = self.training.epochs
             && epochs == 0
@@ -148,6 +188,56 @@ impl TrainingConfig {
                 BDHConfig::SUPPORTED_ROLLOUT_FAST_STEPS,
                 rollout_fast_steps
             ));
+        }
+        if let Some(y_neuron_recurrence) = &self.model.y_neuron_recurrence
+            && y_neuron_recurrence.enabled
+        {
+            if y_neuron_recurrence.carry_in_scale < 0.0 {
+                return Err(anyhow!(
+                    "model.y_neuron_recurrence.carry_in_scale must be >= 0 when enabled"
+                ));
+            }
+            if matches!(y_neuron_recurrence.last_layers, Some(0)) {
+                return Err(anyhow!(
+                    "model.y_neuron_recurrence.last_layers must be > 0 when set"
+                ));
+            }
+            if y_neuron_recurrence.chunk_tokens == 0 {
+                return Err(anyhow!(
+                    "model.y_neuron_recurrence.chunk_tokens must be > 0 when enabled"
+                ));
+            }
+            if !(0.0..=1.0).contains(&y_neuron_recurrence.state_decay) {
+                return Err(anyhow!(
+                    "model.y_neuron_recurrence.state_decay must be in [0, 1] when enabled"
+                ));
+            }
+            if y_neuron_recurrence.state_update_scale <= 0.0 {
+                return Err(anyhow!(
+                    "model.y_neuron_recurrence.state_update_scale must be > 0 when enabled"
+                ));
+            }
+            if matches!(y_neuron_recurrence.state_rms_cap, Some(value) if value <= 0.0) {
+                return Err(anyhow!(
+                    "model.y_neuron_recurrence.state_rms_cap must be > 0 when set"
+                ));
+            }
+        }
+        if let Some(mhc) = &self.model.mhc
+            && mhc.enabled
+        {
+            if mhc.num_streams != 1 {
+                return Err(anyhow!(
+                    "model.mhc.num_streams must currently be 1 for language BDH integration (got {})",
+                    mhc.num_streams
+                ));
+            }
+            if mhc.num_views == 0 {
+                return Err(anyhow!("model.mhc.num_views must be > 0 when enabled"));
+            }
+            if mhc.mhc_tau <= 0.0 {
+                return Err(anyhow!("model.mhc.mhc_tau must be > 0 when enabled"));
+            }
         }
 
         if let Some(schedule) = &self.optimizer.lr_schedule {

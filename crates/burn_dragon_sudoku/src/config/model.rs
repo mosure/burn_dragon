@@ -1,4 +1,5 @@
 use super::*;
+use burn_dragon_core::ManifoldHyperConnectionCoefficientPolicy;
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
@@ -84,6 +85,8 @@ pub struct SudokuCacheMhcConfig {
     pub num_streams: usize,
     #[serde(default = "default_cache_mhc_num_views")]
     pub num_views: usize,
+    #[serde(default)]
+    pub coefficient_policy: ManifoldHyperConnectionCoefficientPolicy,
     #[serde(default = "default_cache_mhc_iters")]
     pub mhc_iters: usize,
     #[serde(default = "default_cache_mhc_tau")]
@@ -100,6 +103,7 @@ impl Default for SudokuCacheMhcConfig {
             enabled: false,
             num_streams: default_cache_mhc_num_streams(),
             num_views: default_cache_mhc_num_views(),
+            coefficient_policy: ManifoldHyperConnectionCoefficientPolicy::StaticSinkhorn,
             mhc_iters: default_cache_mhc_iters(),
             mhc_tau: default_cache_mhc_tau(),
             add_branch_out_to_residual: default_cache_mhc_add_branch_out_to_residual(),
@@ -114,6 +118,7 @@ impl SudokuCacheMhcConfig {
             enabled: self.enabled,
             num_streams: self.num_streams,
             num_views: self.num_views,
+            coefficient_policy: self.coefficient_policy,
             mhc_iters: self.mhc_iters,
             mhc_tau: self.mhc_tau,
             add_branch_out_to_residual: self.add_branch_out_to_residual,

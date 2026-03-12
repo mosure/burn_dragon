@@ -7,16 +7,22 @@ use burn::module::{Module, Param};
 use burn::nn::{LayerNorm, LayerNormConfig, Linear};
 use burn::prelude::*;
 use burn::tensor::activation;
-use burn_dragon_core::{StructuredStepMode, near_critical_embedding_initializer};
-use burn_dragon_wgpu::fused_sparse_graph_rho_attention_wgpu;
+use burn_dragon_core::{
+    StructuredStepMode, near_critical_embedding_initializer, structured_dense_update_tokens,
+    target_major_identity_read, target_major_identity_write, target_major_outer_product,
+};
+use burn_dragon_wgpu::api::graph::fused_sparse_graph_rho_attention_wgpu;
+use serde::{Deserialize, Serialize};
 
+use crate::compiled_routing::CompiledGraphRouting;
 use crate::{
-    CompiledGraphRouting, GraphExecutionError, GraphRhoStepConfig, GraphStepInputs,
-    GraphStepOutput, GraphTopologyRouting, GraphTopologyState, graph_reference_step,
+    GraphCompiledExecutor, GraphExecutionError, GraphRhoStepConfig, GraphStepInputs, GraphStepOutput,
+    GraphTopologyRouting, GraphTopologyState, graph_reference_step,
 };
 use compiled::{GraphCompiledRecurrentOutput, GraphCompiledState, GraphCompiledStepOutput};
 use support::{
-    GraphObservationMerger, linear, pool_dense_from_incoming, pool_dense_to_targets,
+    GraphObservationMerger, linear, pool_dense_to_targets, pool_dense_with_weights,
+    select_assign_target_major_assignments, select_target_major_assignments,
     validate_observation_layout, validate_state_dims,
 };
 
@@ -26,7 +32,7 @@ use support::{
 /// - `embed_dim` is the graph dense-space dimension
 /// - `rank` is the graph neuron-space width used to read/write `rho`
 /// - `value_dim` is the recurrent readout / write-value width emitted by `rho`
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GraphDragonConfig {
     pub embed_dim: usize,
     pub rank: usize,
@@ -68,9 +74,8 @@ impl GraphDragonConfig {
 /// - node / cluster / global `rho` banks
 /// - temporal counters that define the recurrent axis for `observe` / `refine` / `predict`
 ///
-/// Unlike the core BDH path, this adapter does not expose a paper-identical `y_gate` / `y_neuron`
-/// tensor. It projects dense state into neuron-space write activations, reads dense-space messages
-/// from `rho`, and merges those readouts back into the dense activation stream.
+/// This adapter still owns graph routing and dense-state merge policy, but its recurrent readouts
+/// now flow through the shared core `a_dense -> y_gate -> y_neuron -> delta_dense` update helper.
 #[derive(Module, Debug)]
 pub struct GraphDragon<B: Backend> {
     embed_dim: usize,
@@ -82,11 +87,13 @@ pub struct GraphDragon<B: Backend> {
     node_value: Linear<B>,
     cluster_query: Linear<B>,
     cluster_value: Linear<B>,
-    node_local_out: Linear<B>,
-    node_cluster_out: Linear<B>,
-    node_global_out: Linear<B>,
+    node_y_gate: Linear<B>,
+    node_delta: Linear<B>,
+    node_value_norm: LayerNorm<B>,
+    cluster_y_gate: Linear<B>,
+    cluster_delta: Linear<B>,
+    cluster_value_norm: LayerNorm<B>,
     cluster_pool_out: Linear<B>,
-    cluster_global_out: Linear<B>,
     node_norm: LayerNorm<B>,
     cluster_norm: LayerNorm<B>,
     node_observation: GraphObservationMerger<B>,
@@ -114,11 +121,13 @@ impl<B: Backend> GraphDragon<B> {
             node_value: linear(config.embed_dim.max(1), config.value_dim.max(1), device),
             cluster_query: linear(config.embed_dim.max(1), config.rank.max(1), device),
             cluster_value: linear(config.embed_dim.max(1), config.value_dim.max(1), device),
-            node_local_out: linear(config.value_dim.max(1), config.embed_dim.max(1), device),
-            node_cluster_out: linear(config.value_dim.max(1), config.embed_dim.max(1), device),
-            node_global_out: linear(config.value_dim.max(1), config.embed_dim.max(1), device),
+            node_y_gate: linear(config.value_dim.max(1), config.rank.max(1), device),
+            node_delta: linear(config.rank.max(1), config.embed_dim.max(1), device),
+            node_value_norm: LayerNormConfig::new(config.value_dim.max(1)).init(device),
+            cluster_y_gate: linear(config.value_dim.max(1), config.rank.max(1), device),
+            cluster_delta: linear(config.rank.max(1), config.embed_dim.max(1), device),
+            cluster_value_norm: LayerNormConfig::new(config.value_dim.max(1)).init(device),
             cluster_pool_out: linear(config.embed_dim.max(1), config.embed_dim.max(1), device),
-            cluster_global_out: linear(config.value_dim.max(1), config.embed_dim.max(1), device),
             node_norm: LayerNormConfig::new(config.embed_dim.max(1)).init(device),
             cluster_norm: LayerNormConfig::new(config.embed_dim.max(1)).init(device),
             node_observation: GraphObservationMerger::new(config.embed_dim.max(1), device),
@@ -267,6 +276,15 @@ impl<B: Backend> GraphDragon<B> {
         })
     }
 
+    pub fn step_with_executor(
+        &self,
+        state: GraphTopologyState<B>,
+        executor: &GraphCompiledExecutor<B>,
+        mode: StructuredStepMode,
+    ) -> Result<GraphStepOutput<B>, GraphExecutionError> {
+        self.step_compiled(state, executor.routing(), mode)
+    }
+
     pub fn rollout(
         &self,
         mut state: GraphTopologyState<B>,
@@ -297,6 +315,16 @@ impl<B: Backend> GraphDragon<B> {
                 .state;
         }
         Ok(state.into_topology_state())
+    }
+
+    pub fn rollout_with_executor(
+        &self,
+        state: GraphTopologyState<B>,
+        executor: &GraphCompiledExecutor<B>,
+        steps: usize,
+        mode: StructuredStepMode,
+    ) -> Result<GraphTopologyState<B>, GraphExecutionError> {
+        self.rollout_compiled(state, executor.routing(), steps, mode)
     }
 
     fn project_step_inputs(
@@ -342,6 +370,8 @@ impl<B: Backend> GraphDragon<B> {
         {
             recurrent
         } else {
+            let node_x_neuron = inputs.node_query.clone();
+            let cluster_x_neuron = inputs.cluster_query.clone();
             let reference = graph_reference_step(
                 state.into_topology_state(),
                 compiled.host(),
@@ -354,6 +384,8 @@ impl<B: Backend> GraphDragon<B> {
             GraphCompiledRecurrentOutput {
                 state: GraphCompiledState::from_topology_state(reference.state),
                 readouts: reference.readouts,
+                node_x_neuron,
+                cluster_x_neuron,
             }
         };
         Ok(self.finish_compiled_step_output(recurrent, compiled, mode))
@@ -406,6 +438,10 @@ impl<B: Backend> GraphDragon<B> {
         mode: StructuredStepMode,
     ) -> Option<GraphCompiledRecurrentOutput<B>> {
         let decay = self.predict_decay_for_mode(mode);
+        let decay_tensor = Tensor::<B, 1>::from_data(
+            TensorData::new(vec![decay], [1]),
+            &inputs.node_query.device(),
+        );
 
         let node_from_node = fused_sparse_graph_rho_attention_wgpu(
             &inputs.node_query,
@@ -415,75 +451,113 @@ impl<B: Backend> GraphDragon<B> {
             decay,
         )
         .ok()?;
-        let node_self = fused_sparse_graph_rho_attention_wgpu(
-            &inputs.node_query,
-            &inputs.node_value,
-            Some(&state.node_rho),
-            compiled.node_identity().csr(),
-            decay,
-        )
-        .ok()?;
+        let next_node_rho = target_major_identity_write(
+            state.node_rho.clone(),
+            inputs.node_query.clone(),
+            inputs.node_value.clone(),
+            decay_tensor.clone(),
+        );
 
-        let cluster_self = compiled.cluster_identity().and_then(|route| {
-            fused_sparse_graph_rho_attention_wgpu(
-                &inputs.cluster_query,
-                &inputs.cluster_value,
-                Some(&state.cluster_rho),
-                route.csr(),
-                decay,
-            )
-            .ok()
-        });
-        let node_to_cluster = compiled.node_to_cluster().and_then(|route| {
-            fused_sparse_graph_rho_attention_wgpu(
-                &inputs.node_query,
-                &inputs.node_value,
-                Some(&state.cluster_rho),
-                route.csr(),
-                decay,
-            )
-            .ok()
-        });
-        let node_to_global = compiled.node_to_global().and_then(|route| {
-            fused_sparse_graph_rho_attention_wgpu(
-                &inputs.node_query,
-                &inputs.node_value,
-                Some(&state.global_rho),
-                route.csr(),
-                decay,
-            )
-            .ok()
-        });
-        let cluster_to_global = compiled.cluster_to_global().and_then(|route| {
-            fused_sparse_graph_rho_attention_wgpu(
-                &inputs.cluster_query,
-                &inputs.cluster_value,
-                Some(&state.global_rho),
-                route.csr(),
-                decay,
-            )
-            .ok()
-        });
-
-        let decayed_cluster_rho = state.cluster_rho.clone().mul_scalar(decay);
-        let cluster_rho = match (cluster_self.as_ref(), node_to_cluster.as_ref()) {
-            (Some(cluster_self), Some(node_to_cluster)) => {
-                cluster_self.rho.clone() + node_to_cluster.rho.clone() - decayed_cluster_rho
+        let node_outer = target_major_outer_product(
+            inputs.node_query.clone(),
+            inputs.node_value.clone(),
+        );
+        let cluster_outer = target_major_outer_product(
+            inputs.cluster_query.clone(),
+            inputs.cluster_value.clone(),
+        );
+        let mut cluster_rho = state.cluster_rho.clone().mul_scalar(decay) + cluster_outer.clone();
+        let mut node_from_cluster = None;
+        if let Some(route) = compiled.node_to_cluster() {
+            if let Some(assignment_targets) = route.assignment_targets() {
+                let gathered = select_target_major_assignments(
+                    state.cluster_rho.clone(),
+                    assignment_targets.clone(),
+                );
+                node_from_cluster = Some(target_major_identity_read(
+                    inputs.node_query.clone(),
+                    gathered,
+                ));
+                cluster_rho = select_assign_target_major_assignments(
+                    cluster_rho,
+                    node_outer.clone(),
+                    assignment_targets.clone(),
+                );
+            } else {
+                let output = fused_sparse_graph_rho_attention_wgpu(
+                    &inputs.node_query,
+                    &inputs.node_value,
+                    Some(&state.cluster_rho),
+                    route.csr(),
+                    decay,
+                )
+                .ok()?;
+                node_from_cluster = Some(output.context);
+                cluster_rho = cluster_rho + (output.rho - state.cluster_rho.clone().mul_scalar(decay));
             }
-            (Some(cluster_self), None) => cluster_self.rho.clone(),
-            (None, Some(node_to_cluster)) => node_to_cluster.rho.clone(),
-            (None, None) => decayed_cluster_rho,
-        };
+        }
 
         let decayed_global_rho = state.global_rho.clone().mul_scalar(decay);
-        let global_rho = match (node_to_global.as_ref(), cluster_to_global.as_ref()) {
-            (Some(node_to_global), Some(cluster_to_global)) => {
-                node_to_global.rho.clone() + cluster_to_global.rho.clone() - decayed_global_rho
+        let mut global_rho = decayed_global_rho.clone();
+        let mut node_from_global = None;
+        if let Some(route) = compiled.node_to_global() {
+            if let Some(assignment_targets) = route.assignment_targets() {
+                let gathered = select_target_major_assignments(
+                    state.global_rho.clone(),
+                    assignment_targets.clone(),
+                );
+                node_from_global = Some(target_major_identity_read(
+                    inputs.node_query.clone(),
+                    gathered,
+                ));
+                global_rho = select_assign_target_major_assignments(
+                    global_rho,
+                    node_outer.clone(),
+                    assignment_targets.clone(),
+                );
+            } else {
+                let output = fused_sparse_graph_rho_attention_wgpu(
+                    &inputs.node_query,
+                    &inputs.node_value,
+                    Some(&state.global_rho),
+                    route.csr(),
+                    decay,
+                )
+                .ok()?;
+                node_from_global = Some(output.context);
+                global_rho = global_rho + (output.rho - decayed_global_rho.clone());
             }
-            (Some(node_to_global), None) => node_to_global.rho.clone(),
-            (None, Some(cluster_to_global)) => cluster_to_global.rho.clone(),
-            (None, None) => decayed_global_rho,
-        };
+        }
+
+        let mut cluster_from_global = None;
+        if let Some(route) = compiled.cluster_to_global() {
+            if let Some(assignment_targets) = route.assignment_targets() {
+                let gathered = select_target_major_assignments(
+                    state.global_rho.clone(),
+                    assignment_targets.clone(),
+                );
+                cluster_from_global = Some(target_major_identity_read(
+                    inputs.cluster_query.clone(),
+                    gathered,
+                ));
+                global_rho = select_assign_target_major_assignments(
+                    global_rho,
+                    cluster_outer.clone(),
+                    assignment_targets.clone(),
+                );
+            } else {
+                let output = fused_sparse_graph_rho_attention_wgpu(
+                    &inputs.cluster_query,
+                    &inputs.cluster_value,
+                    Some(&state.global_rho),
+                    route.csr(),
+                    decay,
+                )
+                .ok()?;
+                cluster_from_global = Some(output.context);
+                global_rho = global_rho + (output.rho - decayed_global_rho.clone());
+            }
+        }
 
         let (temporal_position, prediction_age) =
             self.advance_temporal_counters(state.temporal_position, state.prediction_age, mode);
@@ -493,7 +567,7 @@ impl<B: Backend> GraphDragon<B> {
                 layout: state.layout,
                 node_state: state.node_state.clone(),
                 cluster_state: state.cluster_state.clone(),
-                node_rho: node_self.rho,
+                node_rho: next_node_rho,
                 cluster_rho,
                 global_rho,
                 temporal_position,
@@ -501,10 +575,12 @@ impl<B: Backend> GraphDragon<B> {
             },
             readouts: crate::GraphStepReadouts {
                 node_from_node: node_from_node.context,
-                node_from_cluster: node_to_cluster.map(|output| output.context),
-                node_from_global: node_to_global.map(|output| output.context),
-                cluster_from_global: cluster_to_global.map(|output| output.context),
+                node_from_cluster,
+                node_from_global,
+                cluster_from_global,
             },
+            node_x_neuron: inputs.node_query.clone(),
+            cluster_x_neuron: inputs.cluster_query.clone(),
         })
     }
 
@@ -516,15 +592,17 @@ impl<B: Backend> GraphDragon<B> {
     ) -> GraphCompiledStepOutput<B> {
         let next_node_state = self.merge_node_state_dense(
             recurrent.state.node_state.clone(),
+            recurrent.node_x_neuron.clone(),
             &recurrent.readouts,
             mode,
         );
         let next_cluster_state = self.merge_cluster_state_compiled(
             recurrent.state.cluster_state.clone(),
             recurrent.state.node_state.clone(),
+            recurrent.cluster_x_neuron.clone(),
             compiled
                 .node_to_cluster()
-                .map(|route| route.incoming_adjacency()),
+                .map(|route| route.incoming_pool_weights()),
             &recurrent.readouts,
             mode,
         );
@@ -578,23 +656,34 @@ impl<B: Backend> GraphDragon<B> {
         recurrent: &GraphStepOutput<B>,
         mode: StructuredStepMode,
     ) -> Tensor<B, 3> {
-        self.merge_node_state_dense(recurrent.state.node_state(), &recurrent.readouts, mode)
+        let current = self.apply_step_mode(recurrent.state.node_state(), mode);
+        let x_neuron = activation::relu(self.node_query.forward(current.clone()));
+        self.merge_node_state_dense(recurrent.state.node_state(), x_neuron, &recurrent.readouts, mode)
     }
 
     fn merge_node_state_dense(
         &self,
         current_node_state: Tensor<B, 3>,
+        x_neuron: Tensor<B, 3>,
         readouts: &crate::GraphStepReadouts<B>,
         mode: StructuredStepMode,
     ) -> Tensor<B, 3> {
         let current = self.apply_step_mode(current_node_state, mode);
-        let mut delta = self.node_local_out.forward(readouts.node_from_node.clone());
+        let mut a_dense = readouts.node_from_node.clone();
         if let Some(node_from_cluster) = &readouts.node_from_cluster {
-            delta = delta + self.node_cluster_out.forward(node_from_cluster.clone());
+            a_dense = a_dense + node_from_cluster.clone();
         }
         if let Some(node_from_global) = &readouts.node_from_global {
-            delta = delta + self.node_global_out.forward(node_from_global.clone());
+            a_dense = a_dense + node_from_global.clone();
         }
+        let delta = structured_dense_update_tokens(
+            x_neuron,
+            a_dense,
+            &self.node_y_gate,
+            &self.node_delta,
+            Some(&self.node_value_norm),
+        )
+        .delta_dense;
         self.node_norm.forward(current + delta)
     }
 
@@ -607,15 +696,27 @@ impl<B: Backend> GraphDragon<B> {
         let current = self.apply_step_mode(recurrent.state.cluster_state(), mode);
         let [batch, cluster_count, _] = current.shape().dims::<3>();
         let device = current.device();
+        let x_neuron = activation::relu(self.cluster_query.forward(current.clone()));
         let mut delta = if let Some(route) = routing.node_to_cluster() {
             let pooled = pool_dense_to_targets(recurrent.state.node_state(), route, cluster_count);
             self.cluster_pool_out.forward(pooled)
         } else {
             Tensor::<B, 3>::zeros([batch, cluster_count, self.embed_dim], &device)
         };
-        if let Some(cluster_from_global) = &recurrent.readouts.cluster_from_global {
-            delta = delta + self.cluster_global_out.forward(cluster_from_global.clone());
-        }
+        let recurrent_a_dense = recurrent
+            .readouts
+            .cluster_from_global
+            .clone()
+            .unwrap_or_else(|| Tensor::<B, 3>::zeros([batch, cluster_count, self.value_dim], &device));
+        delta = delta
+            + structured_dense_update_tokens(
+                x_neuron,
+                recurrent_a_dense,
+                &self.cluster_y_gate,
+                &self.cluster_delta,
+                Some(&self.cluster_value_norm),
+            )
+            .delta_dense;
         self.cluster_norm.forward(current + delta)
     }
 
@@ -623,22 +724,33 @@ impl<B: Backend> GraphDragon<B> {
         &self,
         current_cluster_state: Tensor<B, 3>,
         node_state_for_pool: Tensor<B, 3>,
-        incoming_node_to_cluster: Option<&crate::GraphCsrAdjacency>,
+        x_neuron: Tensor<B, 3>,
+        incoming_node_to_cluster_weights: Option<&Tensor<B, 3>>,
         readouts: &crate::GraphStepReadouts<B>,
         mode: StructuredStepMode,
     ) -> Tensor<B, 3> {
         let current = self.apply_step_mode(current_cluster_state, mode);
         let [batch, cluster_count, _] = current.shape().dims::<3>();
         let device = current.device();
-        let mut delta = if let Some(incoming) = incoming_node_to_cluster {
-            let pooled = pool_dense_from_incoming(node_state_for_pool, incoming, cluster_count);
+        let mut delta = if let Some(weights) = incoming_node_to_cluster_weights {
+            let pooled = pool_dense_with_weights(node_state_for_pool, weights.clone());
             self.cluster_pool_out.forward(pooled)
         } else {
             Tensor::<B, 3>::zeros([batch, cluster_count, self.embed_dim], &device)
         };
-        if let Some(cluster_from_global) = &readouts.cluster_from_global {
-            delta = delta + self.cluster_global_out.forward(cluster_from_global.clone());
-        }
+        let recurrent_a_dense = readouts
+            .cluster_from_global
+            .clone()
+            .unwrap_or_else(|| Tensor::<B, 3>::zeros([batch, cluster_count, self.value_dim], &device));
+        let recurrent_delta = structured_dense_update_tokens(
+            x_neuron,
+            recurrent_a_dense,
+            &self.cluster_y_gate,
+            &self.cluster_delta,
+            Some(&self.cluster_value_norm),
+        )
+        .delta_dense;
+        delta = delta + recurrent_delta;
         self.cluster_norm.forward(current + delta)
     }
 }

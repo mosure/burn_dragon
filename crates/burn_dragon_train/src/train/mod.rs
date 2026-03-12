@@ -6,6 +6,7 @@ pub mod artifacts;
 pub mod constants;
 pub mod gdpo;
 pub mod metrics;
+pub mod runtime;
 pub mod teacher;
 
 pub mod pipeline;

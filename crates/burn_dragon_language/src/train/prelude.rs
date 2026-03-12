@@ -50,7 +50,7 @@ pub(crate) use crate::config::{
     TrainingConfig, TrainingHyperparameters,
 };
 pub(crate) use crate::dataset::{
-    Dataset, DatasetSplit, RandomDataLoader, SequenceBatch, build_dataset,
+    Dataset, DatasetSplit, RandomDataLoader, SequenceBatch, build_dataset, sample_batch_with_shape,
 };
 pub(crate) use crate::inference::{apply_wgpu_fused_core_override, build_model_config};
 pub(crate) use crate::tokenizer::TokenizerConfig;
@@ -68,6 +68,9 @@ pub(crate) use burn_dragon_train::train::metrics::{
 pub(crate) use burn_dragon_train::train::pipeline::{
     ResolvedLrScheduler, ScheduleSource, TrainSchedule, adamw_config_from_optimizer,
     create_run_dir, resolve_valid_steps_per_epoch, write_latest_run,
+};
+pub(crate) use burn_dragon_train::train::runtime::{
+    DeviceMemoryUsage, cleanup_device_memory, device_memory_usage_safe,
 };
 pub(crate) use burn_dragon_train::{
     GdpoConfig, GdpoHardGate, LearningRateScheduleConfig, OptimizerConfig, WgpuRuntimeConfig,

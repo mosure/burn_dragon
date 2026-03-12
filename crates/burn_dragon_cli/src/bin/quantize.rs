@@ -1,4 +1,3 @@
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
@@ -8,7 +7,8 @@ use burn::tensor::backend::Backend as BackendTrait;
 use burn_ndarray::NdArray;
 use clap::Parser;
 
-use burn_dragon::BDH;
+use burn_dragon::api::checkpoint::run::resolve_checkpoint_base;
+use burn_dragon::core::BDH;
 
 type QuantBackend = NdArray<f32>;
 
@@ -85,90 +85,12 @@ fn resolve_output_base(output: Option<&PathBuf>, checkpoint_base: &Path) -> Resu
     Ok(output_base)
 }
 
-fn resolve_checkpoint_base(path: &Path, epoch: Option<usize>) -> Result<(PathBuf, usize)> {
-    if path.is_dir() {
-        let target_epoch = epoch.unwrap_or(find_latest_epoch(path)?);
-        let base = path.join(format!("model-{target_epoch}"));
-        ensure_checkpoint_exists(&base)?;
-        return Ok((base, target_epoch));
-    }
-
-    let mut base = base_without_extension(path);
-    let detected_epoch = parse_epoch_from_stem(&base);
-    let target_epoch = match (epoch, detected_epoch) {
-        (Some(explicit), Some(detected)) if explicit != detected => {
-            let parent = base.parent().map(Path::to_path_buf).unwrap_or_default();
-            base = parent.join(format!("model-{explicit}"));
-            explicit
-        }
-        (Some(explicit), _) => {
-            if detected_epoch.is_none() {
-                let parent = base
-                    .parent()
-                    .map(Path::to_path_buf)
-                    .unwrap_or_else(|| PathBuf::from("runs"));
-                base = parent.join(format!("model-{explicit}"));
-            }
-            explicit
-        }
-        (None, Some(detected)) => detected,
-        (None, None) => {
-            return Err(anyhow!(
-                "unable to infer checkpoint epoch from {}; provide --epoch",
-                path.display()
-            ));
-        }
-    };
-
-    ensure_checkpoint_exists(&base)?;
-    Ok((base, target_epoch))
-}
-
 fn base_without_extension(path: &Path) -> PathBuf {
     let mut base = path.to_path_buf();
     if base.extension().is_some() {
         base.set_extension("");
     }
     base
-}
-
-fn ensure_checkpoint_exists(base: &Path) -> Result<()> {
-    let mut candidate = base.to_path_buf();
-    candidate.set_extension("bin");
-    if candidate.is_file() {
-        return Ok(());
-    }
-
-    Err(anyhow!("checkpoint file {}.bin not found", base.display()))
-}
-
-fn find_latest_epoch(dir: &Path) -> Result<usize> {
-    let mut max_epoch = None;
-    for entry in fs::read_dir(dir)
-        .with_context(|| format!("failed to read checkpoint directory {}", dir.display()))?
-    {
-        let entry = entry?;
-        if !entry.file_type()?.is_file() {
-            continue;
-        }
-        let mut base = entry.path();
-        base.set_extension("");
-        if let Some(epoch) = parse_epoch_from_stem(&base) {
-            let updated = max_epoch
-                .map(|current: usize| current.max(epoch))
-                .unwrap_or(epoch);
-            max_epoch = Some(updated);
-        }
-    }
-
-    max_epoch.ok_or_else(|| anyhow!("no model checkpoints found in {}", dir.display()))
-}
-
-fn parse_epoch_from_stem(path: &Path) -> Option<usize> {
-    let stem = path.file_name()?.to_string_lossy();
-    let stem = stem.strip_suffix(".bin").unwrap_or(&stem);
-    let epoch_part = stem.strip_prefix("model-")?;
-    epoch_part.parse().ok()
 }
 
 fn format_checkpoint(base: &Path) -> String {

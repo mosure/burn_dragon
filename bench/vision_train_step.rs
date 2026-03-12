@@ -180,7 +180,7 @@ fn run_backend<B, Init>(
     {
         let mut warm_bench = VisionSaccadeTrainStepBench::<B>::new(
             vision_cfg.clone(),
-            saccade_cfg.clone(),
+            *saccade_cfg.clone(),
             &training,
             &optimizer_cfg,
             &device,
@@ -209,7 +209,7 @@ fn run_backend<B, Init>(
                 let mut total = Duration::ZERO;
                 let mut bench = VisionSaccadeTrainStepBench::<B>::new(
                     vision_cfg.clone(),
-                    saccade_cfg.clone(),
+                    *saccade_cfg.clone(),
                     &training,
                     &optimizer_cfg,
                     &device,

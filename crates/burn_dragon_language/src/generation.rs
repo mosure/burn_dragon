@@ -14,6 +14,8 @@ use crate::GenerationConfig;
 use crate::config::ContextStrategyConfig;
 use crate::tokenizer::Tokenizer;
 
+type TokenChunkCallback<'a> = Option<&'a mut dyn FnMut(&[i64])>;
+
 #[derive(Clone, Copy, Debug)]
 pub enum ContextStrategy {
     Infinite,
@@ -170,7 +172,7 @@ fn sample_argmax_token_tensor<B: Backend>(logits_temp: Tensor<B, 1>) -> Tensor<B
 fn flush_pending_token_tensors<B: Backend>(
     pending: &mut Vec<Tensor<B, 2, Int>>,
     full_tokens: &mut Vec<i64>,
-    on_chunk: &mut Option<&mut dyn FnMut(&[i64])>,
+    on_chunk: &mut TokenChunkCallback<'_>,
 ) -> Result<()> {
     if pending.is_empty() {
         return Ok(());
@@ -357,6 +359,7 @@ pub async fn sample_next_token_async<B: Backend>(
             .argmax(0)
             .to_data_async()
             .await
+            .map_err(|err| anyhow!("{err:?}"))?
             .convert::<i64>()
             .into_vec::<i64>()
             .map_err(|err| anyhow!("{err:?}"))?;
@@ -380,6 +383,7 @@ pub async fn sample_next_token_async<B: Backend>(
         let logits_values = logits_temp
             .to_data_async()
             .await
+            .map_err(|err| anyhow!("{err:?}"))?
             .convert::<f32>()
             .into_vec::<f32>()
             .map_err(|err| anyhow!("{err:?}"))?;
@@ -486,7 +490,7 @@ pub fn generate_tokens_chunked<B: Backend>(
     settings: GenerationSettings,
     chunk_tokens: usize,
     device_buffer_tokens: usize,
-    mut on_chunk: Option<&mut dyn FnMut(&[i64])>,
+    mut on_chunk: TokenChunkCallback<'_>,
 ) -> Result<Vec<i64>> {
     let GenerationSettings {
         max_new_tokens,

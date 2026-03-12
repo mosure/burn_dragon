@@ -11,6 +11,18 @@ type PreparedDistillData<B> = (
     Option<DistillTeacherModel<B>>,
 );
 
+pub(super) struct DistillDatasetRequest<'a, B: BackendTrait> {
+    pub config: &'a VisionTrainingConfig,
+    pub vision_config: &'a VisionDragonConfig,
+    pub normalize: VisionNormalize,
+    pub train_aug: ImageNetAugmentations,
+    pub val_aug: ImageNetAugmentations,
+    pub train_root: &'a Path,
+    pub val_root: &'a Path,
+    pub student_patch_tokens: usize,
+    pub device: &'a B::Device,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct VisionDistillCheckpointEvalSummary {
     pub backend: String,
@@ -26,16 +38,19 @@ pub struct VisionDistillCheckpointEvalSummary {
 }
 
 pub(super) fn build_distill_datasets_and_teacher<B: BackendTrait>(
-    config: &VisionTrainingConfig,
-    vision_config: &VisionDragonConfig,
-    normalize: VisionNormalize,
-    train_aug: ImageNetAugmentations,
-    val_aug: ImageNetAugmentations,
-    train_root: &Path,
-    val_root: &Path,
-    student_patch_tokens: usize,
-    device: &B::Device,
+    request: DistillDatasetRequest<'_, B>,
 ) -> Result<PreparedDistillData<B>> {
+    let DistillDatasetRequest {
+        config,
+        vision_config,
+        normalize,
+        train_aug,
+        val_aug,
+        train_root,
+        val_root,
+        student_patch_tokens,
+        device,
+    } = request;
     let distill = match &config.mode {
         VisionTrainingModeConfig::Distill(distill) => distill,
         other => {
@@ -390,17 +405,18 @@ where
     );
     let train_root = config.dataset.imagenet_root.join(&config.dataset.train_dir);
     let val_root = config.dataset.imagenet_root.join(&config.dataset.val_dir);
-    let (_, val_dataset, teacher) = build_distill_datasets_and_teacher::<B>(
-        config,
-        &vision_config,
-        normalize,
-        train_aug,
-        val_aug,
-        &train_root,
-        &val_root,
-        student_patch_tokens,
-        &device,
-    )?;
+    let (_, val_dataset, teacher) =
+        build_distill_datasets_and_teacher::<B>(DistillDatasetRequest {
+            config,
+            vision_config: &vision_config,
+            normalize,
+            train_aug,
+            val_aug,
+            train_root: &train_root,
+            val_root: &val_root,
+            student_patch_tokens,
+            device: &device,
+        })?;
 
     let valid_device = device.clone();
     let valid_steps = val_dataset.steps_per_epoch(training.batch_size);

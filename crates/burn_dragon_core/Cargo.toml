@@ -72,6 +72,7 @@ features = [
 burn-autodiff = "0.21.0-pre.2"
 burn-ndarray = "0.21.0-pre.2"
 burn-wgpu = { version = "0.21.0-pre.2", default-features = false, features = ["fusion", "std"] }
+burn-cubecl = { version = "0.21.0-pre.2", default-features = false, features = ["std"] }
 tempfile = "3"
 
 [lib]

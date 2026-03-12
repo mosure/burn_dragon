@@ -2,7 +2,7 @@ use crate::artifacts::write_validation_artifacts_from_batch;
 use crate::train::metrics::{SudokuOutput, SudokuTrainItem};
 use crate::train::prelude::*;
 use crate::vocab::{GRID_LEN, VOCAB_SIZE};
-use burn_dragon_core::{ModelState, mhc_passthrough};
+use burn_dragon_core::ModelState;
 use burn_dragon_train::train::gdpo::{gdpo_advantage_autodiff, gdpo_policy_loss};
 use std::sync::Mutex;
 use tracing::warn;
@@ -922,7 +922,6 @@ mod tests {
                 loss_interval_steps: 1,
                 global_loss_samples: 0,
                 global_loss_weight: 0.0,
-                ..SudokuReconConfig::default()
             },
             validation: SudokuValidationConfig::default(),
             gdpo: GdpoConfig {

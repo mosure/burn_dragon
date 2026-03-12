@@ -13,7 +13,7 @@ use crate::{
     VisionLatentActivation, VisionPatchEmbedMode, VisionRhoStreamConfig, VisionTrmGraphConfig,
     VisionTrmGridMismatchPolicy,
 };
-use burn_dragon_core::FusedKernelConfig;
+use burn_dragon_core::{FusedKernelConfig, ManifoldHyperConnectionCoefficientPolicy};
 use burn_dragon_train::{
     GdpoConfig, GdpoHardGate, OptimizerConfig, VisionArtifactOutputMode, WgpuRuntimeConfig,
 };
@@ -1612,6 +1612,8 @@ pub struct VisionManifoldHyperConnectionsConfig {
     pub enabled: bool,
     pub num_streams: usize,
     pub num_views: usize,
+    #[serde(default)]
+    pub coefficient_policy: ManifoldHyperConnectionCoefficientPolicy,
     pub mhc_iters: usize,
     pub mhc_tau: f32,
     pub add_branch_out_to_residual: bool,
@@ -1624,6 +1626,7 @@ impl Default for VisionManifoldHyperConnectionsConfig {
             enabled: false,
             num_streams: 0,
             num_views: 0,
+            coefficient_policy: ManifoldHyperConnectionCoefficientPolicy::StaticSinkhorn,
             mhc_iters: 10,
             mhc_tau: 0.05,
             add_branch_out_to_residual: true,
@@ -1638,6 +1641,7 @@ impl ModuleDisplayDefault for VisionManifoldHyperConnectionsConfig {
             .add("enabled", &self.enabled)
             .add("num_streams", &self.num_streams)
             .add("num_views", &self.num_views)
+            .add("coefficient_policy", self.coefficient_policy.as_str())
             .add("mhc_iters", &self.mhc_iters)
             .add("mhc_tau", &self.mhc_tau)
             .add(
@@ -1650,6 +1654,33 @@ impl ModuleDisplayDefault for VisionManifoldHyperConnectionsConfig {
 }
 
 impl ModuleDisplay for VisionManifoldHyperConnectionsConfig {}
+
+impl VisionManifoldHyperConnectionsConfig {
+    pub fn to_core(
+        &self,
+        default_streams: usize,
+        default_views: usize,
+    ) -> burn_dragon_core::ManifoldHyperConnectionsConfig {
+        burn_dragon_core::ManifoldHyperConnectionsConfig {
+            enabled: self.enabled,
+            num_streams: if self.num_streams == 0 {
+                default_streams.max(1)
+            } else {
+                self.num_streams
+            },
+            num_views: if self.num_views == 0 {
+                default_views.max(1)
+            } else {
+                self.num_views
+            },
+            coefficient_policy: self.coefficient_policy,
+            mhc_iters: self.mhc_iters,
+            mhc_tau: self.mhc_tau,
+            add_branch_out_to_residual: self.add_branch_out_to_residual,
+            dropout: self.dropout,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
@@ -1773,16 +1804,6 @@ impl VisionModelConfig {
         let patch_size = self.patch_size.max(1);
         let grid = self.image_size.div_ceil(patch_size);
         let num_eyes = self.num_eyes.max(1);
-        let mhc_streams = if self.mhc.num_streams == 0 {
-            num_eyes
-        } else {
-            self.mhc.num_streams
-        };
-        let mhc_views = if self.mhc.num_views == 0 {
-            num_eyes
-        } else {
-            self.mhc.num_views
-        };
         let kernels = FusedKernelConfig {
             enabled: self.fused_kernels,
             relu_threshold: self.relu_threshold,
@@ -1822,15 +1843,7 @@ impl VisionModelConfig {
             },
             use_alibi: self.use_alibi,
             fused_kernels: kernels,
-            mhc: burn_dragon_core::ManifoldHyperConnectionsConfig {
-                enabled: self.mhc.enabled,
-                num_streams: mhc_streams,
-                num_views: mhc_views,
-                mhc_iters: self.mhc.mhc_iters,
-                mhc_tau: self.mhc.mhc_tau,
-                add_branch_out_to_residual: self.mhc.add_branch_out_to_residual,
-                dropout: self.mhc.dropout,
-            },
+            mhc: self.mhc.to_core(num_eyes, num_eyes),
             trm_graph,
             rho_stream,
         }

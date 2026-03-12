@@ -6,12 +6,18 @@ use burn::tensor::{Distribution as TensorDistribution, Int, Tensor, TensorData, 
 use burn_dragon_core::{
     BankedRhoState, FusedKernelConfig, ManifoldHyperConnections, StructuredBankRole,
     StructuredRouteOperation, StructuredRoutePattern, StructuredRouteSpec, StructuredRoutingSpec,
-    StructuredStepMode, StructuredTopologyState, lowrank_residual_step, mhc_merge, mhc_split,
-    near_critical_residual_output_std,
+    StructuredStepMode, StructuredTopologyState, lowrank_residual_step, mhc_merge_with_coefficients,
+    mhc_split_with_coefficients, near_critical_residual_output_std, structured_dense_update_tokens,
 };
-use burn_dragon_wgpu::{
-    LocalGridNeighborhood, LocalGridShape2d, supports_local_grid_rho_backend,
-    try_fused_local_grid_rho_attention_wgpu_head_decay,
+use burn_dragon_wgpu::api::spatial::{
+    CompiledLocalGridRhoPlan, LocalGridNeighborhood, LocalGridShape2d,
+    LocalGridRhoPlanSpec,
+    CompiledStructuredPyramidRhoPlan, StructuredPyramidRhoStepInput,
+    StructuredPyramidRhoStepOutput, StructuredPyramidShape,
+    reference_structured_pyramid_rho_step,
+    supports_local_grid_rho_backend, try_fused_local_grid_rho_attention_wgpu_head_decay,
+    supports_structured_pyramid_rho_backend, try_fused_structured_pyramid_rho_step_wgpu_with_plan,
+    try_fused_local_grid_rho_attention_wgpu_head_decay_with_plan,
 };
 
 const ROW_NORM_EPS: f32 = 1e-6;
@@ -59,6 +65,12 @@ pub struct VisionDragonMultiOutput<B: Backend> {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RhoStreamRolloutExecutorMode {
+    HostLoop,
+    WgpuFused,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PyramidRolloutExecutorMode {
     HostLoop,
     WgpuFused,
 }
@@ -579,6 +591,16 @@ impl<B: Backend> VisionDragon<B> {
         self.split_output(tokens)
     }
 
+    /// Initializes the cellular recurrent state from an observed token sequence.
+    ///
+    /// Persistence contract:
+    /// - `token_state` carries the dense residual stream across recurrent calls.
+    /// - `rho` stores the persistent patch-local associative memory.
+    /// - If CLS is enabled, the CLS token is part of `token_state` but does not own a separate
+    ///   `rho` slot; recurrent memory belongs only to patch tokens, and CLS is updated from pooled
+    ///   patch context during recurrent reads.
+    /// - `temporal_position` advances only during `Predict`; `prediction_age` resets on
+    ///   `Observe` and advances during `Predict`.
     pub fn cellular_state_from_tokens(&self, tokens: Tensor<B, 3>) -> VisionCellularState<B> {
         assert!(
             self.cellular_backbone_enabled(),
@@ -594,6 +616,7 @@ impl<B: Backend> VisionDragon<B> {
         }
     }
 
+    /// Replaces the dense token observation while preserving the persistent cellular `rho`.
     pub fn cellular_state_with_tokens(
         &self,
         state: VisionCellularState<B>,
@@ -612,6 +635,61 @@ impl<B: Backend> VisionDragon<B> {
             temporal_position: state.temporal_position,
             prediction_age: state.prediction_age,
         }
+    }
+
+    /// Observation step for the cellular backbone.
+    ///
+    /// This keeps `rho` resident, replaces the dense token observation, and then rolls the
+    /// recurrent block in `Observe` mode without advancing temporal time.
+    pub fn observe_cellular_state(
+        &self,
+        state: VisionCellularState<B>,
+        tokens: Tensor<B, 3>,
+        steps: usize,
+        backprop_steps: usize,
+    ) -> VisionCellularState<B> {
+        let state = self.cellular_state_with_tokens(state, tokens);
+        self.forward_cellular_state_rollout_mode_unbounded(
+            state,
+            steps,
+            backprop_steps,
+            StructuredStepMode::Observe,
+        )
+    }
+
+    /// Refinement step for the cellular backbone.
+    ///
+    /// This reuses the current dense token state and `rho` without advancing temporal time.
+    pub fn refine_cellular_state(
+        &self,
+        state: VisionCellularState<B>,
+        steps: usize,
+        backprop_steps: usize,
+    ) -> VisionCellularState<B> {
+        self.forward_cellular_state_rollout_mode_unbounded(
+            state,
+            steps,
+            backprop_steps,
+            StructuredStepMode::Refine,
+        )
+    }
+
+    /// Predictive temporal rollout for the cellular backbone.
+    ///
+    /// This reuses the current dense token state and `rho`, advances temporal counters, and
+    /// applies predictive recurrent decay.
+    pub fn predict_cellular_state(
+        &self,
+        state: VisionCellularState<B>,
+        steps: usize,
+        backprop_steps: usize,
+    ) -> VisionCellularState<B> {
+        self.forward_cellular_state_rollout_mode_unbounded(
+            state,
+            steps,
+            backprop_steps,
+            StructuredStepMode::Predict,
+        )
     }
 
     pub fn forward_cellular_state(&self, state: &VisionCellularState<B>) -> VisionDragonOutput<B> {
@@ -671,6 +749,17 @@ impl<B: Backend> VisionDragon<B> {
         self.rollout_cellular_state_unbounded(state, steps, detach_until, mode)
     }
 
+    /// Initializes the pyramid recurrent state from observed patch tokens.
+    ///
+    /// Persistence contract:
+    /// - `primary_state` and `context_state` are the dense patch/coarse residual streams.
+    /// - `rho.primary_rho` and `rho.context_rho` store the local and coarse associative banks.
+    /// - `rho.global_rho` / `hub_rho` is the explicit global recurrent memory for the pyramid
+    ///   backbone.
+    /// - CLS is not part of this persistent state. When higher-level APIs request a CLS token, it
+    ///   is derived as a readout-only summary of patch tokens and does not own its own `rho`.
+    /// - `temporal_position` advances only during `Predict`; `prediction_age` resets on
+    ///   `Observe` and advances during `Predict`.
     pub fn pyramid_state_from_patch_tokens(
         &self,
         patch_tokens: Tensor<B, 3>,
@@ -718,6 +807,7 @@ impl<B: Backend> VisionDragon<B> {
         }
     }
 
+    /// Replaces the dense patch/coarse observation while preserving local/coarse/global `rho`.
     pub fn pyramid_state_with_patch_tokens(
         &self,
         mut state: StructuredTopologyState<B>,
@@ -730,10 +820,70 @@ impl<B: Backend> VisionDragon<B> {
         state
     }
 
+    /// Observation step for the pyramid backbone.
+    ///
+    /// This preserves local/coarse/global recurrent banks, replaces the current observed dense
+    /// patch state, and runs the recurrent block in `Observe` mode without advancing time.
+    pub fn observe_pyramid_state(
+        &self,
+        state: StructuredTopologyState<B>,
+        patch_tokens: Tensor<B, 3>,
+        steps: usize,
+        backprop_steps: usize,
+    ) -> StructuredTopologyState<B> {
+        let state = self.pyramid_state_with_patch_tokens(state, patch_tokens);
+        self.forward_pyramid_state_rollout_mode_unbounded(
+            state,
+            steps,
+            backprop_steps,
+            StructuredStepMode::Observe,
+        )
+    }
+
+    /// Refinement step for the pyramid backbone.
+    ///
+    /// This reuses the current patch/coarse states and local/coarse/global `rho` without
+    /// advancing temporal time.
+    pub fn refine_pyramid_state(
+        &self,
+        state: StructuredTopologyState<B>,
+        steps: usize,
+        backprop_steps: usize,
+    ) -> StructuredTopologyState<B> {
+        self.forward_pyramid_state_rollout_mode_unbounded(
+            state,
+            steps,
+            backprop_steps,
+            StructuredStepMode::Refine,
+        )
+    }
+
+    /// Predictive temporal rollout for the pyramid backbone.
+    ///
+    /// This reuses the current patch/coarse states and local/coarse/global banks, advances
+    /// temporal counters, and applies predictive recurrent decay.
+    pub fn predict_pyramid_state(
+        &self,
+        state: StructuredTopologyState<B>,
+        steps: usize,
+        backprop_steps: usize,
+    ) -> StructuredTopologyState<B> {
+        self.forward_pyramid_state_rollout_mode_unbounded(
+            state,
+            steps,
+            backprop_steps,
+            StructuredStepMode::Predict,
+        )
+    }
+
     pub fn pyramid_patch_tokens(&self, state: &StructuredTopologyState<B>) -> Tensor<B, 3> {
         self.pyramid_spatial_to_patch_tokens(state.primary_state().clone())
     }
 
+    /// Returns the pyramid readout-only global summary.
+    ///
+    /// This is derived from the current patch token state and does not own its own recurrent
+    /// `rho`; persistent global memory lives in `state.hub_rho()`.
     pub fn pyramid_summary(&self, state: &StructuredTopologyState<B>) -> Tensor<B, 2> {
         self.pyramid_patch_tokens(state)
             .mean_dim(1)
@@ -771,16 +921,38 @@ impl<B: Backend> VisionDragon<B> {
         Tensor::<B, 1>::from_data(TensorData::new(values, [rank.max(1)]), device)
     }
 
-    fn pyramid_apply_decay_5d(&self, memory: Tensor<B, 5>, decay: Tensor<B, 1>) -> Tensor<B, 5> {
-        let rank = memory.shape().dims::<5>()[1];
-        let decay = decay.reshape([1, rank, 1, 1, 1]);
-        memory * decay
+    fn pyramid_rollout_executor_mode(&self) -> PyramidRolloutExecutorMode {
+        if self.kernel.enabled && supports_structured_pyramid_rho_backend::<B>() {
+            return PyramidRolloutExecutorMode::WgpuFused;
+        }
+        PyramidRolloutExecutorMode::HostLoop
     }
 
-    fn pyramid_apply_decay_4d(&self, memory: Tensor<B, 4>, decay: Tensor<B, 1>) -> Tensor<B, 4> {
-        let rank = memory.shape().dims::<4>()[2];
-        let decay = decay.reshape([1, 1, rank, 1]);
-        memory * decay
+    fn pyramid_shape(&self) -> StructuredPyramidShape {
+        StructuredPyramidShape {
+            patch: LocalGridShape2d::new(self.grid_height.max(1), self.grid_width.max(1)),
+            coarse: LocalGridShape2d::new(
+                (self.grid_height.max(1) / self.trm_graph.coarse_stride.max(1)).max(1),
+                (self.grid_width.max(1) / self.trm_graph.coarse_stride.max(1)).max(1),
+            ),
+            coarse_stride: self.trm_graph.coarse_stride.max(1),
+            hub_count: self.trm_graph.hub_count.max(1),
+        }
+    }
+
+    fn pyramid_rho_step_with_plan(
+        &self,
+        shape: StructuredPyramidShape,
+        input: StructuredPyramidRhoStepInput<B>,
+        fused_plan: Option<&CompiledStructuredPyramidRhoPlan<B>>,
+    ) -> StructuredPyramidRhoStepOutput<B> {
+        if let Some(plan) = fused_plan
+            && let Some(fused) =
+                try_fused_structured_pyramid_rho_step_wgpu_with_plan(shape, input.clone(), plan)
+        {
+            return fused;
+        }
+        reference_structured_pyramid_rho_step(shape, input)
     }
 
     pub fn forward_pyramid_state_rollout_unbounded(
@@ -831,11 +1003,22 @@ impl<B: Backend> VisionDragon<B> {
         let steps = steps.max(1);
         let backprop_steps = backprop_steps.max(1).min(steps);
         let detach_until = steps.saturating_sub(backprop_steps);
-        let coarse_stride = self.trm_graph.coarse_stride.max(1);
         let hub_count = self.trm_graph.hub_count.max(1);
         let rank = self.trm_graph.rank.max(1);
         let temporal_dt = mode.temporal_dt();
         let decay = self.pyramid_decay_by_rank(rank, temporal_dt, &state.primary_state().device());
+        let pyramid_shape = self.pyramid_shape();
+        let fused_plan = match self.pyramid_rollout_executor_mode() {
+            PyramidRolloutExecutorMode::HostLoop => None,
+            PyramidRolloutExecutorMode::WgpuFused => Some(CompiledStructuredPyramidRhoPlan::new(
+                state.primary_state().shape().dims::<4>()[0],
+                rank,
+                self.trm_graph.value_dim.max(1),
+                pyramid_shape,
+                self.resolve_rho_stream_neighborhood(),
+                &state.primary_state().device(),
+            )),
+        };
 
         for step_idx in 0..steps {
             let h8 = state.primary_state().clone();
@@ -849,57 +1032,37 @@ impl<B: Backend> VisionDragon<B> {
             let x32 = activation::relu(self.project_spatial(h32.clone(), pyramid_x_neuron_proj));
             let v32 = self.project_spatial(h32.clone(), pyramid_write_value_proj);
 
-            let msg8_local = self.pyramid_local_read(patch_rho.clone(), x8.clone());
-            let msg32_local = self.pyramid_local_read(coarse_rho.clone(), x32.clone());
-            let msg8_down = if coarse_stride > 1 {
-                self.pyramid_cross_scale_read(coarse_rho.clone(), x8.clone(), coarse_stride)
-            } else {
-                self.pyramid_contract(coarse_rho.clone(), x8.clone())
-            };
-
             let (hub_w8, hub_w32) = self.pyramid_hub_weights(h8.clone(), h32.clone(), hub_count);
-            let msg8_hub = self.pyramid_hub_read(hub_rho.clone(), x8.clone(), hub_w8.clone());
-            let msg32_hub = self.pyramid_hub_read(hub_rho.clone(), x32.clone(), hub_w32.clone());
+            let rho_step = self.pyramid_rho_step_with_plan(
+                pyramid_shape,
+                StructuredPyramidRhoStepInput {
+                    patch_query: x8.clone(),
+                    patch_value: v8.clone(),
+                    coarse_query: x32.clone(),
+                    coarse_value: v32.clone(),
+                    patch_rho,
+                    coarse_rho,
+                    hub_rho,
+                    patch_hub_weights: hub_w8.clone(),
+                    coarse_hub_weights: hub_w32.clone(),
+                    neighborhood: self.resolve_rho_stream_neighborhood(),
+                    decay: decay.clone(),
+                },
+                fused_plan.as_ref(),
+            );
 
-            let next_patch_state = self.pyramid_update_state(
+            let (next_patch_state, next_coarse_state) = self.pyramid_update_states(
                 h8,
                 x8.clone(),
-                msg8_local + msg8_down + msg8_hub,
-                pyramid_y_gate_proj,
-                pyramid_delta_proj,
-                pyramid_value_norm,
-            );
-            let next_coarse_state = self.pyramid_update_state(
+                rho_step.patch_local_context.clone()
+                    + rho_step.patch_from_coarse_context.clone()
+                    + rho_step.patch_from_hub_context.clone(),
                 h32,
                 x32.clone(),
-                msg32_local + msg32_hub,
+                rho_step.coarse_local_context.clone() + rho_step.coarse_from_hub_context.clone(),
                 pyramid_y_gate_proj,
                 pyramid_delta_proj,
                 pyramid_value_norm,
-            );
-
-            let u8 = self.pyramid_outer_product(x8, v8);
-            let u32 = self.pyramid_outer_product(x32, v32);
-            let u8_pool = if coarse_stride > 1 {
-                self.pyramid_pool_outer(u8.clone(), coarse_stride)
-            } else {
-                u8.clone()
-            };
-            let next_patch_rho = self
-                .pyramid_apply_decay_5d(patch_rho, decay.clone())
-                .add(u8.clone());
-            let next_coarse_rho = self
-                .pyramid_apply_decay_5d(coarse_rho, decay.clone())
-                .add(u32.clone())
-                .add(u8_pool);
-            let next_hub_rho = self.pyramid_update_hub(
-                hub_rho,
-                u8,
-                u32,
-                hub_w8,
-                hub_w32,
-                hub_count,
-                decay.clone(),
             );
 
             *state.primary_state_mut() = if step_idx < detach_until {
@@ -913,19 +1076,19 @@ impl<B: Backend> VisionDragon<B> {
                 next_coarse_state
             };
             *state.patch_rho_mut() = if step_idx < detach_until {
-                next_patch_rho.detach()
+                rho_step.next_patch_rho.detach()
             } else {
-                next_patch_rho
+                rho_step.next_patch_rho
             };
             *state.coarse_rho_mut() = if step_idx < detach_until {
-                next_coarse_rho.detach()
+                rho_step.next_coarse_rho.detach()
             } else {
-                next_coarse_rho
+                rho_step.next_coarse_rho
             };
             *state.hub_rho_mut() = if step_idx < detach_until {
-                next_hub_rho.detach()
+                rho_step.next_hub_rho.detach()
             } else {
-                next_hub_rho
+                rho_step.next_hub_rho
             };
         }
 
@@ -1419,6 +1582,29 @@ impl<B: Backend> VisionDragon<B> {
         } else {
             None
         };
+        let patch_tokens = if self.use_cls_token {
+            current.shape().dims::<4>()[2].saturating_sub(1)
+        } else {
+            current.shape().dims::<4>()[2]
+        };
+        let fused_plan = if patch_tokens > 0 && self.rho_stream_wgpu_forward_enabled() {
+            let grid = self.resolve_rho_stream_grid(patch_tokens);
+            Some(CompiledLocalGridRhoPlan::new(
+                LocalGridRhoPlanSpec {
+                    batch: current.shape().dims::<4>()[0],
+                    heads,
+                    value_heads: 1,
+                    patch_tokens,
+                    latent,
+                    embd: self.embed_dim,
+                    grid: LocalGridShape2d::new(grid.height, grid.width),
+                    neighborhood: self.resolve_rho_stream_neighborhood(),
+                },
+                &current.device(),
+            ))
+        } else {
+            None
+        };
 
         for step_idx in 0..steps {
             let step_current = self.apply_cellular_step_mode_4d(current, mode);
@@ -1434,12 +1620,13 @@ impl<B: Backend> VisionDragon<B> {
                 latent_pattern,
                 sparse_mask.clone(),
                 |query, value| {
-                    self.rho_stream_attention_fused_with_decay(
+                    self.rho_stream_attention_fused_with_decay_plan(
                         query,
                         value,
                         &mut rho_state,
                         decay.clone(),
                         mode,
+                        fused_plan.as_ref(),
                     )
                 },
                 |values| self.apply_latent_activation(values),
@@ -1518,176 +1705,56 @@ impl<B: Backend> VisionDragon<B> {
             );
         }
 
-        let pyramid_x_neuron_proj = match self.pyramid_x_neuron_proj.as_ref() {
-            Some(layer) => layer,
-            None => {
-                return self.pyramid_backbone_fallback(
-                    tokens,
-                    steps,
-                    detach_until,
-                    "missing pyramid backbone projection layer `pyramid_x_neuron_proj`",
-                );
-            }
-        };
-        let pyramid_write_value_proj = match self.pyramid_write_value_proj.as_ref() {
-            Some(layer) => layer,
-            None => {
-                return self.pyramid_backbone_fallback(
-                    tokens,
-                    steps,
-                    detach_until,
-                    "missing pyramid backbone projection layer `pyramid_write_value_proj`",
-                );
-            }
-        };
-        let pyramid_y_gate_proj = match self.pyramid_y_gate_proj.as_ref() {
-            Some(layer) => layer,
-            None => {
-                return self.pyramid_backbone_fallback(
-                    tokens,
-                    steps,
-                    detach_until,
-                    "missing pyramid backbone projection layer `pyramid_y_gate_proj`",
-                );
-            }
-        };
-        let pyramid_delta_proj = match self.pyramid_delta_proj.as_ref() {
-            Some(layer) => layer,
-            None => {
-                return self.pyramid_backbone_fallback(
-                    tokens,
-                    steps,
-                    detach_until,
-                    "missing pyramid backbone projection layer `pyramid_delta_proj`",
-                );
-            }
-        };
-        let pyramid_value_norm = match self.pyramid_value_norm.as_ref() {
-            Some(layer) => layer,
-            None => {
-                return self.pyramid_backbone_fallback(
-                    tokens,
-                    steps,
-                    detach_until,
-                    "missing pyramid backbone normalization layer `pyramid_value_norm`",
-                );
-            }
-        };
-
-        let device = tokens.device();
-        let rank = self.trm_graph.rank.max(1);
-        let value_dim = self.trm_graph.value_dim.max(1);
-        let hub_count = self.trm_graph.hub_count.max(1);
-        let decay = self
-            .pyramid_decay_by_rank(rank, 1, &device)
-            .reshape([1, rank, 1, 1, 1]);
-        let coarse_stride = self.trm_graph.coarse_stride.max(1);
-
-        let mut h8 = patch_tokens
-            .reshape([batch, grid_height, grid_width, dim])
-            .swap_dims(1, 3)
-            .swap_dims(2, 3);
-        h8 = self.apply_embed_norm_spatial(h8);
-
-        let h32_height = grid_height / coarse_stride.max(1);
-        let h32_width = grid_width / coarse_stride.max(1);
-        let mut h32 = if coarse_stride > 1 {
-            let pooled = h8
-                .clone()
-                .reshape([
-                    batch,
-                    dim,
-                    h32_height.max(1),
-                    coarse_stride,
-                    h32_width.max(1),
-                    coarse_stride,
-                ])
-                .sum_dims_squeeze::<4, usize>(&[3, 5])
-                .div_scalar((coarse_stride * coarse_stride) as f32);
-            self.apply_embed_norm_spatial(pooled)
-        } else {
-            h8.clone()
-        };
-
-        let mut patch_rho =
-            Tensor::<B, 5>::zeros([batch, rank, value_dim, grid_height, grid_width], &device);
-        let mut coarse_rho = Tensor::<B, 5>::zeros(
-            [batch, rank, value_dim, h32_height.max(1), h32_width.max(1)],
-            &device,
-        );
-        let mut hub_rho = Tensor::<B, 4>::zeros([batch, hub_count, rank, value_dim], &device);
-
-        for step_idx in 0..steps {
-            let x8 = activation::relu(self.project_spatial(h8.clone(), pyramid_x_neuron_proj));
-            let v8 = self.project_spatial(h8.clone(), pyramid_write_value_proj);
-            let x32 = activation::relu(self.project_spatial(h32.clone(), pyramid_x_neuron_proj));
-            let v32 = self.project_spatial(h32.clone(), pyramid_write_value_proj);
-
-            let msg8_local = self.pyramid_local_read(patch_rho.clone(), x8.clone());
-            let msg32_local = self.pyramid_local_read(coarse_rho.clone(), x32.clone());
-            let msg8_down = if coarse_stride > 1 {
-                self.pyramid_cross_scale_read(coarse_rho.clone(), x8.clone(), coarse_stride)
-            } else {
-                self.pyramid_contract(coarse_rho.clone(), x8.clone())
-            };
-
-            let (hub_w8, hub_w32) = self.pyramid_hub_weights(h8.clone(), h32.clone(), hub_count);
-            let msg8_hub = self.pyramid_hub_read(hub_rho.clone(), x8.clone(), hub_w8.clone());
-            let msg32_hub = self.pyramid_hub_read(hub_rho.clone(), x32.clone(), hub_w32.clone());
-
-            let msg8 = msg8_local + msg8_down + msg8_hub;
-            let msg32 = msg32_local + msg32_hub;
-
-            h8 = self.pyramid_update_state(
-                h8,
-                x8.clone(),
-                msg8,
-                pyramid_y_gate_proj,
-                pyramid_delta_proj,
-                pyramid_value_norm,
+        if self.pyramid_x_neuron_proj.is_none() {
+            return self.pyramid_backbone_fallback(
+                tokens,
+                steps,
+                detach_until,
+                "missing pyramid backbone projection layer `pyramid_x_neuron_proj`",
             );
-            h32 = self.pyramid_update_state(
-                h32,
-                x32.clone(),
-                msg32,
-                pyramid_y_gate_proj,
-                pyramid_delta_proj,
-                pyramid_value_norm,
+        }
+        if self.pyramid_write_value_proj.is_none() {
+            return self.pyramid_backbone_fallback(
+                tokens,
+                steps,
+                detach_until,
+                "missing pyramid backbone projection layer `pyramid_write_value_proj`",
             );
-
-            let u8 = self.pyramid_outer_product(x8, v8);
-            let u32 = self.pyramid_outer_product(x32, v32);
-            let u8_pool = if coarse_stride > 1 {
-                self.pyramid_pool_outer(u8.clone(), coarse_stride)
-            } else {
-                u8.clone()
-            };
-            patch_rho = patch_rho.mul(decay.clone()).add(u8.clone());
-            coarse_rho = coarse_rho.mul(decay.clone()).add(u32.clone()).add(u8_pool);
-
-            hub_rho = self.pyramid_update_hub(
-                hub_rho,
-                u8.clone(),
-                u32,
-                hub_w8,
-                hub_w32,
-                hub_count,
-                decay.clone().reshape([rank]),
+        }
+        if self.pyramid_y_gate_proj.is_none() {
+            return self.pyramid_backbone_fallback(
+                tokens,
+                steps,
+                detach_until,
+                "missing pyramid backbone projection layer `pyramid_y_gate_proj`",
             );
-
-            if step_idx < detach_until {
-                h8 = h8.detach();
-                h32 = h32.detach();
-                patch_rho = patch_rho.detach();
-                coarse_rho = coarse_rho.detach();
-                hub_rho = hub_rho.detach();
-            }
+        }
+        if self.pyramid_delta_proj.is_none() {
+            return self.pyramid_backbone_fallback(
+                tokens,
+                steps,
+                detach_until,
+                "missing pyramid backbone projection layer `pyramid_delta_proj`",
+            );
+        }
+        if self.pyramid_value_norm.is_none() {
+            return self.pyramid_backbone_fallback(
+                tokens,
+                steps,
+                detach_until,
+                "missing pyramid backbone normalization layer `pyramid_value_norm`",
+            );
         }
 
-        let patch_tokens = h8
-            .swap_dims(1, 3)
-            .swap_dims(1, 2)
-            .reshape([batch, patch_count, dim]);
+        let backprop_steps = steps.saturating_sub(detach_until).max(1);
+        let state = self.pyramid_state_from_patch_tokens(patch_tokens);
+        let state = self.forward_pyramid_state_rollout_mode_unbounded(
+            state,
+            steps,
+            backprop_steps,
+            StructuredStepMode::Predict,
+        );
+        let patch_tokens = self.pyramid_patch_tokens(&state).reshape([batch, patch_count, dim]);
         if has_cls {
             let cls = patch_tokens.clone().mean_dim(1).reshape([batch, 1, dim]);
             Tensor::cat(vec![cls, patch_tokens], 1)
@@ -1746,12 +1813,21 @@ impl<B: Backend> VisionDragon<B> {
             None
         };
 
+        let mhc_coefficients = self
+            .mhc_layers
+            .as_ref()
+            .map(|layers| layers.iter().map(|mhc| mhc.coefficients()).collect::<Vec<_>>());
+
         for step_idx in 0..steps {
             let mhc = self
                 .mhc_layers
                 .as_ref()
                 .map(|layers| &layers[step_idx.min(layers.len().saturating_sub(1))]);
-            let (branch_input, residuals_base, beta) = mhc_split(mhc, current);
+            let mhc_coefficients = mhc_coefficients
+                .as_ref()
+                .and_then(|coefficients| coefficients.get(step_idx.min(coefficients.len().saturating_sub(1))));
+            let (branch_input, residuals_base, beta) =
+                mhc_split_with_coefficients(mhc, current, mhc_coefficients);
 
             let [batch, views, time, dim] = branch_input.shape().dims::<4>();
             let branch_flat = branch_input.reshape([batch * views, 1, time, dim]);
@@ -1773,7 +1849,13 @@ impl<B: Backend> VisionDragon<B> {
             );
 
             let branch_out = output.next.reshape([batch, views, time, dim]);
-            let next = mhc_merge(mhc, branch_out, residuals_base, beta);
+            let next = mhc_merge_with_coefficients(
+                mhc,
+                branch_out,
+                residuals_base,
+                mhc_coefficients,
+                beta,
+            );
 
             current = self.sync_cls_tokens_multi(self.apply_token_norm(next));
             if step_idx < detach_until {

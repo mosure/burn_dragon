@@ -31,6 +31,7 @@ pub use burn_dragon_train::train::gdpo::{gdpo_cpu_fallbacks, gdpo_reset_cpu_fall
 #[cfg(feature = "integration_test")]
 pub use burn_dragon_train::train::metrics::{loss_trace_len, loss_trace_reset, loss_trace_take};
 pub use saccade::SaccadeFoveationSampler;
+pub(crate) use pipeline::resolve_vision_rollout;
 pub use vision::train::train_vision_backend;
 #[cfg(feature = "integration_test")]
 pub use vision::train::train_vision_backend_for_test;
@@ -42,3 +43,6 @@ pub use vision::{
     VideoTargetHorizonCurriculum, VisionNormalize,
 };
 pub use vision::{VisionDistillCheckpointEvalSummary, eval_vision_distill_checkpoint_backend};
+pub(crate) use vision::{
+    VisionDistillModel, VisionLejepaInit, VisionLejepaModel, VisionReconstructionInit,
+};

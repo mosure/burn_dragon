@@ -5,7 +5,8 @@ use burn::tensor::{Distribution as TensorDistribution, Int, Tensor, TensorData, 
 use std::f32::consts::PI;
 
 use burn_dragon_core::{
-    BDH, BDHConfig, FusedKernelConfig, HaltHead, ManifoldHyperConnections, ModelState,
+    BDH, BDHConfig, FusedKernelConfig, HaltHead, ManifoldHyperConnections,
+    ManifoldHyperConnectionsConfig, ModelState,
 };
 use burn_dragon_train::WgpuRuntimeConfig;
 use burn_dragon_train::wgpu::apply_wgpu_fused_core_override;
@@ -129,6 +130,8 @@ impl SudokuModelConfig {
             vocab_size: VOCAB_SIZE,
             rollout_fast_steps_per_slow_step: 1,
             fused_kernels: fused,
+            mhc: ManifoldHyperConnectionsConfig::default(),
+            y_neuron_recurrence: Default::default(),
         }
     }
 

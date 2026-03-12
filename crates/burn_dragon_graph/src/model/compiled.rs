@@ -21,6 +21,8 @@ pub(super) struct GraphCompiledState<B: Backend> {
 pub(super) struct GraphCompiledRecurrentOutput<B: Backend> {
     pub(super) state: GraphCompiledState<B>,
     pub(super) readouts: GraphStepReadouts<B>,
+    pub(super) node_x_neuron: Tensor<B, 3>,
+    pub(super) cluster_x_neuron: Tensor<B, 3>,
 }
 
 #[derive(Clone)]

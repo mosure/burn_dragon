@@ -435,6 +435,21 @@ pub struct MovingMnistVideoDataLoader<B: BackendTrait> {
     artifact_extra_future_frames: usize,
 }
 
+#[derive(Clone, Debug)]
+pub struct MovingMnistVideoLoaderConfig {
+    pub batch_size: usize,
+    pub steps_per_epoch: usize,
+    pub total_steps: Option<usize>,
+    pub target_horizon_curriculum: Option<VideoTargetHorizonCurriculum>,
+    pub prefetch_batches: usize,
+    pub prefetch_workers: usize,
+    pub prefetch_to_device: bool,
+    pub sequential: bool,
+    pub artifact_capture_every: usize,
+    pub artifact_capture_images: usize,
+    pub artifact_extra_future_frames: usize,
+}
+
 impl<B: BackendTrait> Clone for MovingMnistVideoDataLoader<B> {
     fn clone(&self) -> Self {
         Self {
@@ -459,19 +474,22 @@ impl<B: BackendTrait> Clone for MovingMnistVideoDataLoader<B> {
 impl<B: BackendTrait> MovingMnistVideoDataLoader<B> {
     pub fn new(
         dataset: Arc<MovingMnistVideoDataset>,
-        batch_size: usize,
         device: &B::Device,
-        steps_per_epoch: usize,
-        total_steps: Option<usize>,
-        target_horizon_curriculum: Option<VideoTargetHorizonCurriculum>,
-        prefetch_batches: usize,
-        prefetch_workers: usize,
-        prefetch_to_device: bool,
-        sequential: bool,
-        artifact_capture_every: usize,
-        artifact_capture_images: usize,
-        artifact_extra_future_frames: usize,
+        config: MovingMnistVideoLoaderConfig,
     ) -> Self {
+        let MovingMnistVideoLoaderConfig {
+            batch_size,
+            steps_per_epoch,
+            total_steps,
+            target_horizon_curriculum,
+            prefetch_batches,
+            prefetch_workers,
+            prefetch_to_device,
+            sequential,
+            artifact_capture_every,
+            artifact_capture_images,
+            artifact_extra_future_frames,
+        } = config;
         let steps_per_epoch = if steps_per_epoch == 0 {
             dataset.steps_per_epoch(batch_size)
         } else {
@@ -1032,7 +1050,21 @@ mod tests {
             .expect("dataset"),
         );
         let loader = MovingMnistVideoDataLoader::<Backend>::new(
-            dataset, 4, &device, 3, None, None, 2, 2, true, false, 0, 0, 0,
+            dataset,
+            &device,
+            MovingMnistVideoLoaderConfig {
+                batch_size: 4,
+                steps_per_epoch: 3,
+                total_steps: None,
+                target_horizon_curriculum: None,
+                prefetch_batches: 2,
+                prefetch_workers: 2,
+                prefetch_to_device: true,
+                sequential: false,
+                artifact_capture_every: 0,
+                artifact_capture_images: 0,
+                artifact_extra_future_frames: 0,
+            },
         );
 
         let mut iter = loader.iter();
@@ -1073,23 +1105,25 @@ mod tests {
         );
         let loader = MovingMnistVideoDataLoader::<Backend>::new(
             dataset,
-            4,
             &device,
-            6,
-            Some(6),
-            Some(VideoTargetHorizonCurriculum {
-                min_target_len: 2,
-                max_target_len: 6,
-                warmup_steps: 4,
-                seed: 123,
-            }),
-            0,
-            0,
-            false,
-            true,
-            0,
-            0,
-            0,
+            MovingMnistVideoLoaderConfig {
+                batch_size: 4,
+                steps_per_epoch: 6,
+                total_steps: Some(6),
+                target_horizon_curriculum: Some(VideoTargetHorizonCurriculum {
+                    min_target_len: 2,
+                    max_target_len: 6,
+                    warmup_steps: 4,
+                    seed: 123,
+                }),
+                prefetch_batches: 0,
+                prefetch_workers: 0,
+                prefetch_to_device: false,
+                sequential: true,
+                artifact_capture_every: 0,
+                artifact_capture_images: 0,
+                artifact_extra_future_frames: 0,
+            },
         );
 
         let lengths = loader
@@ -1097,7 +1131,7 @@ mod tests {
             .map(|batch| batch.target_len)
             .collect::<Vec<_>>();
         assert_eq!(lengths.len(), 6);
-        assert!(lengths[0] >= 2 && lengths[0] <= 2);
+        assert_eq!(lengths[0], 2);
         assert!(lengths[1] >= 2 && lengths[1] <= 3);
         assert!(lengths[2] >= 2 && lengths[2] <= 4);
         assert!(lengths[3] >= 2 && lengths[3] <= 5);
@@ -1136,7 +1170,21 @@ mod tests {
             .expect("dataset"),
         );
         let loader = MovingMnistVideoDataLoader::<Backend>::new(
-            dataset, 8, &device, 4, None, None, 0, 0, false, true, 1, 8, 6,
+            dataset,
+            &device,
+            MovingMnistVideoLoaderConfig {
+                batch_size: 8,
+                steps_per_epoch: 4,
+                total_steps: None,
+                target_horizon_curriculum: None,
+                prefetch_batches: 0,
+                prefetch_workers: 0,
+                prefetch_to_device: false,
+                sequential: true,
+                artifact_capture_every: 1,
+                artifact_capture_images: 8,
+                artifact_extra_future_frames: 6,
+            },
         );
 
         let batches = loader.iter().collect::<Vec<_>>();

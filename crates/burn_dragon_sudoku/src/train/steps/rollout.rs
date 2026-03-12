@@ -211,6 +211,7 @@ pub(super) fn rollout_base_impl<B: BackendTrait>(
             .mean_dim(1)
             .reshape([batch_size.max(1), GRID_LEN, embd]);
     let mut cache = input_cache.clone();
+    let cache_mhc_coeffs = model.cache_mhc.as_ref().map(|mhc| mhc.coefficients());
     let mut summary_tokens = model.init_summary_tokens(batch_size);
     let summary_len = model.summary_token_count();
     let (_initial_acc_per_sample, initial_acc_mean, initial_exact, initial_solve_rate) =
@@ -372,7 +373,11 @@ pub(super) fn rollout_base_impl<B: BackendTrait>(
             let update_mask_stream = update_mask_f.clone().unsqueeze_dim::<4>(1);
             let keep = update_mask_stream.clone().mul_scalar(-1.0).add_scalar(1.0);
             cache = cache * keep + update_emb.mul(update_mask_stream);
-            cache = mhc_passthrough(model.cache_mhc.as_ref(), cache);
+            cache = burn_dragon_core::mhc_passthrough_with_coefficients(
+                model.cache_mhc.as_ref(),
+                cache,
+                cache_mhc_coeffs.as_ref(),
+            );
         }
     }
 
@@ -733,7 +738,11 @@ pub(super) fn rollout_base_impl<B: BackendTrait>(
         let update_mask_stream = update_mask_f.clone().unsqueeze_dim::<4>(1);
         let keep = update_mask_stream.clone().mul_scalar(-1.0).add_scalar(1.0);
         cache = cache * keep + update_emb.mul(update_mask_stream);
-        cache = mhc_passthrough(model.cache_mhc.as_ref(), cache);
+        cache = burn_dragon_core::mhc_passthrough_with_coefficients(
+            model.cache_mhc.as_ref(),
+            cache,
+            cache_mhc_coeffs.as_ref(),
+        );
 
         let tokens_solved_after = tokens_reward
             .clone()

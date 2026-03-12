@@ -83,7 +83,7 @@ pub(crate) struct VisionVideoForward<B: BackendTrait> {
     pub(crate) observation_target_proj: Tensor<B, 3>,
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) context_posterior_patch_tokens: Tensor<B, 4>,
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(dead_code)]
     pub(crate) context_posterior_cls_embed: Tensor<B, 3>,
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) context_summary: Tensor<B, 2>,

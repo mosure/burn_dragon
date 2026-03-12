@@ -460,7 +460,7 @@ impl<B: BackendTrait> VisionArtifactMetric<B> {
 
                 let mut grid = patch_meta
                     .or_else(|| pca_meta.map(|(h, w, _)| (h, w)))
-                    .or_else(|| posterior_patch_meta)
+                    .or(posterior_patch_meta)
                     .or_else(|| posterior_pca_meta.map(|(h, w, _)| (h, w)));
                 if grid.is_none() {
                     grid = debug_patch_meta.or_else(|| debug_pca_meta.map(|(h, w, _)| (h, w)));

@@ -1,5 +1,4 @@
 use std::any::{Any, TypeId};
-use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 use burn::tensor::Tensor as BurnTensor;
@@ -16,6 +15,10 @@ use burn_fusion::FusionTensor;
 use burn_wgpu::{CubeBackend, KernelSource, SourceKernel, SourceTemplate, WgpuRuntime};
 
 use crate::fusion_compat::register_fusion_float_tensor;
+use crate::profiling::{
+    KernelProfileSite, KernelProfileSnapshot, profile_enabled, profile_record, profile_reset,
+    profile_snapshot,
+};
 
 const WORKGROUP_SIZE_X: u32 = 64;
 const META_LEN: usize = 6;
@@ -24,63 +27,78 @@ type WgpuCubeBackend = CubeBackend<WgpuRuntime, f32, i32, u32>;
 type WgpuCubeAutodiffBackend = Autodiff<WgpuCubeBackend>;
 type WgpuCubeAutodiffTensor = <WgpuCubeAutodiffBackend as BackendTrait>::FloatTensorPrimitive;
 
-#[derive(Debug, Default, Clone, Copy)]
-pub struct RecurrentProfileSnapshot {
-    pub calls: u64,
-    pub total_ns: u128,
-    pub setup_ns: u128,
-    pub copy_ns: u128,
-    pub dispatch_ns: u128,
-}
+pub type RecurrentProfileSnapshot = KernelProfileSnapshot;
 
-#[derive(Debug, Default)]
-struct RecurrentProfileState {
-    calls: u64,
-    total_ns: u128,
-    setup_ns: u128,
-    copy_ns: u128,
-    dispatch_ns: u128,
-}
-
-static RECURRENT_PROFILE: OnceLock<Mutex<RecurrentProfileState>> = OnceLock::new();
-
-fn profile_enabled() -> bool {
-    std::env::var_os("BDH_STAGE_PROFILE").is_some()
-}
-
-fn profile_state() -> &'static Mutex<RecurrentProfileState> {
-    RECURRENT_PROFILE.get_or_init(|| Mutex::new(RecurrentProfileState::default()))
-}
-
-fn profile_record(mutator: impl FnOnce(&mut RecurrentProfileState)) {
-    if let Ok(mut state) = profile_state().lock() {
-        mutator(&mut state);
-    }
-}
+static RECURRENT_PROFILE: KernelProfileSite = KernelProfileSite::new();
 
 pub fn recurrent_profile_reset() {
-    if let Ok(mut state) = profile_state().lock() {
-        *state = RecurrentProfileState::default();
-    }
+    profile_reset(&RECURRENT_PROFILE);
 }
 
 pub fn recurrent_profile_snapshot() -> RecurrentProfileSnapshot {
-    if let Ok(state) = profile_state().lock() {
-        return RecurrentProfileSnapshot {
-            calls: state.calls,
-            total_ns: state.total_ns,
-            setup_ns: state.setup_ns,
-            copy_ns: state.copy_ns,
-            dispatch_ns: state.dispatch_ns,
-        };
-    }
-    RecurrentProfileSnapshot::default()
+    profile_snapshot(&RECURRENT_PROFILE)
 }
 
 #[derive(Debug)]
 pub struct RecurrentAttentionOutput<B: BackendTrait> {
     pub context: BurnTensor<B, 4>,
     pub rho: BurnTensor<B, 4>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CompiledRecurrentAttentionPlan<B: BackendTrait> {
+    meta: BurnTensor<B, 1>,
+    batch: usize,
+    heads: usize,
+    value_heads: usize,
+    time: usize,
+    latent: usize,
+    embd: usize,
+}
+
+impl<B: BackendTrait> CompiledRecurrentAttentionPlan<B> {
+    pub fn new(
+        batch: usize,
+        heads: usize,
+        value_heads: usize,
+        time: usize,
+        latent: usize,
+        embd: usize,
+        device: &B::Device,
+    ) -> Self {
+        let meta = BurnTensor::<B, 1>::from_data(
+            TensorData::new(
+                vec![
+                    batch as f32,
+                    heads as f32,
+                    value_heads as f32,
+                    time as f32,
+                    latent as f32,
+                    embd as f32,
+                ],
+                [META_LEN],
+            ),
+            device,
+        );
+        Self {
+            meta,
+            batch,
+            heads,
+            value_heads,
+            time,
+            latent,
+            embd,
+        }
+    }
+
+    fn matches(&self, query: &BurnTensor<B, 4>, value: &BurnTensor<B, 4>) -> bool {
+        query.shape().dims::<4>() == [self.batch, self.heads, self.time, self.latent]
+            && value.shape().dims::<4>() == [self.batch, self.value_heads, self.time, self.embd]
+    }
+
+    fn meta(&self) -> BurnTensor<B, 1> {
+        self.meta.clone()
+    }
 }
 
 pub fn supports_backend<B: BackendTrait>() -> bool
@@ -100,14 +118,6 @@ pub fn try_fused_recurrent_attention_wgpu<B: BackendTrait>(
 where
     B::FloatTensorPrimitive: 'static,
 {
-    let prof_enabled = profile_enabled();
-    let total_start = prof_enabled.then(Instant::now);
-
-    if !supports_backend::<B>() {
-        return None;
-    }
-
-    let setup_start = prof_enabled.then(Instant::now);
     let [batch, heads, time, latent] = query.shape().dims::<4>();
     let [value_batch, value_heads, value_time, embd] = value.shape().dims::<4>();
 
@@ -121,40 +131,65 @@ where
         return None;
     }
 
+    let plan = CompiledRecurrentAttentionPlan::new(
+        batch,
+        heads,
+        value_heads,
+        time,
+        latent,
+        embd,
+        &query.device(),
+    );
+    let output = try_fused_recurrent_attention_wgpu_with_plan(query, value, rho, decay, &plan);
+    if output.is_some() {
+        profile_record(&RECURRENT_PROFILE, |state| {
+            state.metadata_reuse_hits = state.metadata_reuse_hits.saturating_sub(1);
+            state.metadata_reuse_bytes = state
+                .metadata_reuse_bytes
+                .saturating_sub((META_LEN * core::mem::size_of::<f32>()) as u64);
+            state.metadata_upload_bytes = state.metadata_upload_bytes.saturating_add(
+                ((META_LEN + heads.max(1)) * core::mem::size_of::<f32>()) as u64,
+            );
+        });
+    }
+    output
+}
+
+pub fn try_fused_recurrent_attention_wgpu_with_plan<B: BackendTrait>(
+    query: &BurnTensor<B, 4>,
+    value: &BurnTensor<B, 4>,
+    rho: Option<&BurnTensor<B, 4>>,
+    decay: Option<&BurnTensor<B, 1>>,
+    plan: &CompiledRecurrentAttentionPlan<B>,
+) -> Option<RecurrentAttentionOutput<B>>
+where
+    B::FloatTensorPrimitive: 'static,
+{
+    let prof_enabled = profile_enabled();
+    let total_start = prof_enabled.then(Instant::now);
+
+    if !supports_backend::<B>() || !plan.matches(query, value) {
+        return None;
+    }
+
+    let setup_start = prof_enabled.then(Instant::now);
+    let [batch, heads, _time, latent] = query.shape().dims::<4>();
+    let embd = value.shape().dims::<4>()[3];
     let device = query.device();
     let expected_rho = [batch, heads, latent, embd];
-
     let rho = match rho {
         Some(existing) if existing.shape().dims::<4>() == expected_rho => existing.clone(),
         _ => BurnTensor::<B, 4>::zeros(expected_rho, &device),
     };
-
     let decay = match decay {
         Some(existing) if existing.shape().dims::<1>()[0] == heads => existing.clone(),
         _ => BurnTensor::<B, 1>::ones([heads], &device),
     };
-
-    let meta = BurnTensor::<B, 1>::from_data(
-        TensorData::new(
-            vec![
-                batch as f32,
-                heads as f32,
-                value_heads as f32,
-                time as f32,
-                latent as f32,
-                embd as f32,
-            ],
-            [META_LEN],
-        ),
-        &device,
-    );
-
+    let meta = plan.meta();
     let setup_ns = setup_start
         .map(|start| start.elapsed().as_nanos())
         .unwrap_or_default();
 
-    // Only `rho` is mutated in-place by the fused kernel, so keep it in dedicated storage.
-    // Other inputs are read-only and can stay in-place to avoid redundant allocation/copy ops.
     let copy_start = prof_enabled.then(Instant::now);
     let query_copy = query.clone();
     let value_copy = value.clone();
@@ -187,11 +222,16 @@ where
     });
 
     if let Some(start) = total_start {
-        profile_record(|state| {
+        profile_record(&RECURRENT_PROFILE, |state| {
             state.calls = state.calls.saturating_add(u64::from(output.is_some()));
             state.total_ns = state.total_ns.saturating_add(start.elapsed().as_nanos());
             state.setup_ns = state.setup_ns.saturating_add(setup_ns);
             state.copy_ns = state.copy_ns.saturating_add(copy_ns);
+            state.transient_allocations = state.transient_allocations.saturating_add(5);
+            state.metadata_reuse_hits = state.metadata_reuse_hits.saturating_add(1);
+            state.metadata_reuse_bytes = state
+                .metadata_reuse_bytes
+                .saturating_add((META_LEN * core::mem::size_of::<f32>()) as u64);
         });
     }
 
@@ -406,7 +446,8 @@ fn recurrent_attention_wgsl_runtime<R: CubeRuntime>(
         .expect("launch recurrent attention kernel");
     if let Some(start) = dispatch_start {
         let dispatch_ns = start.elapsed().as_nanos();
-        profile_record(|state| {
+        profile_record(&RECURRENT_PROFILE, |state| {
+            state.launches = state.launches.saturating_add(1);
             state.dispatch_ns = state.dispatch_ns.saturating_add(dispatch_ns);
         });
     }
@@ -477,6 +518,7 @@ where
 mod tests {
     use super::*;
     use burn::tensor::{Distribution, Tensor};
+    use burn_cubecl::cubecl::Runtime;
     use burn_wgpu::{CubeBackend, RuntimeOptions, graphics};
 
     type Backend = CubeBackend<WgpuRuntime, f32, i32, u32>;
@@ -518,6 +560,45 @@ mod tests {
         assert!(
             max_diff <= max_tol,
             "max difference {max_diff} exceeds tolerance {max_tol} (lhs={max_lhs}, rhs={max_rhs})"
+        );
+    }
+
+    #[derive(Clone, Copy)]
+    struct MemorySnapshot {
+        reserved: u64,
+        in_use: u64,
+    }
+
+    fn memory_snapshot(device: &<Backend as BackendTrait>::Device) -> MemorySnapshot {
+        let usage = <WgpuRuntime as Runtime>::client(device).memory_usage();
+        MemorySnapshot {
+            reserved: usage.bytes_reserved,
+            in_use: usage.bytes_in_use,
+        }
+    }
+
+    fn assert_memory_growth_bounded(
+        label: &str,
+        snapshots: &[MemorySnapshot],
+        max_reserved_growth: u64,
+        max_in_use_growth: u64,
+    ) {
+        assert!(!snapshots.is_empty(), "{label}: no memory snapshots");
+        let first = snapshots[0];
+        let last = snapshots[snapshots.len() - 1];
+        let reserved_growth = last.reserved.saturating_sub(first.reserved);
+        let in_use_growth = last.in_use.saturating_sub(first.in_use);
+        assert!(
+            reserved_growth <= max_reserved_growth,
+            "{label}: reserved growth {} exceeded {}",
+            reserved_growth,
+            max_reserved_growth
+        );
+        assert!(
+            in_use_growth <= max_in_use_growth,
+            "{label}: in_use growth {} exceeded {}",
+            in_use_growth,
+            max_in_use_growth
         );
     }
 
@@ -600,5 +681,50 @@ mod tests {
 
         assert_close(fused.context, reference_context, 2e-4, 2e-4);
         assert_close(fused.rho, reference_rho, 2e-4, 2e-4);
+    }
+
+    #[test]
+    fn fused_recurrent_memory_stays_bounded_across_repeated_calls() {
+        let device = <Backend as BackendTrait>::Device::default();
+        init_runtime(&device);
+        <Backend as BackendTrait>::seed(&device, 23);
+
+        let query =
+            Tensor::<Backend, 4>::random([2, 4, 16, 8], Distribution::Normal(0.0, 1.0), &device);
+        let value =
+            Tensor::<Backend, 4>::random([2, 1, 16, 12], Distribution::Normal(0.0, 1.0), &device);
+        let decay = Tensor::<Backend, 1>::from_floats([0.9, 0.91, 0.92, 0.93], &device);
+        let mut rho = Tensor::<Backend, 4>::zeros([2, 4, 8, 12], &device);
+
+        for _ in 0..2 {
+            let output =
+                try_fused_recurrent_attention_wgpu::<Backend>(&query, &value, Some(&rho), Some(&decay))
+                    .expect("fused recurrent");
+            rho = output.rho;
+        }
+        let _ = Backend::sync(&device);
+        Backend::memory_cleanup(&device);
+        let _ = Backend::sync(&device);
+
+        let mut snapshots = Vec::with_capacity(24);
+        for step in 0..32 {
+            let output =
+                try_fused_recurrent_attention_wgpu::<Backend>(&query, &value, Some(&rho), Some(&decay))
+                    .expect("fused recurrent");
+            rho = output.rho;
+            let _ = Backend::sync(&device);
+            Backend::memory_cleanup(&device);
+            let _ = Backend::sync(&device);
+            if step >= 8 {
+                snapshots.push(memory_snapshot(&device));
+            }
+        }
+
+        assert_memory_growth_bounded(
+            "wgpu_recurrent",
+            &snapshots,
+            256 * 1024 * 1024,
+            64 * 1024 * 1024,
+        );
     }
 }

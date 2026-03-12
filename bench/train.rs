@@ -9,7 +9,7 @@ use burn_autodiff::Autodiff;
 use burn_dragon::language::loss::language_model_loss;
 use burn_dragon::train::WgpuRuntimeConfig;
 use burn_dragon::train::wgpu::init_runtime;
-use burn_dragon::{BDH, BDHConfig};
+use burn_dragon::core::{BDH, BDHConfig};
 use burn_wgpu::Wgpu;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 

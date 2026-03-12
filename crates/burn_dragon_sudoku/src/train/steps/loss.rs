@@ -1,5 +1,9 @@
 use super::*;
 
+fn scene_batch_size(batch: usize, gdpo_group: usize) -> usize {
+    batch.checked_div(gdpo_group).unwrap_or(batch).max(1)
+}
+
 #[cfg(test)]
 #[allow(dead_code, clippy::too_many_arguments)]
 pub(super) fn rollout_losses<B: AutodiffBackend>(
@@ -78,21 +82,17 @@ pub(super) fn rollout_losses<B: AutodiffBackend>(
     let halt_target_mean = rollout.halt_target_mean.clone();
 
     let (policy_loss, advantage_abs_mean, advantage_std) = if gdpo_active {
-        let scene_batch = if gdpo_group == 0 {
-            rollout.batch
-        } else {
-            rollout.batch / gdpo_group
-        };
+        let scene_batch = scene_batch_size(rollout.batch, gdpo_group);
         let hard = rollout
             .hard_reward
             .clone()
             .detach()
-            .reshape([scene_batch.max(1), gdpo_group.max(1)]);
+            .reshape([scene_batch, gdpo_group.max(1)]);
         let easy = rollout
             .easy_reward
             .clone()
             .detach()
-            .reshape([scene_batch.max(1), gdpo_group.max(1)]);
+            .reshape([scene_batch, gdpo_group.max(1)]);
         let advantage = gdpo_advantage_autodiff::<B>(hard, easy, &training.gdpo)
             .reshape([rollout.batch.max(1), 1])
             .detach();
@@ -405,6 +405,11 @@ pub(super) fn rollout_losses_train<B: AutodiffBackend>(
             .mean_dim(1)
             .reshape([batch_size.max(1), GRID_LEN, embd]);
     let mut cache = input_cache.clone();
+    let cache_mhc_coeffs = trainer
+        .model
+        .cache_mhc
+        .as_ref()
+        .map(|mhc| mhc.coefficients());
     let mut summary_tokens = trainer.model.init_summary_tokens(batch_size);
     let summary_len = trainer.model.summary_token_count();
     let (_initial_acc_per_sample, initial_acc_mean, initial_exact, _initial_solve) =
@@ -589,7 +594,11 @@ pub(super) fn rollout_losses_train<B: AutodiffBackend>(
             let update_mask_stream = update_mask_f.clone().unsqueeze_dim::<4>(1);
             let keep = update_mask_stream.clone().mul_scalar(-1.0).add_scalar(1.0);
             cache = cache * keep + update_emb.mul(update_mask_stream);
-            cache = mhc_passthrough(trainer.model.cache_mhc.as_ref(), cache);
+            cache = burn_dragon_core::mhc_passthrough_with_coefficients(
+                trainer.model.cache_mhc.as_ref(),
+                cache,
+                cache_mhc_coeffs.as_ref(),
+            );
 
             summary_tokens = summary_tokens.detach();
             cache = cache.detach();
@@ -958,7 +967,11 @@ pub(super) fn rollout_losses_train<B: AutodiffBackend>(
         let update_mask_stream = update_mask_f.clone().unsqueeze_dim::<4>(1);
         let keep = update_mask_stream.clone().mul_scalar(-1.0).add_scalar(1.0);
         cache = cache * keep + update_emb.mul(update_mask_stream);
-        cache = mhc_passthrough(trainer.model.cache_mhc.as_ref(), cache);
+        cache = burn_dragon_core::mhc_passthrough_with_coefficients(
+            trainer.model.cache_mhc.as_ref(),
+            cache,
+            cache_mhc_coeffs.as_ref(),
+        );
 
         let tokens_solved_after = tokens_reward
             .clone()
@@ -1381,16 +1394,12 @@ pub(super) fn rollout_losses_train<B: AutodiffBackend>(
                     }
                     let mut advantage = Tensor::cat(adv_stack, 0).reshape([step_count * batch, 1]);
                     if gdpo_group > 1 {
-                        let scene_batch = if gdpo_group == 0 {
-                            batch
-                        } else {
-                            batch / gdpo_group
-                        };
+                        let scene_batch = scene_batch_size(batch, gdpo_group);
                         let hard = advantage
                             .clone()
-                            .reshape([step_count * scene_batch.max(1), gdpo_group.max(1)]);
+                            .reshape([step_count * scene_batch, gdpo_group.max(1)]);
                         let easy = Tensor::<B, 2>::zeros(
-                            [step_count * scene_batch.max(1), gdpo_group.max(1)],
+                            [step_count * scene_batch, gdpo_group.max(1)],
                             &device,
                         );
                         advantage = gdpo_advantage_autodiff::<B>(hard, easy, &training.gdpo)
@@ -1402,19 +1411,15 @@ pub(super) fn rollout_losses_train<B: AutodiffBackend>(
                     let log_prob_old = log_prob.clone().detach();
                     gdpo_policy_loss(log_prob, log_prob_old, advantage, &training.gdpo)
                 } else {
-                    let scene_batch = if gdpo_group == 0 {
-                        batch_size
-                    } else {
-                        batch_size / gdpo_group
-                    };
+                    let scene_batch = scene_batch_size(batch_size, gdpo_group);
                     let hard = hard_reward
                         .clone()
                         .detach()
-                        .reshape([scene_batch.max(1), gdpo_group.max(1)]);
+                        .reshape([scene_batch, gdpo_group.max(1)]);
                     let easy = easy_reward
                         .clone()
                         .detach()
-                        .reshape([scene_batch.max(1), gdpo_group.max(1)]);
+                        .reshape([scene_batch, gdpo_group.max(1)]);
                     let advantage = gdpo_advantage_autodiff::<B>(hard, easy, &training.gdpo)
                         .reshape([batch_size.max(1), 1])
                         .detach();
@@ -1673,16 +1678,12 @@ pub(super) fn rollout_losses_train<B: AutodiffBackend>(
             }
             let mut advantage = Tensor::cat(adv_stack, 0).reshape([step_count * batch, 1]);
             if gdpo_group > 1 {
-                let scene_batch = if gdpo_group == 0 {
-                    batch
-                } else {
-                    batch / gdpo_group
-                };
+                let scene_batch = scene_batch_size(batch, gdpo_group);
                 let hard = advantage
                     .clone()
-                    .reshape([step_count * scene_batch.max(1), gdpo_group.max(1)]);
+                    .reshape([step_count * scene_batch, gdpo_group.max(1)]);
                 let easy = Tensor::<B, 2>::zeros(
-                    [step_count * scene_batch.max(1), gdpo_group.max(1)],
+                    [step_count * scene_batch, gdpo_group.max(1)],
                     &device,
                 );
                 advantage = gdpo_advantage_autodiff::<B>(hard, easy, &training.gdpo)
@@ -1701,17 +1702,13 @@ pub(super) fn rollout_losses_train<B: AutodiffBackend>(
             let adv_std = adv_var.add_scalar(SUDOKU_EPS).sqrt();
             (policy_loss, adv_abs, adv_std)
         } else {
-            let scene_batch = if gdpo_group == 0 {
-                batch_size
-            } else {
-                batch_size / gdpo_group
-            };
+            let scene_batch = scene_batch_size(batch_size, gdpo_group);
             let hard = hard_reward
                 .clone()
-                .reshape([scene_batch.max(1), gdpo_group.max(1)]);
+                .reshape([scene_batch, gdpo_group.max(1)]);
             let easy = easy_reward
                 .clone()
-                .reshape([scene_batch.max(1), gdpo_group.max(1)]);
+                .reshape([scene_batch, gdpo_group.max(1)]);
             let advantage = gdpo_advantage_autodiff::<B>(hard, easy, &training.gdpo)
                 .reshape([batch_size.max(1), 1])
                 .detach();

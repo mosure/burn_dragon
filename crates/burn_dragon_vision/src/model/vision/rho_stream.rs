@@ -1,5 +1,7 @@
 use super::*;
 
+type RhoStreamStateShape = [usize; 5];
+
 impl<B: Backend> VisionDragon<B> {
     pub(super) fn resolve_rho_stream_grid(&self, patch_tokens: usize) -> PatchGrid {
         let patch_tokens = patch_tokens.max(1);
@@ -40,14 +42,9 @@ impl<B: Backend> VisionDragon<B> {
     pub(super) fn resolve_rho_stream_state(
         &self,
         rho_state: Option<&Tensor<B, 5>>,
-        batch: usize,
-        heads: usize,
-        patch_tokens: usize,
-        latent: usize,
-        embd: usize,
+        expected: RhoStreamStateShape,
         device: &B::Device,
     ) -> Tensor<B, 5> {
-        let expected = [batch, heads, patch_tokens, latent, embd];
         match rho_state {
             Some(existing) if existing.shape().dims::<5>() == expected => existing.clone(),
             _ => Tensor::<B, 5>::zeros(expected, device),
@@ -88,6 +85,15 @@ impl<B: Backend> VisionDragon<B> {
         } else {
             patch_context
         }
+    }
+
+    pub(super) fn resolve_rho_stream_neighborhood(&self) -> LocalGridNeighborhood {
+        if self.rho_stream.local_diagonals {
+            LocalGridNeighborhood::moore(self.rho_stream.local_radius)
+        } else {
+            LocalGridNeighborhood::von_neumann(self.rho_stream.local_radius)
+        }
+        .with_self_edges(self.rho_stream.local_self)
     }
 
     #[allow(dead_code)]
@@ -228,11 +234,7 @@ impl<B: Backend> VisionDragon<B> {
 
         let state = self.resolve_rho_stream_state(
             rho_state.as_ref(),
-            batch,
-            heads,
-            patch_tokens,
-            latent,
-            embd,
+            [batch, heads, patch_tokens, latent, embd],
             &device,
         );
         let (context, next_state) = self
@@ -266,6 +268,20 @@ impl<B: Backend> VisionDragon<B> {
         decay: Tensor<B, 1>,
         mode: StructuredStepMode,
     ) -> Tensor<B, 4> {
+        self.rho_stream_attention_fused_with_decay_plan(
+            query, value, rho_state, decay, mode, None,
+        )
+    }
+
+    pub(super) fn rho_stream_attention_fused_with_decay_plan(
+        &self,
+        query: Tensor<B, 4>,
+        value: Tensor<B, 4>,
+        rho_state: &mut Option<Tensor<B, 5>>,
+        decay: Tensor<B, 1>,
+        mode: StructuredStepMode,
+        fused_plan: Option<&CompiledLocalGridRhoPlan<B>>,
+    ) -> Tensor<B, 4> {
         let [batch, heads, time, latent] = query.shape().dims::<4>();
         let embd = value.shape().dims::<4>()[3];
         let device = value.device();
@@ -287,29 +303,31 @@ impl<B: Backend> VisionDragon<B> {
 
         let state = self.resolve_rho_stream_state(
             rho_state.as_ref(),
-            batch,
-            heads,
-            patch_tokens,
-            latent,
-            embd,
+            [batch, heads, patch_tokens, latent, embd],
             &device,
         );
         let grid = self.resolve_rho_stream_grid(patch_tokens);
-        let neighborhood = if self.rho_stream.local_diagonals {
-            LocalGridNeighborhood::moore(self.rho_stream.local_radius)
+        let neighborhood = self.resolve_rho_stream_neighborhood();
+        let fused = if let Some(plan) = fused_plan {
+            try_fused_local_grid_rho_attention_wgpu_head_decay_with_plan::<B>(
+                &patch_query,
+                &patch_value,
+                Some(&state),
+                &decay,
+                plan,
+            )
         } else {
-            LocalGridNeighborhood::von_neumann(self.rho_stream.local_radius)
-        }
-        .with_self_edges(self.rho_stream.local_self);
+            try_fused_local_grid_rho_attention_wgpu_head_decay::<B>(
+                &patch_query,
+                &patch_value,
+                Some(&state),
+                LocalGridShape2d::new(grid.height, grid.width),
+                neighborhood,
+                &decay,
+            )
+        };
 
-        if let Some(output) = try_fused_local_grid_rho_attention_wgpu_head_decay::<B>(
-            &patch_query,
-            &patch_value,
-            Some(&state),
-            LocalGridShape2d::new(grid.height, grid.width),
-            neighborhood,
-            &decay,
-        ) {
+        if let Some(output) = fused {
             let fused_context =
                 self.rho_stream_with_cls_context(output.context, batch, heads, embd, has_cls);
             if B::ad_enabled(&query.device()) {

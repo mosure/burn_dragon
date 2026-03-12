@@ -1,10 +1,11 @@
 use burn::tensor::backend::Backend as BackendTrait;
 use burn::tensor::{Distribution, Tensor};
 use burn_dragon::vision::{
-    PatchEmbed, PatchGrid, SpatialPositionalEncodingKind, VisionAttentionMode, VisionDragon,
-    VisionDragonConfig, VisionLatentActivation, VisionPatchEmbedMode, pool_patch_tokens,
+    PatchEmbed, PatchGrid, SpatialPositionalEncodingKind, VisionAttentionMode, VisionBackboneKind,
+    VisionDragon, VisionDragonConfig, VisionLatentActivation, VisionPatchEmbedMode,
+    pool_patch_tokens,
 };
-use burn_dragon::{FusedKernelConfig, ManifoldHyperConnectionsConfig};
+use burn_dragon::core::{FusedKernelConfig, ManifoldHyperConnectionsConfig};
 use burn_ndarray::NdArray;
 
 #[test]
@@ -13,6 +14,7 @@ fn patch_embed_and_model_shapes() {
     let device = <Backend as BackendTrait>::Device::default();
 
     let config = VisionDragonConfig {
+        backbone: VisionBackboneKind::Dense,
         image_size: 32,
         patch_size: 8,
         patch_embed_mode: VisionPatchEmbedMode::default(),
@@ -60,6 +62,7 @@ fn patch_embed_raw_matches_add_position() {
     let device = <Backend as BackendTrait>::Device::default();
 
     let config = VisionDragonConfig {
+        backbone: VisionBackboneKind::Dense,
         image_size: 32,
         patch_size: 8,
         patch_embed_mode: VisionPatchEmbedMode::default(),
@@ -108,6 +111,7 @@ fn vision_forward_steps_shapes() {
     let device = <Backend as BackendTrait>::Device::default();
 
     let config = VisionDragonConfig {
+        backbone: VisionBackboneKind::Dense,
         image_size: 32,
         patch_size: 8,
         patch_embed_mode: VisionPatchEmbedMode::default(),

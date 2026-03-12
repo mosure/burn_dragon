@@ -3,6 +3,7 @@ use burn::tensor::backend::Backend;
 use burn::tensor::{Int, Tensor, TensorData};
 use burn_autodiff::Autodiff;
 use burn_dragon_core::{BDH, BDHConfig, FusedKernelConfig};
+use burn_dragon_wgpu::api::recurrent::supports_recurrent_backend;
 use burn_wgpu::{CubeBackend, RuntimeOptions, WgpuRuntime, graphics};
 
 type InnerBackend = CubeBackend<WgpuRuntime, f32, i32, u32>;
@@ -180,7 +181,7 @@ fn recurrent_wgpu_kernel_autodiff_tracks_forward_and_backward() {
     let device = <TrainBackend as Backend>::Device::default();
     init_runtime(&device);
     assert!(
-        burn_dragon_wgpu::supports_recurrent_backend::<TrainBackend>(),
+        supports_recurrent_backend::<TrainBackend>(),
         "autodiff cube backend should be routable to the fused recurrent kernel"
     );
 
@@ -205,7 +206,7 @@ fn recurrent_wgpu_kernel_autodiff_tracks_forward_backward_across_config_matrix()
     let device = <TrainBackend as Backend>::Device::default();
     init_runtime(&device);
     assert!(
-        burn_dragon_wgpu::supports_recurrent_backend::<TrainBackend>(),
+        supports_recurrent_backend::<TrainBackend>(),
         "autodiff cube backend should be routable to the fused recurrent kernel"
     );
 

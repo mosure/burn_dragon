@@ -12,21 +12,50 @@ burn inference and training of the [dragon model](https://arxiv.org/abs/2509.265
 ![Alt text](./docs/bdh.png)
 
 
+## current state
+
+This repository is now organized as a generic Dragon framework with curated library-facing APIs:
+
+- root facade: `burn_dragon::api`
+- core Dragon concepts: `burn_dragon_core::api`
+- fused execution layer: `burn_dragon_wgpu::api`
+- checkpoint/deployment helpers: `burn_dragon_checkpoint::api`
+- domain adapters:
+  - `burn_dragon_language::api`
+  - `burn_dragon_vision::api`
+  - `burn_dragon_graph::api`
+  - `burn_dragon_sudoku::api`
+
+Lower-level surfaces remain available for advanced use through `::api::expert::*`, but they are
+not the recommended entrypoint.
+
+Framework status/tracking:
+
+- [framework support matrix](./docs/dragon_framework_support_matrix.md)
+- [Dragon Hatchling alignment spec](./docs/dragon_hatchling_alignment_spec.md)
+- [Dragon Hatchling progress tracker](./docs/dragon_hatchling_progress_tracker.md)
+- [Dragon mHC roadmap](./docs/dragon_mhc_core_roadmap.md)
+
 ## features
 
 - [x] cached inference
 - [x] training benchmarks and reporting
 - [x] [pope](https://arxiv.org/abs/2509.10534v1) positional embeddings
 - [x] wasm deployments
+- [x] burnpack multipart deployment + streamed web initialization
+- [x] native burnpack bootstrap/cache helpers
 - [x] sparsity metrics and visualization
 - [x] vision dragon [cortical column/stack](https://arxiv.org/abs/2412.18354)
 - [x] recurrent, foveated saccade training and inference
 - [x] [GDPO](https://arxiv.org/abs/2601.05242)
+- [x] fused recurrent, local-grid, structured-pyramid, and sparse-graph kernels
+- [x] topology-agnostic structured recurrent state contracts
+- [x] graph recurrent adapters with compiled execution
+- [x] manifold constrained hyper-connections (experimental core integration)
 - [ ] adaptive tool discovery
 - [ ] conditional (deep) gating
 - [ ] document-coherent dataloading and scale mixup
 - [ ] episodic memory
-- [ ] fused kernels
 - [ ] hierarchical, memory-aware recurrent state
 - [ ] mixture-of-expert routing
 - [ ] multi-modal architecture
@@ -37,6 +66,101 @@ burn inference and training of the [dragon model](https://arxiv.org/abs/2509.265
 
 
 Dataset configuration (built-in presets and Hugging Face examples) is documented inline in `config/language/base.toml`.
+
+## library quickstart
+
+Compile-checked examples:
+
+- [examples/core_bdh_api.rs](./examples/core_bdh_api.rs)
+- [examples/vision_pyramid_api.rs](./examples/vision_pyramid_api.rs)
+- [examples/vision_encoder_export_api.rs](./examples/vision_encoder_export_api.rs)
+- [examples/graph_compiled_executor_api.rs](./examples/graph_compiled_executor_api.rs)
+- [examples/graph_export_api.rs](./examples/graph_export_api.rs)
+- [examples/language_export_api.rs](./examples/language_export_api.rs)
+- [examples/sudoku_export_api.rs](./examples/sudoku_export_api.rs)
+
+Typical imports:
+
+```rust
+use burn_dragon::api::core;
+use burn_dragon::api::checkpoint;
+use burn_dragon::api::vision;
+use burn_dragon::api::graph;
+```
+
+Use `burn_dragon::api::expert::*` only when you need lower-level compiled plans or internal
+layout/kernel details.
+
+## deployment checkpoints
+
+The shared deployment/checkpoint crate is [burn_dragon_checkpoint](./crates/burn_dragon_checkpoint).
+
+Recommended deployment path:
+
+- export model weights as burnpack (`.bpk`)
+- optionally split them into `*.bpk.parts.json` + `*.bpk.part-*` shards for web/CDN delivery
+- load them through the shared multipart helpers, the native bootstrap/cache helpers, or the web
+  `loadModelFromUrl(...)` path
+
+Current status:
+
+- multipart burnpack loading is shared and supported
+- shared burnpack bundle export helpers are supported
+- streamed web initialization is supported
+- native cache/bootstrap resolution for remote burnpack bundles is supported in the shared checkpoint crate
+- monolithic-or-parts burnpack loading is supported in CLI inference
+- language/BDH checkpoint export is supported in CLI through `export_burnpack`
+- vision encoder checkpoint export is supported in CLI through `export_burnpack` for `distill`, `lejepa`, and `video_lejepa`
+- sudoku checkpoint export is supported in CLI through `export_burnpack`
+- graph checkpoint export is supported in CLI through `export_burnpack`
+- exporters currently expect checkpoints recorded by the current Burn runtime/layout used by this repository
+- the main remaining gaps are broader vision/video wrappers and true deployment quantization beyond
+  float downcast
+
+Example language deployment export:
+
+```bash
+cargo run -p burn_dragon_cli --features train,web --bin export_burnpack -- \
+  --family language \
+  --checkpoint runs/<run>/checkpoint \
+  --epoch 1 \
+  --parts-mib 64
+```
+
+Example graph deployment export:
+
+```bash
+cargo run -p burn_dragon_cli --features train,web --bin export_burnpack -- \
+  --family graph \
+  --checkpoint runs/graph/<run>/checkpoint \
+  --epoch 1 \
+  -c config/graph/<config>.json \
+  --parts-mib 64
+```
+
+Example vision encoder deployment export:
+
+```bash
+cargo run -p burn_dragon_cli --features train,web --bin export_burnpack -- \
+  --family vision-encoder \
+  --checkpoint runs/vision/<run>/checkpoint \
+  --epoch 1 \
+  -c config/vision/distill/<config>.toml \
+  --parts-mib 64
+```
+
+The `vision-encoder` family exports the student `VisionDragon` encoder from the supported vision
+training wrappers, including `distill`, `lejepa`, and `video_lejepa`.
+
+Example sudoku deployment export:
+
+```bash
+cargo run -p burn_dragon_cli --features train,web --bin export_burnpack -- \
+  --family sudoku \
+  --checkpoint runs/sudoku/<run>/checkpoint \
+  --epoch 1 \
+  --parts-mib 64
+```
 
 ## training
 
@@ -58,6 +182,7 @@ Dataset configuration (built-in presets and Hugging Face examples) is documented
 
 | `burn_dragon` | `burn` |
 | :--                     | :--    |
+| `0.4`                   | `0.21.0-pre.2` |
 | `0.2`                   | `0.19` |
 | `0.1`                   | `0.18` |
 

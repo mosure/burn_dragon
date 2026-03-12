@@ -90,6 +90,10 @@ pub enum HuggingFaceRecordFormat {
 pub struct TrainingHyperparameters {
     pub block_size: usize,
     pub batch_size: usize,
+    #[serde(default = "default_gradient_accumulation_steps")]
+    pub gradient_accumulation_steps: usize,
+    #[serde(default)]
+    pub target_effective_batch_size: Option<usize>,
     #[serde(default)]
     pub epochs: Option<usize>,
     pub max_iters: usize,
@@ -132,4 +136,8 @@ fn default_hf_field_separator() -> String {
 
 fn default_context_strategy() -> ContextStrategyConfig {
     ContextStrategyConfig::Infinite
+}
+
+fn default_gradient_accumulation_steps() -> usize {
+    1
 }

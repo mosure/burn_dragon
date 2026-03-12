@@ -33,3 +33,13 @@ burn_dragon_wgpu = { path = "../burn_dragon_wgpu", version = "0.4.0", default-fe
 burn_dragon_sudoku = { path = "../burn_dragon_sudoku", version = "0.4.0", default-features = false, optional = true }
 pollster = "0.3"
 wgpu = "26"
+
+[[bin]]
+name = "core_mhc_bench"
+path = "src/bin/core_mhc_bench.rs"
+required-features = ["benchmark"]
+
+[[bin]]
+name = "core_mhc_fb_bench"
+path = "src/bin/core_mhc_fb_bench.rs"
+required-features = ["benchmark"]

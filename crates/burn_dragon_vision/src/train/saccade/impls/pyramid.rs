@@ -448,7 +448,7 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
 
         let total = total.add_scalar(SACCADE_EPS);
         let mut weights_out = Vec::with_capacity(level_count);
-        for (level, weights) in levels.iter().zip(raw_weights.into_iter()) {
+        for (level, weights) in levels.iter().zip(raw_weights) {
             let tokens_len = level.tokens.shape().dims::<3>()[1].max(1);
             let denom = total.clone().repeat_dim(1, tokens_len);
             let weights = (weights / denom).reshape([batch, traj_tokens, tokens_len]);

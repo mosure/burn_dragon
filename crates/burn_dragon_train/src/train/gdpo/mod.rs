@@ -132,7 +132,7 @@ fn percentile_thresholds<B: BackendTrait>(values: Tensor<B, 2>, quantile: f32) -
         let hi = v0.clone().mask_where(use_v0, v1);
         return lo.clone() + (hi - lo).mul_scalar(quantile);
     }
-    if group <= cubecl::MAX_GROUP as usize
+    if group <= cubecl::MAX_GROUP
         && let Some(result) = cubecl::try_percentile_thresholds_cubecl(&values, quantile)
     {
         return result;

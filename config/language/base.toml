@@ -37,6 +37,14 @@ vocab_path = "vocab.json"
 [training]
 block_size = 512
 batch_size = 24
+# Optimizer updates happen every `gradient_accumulation_steps` micro-batches.
+gradient_accumulation_steps = 1
+# Optional target for automatic effective-batch recovery.
+# When set, the runtime derives gradient accumulation steps so the effective
+# batch size approximates this target.
+# When omitted, the configured `gradient_accumulation_steps` is used as-is,
+# including after startup autotune shrinks the micro-batch.
+# target_effective_batch_size = 64
 max_iters = 3000
 epochs = 30
 # When set, training uses full epochs and derives max_iters and lr_schedule.num_iters
@@ -67,17 +75,35 @@ backend = "auto"
 # Switches recurrent core implementation for language training on wgpu backends.
 # false: burn tensor-core recurrent path
 # true: fused burn_dragon_wgpu recurrent path
-fused_core_recurrent = false
+# Note: the language train CLI now routes `--backend wgpu` through the Cube
+# backend automatically. On the current tiny-Shakespeare training path, the
+# fused recurrent Cube path is the best measured default again. The non-fused
+# path remains a useful fallback for A/B checks and for debugging experimental
+# recurrent-state features such as y_neuron carry.
+fused_core_recurrent = true
 # Switches rollout executor when fused_core_recurrent is enabled.
 # false: host-managed per-fast-step loop
 # true: fused per-slow-step rollout executor (device-side fast inner steps)
+# For language training, the current default keeps rollout fusion off.
+# Multi-step rollout training with fast_steps > 1 is still an experimental path.
 fused_core_rollout = false
+# Optional startup batch-size probe for WGPU language training.
+# When enabled, the current `training.batch_size` acts as the default upper bound
+# unless `max_batch_size` is set explicitly.
+#
+# [wgpu.training.startup_autotune]
+# enabled = true
+# target_device_memory_mb = 8192
+# min_batch_size = 8
+# max_batch_size = 128
+# probe_steps = 1
+# binary_search = true
 
 [wgpu.inference]
 # Switches recurrent core implementation for language inference on wgpu backends.
 # false: burn tensor-core recurrent path
 # true: fused burn_dragon_wgpu recurrent path
-fused_core_recurrent = false
+fused_core_recurrent = true
 # Switches rollout executor when fused_core_recurrent is enabled.
 # false: host-managed per-fast-step loop
 # true: fused per-slow-step rollout executor (device-side fast inner steps)

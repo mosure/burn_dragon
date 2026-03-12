@@ -76,27 +76,39 @@ pub fn sample_batch<B: Backend, T: TokenSequenceDataset + ?Sized>(
     split: DatasetSplit,
     device: &B::Device,
 ) -> SequenceBatch<B> {
+    sample_batch_with_shape::<B, T>(dataset, split, dataset.batch_size(), dataset.block_size(), device)
+}
+
+/// Sample a random batch with an explicit batch/block shape from any dataset implementing
+/// [`TokenSequenceDataset`].
+pub fn sample_batch_with_shape<B: Backend, T: TokenSequenceDataset + ?Sized>(
+    dataset: &T,
+    split: DatasetSplit,
+    batch_size: usize,
+    block_size: usize,
+    device: &B::Device,
+) -> SequenceBatch<B> {
     let prof_enabled = crate::train::profile::enabled();
     let cpu_start = prof_enabled.then(Instant::now);
     let tokens = dataset.tokens();
     let (offset, span) = dataset.split_offset_and_span(split);
 
     let mut rng = thread_rng();
-    let mut inputs = vec![0i64; dataset.batch_size() * dataset.block_size()];
-    let mut targets = vec![0i64; dataset.batch_size() * dataset.block_size()];
+    let mut inputs = vec![0i64; batch_size * block_size];
+    let mut targets = vec![0i64; batch_size * block_size];
 
-    for batch_idx in 0..dataset.batch_size() {
-        let max_start = span.saturating_sub(dataset.block_size() + 1);
+    for batch_idx in 0..batch_size {
+        let max_start = span.saturating_sub(block_size + 1);
         let start_offset = if max_start == 0 {
             0
         } else {
             rng.gen_range(0..=max_start)
         };
         let start = offset + start_offset;
-        for t in 0..dataset.block_size() {
+        for t in 0..block_size {
             let data_idx = start + t;
-            inputs[batch_idx * dataset.block_size() + t] = tokens[data_idx] as i64;
-            targets[batch_idx * dataset.block_size() + t] = tokens[data_idx + 1] as i64;
+            inputs[batch_idx * block_size + t] = tokens[data_idx] as i64;
+            targets[batch_idx * block_size + t] = tokens[data_idx + 1] as i64;
         }
     }
 
@@ -106,11 +118,11 @@ pub fn sample_batch<B: Backend, T: TokenSequenceDataset + ?Sized>(
 
     let tensor_copy_start = prof_enabled.then(Instant::now);
     let inputs_tensor = Tensor::<B, 2, Int>::from_data(
-        TensorData::new(inputs, [dataset.batch_size(), dataset.block_size()]),
+        TensorData::new(inputs, [batch_size, block_size]),
         device,
     );
     let targets_tensor = Tensor::<B, 2, Int>::from_data(
-        TensorData::new(targets, [dataset.batch_size(), dataset.block_size()]),
+        TensorData::new(targets, [batch_size, block_size]),
         device,
     );
     let tensor_copy_ns = tensor_copy_start
@@ -118,7 +130,7 @@ pub fn sample_batch<B: Backend, T: TokenSequenceDataset + ?Sized>(
         .unwrap_or_default();
 
     if prof_enabled {
-        let values = dataset.batch_size().saturating_mul(dataset.block_size());
+        let values = batch_size.saturating_mul(block_size);
         let copy_bytes = (values.saturating_mul(2).saturating_mul(size_of::<i64>())) as u128;
         crate::train::profile::record_dataloader(cpu_ns, tensor_copy_ns, copy_bytes, 0);
     }

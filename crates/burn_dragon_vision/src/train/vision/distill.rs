@@ -2,6 +2,13 @@ use crate::train::prelude::*;
 
 use super::models::{DistillTeacherModel, VisionDistillModel};
 
+type RolloutMetricTensorArray<B> = [Tensor<B, 1>; VISION_ROLLOUT_HORIZON_COUNT];
+type RolloutMetricArrays<B> = (
+    RolloutMetricTensorArray<B>,
+    RolloutMetricTensorArray<B>,
+    RolloutMetricTensorArray<B>,
+);
+
 fn rollout_supervision_steps(total_steps: usize, frames: usize) -> Vec<usize> {
     if total_steps == 0 {
         return Vec::new();
@@ -64,13 +71,7 @@ fn sample_rollout_steps<R: Rng + ?Sized>(
     rollout.max_steps.max(1)
 }
 
-fn zero_rollout_metric_arrays<B: BackendTrait>(
-    device: &B::Device,
-) -> (
-    [Tensor<B, 1>; VISION_ROLLOUT_HORIZON_COUNT],
-    [Tensor<B, 1>; VISION_ROLLOUT_HORIZON_COUNT],
-    [Tensor<B, 1>; VISION_ROLLOUT_HORIZON_COUNT],
-) {
+fn zero_rollout_metric_arrays<B: BackendTrait>(device: &B::Device) -> RolloutMetricArrays<B> {
     let total = core::array::from_fn(|_| Tensor::<B, 1>::zeros([1], device));
     let patch = core::array::from_fn(|_| Tensor::<B, 1>::zeros([1], device));
     let cls = core::array::from_fn(|_| Tensor::<B, 1>::zeros([1], device));
@@ -80,11 +81,7 @@ fn zero_rollout_metric_arrays<B: BackendTrait>(
 fn rollout_metric_arrays<B: BackendTrait>(
     device: &B::Device,
     terms_by_step: &[(usize, VisionDistillationLossTerms<B>)],
-) -> (
-    [Tensor<B, 1>; VISION_ROLLOUT_HORIZON_COUNT],
-    [Tensor<B, 1>; VISION_ROLLOUT_HORIZON_COUNT],
-    [Tensor<B, 1>; VISION_ROLLOUT_HORIZON_COUNT],
-) {
+) -> RolloutMetricArrays<B> {
     let (mut total, mut patch, mut cls) = zero_rollout_metric_arrays(device);
     for (index, step) in VISION_ROLLOUT_HORIZON_CAPS.into_iter().enumerate() {
         if let Some((_, terms)) = terms_by_step

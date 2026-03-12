@@ -7,7 +7,7 @@ use burn_dragon::language::loss::language_model_loss;
 use burn_dragon::language::{
     ContextStrategy, GenerationSettings, generate_tokens, generate_tokens_chunked,
 };
-use burn_dragon::{BDH, BDHConfig, FusedKernelConfig, RotaryEmbedding};
+use burn_dragon::core::{BDH, BDHConfig, FusedKernelConfig, RotaryEmbedding};
 
 type TrainBackend = Autodiff<NdArray<f32>>;
 type InferBackend = NdArray<f32>;

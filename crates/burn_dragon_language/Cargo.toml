@@ -14,6 +14,7 @@ default = []
 cli = []
 train = [
   "burn/dataset",
+  "dep:burn_dragon_checkpoint",
   "burn_dragon_core/train",
   "burn_dragon_train/train",
   "dep:burn-autodiff",
@@ -33,6 +34,7 @@ viz = ["burn_dragon_core/viz"]
 web = ["burn_dragon_core/web"]
 
 [dependencies]
+burn_dragon_checkpoint = { path = "../burn_dragon_checkpoint", version = "0.4.0", default-features = false, optional = true }
 burn_dragon_core = { path = "../burn_dragon_core", version = "0.4.0", default-features = false }
 burn_dragon_train = { path = "../burn_dragon_train", version = "0.4.0", default-features = false, optional = true }
 

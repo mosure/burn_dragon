@@ -96,7 +96,10 @@ impl<B: BackendTrait> Module<B> for VisionDistillModel<B> {
     fn load_record(self, record: Self::Record) -> Self {
         Self {
             model: Module::load_record(self.model, record.model),
-            loss: Module::<B>::load_record(self.loss, record.loss),
+            loss: {
+                let _: () = record.loss;
+                Module::<B>::load_record(self.loss, ())
+            },
             teacher: self.teacher,
             rollout: self.rollout,
             rollout_supervision_frames: self.rollout_supervision_frames,

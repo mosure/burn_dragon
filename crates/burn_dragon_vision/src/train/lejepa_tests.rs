@@ -365,9 +365,11 @@ fn lejepa_teacher_ema_lags_student_after_one_step() {
     let batch_size = 2;
     let images = toy_images::<Backend>(batch_size, 3, image_size, image_size, &device);
     let initial_teacher = lejepa
-        .teacher_proj_for_views(&[images.clone()], 1)
+        .teacher_proj_for_views(std::slice::from_ref(&images), 1)
         .expect("teacher targets");
-    let initial_student = lejepa.forward_view_group(&[images.clone()], 1, 1).proj;
+    let initial_student = lejepa
+        .forward_view_group(std::slice::from_ref(&images), 1, 1)
+        .proj;
     assert!(mean_abs_tensor(initial_student - initial_teacher) <= 1e-6);
 
     let labels = Tensor::<Backend, 1, Int>::zeros([batch_size], &device);
@@ -391,7 +393,7 @@ fn lejepa_teacher_ema_lags_student_after_one_step() {
     lejepa = lejepa.optimize::<Backend, _>(&mut optimizer, 2e-2, grads);
 
     let teacher = lejepa
-        .teacher_proj_for_views(&[images.clone()], 1)
+        .teacher_proj_for_views(std::slice::from_ref(&images), 1)
         .expect("teacher targets");
     let student = lejepa.forward_view_group(&[images], 1, 1).proj;
     let drift = mean_abs_tensor(student - teacher);
@@ -477,7 +479,7 @@ fn lejepa_load_record_rebuilds_teacher_from_student() {
 
     let images = toy_images::<Backend>(2, 3, image_size, image_size, &device);
     let teacher = restored
-        .teacher_proj_for_views(&[images.clone()], 1)
+        .teacher_proj_for_views(std::slice::from_ref(&images), 1)
         .expect("teacher targets");
     let student = restored.forward_view_group(&[images], 1, 1).proj;
     assert!(mean_abs_tensor(student - teacher) <= 1e-6);

@@ -10,12 +10,12 @@ use anyhow::{Context, Result, anyhow};
 use burn::tensor::backend::Backend as BackendTrait;
 use burn::tensor::{Int, Tensor, TensorData};
 use burn_autodiff::Autodiff;
+use burn_dragon::core::{BDH, BDHConfig, FusedKernelConfig};
 use burn_dragon::language::{
     ContextStrategy, GenerationSettings, generate_tokens, generate_tokens_chunked,
     generation_profile_reset, generation_profile_snapshot,
 };
-use burn_dragon::{BDH, BDHConfig, FusedKernelConfig};
-use burn_dragon_wgpu::{recurrent_profile_reset, recurrent_profile_snapshot};
+use burn_dragon_wgpu::api::recurrent::{recurrent_profile_reset, recurrent_profile_snapshot};
 use burn_wgpu::{CubeBackend, RuntimeOptions, WgpuRuntime, graphics};
 use clap::Parser;
 use serde::Serialize;
@@ -747,7 +747,7 @@ fn format_delta_csv(rows: &[DeltaRow]) -> String {
 fn format_markdown_summary(report: &RolloutBenchReport) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "# Rollout Benchmark Summary");
-    let _ = writeln!(out, "");
+    let _ = writeln!(out);
     let _ = writeln!(out, "- benchmark: {}", report.benchmark);
     let _ = writeln!(out, "- max_new_tokens: {}", report.max_new_tokens);
     let _ = writeln!(out, "- rollout_fast_steps: {:?}", report.rollout_fast_steps);
@@ -765,9 +765,9 @@ fn format_markdown_summary(report: &RolloutBenchReport) -> String {
         pass_count,
         report.correctness.len()
     );
-    let _ = writeln!(out, "");
+    let _ = writeln!(out);
     let _ = writeln!(out, "## Delta Table");
-    let _ = writeln!(out, "");
+    let _ = writeln!(out);
     let _ = writeln!(
         out,
         "| rollout | seq | inf speedup x | inf delta % | recurrent call reduction % | host sync reduction % | H2D copy reduction % | D2H copy reduction % | chunk flush overhead % | train speedup x |"

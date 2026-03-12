@@ -1,4 +1,5 @@
 use crate::train::prelude::*;
+use crate::train::startup_autotune::StartupAutotuneReport;
 
 pub fn build_vocab_only(config: &TrainingConfig) -> Result<()> {
     let dataset = prepare_dataset(&config.dataset, &config.training)?;
@@ -77,13 +78,25 @@ pub fn log_theoretical_profile(config: &BDHConfig, batch: usize, block: usize, b
 }
 
 #[derive(Serialize)]
-pub struct WebConfigOutput {
+pub struct RunConfigOutput {
     run_name: String,
+    backend_name: String,
     block_size: usize,
+    training_batch_size: usize,
+    training_gradient_accumulation_steps: usize,
+    training_effective_batch_size: usize,
     overrides: ModelOverrides,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    startup_autotune: Option<StartupAutotuneReport>,
 }
 
-pub fn write_run_config(config: &TrainingConfig, run_dir: &Path, run_name: &str) -> Result<()> {
+pub fn write_run_config(
+    config: &TrainingConfig,
+    run_dir: &Path,
+    run_name: &str,
+    backend_name: &str,
+    startup_autotune: Option<&StartupAutotuneReport>,
+) -> Result<()> {
     fs::create_dir_all(run_dir)
         .with_context(|| format!("failed to create run directory {}", run_dir.display()))?;
 
@@ -92,10 +105,18 @@ pub fn write_run_config(config: &TrainingConfig, run_dir: &Path, run_name: &str)
         .block_size
         .unwrap_or(config.training.block_size)
         .max(1);
-    let output = WebConfigOutput {
+    let output = RunConfigOutput {
         run_name: run_name.to_string(),
+        backend_name: backend_name.to_string(),
         block_size,
+        training_batch_size: config.training.batch_size,
+        training_gradient_accumulation_steps: config.training.gradient_accumulation_steps,
+        training_effective_batch_size: config
+            .training
+            .batch_size
+            .saturating_mul(config.training.gradient_accumulation_steps),
         overrides: config.model.clone(),
+        startup_autotune: startup_autotune.cloned(),
     };
     let payload =
         serde_json::to_string_pretty(&output).context("failed to serialize web config")?;

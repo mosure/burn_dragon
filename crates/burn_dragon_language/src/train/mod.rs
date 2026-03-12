@@ -5,6 +5,7 @@ mod prelude;
 pub mod backend;
 pub mod profile;
 pub mod schedule;
+pub mod startup_autotune;
 pub mod steps;
 pub mod utils;
 
@@ -14,6 +15,8 @@ pub use backend::*;
 pub use profile::*;
 #[allow(unused_imports)]
 pub use schedule::*;
+#[allow(unused_imports)]
+pub use startup_autotune::*;
 #[allow(unused_imports)]
 pub use steps::*;
 #[allow(unused_imports)]

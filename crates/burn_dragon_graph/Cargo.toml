@@ -21,11 +21,18 @@ readme = "../../README.md"
 
 [features]
 default = []
-benchmark = ["dep:burn-wgpu", "dep:pollster", "dep:wgpu"]
+benchmark = ["dep:burn-autodiff", "dep:burn-wgpu", "dep:pollster", "dep:wgpu"]
 
 [dependencies]
 burn_dragon_core = { path = "../burn_dragon_core", version = "0.4.0" }
 burn_dragon_wgpu = { path = "../burn_dragon_wgpu", version = "0.4.0" }
+burn_dragon_checkpoint = { path = "../burn_dragon_checkpoint", version = "0.4.0", default-features = false }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.9"
+anyhow = "1"
+burn-ndarray = "0.21.0-pre.2"
+burn-autodiff = { version = "0.21.0-pre.2", optional = true }
 burn-wgpu = { version = "0.21.0-pre.2", default-features = false, features = ["fusion", "std"], optional = true }
 pollster = { version = "0.3", optional = true }
 wgpu = { version = "26", optional = true }
@@ -36,8 +43,10 @@ default-features = false
 features = ["fusion", "ndarray", "std", "wgpu"]
 
 [dev-dependencies]
-burn-ndarray = "0.21.0-pre.2"
+burn-autodiff = "0.21.0-pre.2"
+burn-cubecl = { version = "0.21.0-pre.2", default-features = false, features = ["std"] }
 burn-wgpu = { version = "0.21.0-pre.2", default-features = false, features = ["fusion", "std"] }
+tempfile = "3"
 
 [lib]
 path = "src/lib.rs"
@@ -46,4 +55,9 @@ crate-type = ["rlib", "cdylib"]
 [[bin]]
 name = "graph_step_bench"
 path = "src/bin/graph_step_bench.rs"
+required-features = ["benchmark"]
+
+[[bin]]
+name = "graph_step_fb_bench"
+path = "src/bin/graph_step_fb_bench.rs"
 required-features = ["benchmark"]

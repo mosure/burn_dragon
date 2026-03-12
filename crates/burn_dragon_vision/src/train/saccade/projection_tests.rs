@@ -70,7 +70,7 @@ fn cuda_random_kernel_stable() -> bool {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let device = burn_cuda::CudaDevice::default();
             let _ = Tensor::<Cuda<f32>, 3>::random([1, 1, 1], TensorDistribution::Default, &device);
-            Cuda::<f32>::sync(&device);
+            let _ = Cuda::<f32>::sync(&device);
         }))
         .is_ok()
     })

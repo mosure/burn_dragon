@@ -68,6 +68,46 @@ impl Default for WgpuInferenceConfig {
 pub struct WgpuTrainingConfig {
     pub fused_core_recurrent: Option<bool>,
     pub fused_core_rollout: Option<bool>,
+    pub startup_autotune: WgpuStartupAutotuneConfig,
+}
+
+fn default_startup_autotune_min_batch_size() -> usize {
+    1
+}
+
+fn default_startup_autotune_probe_steps() -> usize {
+    1
+}
+
+fn default_startup_autotune_binary_search() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(default)]
+pub struct WgpuStartupAutotuneConfig {
+    pub enabled: bool,
+    pub target_device_memory_mb: usize,
+    #[serde(default = "default_startup_autotune_min_batch_size")]
+    pub min_batch_size: usize,
+    pub max_batch_size: Option<usize>,
+    #[serde(default = "default_startup_autotune_probe_steps")]
+    pub probe_steps: usize,
+    #[serde(default = "default_startup_autotune_binary_search")]
+    pub binary_search: bool,
+}
+
+impl Default for WgpuStartupAutotuneConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            target_device_memory_mb: 0,
+            min_batch_size: default_startup_autotune_min_batch_size(),
+            max_batch_size: None,
+            probe_steps: default_startup_autotune_probe_steps(),
+            binary_search: default_startup_autotune_binary_search(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default)]

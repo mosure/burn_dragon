@@ -57,6 +57,11 @@ pub(crate) fn rollout_losses_train_trm_chunk<B: AutodiffBackend>(
             .mean_dim(1)
             .reshape([batch_size.max(1), GRID_LEN, embd]);
     let mut cache = input_cache.clone();
+    let cache_mhc_coeffs = trainer
+        .model
+        .cache_mhc
+        .as_ref()
+        .map(|mhc| mhc.coefficients());
     let mut summary_tokens = trainer.model.init_summary_tokens(batch_size);
     let summary_len = trainer.model.summary_token_count();
 
@@ -180,7 +185,11 @@ pub(crate) fn rollout_losses_train_trm_chunk<B: AutodiffBackend>(
             let keep = update_mask_stream.clone().mul_scalar(-1.0).add_scalar(1.0);
             let cache_chunk = cache_chunk * keep + update_emb.mul(update_mask_stream);
             cache = replace_grid_4d(&cache, grid_start, cache_chunk);
-            cache = mhc_passthrough(trainer.model.cache_mhc.as_ref(), cache);
+            cache = burn_dragon_core::mhc_passthrough_with_coefficients(
+                trainer.model.cache_mhc.as_ref(),
+                cache,
+                cache_mhc_coeffs.as_ref(),
+            );
 
             summary_tokens = summary_tokens.detach();
             cache = cache.detach();
@@ -315,7 +324,11 @@ pub(crate) fn rollout_losses_train_trm_chunk<B: AutodiffBackend>(
         let keep = update_mask_stream.clone().mul_scalar(-1.0).add_scalar(1.0);
         let cache_chunk = cache_chunk * keep + update_emb.mul(update_mask_stream);
         cache = replace_grid_4d(&cache, grid_start, cache_chunk);
-        cache = mhc_passthrough(trainer.model.cache_mhc.as_ref(), cache);
+        cache = burn_dragon_core::mhc_passthrough_with_coefficients(
+            trainer.model.cache_mhc.as_ref(),
+            cache,
+            cache_mhc_coeffs.as_ref(),
+        );
 
         if recon_interval > 0 && global_samples > 0 {
             let chunk_idx = steps_done / trm_chunk_size;

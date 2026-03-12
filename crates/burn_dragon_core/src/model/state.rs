@@ -4,6 +4,7 @@ use burn::tensor::backend::Backend;
 #[derive(Debug, Clone)]
 pub struct LayerState<B: Backend> {
     pub rho: Option<Tensor<B, 4>>,
+    pub y_neuron_state: Option<Tensor<B, 3>>,
     #[cfg(feature = "viz")]
     pub viz: Option<LayerVizState<B>>,
 }
@@ -29,6 +30,7 @@ impl<B: Backend> ModelState<B> {
             layers: (0..num_layers)
                 .map(|_| LayerState {
                     rho: None,
+                    y_neuron_state: None,
                     #[cfg(feature = "viz")]
                     viz: None,
                 })
@@ -40,6 +42,7 @@ impl<B: Backend> ModelState<B> {
     pub fn reset(&mut self) {
         for layer in &mut self.layers {
             layer.rho = None;
+            layer.y_neuron_state = None;
         }
         self.position = 0;
     }

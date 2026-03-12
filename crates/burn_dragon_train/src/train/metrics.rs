@@ -1,6 +1,3 @@
-#![cfg_attr(not(feature = "cli"), allow(dead_code))]
-
-use std::any::Any;
 use std::sync::Arc;
 #[cfg(feature = "integration_test")]
 use std::sync::Mutex;
@@ -9,9 +6,12 @@ use std::sync::OnceLock;
 
 use burn::tensor::backend::{AutodiffBackend, Backend as BackendTrait};
 use burn::tensor::Tensor;
-use burn_cubecl::cubecl::Runtime;
 use burn_ndarray::NdArray;
 use burn_train::metric::{Adaptor, ItemLazy, LossInput};
+use crate::train::runtime::{
+    DeviceMemoryUsage, bytes_to_mb, cleanup_device_memory, cleanup_device_memory_allowed,
+    device_memory_usage_safe,
+};
 pub type MetricsBackend = NdArray<f32>;
 
 fn serialized_entry(
@@ -19,10 +19,6 @@ fn serialized_entry(
     serialized: impl Into<String>,
 ) -> burn_train::metric::SerializedEntry {
     burn_train::metric::SerializedEntry::new(formatted.into(), serialized.into())
-}
-
-fn metric_iteration(metadata: &burn_train::metric::MetricMetadata) -> usize {
-    metadata.iteration.unwrap_or(0)
 }
 
 fn should_emit_metric(metadata: &burn_train::metric::MetricMetadata, every: usize) -> bool {
@@ -34,18 +30,6 @@ fn should_emit_metric(metadata: &burn_train::metric::MetricMetadata, every: usiz
 
 fn metric_epoch(metadata: &burn_train::metric::MetricMetadata) -> usize {
     metadata.global_progress.items_processed
-}
-
-fn sync_float_tensor<B: BackendTrait, const D: usize>(
-    tensor: Tensor<B, D>,
-) -> Tensor<MetricsBackend, D> {
-    Tensor::<MetricsBackend, D>::from_data(tensor.into_data(), &Default::default())
-}
-
-fn sync_optional_float_tensor<B: BackendTrait, const D: usize>(
-    tensor: Option<Tensor<B, D>>,
-) -> Option<Tensor<MetricsBackend, D>> {
-    tensor.map(sync_float_tensor)
 }
 
 mod language;
@@ -363,100 +347,6 @@ impl burn_train::metric::Metric for DeviceMetric {
     fn clear(&mut self) {}
 }
 
-#[cfg(any(feature = "train", feature = "cli"))]
-fn extra_memory_cleanup<B: BackendTrait>(device: &B::Device)
-where
-    B::Device: 'static,
-{
-    #[cfg(feature = "cuda")]
-    {
-        if let Some(cuda_device) = (device as &dyn Any).downcast_ref::<burn_cuda::CudaDevice>() {
-            <burn_cubecl::cubecl::cuda::CudaRuntime as Runtime>::client(cuda_device)
-                .memory_cleanup();
-        }
-    }
-    if let Some(wgpu_device) = (device as &dyn Any).downcast_ref::<burn_wgpu::WgpuDevice>() {
-        <burn_wgpu::WgpuRuntime as Runtime>::client(wgpu_device).memory_cleanup();
-    }
-}
-
-fn allow_memory_cleanup<B: BackendTrait>(_device: &B::Device, _allow_cuda_cleanup: bool) -> bool
-where
-    B::Device: 'static,
-{
-    #[cfg(feature = "cuda")]
-    if (_device as &dyn Any)
-        .downcast_ref::<burn_cuda::CudaDevice>()
-        .is_some()
-    {
-        return _allow_cuda_cleanup;
-    }
-    true
-}
-
-#[derive(Clone, Copy, Debug)]
-struct DeviceMemoryUsage {
-    reserved_bytes: u64,
-    in_use_bytes: u64,
-}
-
-impl DeviceMemoryUsage {
-    fn reserved_mb(self) -> f64 {
-        bytes_to_mb(self.reserved_bytes)
-    }
-
-    fn in_use_mb(self) -> f64 {
-        bytes_to_mb(self.in_use_bytes)
-    }
-}
-
-fn bytes_to_mb(bytes: u64) -> f64 {
-    bytes as f64 / (1024.0 * 1024.0)
-}
-
-#[cfg(any(feature = "train", feature = "cli"))]
-fn device_memory_usage<B: BackendTrait>(device: &B::Device) -> Option<DeviceMemoryUsage>
-where
-    B::Device: 'static,
-{
-    #[cfg(feature = "cuda")]
-    if let Some(cuda_device) = (device as &dyn Any).downcast_ref::<burn_cuda::CudaDevice>() {
-        let usage =
-            <burn_cubecl::cubecl::cuda::CudaRuntime as Runtime>::client(cuda_device).memory_usage();
-        return Some(DeviceMemoryUsage {
-            reserved_bytes: usage.bytes_reserved,
-            in_use_bytes: usage.bytes_in_use,
-        });
-    }
-    if let Some(wgpu_device) = (device as &dyn Any).downcast_ref::<burn_wgpu::WgpuDevice>() {
-        let usage = <burn_wgpu::WgpuRuntime as Runtime>::client(wgpu_device).memory_usage();
-        return Some(DeviceMemoryUsage {
-            reserved_bytes: usage.bytes_reserved,
-            in_use_bytes: usage.bytes_in_use,
-        });
-    }
-    None
-}
-
-fn device_memory_usage_safe<B: BackendTrait>(device: &B::Device) -> Option<DeviceMemoryUsage>
-where
-    B::Device: 'static,
-{
-    #[cfg(any(feature = "train", feature = "cli"))]
-    {
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            device_memory_usage::<B>(device)
-        }))
-        .ok()
-        .flatten()
-    }
-    #[cfg(not(any(feature = "train", feature = "cli")))]
-    {
-        let _ = device;
-        None
-    }
-}
-
 #[derive(Clone)]
 pub struct MemoryCleanupMetric<B: BackendTrait> {
     name: Arc<String>,
@@ -500,7 +390,8 @@ where
         _item: &Self::Input,
         metadata: &burn_train::metric::MetricMetadata,
     ) -> burn_train::metric::SerializedEntry {
-        let allow_cleanup = allow_memory_cleanup::<B>(&self.device, self.allow_cuda_cleanup);
+        let allow_cleanup =
+            cleanup_device_memory_allowed::<B>(&self.device, self.allow_cuda_cleanup);
         if self.every_epochs == 0 && self.every_iters == 0 {
             return serialized_entry("disabled", "0");
         }
@@ -513,11 +404,7 @@ where
                 .iteration
                 .is_some_and(|iteration| iteration.is_multiple_of(self.every_iters))
         {
-            let _guard = crate::device::device_allocation_lock().lock().ok();
-            let _ = B::sync(&self.device);
-            B::memory_cleanup(&self.device);
-            extra_memory_cleanup::<B>(&self.device);
-            cleaned = true;
+            cleaned = cleanup_device_memory::<B>(&self.device, self.allow_cuda_cleanup);
         }
         if let Some(last_epoch) = self.last_epoch
             && allow_cleanup
@@ -525,11 +412,7 @@ where
             && epoch != last_epoch
             && epoch.is_multiple_of(self.every_epochs)
         {
-            let _guard = crate::device::device_allocation_lock().lock().ok();
-            let _ = B::sync(&self.device);
-            B::memory_cleanup(&self.device);
-            extra_memory_cleanup::<B>(&self.device);
-            cleaned = true;
+            cleaned |= cleanup_device_memory::<B>(&self.device, self.allow_cuda_cleanup);
         }
         self.last_epoch = Some(epoch);
 
@@ -610,13 +493,9 @@ where
             let mut current = usage.reserved_bytes.max(usage.in_use_bytes);
             if current > self.max_bytes {
                 let allow_cleanup =
-                    allow_memory_cleanup::<B>(&self.device, self.allow_cuda_cleanup);
+                    cleanup_device_memory_allowed::<B>(&self.device, self.allow_cuda_cleanup);
                 if allow_cleanup {
-                    let _guard = crate::device::device_allocation_lock().lock().ok();
-                    let _ = B::sync(&self.device);
-                    B::memory_cleanup(&self.device);
-                    extra_memory_cleanup::<B>(&self.device);
-                    let _ = B::sync(&self.device);
+                    cleanup_device_memory::<B>(&self.device, self.allow_cuda_cleanup);
                     if let Some(cleaned) = device_memory_usage_safe::<B>(&self.device) {
                         usage = cleaned;
                         current = usage.reserved_bytes.max(usage.in_use_bytes);

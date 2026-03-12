@@ -118,9 +118,11 @@ fn make_video_configs(
             wgpu_rollout_fused: false,
         },
     };
-    let mut video = VisionVideoLejepaConfig::default();
-    video.context_frames = 3;
-    video.target_frames = 2;
+    let mut video = VisionVideoLejepaConfig {
+        context_frames: 3,
+        target_frames: 2,
+        ..VisionVideoLejepaConfig::default()
+    };
     video.loss.sigreg.enabled = true;
     video.loss.sigreg.lambda = 0.02;
     video.loss.cosine_weight = 0.1;
@@ -183,11 +185,13 @@ fn make_video_configs_runlike(
         },
     };
     vision = enable_pyramid_backbone(vision);
-    let mut video = VisionVideoLejepaConfig::default();
-    video.context_frames = 4;
-    video.target_frames = 6;
-    video.train_target_frames_min = 6;
-    video.train_target_frames_max = 6;
+    let mut video = VisionVideoLejepaConfig {
+        context_frames: 4,
+        target_frames: 6,
+        train_target_frames_min: 6,
+        train_target_frames_max: 6,
+        ..VisionVideoLejepaConfig::default()
+    };
     video.teacher_ema.enabled = false;
     video.loss.sigreg.enabled = false;
     video.loss.cosine_weight = 0.0;

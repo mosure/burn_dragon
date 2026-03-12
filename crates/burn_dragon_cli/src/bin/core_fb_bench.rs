@@ -6,9 +6,9 @@ use std::time::Instant;
 use burn::tensor::backend::Backend as BackendTrait;
 use burn::tensor::{Int, Tensor, TensorData};
 use burn_autodiff::Autodiff;
+use burn_dragon::core::{BDH, BDHConfig, FusedKernelConfig};
 use burn_dragon::language::loss::language_model_loss;
-use burn_dragon::{BDH, BDHConfig, FusedKernelConfig};
-use burn_dragon_wgpu::{recurrent_profile_reset, recurrent_profile_snapshot};
+use burn_dragon_wgpu::api::recurrent::{recurrent_profile_reset, recurrent_profile_snapshot};
 use burn_wgpu::{CubeBackend, RuntimeOptions, WgpuRuntime, graphics};
 use clap::Parser;
 use serde::Serialize;
@@ -50,6 +50,7 @@ struct ErrorMetrics {
 #[derive(Clone, Serialize)]
 struct CaseResult {
     case: BenchCase,
+    problem_shape: String,
     rollout_fast_steps: usize,
     warmup: usize,
     iterations: usize,
@@ -62,8 +63,14 @@ struct CaseResult {
     logits_error: ErrorMetrics,
     baseline_recurrent_calls: f64,
     fused_recurrent_calls: f64,
+    baseline_recurrent_launches: f64,
+    fused_recurrent_launches: f64,
     baseline_dispatch_ns: f64,
     fused_dispatch_ns: f64,
+    baseline_transient_allocations: f64,
+    fused_transient_allocations: f64,
+    baseline_metadata_upload_bytes: f64,
+    fused_metadata_upload_bytes: f64,
 }
 
 #[derive(Clone, Serialize)]
@@ -238,22 +245,34 @@ fn run_case(
 
     let mut baseline_ns = Vec::with_capacity(args.iterations);
     let mut baseline_calls = Vec::with_capacity(args.iterations);
+    let mut baseline_launches = Vec::with_capacity(args.iterations);
     let mut baseline_dispatch = Vec::with_capacity(args.iterations);
+    let mut baseline_allocs = Vec::with_capacity(args.iterations);
+    let mut baseline_metadata = Vec::with_capacity(args.iterations);
     let mut fused_ns = Vec::with_capacity(args.iterations);
     let mut fused_calls = Vec::with_capacity(args.iterations);
+    let mut fused_launches = Vec::with_capacity(args.iterations);
     let mut fused_dispatch = Vec::with_capacity(args.iterations);
+    let mut fused_allocs = Vec::with_capacity(args.iterations);
+    let mut fused_metadata = Vec::with_capacity(args.iterations);
 
     for _ in 0..args.iterations {
         let baseline_metrics =
             run_forward_backward(&baseline, inputs.clone(), targets.clone(), device);
         baseline_ns.push(baseline_metrics.elapsed_ns);
         baseline_calls.push(baseline_metrics.recurrent_calls as f64);
+        baseline_launches.push(baseline_metrics.recurrent_launches as f64);
         baseline_dispatch.push(baseline_metrics.dispatch_ns as f64);
+        baseline_allocs.push(baseline_metrics.transient_allocations as f64);
+        baseline_metadata.push(baseline_metrics.metadata_upload_bytes as f64);
 
         let fused_metrics = run_forward_backward(&fused, inputs.clone(), targets.clone(), device);
         fused_ns.push(fused_metrics.elapsed_ns);
         fused_calls.push(fused_metrics.recurrent_calls as f64);
+        fused_launches.push(fused_metrics.recurrent_launches as f64);
         fused_dispatch.push(fused_metrics.dispatch_ns as f64);
+        fused_allocs.push(fused_metrics.transient_allocations as f64);
+        fused_metadata.push(fused_metrics.metadata_upload_bytes as f64);
     }
 
     let baseline_avg_ns = mean_u128(&baseline_ns);
@@ -264,6 +283,16 @@ fn run_case(
 
     CaseResult {
         case,
+        problem_shape: format!(
+            "b{} t{} layer{} embd{} head{} vocab{} fast{}",
+            case.batch,
+            case.sequence_len,
+            case.n_layer,
+            case.n_embd,
+            case.n_head,
+            case.vocab_size,
+            rollout_fast_steps
+        ),
         rollout_fast_steps,
         warmup: args.warmup,
         iterations: args.iterations,
@@ -276,8 +305,14 @@ fn run_case(
         logits_error,
         baseline_recurrent_calls: mean_f64(&baseline_calls),
         fused_recurrent_calls: mean_f64(&fused_calls),
+        baseline_recurrent_launches: mean_f64(&baseline_launches),
+        fused_recurrent_launches: mean_f64(&fused_launches),
         baseline_dispatch_ns: mean_f64(&baseline_dispatch),
         fused_dispatch_ns: mean_f64(&fused_dispatch),
+        baseline_transient_allocations: mean_f64(&baseline_allocs),
+        fused_transient_allocations: mean_f64(&fused_allocs),
+        baseline_metadata_upload_bytes: mean_f64(&baseline_metadata),
+        fused_metadata_upload_bytes: mean_f64(&fused_metadata),
     }
 }
 
@@ -285,7 +320,10 @@ fn run_case(
 struct StepMetrics {
     elapsed_ns: u128,
     recurrent_calls: u64,
+    recurrent_launches: u64,
     dispatch_ns: u128,
+    transient_allocations: u64,
+    metadata_upload_bytes: u64,
 }
 
 fn run_forward_backward(
@@ -294,19 +332,22 @@ fn run_forward_backward(
     targets: Tensor<TrainBackend, 2, Int>,
     device: &Device,
 ) -> StepMetrics {
-    <TrainBackend as BackendTrait>::sync(device);
+    let _ = <TrainBackend as BackendTrait>::sync(device);
     recurrent_profile_reset();
     let started = Instant::now();
     let logits = model.forward(inputs);
     let loss = language_model_loss::<TrainBackend>(logits, targets);
     let _ = loss.backward();
-    <TrainBackend as BackendTrait>::sync(device);
+    let _ = <TrainBackend as BackendTrait>::sync(device);
     let profile = recurrent_profile_snapshot();
 
     StepMetrics {
         elapsed_ns: started.elapsed().as_nanos(),
         recurrent_calls: profile.calls,
+        recurrent_launches: profile.launches,
         dispatch_ns: profile.dispatch_ns,
+        transient_allocations: profile.transient_allocations,
+        metadata_upload_bytes: profile.metadata_upload_bytes,
     }
 }
 
@@ -325,7 +366,7 @@ fn parity_snapshot(
 
     let baseline_loss_value = scalar_to_f32(baseline_loss);
     let fused_loss_value = scalar_to_f32(fused_loss);
-    <TrainBackend as BackendTrait>::sync(device);
+    let _ = <TrainBackend as BackendTrait>::sync(device);
 
     let baseline_logits = baseline_logits.inner();
     let fused_logits = fused_logits.inner();
@@ -405,16 +446,16 @@ fn format_markdown(report: &Report) -> String {
     let _ = writeln!(out);
     let _ = writeln!(
         out,
-        "| case | fast_steps | baseline ms | fused ms | speedup x | baseline tok/s | fused tok/s | loss abs diff | logits max abs | logits mean abs | fused recurrent calls | fused dispatch ms |"
+        "| case | fast_steps | baseline ms | fused ms | speedup x | baseline tok/s | fused tok/s | loss abs diff | logits max abs | logits mean abs | fused recurrent calls | fused launches | fused dispatch ms | fused meta bytes |"
     );
     let _ = writeln!(
         out,
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
     );
     for row in &report.cases {
         let _ = writeln!(
             out,
-            "| {} | {} | {:.3} | {:.3} | {:.3} | {:.1} | {:.1} | {:.6} | {:.6} | {:.6} | {:.1} | {:.3} |",
+            "| {} | {} | {:.3} | {:.3} | {:.3} | {:.1} | {:.1} | {:.6} | {:.6} | {:.6} | {:.1} | {:.1} | {:.3} | {:.1} |",
             row.case.name,
             row.rollout_fast_steps,
             row.baseline_forward_backward_ms,
@@ -426,7 +467,9 @@ fn format_markdown(report: &Report) -> String {
             row.logits_error.max_abs,
             row.logits_error.mean_abs,
             row.fused_recurrent_calls,
+            row.fused_recurrent_launches,
             row.fused_dispatch_ns / 1e6,
+            row.fused_metadata_upload_bytes,
         );
     }
     out

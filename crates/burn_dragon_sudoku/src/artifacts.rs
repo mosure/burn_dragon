@@ -4,7 +4,7 @@ use anyhow::{Result, anyhow};
 use burn::tensor::backend::Backend as BackendTrait;
 use burn::tensor::{Distribution as TensorDistribution, Int, Tensor, TensorData};
 
-use burn_dragon_core::mhc_passthrough;
+use burn_dragon_core::mhc_passthrough_with_coefficients;
 use burn_dragon_train::VisionArtifactOutputMode;
 use burn_dragon_train::train::artifacts::{ArtifactFrame, write_video};
 
@@ -235,6 +235,7 @@ fn generate_rollout_frames<B: BackendTrait>(
         model.cell_embeddings_with_positions(init_tokens.clone(), row_ids.clone(), col_ids.clone());
     let [_, _, embd] = input_cache.shape().dims();
     let cache_streams = model.cache_streams();
+    let cache_mhc_coeffs = model.cache_mhc.as_ref().map(|mhc| mhc.coefficients());
     let input_cache =
         input_cache
             .unsqueeze_dim::<4>(1)
@@ -415,7 +416,11 @@ fn generate_rollout_frames<B: BackendTrait>(
         let update_mask_stream = update_mask_f.clone().unsqueeze_dim::<4>(1);
         let keep = update_mask_stream.clone().mul_scalar(-1.0).add_scalar(1.0);
         cache = cache * keep + update_emb.mul(update_mask_stream);
-        cache = mhc_passthrough(model.cache_mhc.as_ref(), cache);
+        cache = mhc_passthrough_with_coefficients(
+            model.cache_mhc.as_ref(),
+            cache,
+            cache_mhc_coeffs.as_ref(),
+        );
         let write_gate_data = write_gate
             .to_data()
             .convert::<f32>()
@@ -498,7 +503,7 @@ fn build_select_mask(
             mask.push(allowed.min(1.0));
         }
         selectable_counts.push(mask.iter().copied().sum::<f32>());
-        select_mask.extend(mask.into_iter());
+        select_mask.extend(mask);
     }
     (select_mask, selectable_counts)
 }

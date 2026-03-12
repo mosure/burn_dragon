@@ -14,6 +14,8 @@ mod rollout;
 #[cfg(test)]
 mod tests;
 
+use rollout::VideoDebugReconInput;
+
 #[derive(Debug, Clone)]
 pub(crate) struct VisionVideoLejepaModel<B: BackendTrait> {
     pub(crate) frame_model: VisionDragon<B>,
@@ -494,16 +496,16 @@ impl<B: BackendTrait> VisionVideoLejepaModel<B> {
             let future_patch_tokens = Tensor::cat(future_patch_tokens_detached.clone(), 1);
             let frame_patch_tokens =
                 Tensor::cat(vec![context_patch_tokens, future_patch_tokens.clone()], 1);
-            self.debug_reconstruction_outputs_from_patch_tokens(
-                clip_frames.clone(),
+            self.debug_reconstruction_outputs_from_patch_tokens(VideoDebugReconInput {
+                clip_frames: clip_frames.clone(),
                 frame_patch_tokens,
                 future_patch_tokens,
                 context_len,
                 target_len,
                 future_len_all,
                 steps,
-                false,
-            )
+                capture_artifacts: false,
+            })
         } else {
             VisionVideoDebugRecon {
                 loss: zero.clone(),
@@ -971,7 +973,10 @@ impl<B: BackendTrait> Module<B> for VisionVideoLejepaModel<B> {
             recon: Module::load_record(self.recon, record.recon),
             probe_loss: Module::load_record(self.probe_loss, record.probe_loss),
             future_queries: Module::load_record(self.future_queries, record.future_queries),
-            config: Module::<B>::load_record(self.config, record.config),
+            config: {
+                let _: () = record.config;
+                Module::<B>::load_record(self.config, ())
+            },
             teacher_frame_model: None,
             rollout: self.rollout,
             embed_dim: self.embed_dim,

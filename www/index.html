@@ -210,7 +210,7 @@
     <canvas id="bevy" data-bdh-layout="css"></canvas>
 
     <script type="module">
-      import init, { loadModel } from "./out/burn_dragon.js";
+      import init, { loadModelFromUrl } from "./out/burn_dragon.js";
 
       const overlay = document.getElementById("overlay");
       const status = document.getElementById("status");
@@ -393,9 +393,6 @@
         setStatus("loading wasm runtime");
         await init();
 
-        setStatus("downloading model weights");
-        const modelBytes = await fetchCached(modelUrl, false);
-
         setStatus("loading vocab");
         const vocabJson = await fetchCached(vocabUrl, true);
 
@@ -411,9 +408,9 @@
           }
         }
 
-        setStatus("initializing model");
-        const engine = await loadModel(
-          new Uint8Array(modelBytes),
+        setStatus("loading model weights");
+        const engine = await loadModelFromUrl(
+          modelUrl,
           vocabJson,
           configJson || undefined,
           startViz

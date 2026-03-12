@@ -4,8 +4,6 @@ use burn::tensor::backend::Backend;
 
 use crate::kernel::{BlockPattern1d, relu_lowrank};
 
-use super::residual::ManifoldHyperConnections;
-
 #[derive(Debug)]
 pub struct LowRankResidualOutput<B: Backend> {
     pub next: Tensor<B, 4>,
@@ -179,41 +177,5 @@ mod tests {
         assert_eq!(y_gate, expected_y_gate);
         assert_eq!(y_neuron, expected_y_neuron);
         assert_eq!(next, expected_next);
-    }
-}
-
-pub fn mhc_split<B: Backend>(
-    mhc: Option<&ManifoldHyperConnections<B>>,
-    residuals: Tensor<B, 4>,
-) -> (Tensor<B, 4>, Tensor<B, 4>, Option<Tensor<B, 2>>) {
-    if let Some(mhc) = mhc {
-        mhc.width_connection(residuals)
-    } else {
-        (residuals.clone(), residuals, None)
-    }
-}
-
-pub fn mhc_merge<B: Backend>(
-    mhc: Option<&ManifoldHyperConnections<B>>,
-    branch_output: Tensor<B, 4>,
-    residuals: Tensor<B, 4>,
-    beta: Option<Tensor<B, 2>>,
-) -> Tensor<B, 4> {
-    if let Some(mhc) = mhc {
-        mhc.depth_connection(branch_output, residuals, beta)
-    } else {
-        branch_output
-    }
-}
-
-pub fn mhc_passthrough<B: Backend>(
-    mhc: Option<&ManifoldHyperConnections<B>>,
-    residuals: Tensor<B, 4>,
-) -> Tensor<B, 4> {
-    if let Some(mhc) = mhc {
-        let (branch_input, residuals_out, beta) = mhc.width_connection(residuals);
-        mhc.depth_connection(branch_input, residuals_out, beta)
-    } else {
-        residuals
     }
 }

@@ -960,7 +960,10 @@ impl<B: BackendTrait> Module<B> for VisionLejepaModel<B> {
             probe_loss: Module::load_record(self.probe_loss, record.probe_loss),
             recon: Module::load_record(self.recon, record.recon),
             mask_token: Module::load_record(self.mask_token, record.mask_token),
-            config: Module::<B>::load_record(self.config, record.config),
+            config: {
+                let _: () = record.config;
+                Module::<B>::load_record(self.config, ())
+            },
             teacher: None,
             denorm_std_patch: self.denorm_std_patch,
             rollout: self.rollout,

@@ -15,6 +15,15 @@ pub async fn load_model(
     Err(unsupported())
 }
 
+pub async fn load_model_from_url(
+    _model_url: String,
+    _vocab_json: String,
+    _config_json: Option<String>,
+    _start_viz: Option<bool>,
+) -> Result<WasmInference, JsValue> {
+    Err(unsupported())
+}
+
 impl WasmInference {
     pub fn start_stream(
         &mut self,

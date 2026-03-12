@@ -9,16 +9,16 @@ var<storage, read_write> value: array<f32>;
 var<storage, read_write> rho_state: array<f32>;
 
 @group(0) @binding(3)
-var<storage, read_write> source_offsets: array<f32>;
+var<storage, read_write> source_offsets: array<i32>;
 
 @group(0) @binding(4)
-var<storage, read_write> source_indices: array<f32>;
+var<storage, read_write> source_indices: array<i32>;
 
 @group(0) @binding(5)
-var<storage, read_write> incoming_offsets: array<f32>;
+var<storage, read_write> incoming_offsets: array<i32>;
 
 @group(0) @binding(6)
-var<storage, read_write> incoming_indices: array<f32>;
+var<storage, read_write> incoming_indices: array<i32>;
 
 @group(0) @binding(7)
 var<storage, read_write> decay: array<f32>;
@@ -32,8 +32,12 @@ var<storage, read_write> rho_next: array<f32>;
 @group(0) @binding(10)
 var<storage, read_write> params: array<f32>;
 
-fn to_u32(v: f32) -> u32 {
+fn f32_to_u32(v: f32) -> u32 {
   return u32(v + 0.5);
+}
+
+fn i32_to_u32(v: i32) -> u32 {
+  return u32(max(v, 0));
 }
 
 fn idx_query(b: u32, s: u32, l: u32, source_count: u32, latent: u32) -> u32 {
@@ -62,11 +66,11 @@ fn idx_context(b: u32, s: u32, e: u32, source_count: u32, embd: u32) -> u32 {
 
 @compute @workgroup_size(8, 8, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-  let batch = to_u32(params[0]);
-  let source_count = to_u32(params[1]);
-  let target_count = to_u32(params[2]);
-  let latent = to_u32(params[3]);
-  let embd = to_u32(params[4]);
+  let batch = f32_to_u32(params[0]);
+  let source_count = f32_to_u32(params[1]);
+  let target_count = f32_to_u32(params[2]);
+  let latent = f32_to_u32(params[3]);
+  let embd = f32_to_u32(params[4]);
 
   let e = gid.x;
   let item = gid.y;
@@ -79,15 +83,15 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let decay_value = decay[0];
 
   if item < source_count {
-    let start = to_u32(source_offsets[item]);
-    let end = to_u32(source_offsets[item + 1u]);
+    let start = i32_to_u32(source_offsets[item]);
+    let end = i32_to_u32(source_offsets[item + 1u]);
     var acc = 0.0;
     var edge = start;
     loop {
       if edge >= end {
         break;
       }
-      let dst_index = to_u32(source_indices[edge]);
+      let dst_index = i32_to_u32(source_indices[edge]);
       if dst_index < target_count {
         var l = 0u;
         while l < latent {
@@ -104,8 +108,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
 
   if item < target_count {
-    let start = to_u32(incoming_offsets[item]);
-    let end = to_u32(incoming_offsets[item + 1u]);
+    let start = i32_to_u32(incoming_offsets[item]);
+    let end = i32_to_u32(incoming_offsets[item + 1u]);
     var l = 0u;
     while l < latent {
       let rho_index = idx_rho(b, item, l, e, target_count, latent, embd);
@@ -115,7 +119,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         if edge >= end {
           break;
         }
-        let src_index = to_u32(incoming_indices[edge]);
+        let src_index = i32_to_u32(incoming_indices[edge]);
         if src_index < source_count {
           let q_index = idx_query(b, src_index, l, source_count, latent);
           let v_index = idx_value(b, src_index, e, source_count, embd);

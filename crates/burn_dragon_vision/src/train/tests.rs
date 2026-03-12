@@ -34,6 +34,8 @@ fn make_training(max_iters: usize, epochs: Option<usize>) -> TrainingHyperparame
     TrainingHyperparameters {
         block_size: 16,
         batch_size: 2,
+        gradient_accumulation_steps: 1,
+        target_effective_batch_size: None,
         epochs,
         max_iters,
         log_frequency: 10,
@@ -534,7 +536,7 @@ fn cuda_memory_pool_stable() -> bool {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let device = burn_cuda::CudaDevice::default();
             let _ = Tensor::<Cuda<f32>, 2>::zeros([1, 1], &device);
-            Cuda::<f32>::sync(&device);
+            let _ = Cuda::<f32>::sync(&device);
             let _ = cuda_memory_snapshot(&device);
         }))
         .is_ok()
@@ -548,7 +550,7 @@ fn cuda_random_kernel_stable() -> bool {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let device = burn_cuda::CudaDevice::default();
             let _ = Tensor::<Cuda<f32>, 2>::random([1, 1], TensorDistribution::Default, &device);
-            Cuda::<f32>::sync(&device);
+            let _ = Cuda::<f32>::sync(&device);
         }))
         .is_ok()
     })

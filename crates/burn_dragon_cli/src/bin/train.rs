@@ -24,6 +24,12 @@ use burn_dragon::language::{
     TrainingConfig as LanguageTrainingConfig, load_training_config as load_language_training_config,
 };
 #[cfg(feature = "train")]
+use burn_dragon::multimodal::{
+    MultimodalRuntimeConfig, MultimodalTrainingConfig, MultimodalVideoTrainingConfig,
+    load_multimodal_runtime_config, train_backend as train_multimodal_backend,
+    train_video_backend as train_multimodal_video_backend,
+};
+#[cfg(feature = "train")]
 use burn_dragon::train::train::constants::FAST_TRAIN;
 #[cfg(feature = "train")]
 use burn_dragon::train::wgpu::init_runtime;
@@ -69,6 +75,8 @@ enum Command {
     Vision(VisionArgs),
     /// Train sudoku models.
     Sudoku(SudokuArgs),
+    /// Train multimodal VL-JEPA models.
+    Multimodal(MultimodalArgs),
 }
 
 #[cfg(feature = "train")]
@@ -104,6 +112,17 @@ struct SudokuArgs {
     config: Vec<PathBuf>,
     /// Backend to use for training.
     #[arg(long, value_enum, default_value_t = BackendArg::Cuda)]
+    backend: BackendArg,
+}
+
+#[cfg(feature = "train")]
+#[derive(Args, Debug)]
+struct MultimodalArgs {
+    /// Additional configuration files applied in order (later files override earlier ones).
+    #[arg(short = 'c', long = "config", value_name = "PATH")]
+    config: Vec<PathBuf>,
+    /// Backend to use for training.
+    #[arg(long, value_enum, default_value_t = BackendArg::Wgpu)]
     backend: BackendArg,
 }
 
@@ -172,6 +191,50 @@ where
     Init: Fn(&B::Device),
 {
     train_sudoku_backend::<B, _>(config, backend_name, init)
+}
+
+#[cfg(feature = "train")]
+fn train_multimodal<B, Init>(
+    config: &MultimodalTrainingConfig,
+    backend_name: &str,
+    init: Init,
+) -> Result<()>
+where
+    B: AutodiffBackend + Clone + 'static,
+    B::Device: Default + Clone,
+    Init: Fn(&B::Device),
+{
+    let report = train_multimodal_backend::<B, _>(config, backend_name, init)?;
+    eprintln!(
+        "multimodal run: {} ({}) checkpoints={} artifacts={}",
+        report.run_name,
+        report.run_dir.display(),
+        report.checkpoint_paths.len(),
+        report.artifact_paths.len(),
+    );
+    Ok(())
+}
+
+#[cfg(feature = "train")]
+fn train_multimodal_video<B, Init>(
+    config: &MultimodalVideoTrainingConfig,
+    backend_name: &str,
+    init: Init,
+) -> Result<()>
+where
+    B: AutodiffBackend + Clone + 'static,
+    B::Device: Default + Clone,
+    Init: Fn(&B::Device),
+{
+    let report = train_multimodal_video_backend::<B, _>(config, backend_name, init)?;
+    eprintln!(
+        "multimodal video run: {} ({}) checkpoints={} artifacts={}",
+        report.run_name,
+        report.run_dir.display(),
+        report.checkpoint_paths.len(),
+        report.artifact_paths.len(),
+    );
+    Ok(())
 }
 
 #[cfg(feature = "train")]
@@ -336,12 +399,87 @@ fn run_sudoku(args: SudokuArgs) -> Result<()> {
 }
 
 #[cfg(feature = "train")]
+fn run_multimodal(args: MultimodalArgs) -> Result<()> {
+    let mut config_paths = vec![PathBuf::from("config/multimodal/base.toml")];
+    config_paths.extend(args.config);
+    let config = load_multimodal_runtime_config(&config_paths)?;
+
+    run_in_training_thread("multimodal-train", move || match config {
+        MultimodalRuntimeConfig::ImageText(config) => match args.backend {
+            BackendArg::Ndarray => {
+                train_multimodal::<Autodiff<NdArray<f32>>, _>(&config, "cpu", |_| {})
+            }
+            BackendArg::Wgpu => {
+                let wgpu_config = config.wgpu.clone();
+                train_multimodal::<Autodiff<WgpuNoFusion>, _>(&config, "wgpu", move |device| {
+                    init_runtime(device, &wgpu_config)
+                })
+            }
+            BackendArg::WgpuNoFusion => {
+                let wgpu_config = config.wgpu.clone();
+                train_multimodal::<Autodiff<WgpuNoFusion>, _>(
+                    &config,
+                    "wgpu-nofusion",
+                    move |device| init_runtime(device, &wgpu_config),
+                )
+            }
+            BackendArg::Cuda => {
+                #[cfg(feature = "cuda")]
+                {
+                    train_multimodal::<Autodiff<Cuda<f32>>, _>(&config, "cuda", |_| {})
+                }
+                #[cfg(not(feature = "cuda"))]
+                {
+                    Err(anyhow!(
+                        "cuda backend selected but this build lacks `cuda` feature; rebuild with `--features cuda`"
+                    ))
+                }
+            }
+        },
+        MultimodalRuntimeConfig::VideoText(config) => match args.backend {
+            BackendArg::Ndarray => {
+                train_multimodal_video::<Autodiff<NdArray<f32>>, _>(&config, "cpu", |_| {})
+            }
+            BackendArg::Wgpu => {
+                let wgpu_config = config.wgpu.clone();
+                train_multimodal_video::<Autodiff<WgpuNoFusion>, _>(
+                    &config,
+                    "wgpu",
+                    move |device| init_runtime(device, &wgpu_config),
+                )
+            }
+            BackendArg::WgpuNoFusion => {
+                let wgpu_config = config.wgpu.clone();
+                train_multimodal_video::<Autodiff<WgpuNoFusion>, _>(
+                    &config,
+                    "wgpu-nofusion",
+                    move |device| init_runtime(device, &wgpu_config),
+                )
+            }
+            BackendArg::Cuda => {
+                #[cfg(feature = "cuda")]
+                {
+                    train_multimodal_video::<Autodiff<Cuda<f32>>, _>(&config, "cuda", |_| {})
+                }
+                #[cfg(not(feature = "cuda"))]
+                {
+                    Err(anyhow!(
+                        "cuda backend selected but this build lacks `cuda` feature; rebuild with `--features cuda`"
+                    ))
+                }
+            }
+        },
+    })
+}
+
+#[cfg(feature = "train")]
 fn run() -> Result<()> {
     let args = Cli::parse();
     match args.command {
         Command::Language(cmd) => run_language(cmd),
         Command::Vision(cmd) => run_vision(cmd),
         Command::Sudoku(cmd) => run_sudoku(cmd),
+        Command::Multimodal(cmd) => run_multimodal(cmd),
     }
 }
 

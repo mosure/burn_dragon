@@ -338,6 +338,7 @@ mod real {
             num_eyes: 1,
             cross_eye_steps: 0,
             token_state_norm: true,
+            normalization: burn_dragon::core::DragonNormConfig::default(),
             latent_activation: VisionLatentActivation::default(),
             pos_encoding: SpatialPositionalEncodingKind::Learned2d,
             pos_max_height: case.image_size.div_ceil(case.patch_size),

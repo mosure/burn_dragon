@@ -6,7 +6,7 @@ const VIDEO_FRAME_ENCODE_CHUNK: usize = 512;
 
 #[derive(Module, Debug)]
 pub(crate) struct VisionVideoPredictor<B: BackendTrait> {
-    norm: LayerNorm<B>,
+    norm: DragonNorm<B>,
     hidden: Option<Linear<B>>,
     out: Linear<B>,
 }
@@ -16,9 +16,10 @@ impl<B: BackendTrait> VisionVideoPredictor<B> {
         embed_dim: usize,
         hidden_dim: usize,
         projection_dim: usize,
+        norm_config: &DragonNormConfig,
         device: &B::Device,
     ) -> Self {
-        let norm = LayerNormConfig::new(embed_dim.max(1)).init(device);
+        let norm = DragonNorm::new(norm_config, embed_dim.max(1), device);
         let hidden = if hidden_dim > 0 {
             Some(LinearConfig::new(embed_dim.max(1), hidden_dim).init(device))
         } else {
@@ -46,17 +47,21 @@ impl<B: BackendTrait> VisionVideoPredictor<B> {
 
 #[derive(Module, Debug)]
 pub(crate) struct VisionVideoObservationMerger<B: BackendTrait> {
-    prior_norm: LayerNorm<B>,
-    obs_norm: LayerNorm<B>,
+    prior_norm: DragonNorm<B>,
+    obs_norm: DragonNorm<B>,
     gate_prior: Linear<B>,
     gate_obs: Linear<B>,
 }
 
 impl<B: BackendTrait> VisionVideoObservationMerger<B> {
-    pub(crate) fn new(embed_dim: usize, device: &B::Device) -> Self {
+    pub(crate) fn new(
+        embed_dim: usize,
+        norm_config: &DragonNormConfig,
+        device: &B::Device,
+    ) -> Self {
         Self {
-            prior_norm: LayerNormConfig::new(embed_dim.max(1)).init(device),
-            obs_norm: LayerNormConfig::new(embed_dim.max(1)).init(device),
+            prior_norm: DragonNorm::new(norm_config, embed_dim.max(1), device),
+            obs_norm: DragonNorm::new(norm_config, embed_dim.max(1), device),
             gate_prior: LinearConfig::new(embed_dim.max(1), embed_dim.max(1)).init(device),
             gate_obs: LinearConfig::new(embed_dim.max(1), embed_dim.max(1)).init(device),
         }

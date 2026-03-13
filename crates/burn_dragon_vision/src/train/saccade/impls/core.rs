@@ -264,6 +264,7 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
             config.loss.recon.hidden_dim,
             recon_patch_dim,
             config.loss.recon.recon_head_norm,
+            &DragonNormConfig::default(),
             device,
         );
         let traj_tokens = config.traj_tokens.max(1);
@@ -295,20 +296,36 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
             &config.input_projection,
             device,
         );
-        let fovea_proj = VisionSaccadeProjection::new(3, embed_dim, device);
+        let fovea_proj =
+            VisionSaccadeProjection::new(3, embed_dim, &DragonNormConfig::default(), device);
         let pyramid_in_proj = if pyramid_dim != embed_dim {
-            Some(VisionSaccadeProjection::new(embed_dim, pyramid_dim, device))
+            Some(VisionSaccadeProjection::new(
+                embed_dim,
+                pyramid_dim,
+                &DragonNormConfig::default(),
+                device,
+            ))
         } else {
             None
         };
         let pyramid_out_proj = if pyramid_dim != embed_dim {
-            Some(VisionSaccadeProjection::new(pyramid_dim, embed_dim, device))
+            Some(VisionSaccadeProjection::new(
+                pyramid_dim,
+                embed_dim,
+                &DragonNormConfig::default(),
+                device,
+            ))
         } else {
             None
         };
         let pyramid_norm = LayerNormConfig::new(pyramid_dim).init(device);
-        let residual_proj = VisionSaccadeProjection::new(embed_dim, pyramid_dim, device);
-        let saccade_head = VisionSaccadeHead::new(embed_dim, device);
+        let residual_proj = VisionSaccadeProjection::new(
+            embed_dim,
+            pyramid_dim,
+            &DragonNormConfig::default(),
+            device,
+        );
+        let saccade_head = VisionSaccadeHead::new(embed_dim, &DragonNormConfig::default(), device);
         Self {
             model,
             recon,

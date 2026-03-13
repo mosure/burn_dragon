@@ -32,6 +32,7 @@ fn make_saccade_model<B: BackendTrait>(
         num_eyes: 1,
         cross_eye_steps: 0,
         token_state_norm: true,
+        normalization: burn_dragon_core::DragonNormConfig::default(),
         latent_activation: VisionLatentActivation::default(),
         pos_encoding: SpatialPositionalEncodingKind::Learned2d,
         pos_max_height: 2,

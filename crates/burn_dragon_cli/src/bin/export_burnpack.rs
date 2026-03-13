@@ -9,6 +9,7 @@ use burn_dragon::api::checkpoint::run::{CheckpointExportReport, resolve_checkpoi
 use burn_dragon::api::graph::checkpoint::export_graph_checkpoint_to_burnpack;
 use burn_dragon::api::checkpoint::policy::{BurnpackLoadPolicy, BurnpackPrecisionPreference};
 use burn_dragon::api::language::checkpoint::export_language_checkpoint_to_burnpack;
+use burn_dragon::api::multimodal::checkpoint::export_multimodal_checkpoint_to_burnpack;
 use burn_dragon::api::sudoku::checkpoint::export_sudoku_checkpoint_to_burnpack;
 use burn_dragon::api::vision::checkpoint::export_vision_encoder_checkpoint_to_burnpack;
 
@@ -16,6 +17,7 @@ use burn_dragon::api::vision::checkpoint::export_vision_encoder_checkpoint_to_bu
 enum ModelFamilyArg {
     Graph,
     Language,
+    MultimodalVlJepa,
     Sudoku,
     VisionEncoder,
 }
@@ -125,6 +127,16 @@ fn run() -> Result<()> {
                 report.bundle.burnpack_path.display()
             );
             print_bundle_artifacts(&report.bundle);
+        }
+        ModelFamilyArg::MultimodalVlJepa => {
+            let report = export_multimodal_checkpoint_to_burnpack(
+                &args.checkpoint,
+                Some(epoch),
+                &args.config,
+                &output_base,
+                &bundle_options,
+            )?;
+            print_common_export_report("multimodal-vl-jepa", &report);
         }
         ModelFamilyArg::Sudoku => {
             let report = export_sudoku_checkpoint_to_burnpack(

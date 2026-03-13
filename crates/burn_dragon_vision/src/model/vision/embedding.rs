@@ -1,11 +1,10 @@
 use super::{PatchGrid, SpatialPositionalEncodingKind, VisionDragonConfig, VisionPatchEmbedMode};
 use burn::module::{Module, Param};
 use burn::nn::conv::{Conv2d, Conv2dConfig};
-use burn::nn::{
-    Dropout, DropoutConfig, LayerNorm, LayerNormConfig, Linear, LinearConfig, PaddingConfig2d,
-};
+use burn::nn::{Dropout, DropoutConfig, Linear, LinearConfig, PaddingConfig2d};
 use burn::tensor::backend::Backend;
 use burn::tensor::{Distribution as TensorDistribution, Tensor, TensorData, activation};
+use burn_dragon_core::{DragonNorm, DragonNormConfig};
 use core::f32::consts::PI;
 
 #[derive(Clone)]
@@ -551,7 +550,7 @@ impl<B: Backend> SpatialPositionalEncoding<B> {
 
 #[derive(Module, Debug)]
 pub struct VisionProjectionHead<B: Backend> {
-    norm: LayerNorm<B>,
+    norm: DragonNorm<B>,
     fc1: Linear<B>,
     fc2: Linear<B>,
     dropout: Dropout,
@@ -563,9 +562,10 @@ impl<B: Backend> VisionProjectionHead<B> {
         hidden_dim: usize,
         output_dim: usize,
         dropout: f64,
+        norm_config: &DragonNormConfig,
         device: &B::Device,
     ) -> Self {
-        let norm = LayerNormConfig::new(input_dim).init(device);
+        let norm = DragonNorm::new(norm_config, input_dim, device);
         let fc1 = LinearConfig::new(input_dim, hidden_dim).init(device);
         let fc2 = LinearConfig::new(hidden_dim, output_dim).init(device);
         let dropout = DropoutConfig::new(dropout).init();

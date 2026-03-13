@@ -39,8 +39,8 @@ pub use vision::{
     CifarBatch, CifarDataLoader, CifarDataset, CifarSplit, CifarType, DinoFeatureStore,
     ImageNetAugmentations, ImageNetBatch, ImageNetDataLoader, ImageNetDataset,
     ImageNetDatasetConfig, ImageNetSplit, MovingMnistSplit, MovingMnistVideoDataLoader,
-    MovingMnistVideoDataset, MovingMnistVideoDatasetConfig, VideoClipBatch,
-    VideoTargetHorizonCurriculum, VisionNormalize,
+    MovingMnistRenderedClip, MovingMnistVideoDataset, MovingMnistVideoDatasetConfig,
+    VideoClipBatch, VideoTargetHorizonCurriculum, VisionNormalize,
 };
 pub use vision::{VisionDistillCheckpointEvalSummary, eval_vision_distill_checkpoint_backend};
 pub(crate) use vision::{

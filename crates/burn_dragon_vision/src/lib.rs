@@ -57,7 +57,8 @@ pub mod api {
     pub mod checkpoint {
         pub use crate::checkpoint::{
             VisionBurnpackExportReport, export_vision_encoder_checkpoint_to_burnpack,
-            load_training_config_for_checkpoint, write_training_snapshot,
+            load_training_config_for_checkpoint, load_vision_encoder_from_checkpoint,
+            write_training_snapshot,
         };
     }
 
@@ -73,7 +74,8 @@ pub mod api {
             CifarBatch, CifarDataLoader, CifarDataset, CifarSplit, CifarType, DinoFeatureStore,
             ImageNetAugmentations, ImageNetBatch, ImageNetDataLoader, ImageNetDataset,
             ImageNetDatasetConfig, ImageNetSplit, MovingMnistSplit, MovingMnistVideoDataLoader,
-            MovingMnistVideoDataset, MovingMnistVideoDatasetConfig, VideoClipBatch,
+            MovingMnistRenderedClip, MovingMnistVideoDataset, MovingMnistVideoDatasetConfig,
+            VideoClipBatch,
             VisionNormalize,
         };
     }
@@ -108,13 +110,15 @@ pub use train::{
     CifarBatch, CifarDataLoader, CifarDataset, CifarSplit, CifarType, DinoFeatureStore,
     ImageNetAugmentations, ImageNetBatch, ImageNetDataLoader, ImageNetDataset,
     ImageNetDatasetConfig, ImageNetSplit, MovingMnistSplit, MovingMnistVideoDataLoader,
-    MovingMnistVideoDataset, MovingMnistVideoDatasetConfig, VideoClipBatch, VisionNormalize,
+    MovingMnistRenderedClip, MovingMnistVideoDataset, MovingMnistVideoDatasetConfig,
+    VideoClipBatch, VisionNormalize,
 };
 
 #[cfg(feature = "train")]
 pub use checkpoint::{
     VisionBurnpackExportReport, export_vision_encoder_checkpoint_to_burnpack,
-    load_training_config_for_checkpoint, write_training_snapshot,
+    load_training_config_for_checkpoint, load_vision_encoder_from_checkpoint,
+    write_training_snapshot,
 };
 #[cfg(feature = "train")]
 pub use config::*;

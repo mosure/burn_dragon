@@ -13,7 +13,7 @@ use crate::{
     VisionLatentActivation, VisionPatchEmbedMode, VisionRhoStreamConfig, VisionTrmGraphConfig,
     VisionTrmGridMismatchPolicy,
 };
-use burn_dragon_core::{FusedKernelConfig, ManifoldHyperConnectionCoefficientPolicy};
+use burn_dragon_core::{DragonNormConfig, FusedKernelConfig, ManifoldHyperConnectionCoefficientPolicy};
 use burn_dragon_train::{
     GdpoConfig, GdpoHardGate, OptimizerConfig, VisionArtifactOutputMode, WgpuRuntimeConfig,
 };
@@ -1705,6 +1705,8 @@ pub struct VisionModelConfig {
     /// Enable LayerNorm on the token state/residual stream.
     #[serde(alias = "token_norm")]
     pub token_state_norm: bool,
+    #[serde(default)]
+    pub normalization: DragonNormConfig,
     pub latent_activation: VisionLatentActivation,
     pub pos_encoding: SpatialPositionalEncodingKind,
     pub pos_max_height: Option<usize>,
@@ -1743,6 +1745,7 @@ impl Default for VisionModelConfig {
             num_eyes: 1,
             cross_eye_steps: 0,
             token_state_norm: true,
+            normalization: DragonNormConfig::default(),
             latent_activation: VisionLatentActivation::default(),
             pos_encoding: SpatialPositionalEncodingKind::Learned2d,
             pos_max_height: None,
@@ -1832,6 +1835,7 @@ impl VisionModelConfig {
             num_eyes,
             cross_eye_steps: self.cross_eye_steps,
             token_state_norm: self.token_state_norm,
+            normalization: self.normalization.clone(),
             latent_activation: self.latent_activation,
             pos_encoding: self.pos_encoding,
             pos_max_height: self.pos_max_height.unwrap_or(grid),

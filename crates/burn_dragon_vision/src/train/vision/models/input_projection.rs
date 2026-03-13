@@ -18,7 +18,12 @@ impl<B: BackendTrait> VisionSaccadeInputProjection<B> {
     ) -> Self {
         match config {
             VisionSaccadeInputProjectionConfig::Linear => {
-                let linear = VisionSaccadeProjection::new(embed_dim, embed_dim, device);
+                let linear = VisionSaccadeProjection::new(
+                    embed_dim,
+                    embed_dim,
+                    &DragonNormConfig::default(),
+                    device,
+                );
                 let param_count =
                     linear_params(embed_dim, embed_dim) + layer_norm_params(embed_dim);
                 Self {

@@ -1,17 +1,19 @@
 use burn::module::Module;
-use burn::nn::{LayerNorm, LayerNormConfig, Linear, LinearConfig};
+use burn::nn::{Linear, LinearConfig};
 use burn::tensor::Tensor;
 use burn::tensor::backend::Backend;
 
+use super::{DragonNorm, DragonNormConfig};
+
 #[derive(Module, Debug)]
 pub struct HaltHead<B: Backend> {
-    norm: LayerNorm<B>,
+    norm: DragonNorm<B>,
     proj: Linear<B>,
 }
 
 impl<B: Backend> HaltHead<B> {
-    pub fn new(embed_dim: usize, device: &B::Device) -> Self {
-        let norm = LayerNormConfig::new(embed_dim).init(device);
+    pub fn new(embed_dim: usize, norm_config: &DragonNormConfig, device: &B::Device) -> Self {
+        let norm = DragonNorm::new(norm_config, embed_dim, device);
         let proj = LinearConfig::new(embed_dim, 1).init(device);
         Self { norm, proj }
     }

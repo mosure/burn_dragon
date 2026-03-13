@@ -4,6 +4,7 @@ mod config;
 mod halt;
 mod init;
 mod mhc;
+mod norm;
 mod residual_stream;
 mod state;
 mod structured_mode;
@@ -24,6 +25,7 @@ pub use mhc::{
     ManifoldHyperConnectionsConfig, mhc_merge, mhc_merge_with_coefficients, mhc_passthrough,
     mhc_passthrough_with_coefficients, mhc_split, mhc_split_with_coefficients,
 };
+pub use norm::{DragonNorm, DragonNormConfig, DragonNormKind};
 pub use residual_stream::{LowRankResidualOutput, lowrank_residual_step};
 #[cfg(feature = "viz")]
 pub use state::LayerVizState;

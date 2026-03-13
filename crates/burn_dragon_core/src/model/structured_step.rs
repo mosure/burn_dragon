@@ -1,8 +1,8 @@
-use burn::nn::{LayerNorm, Linear};
+use burn::nn::Linear;
 use burn::prelude::*;
 use burn::tensor::activation;
 
-use super::StructuredStepMode;
+use super::{DragonNorm, StructuredStepMode};
 
 #[derive(Clone)]
 pub struct StructuredDenseUpdateOutput<B: Backend> {
@@ -88,7 +88,7 @@ pub fn structured_dense_update_tokens<B: Backend>(
     a_dense: Tensor<B, 3>,
     y_gate_proj: &Linear<B>,
     delta_proj: &Linear<B>,
-    value_norm: Option<&LayerNorm<B>>,
+    value_norm: Option<&DragonNorm<B>>,
 ) -> StructuredDenseUpdateOutput<B> {
     let [batch, targets, value_dim] = a_dense.shape().dims::<3>();
     let [x_batch, x_targets, rank] = x_neuron.shape().dims::<3>();

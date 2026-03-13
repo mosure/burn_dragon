@@ -148,15 +148,28 @@ impl<B: BackendTrait> VisionVideoLejepaModel<B> {
             None
         } else {
             Some(BDH::<B>::new(
-                build_temporal_config(embed_dim, &config.temporal),
+                build_temporal_config(embed_dim, &config.temporal, &vision.normalization),
                 device,
             ))
         };
         let predictor =
-            VisionVideoPredictor::new(embed_dim, predictor_hidden_dim, projection_dim, device);
+            VisionVideoPredictor::new(
+                embed_dim,
+                predictor_hidden_dim,
+                projection_dim,
+                &vision.normalization,
+                device,
+            );
         let patch_conditioner =
-            VisionVideoPredictor::new(embed_dim, predictor_hidden_dim, embed_dim, device);
-        let observation_merger = VisionVideoObservationMerger::new(embed_dim, device);
+            VisionVideoPredictor::new(
+                embed_dim,
+                predictor_hidden_dim,
+                embed_dim,
+                &vision.normalization,
+                device,
+            );
+        let observation_merger =
+            VisionVideoObservationMerger::new(embed_dim, &vision.normalization, device);
         let step_mode_embeddings = if config.temporal.mode_embeddings {
             Some(Param::from_tensor(Tensor::<B, 2>::random(
                 [StructuredStepMode::COUNT, embed_dim],
@@ -166,7 +179,7 @@ impl<B: BackendTrait> VisionVideoLejepaModel<B> {
         } else {
             None
         };
-        let probe = VisionProbe::new(embed_dim, num_classes, device);
+        let probe = VisionProbe::new(embed_dim, num_classes, &vision.normalization, device);
         let patch_size = vision.patch_size.max(1);
         let patch_dim = vision.in_channels.max(1) * patch_size * patch_size;
         let recon_hidden_dim = if config.loss.debug_recon_hidden_dim == 0 {
@@ -174,8 +187,14 @@ impl<B: BackendTrait> VisionVideoLejepaModel<B> {
         } else {
             config.loss.debug_recon_hidden_dim
         };
-        let recon =
-            VisionReconstructionHead::new(embed_dim, recon_hidden_dim, patch_dim, true, device);
+        let recon = VisionReconstructionHead::new(
+            embed_dim,
+            recon_hidden_dim,
+            patch_dim,
+            true,
+            &vision.normalization,
+            device,
+        );
         let probe_loss = CrossEntropyLossConfig::new().init(device);
         let future_queries = if pyramid_backbone {
             None
@@ -1263,7 +1282,11 @@ impl<B: BackendTrait> ValidStep for VisionVideoLejepaModel<B> {
     }
 }
 
-fn build_temporal_config(embed_dim: usize, temporal: &VisionVideoTemporalConfig) -> BDHConfig {
+fn build_temporal_config(
+    embed_dim: usize,
+    temporal: &VisionVideoTemporalConfig,
+    normalization: &burn_dragon_core::DragonNormConfig,
+) -> BDHConfig {
     let mut config = BDHConfig {
         n_layer: temporal.n_layer,
         n_embd: embed_dim.max(1),
@@ -1277,6 +1300,7 @@ fn build_temporal_config(embed_dim: usize, temporal: &VisionVideoTemporalConfig)
             wgpu_rollout_fused: temporal.wgpu_rollout_fused,
             ..FusedKernelConfig::default()
         },
+        normalization: normalization.clone(),
         ..BDHConfig::default()
     };
     config

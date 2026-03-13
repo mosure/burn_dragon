@@ -20,6 +20,8 @@ This repository is now organized as a generic Dragon framework with curated libr
 - core Dragon concepts: `burn_dragon_core::api`
 - fused execution layer: `burn_dragon_wgpu::api`
 - checkpoint/deployment helpers: `burn_dragon_checkpoint::api`
+- shared stream semantics: `burn_dragon_stream::api`
+- multimodal composition: `burn_dragon_multimodal::api`
 - domain adapters:
   - `burn_dragon_language::api`
   - `burn_dragon_vision::api`
@@ -35,6 +37,8 @@ Framework status/tracking:
 - [Dragon Hatchling alignment spec](./docs/dragon_hatchling_alignment_spec.md)
 - [Dragon Hatchling progress tracker](./docs/dragon_hatchling_progress_tracker.md)
 - [Dragon mHC roadmap](./docs/dragon_mhc_core_roadmap.md)
+- [Dragon multimodal VL-JEPA roadmap](./docs/dragon_multimodal_vl_jepa_roadmap.md)
+- [Dragon multimodal progress tracker](./docs/dragon_multimodal_progress_tracker.md)
 
 ## features
 
@@ -58,8 +62,8 @@ Framework status/tracking:
 - [ ] episodic memory
 - [ ] hierarchical, memory-aware recurrent state
 - [ ] mixture-of-expert routing
-- [ ] multi-modal architecture
-- [ ] multi-stream truncated backpropagation through time
+- [x] payload-agnostic stream/TBPTT crate
+- [x] multimodal VL-JEPA composition foundation
 - [ ] neuromorphic backend
 - [ ] streaming, sparse synaptic backpropagation
 - [ ] temporal neuron dampening
@@ -74,6 +78,9 @@ Compile-checked examples:
 - [examples/core_bdh_api.rs](./examples/core_bdh_api.rs)
 - [examples/vision_pyramid_api.rs](./examples/vision_pyramid_api.rs)
 - [examples/vision_encoder_export_api.rs](./examples/vision_encoder_export_api.rs)
+- [examples/stream_api.rs](./examples/stream_api.rs)
+- [examples/multimodal_vl_jepa_api.rs](./examples/multimodal_vl_jepa_api.rs)
+- [examples/multimodal_export_api.rs](./examples/multimodal_export_api.rs)
 - [examples/graph_compiled_executor_api.rs](./examples/graph_compiled_executor_api.rs)
 - [examples/graph_export_api.rs](./examples/graph_export_api.rs)
 - [examples/language_export_api.rs](./examples/language_export_api.rs)
@@ -84,6 +91,8 @@ Typical imports:
 ```rust
 use burn_dragon::api::core;
 use burn_dragon::api::checkpoint;
+use burn_dragon::api::stream;
+use burn_dragon::api::multimodal;
 use burn_dragon::api::vision;
 use burn_dragon::api::graph;
 ```
@@ -113,9 +122,10 @@ Current status:
 - vision encoder checkpoint export is supported in CLI through `export_burnpack` for `distill`, `lejepa`, and `video_lejepa`
 - sudoku checkpoint export is supported in CLI through `export_burnpack`
 - graph checkpoint export is supported in CLI through `export_burnpack`
+- multimodal VL-JEPA checkpoint export is supported in CLI through `export_burnpack`
 - exporters currently expect checkpoints recorded by the current Burn runtime/layout used by this repository
-- the main remaining gaps are broader vision/video wrappers and true deployment quantization beyond
-  float downcast
+- multimodal VL-JEPA runtime/config/export support now covers image-text and video-text composition on top of the shared stream crate
+- the main remaining gaps are broader vision/video wrappers beyond encoder-style export and true deployment quantization beyond float downcast
 
 Example language deployment export:
 
@@ -151,6 +161,42 @@ cargo run -p burn_dragon_cli --features train,web --bin export_burnpack -- \
 
 The `vision-encoder` family exports the student `VisionDragon` encoder from the supported vision
 training wrappers, including `distill`, `lejepa`, and `video_lejepa`.
+
+Example multimodal VL-JEPA deployment export:
+
+```bash
+cargo run -p burn_dragon_cli --features train,web --bin export_burnpack -- \
+  --family multimodal-vl-jepa \
+  --checkpoint runs/multimodal/<run>/checkpoint \
+  --epoch 1 \
+  -c config/multimodal/<config>.toml \
+  --parts-mib 64
+```
+
+Example multimodal VL-JEPA training config chains:
+
+```bash
+# reproducible low-budget image-text smoke
+cargo run -p burn_dragon_cli --features train --bin train -- \
+  multimodal \
+  -c config/multimodal/mnist_label_text_smoke.toml \
+  --backend wgpu
+
+# reproducible low-budget video-text smoke
+cargo run -p burn_dragon_cli --features train --bin train -- \
+  multimodal \
+  -c config/multimodal/mnist_video_label_text_smoke.toml \
+  --backend wgpu
+```
+
+Tracked real runs on the current codepath:
+
+- image-text MNIST-label-text smoke: `runs/multimodal/wgpu/fat-operation`
+- video-text centered-MNIST-label-text smoke: `runs/multimodal/wgpu/verdant-wealth`
+
+The cheap centered-MNIST video smoke is the current recommended reproducible multimodal video
+benchmark. The Moving-MNIST label-text path remains available as a harder temporal benchmark, but
+it is not the recommended low-budget validation target today.
 
 Example sudoku deployment export:
 

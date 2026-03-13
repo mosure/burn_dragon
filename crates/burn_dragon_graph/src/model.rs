@@ -8,8 +8,9 @@ use burn::nn::{LayerNorm, LayerNormConfig, Linear};
 use burn::prelude::*;
 use burn::tensor::activation;
 use burn_dragon_core::{
-    StructuredStepMode, near_critical_embedding_initializer, structured_dense_update_tokens,
-    target_major_identity_read, target_major_identity_write, target_major_outer_product,
+    DragonNorm, DragonNormConfig, StructuredStepMode, near_critical_embedding_initializer,
+    structured_dense_update_tokens, target_major_identity_read, target_major_identity_write,
+    target_major_outer_product,
 };
 use burn_dragon_wgpu::api::graph::fused_sparse_graph_rho_attention_wgpu;
 use serde::{Deserialize, Serialize};
@@ -89,10 +90,10 @@ pub struct GraphDragon<B: Backend> {
     cluster_value: Linear<B>,
     node_y_gate: Linear<B>,
     node_delta: Linear<B>,
-    node_value_norm: LayerNorm<B>,
+    node_value_norm: DragonNorm<B>,
     cluster_y_gate: Linear<B>,
     cluster_delta: Linear<B>,
-    cluster_value_norm: LayerNorm<B>,
+    cluster_value_norm: DragonNorm<B>,
     cluster_pool_out: Linear<B>,
     node_norm: LayerNorm<B>,
     cluster_norm: LayerNorm<B>,
@@ -123,10 +124,18 @@ impl<B: Backend> GraphDragon<B> {
             cluster_value: linear(config.embed_dim.max(1), config.value_dim.max(1), device),
             node_y_gate: linear(config.value_dim.max(1), config.rank.max(1), device),
             node_delta: linear(config.rank.max(1), config.embed_dim.max(1), device),
-            node_value_norm: LayerNormConfig::new(config.value_dim.max(1)).init(device),
+            node_value_norm: DragonNorm::new(
+                &DragonNormConfig::default(),
+                config.value_dim.max(1),
+                device,
+            ),
             cluster_y_gate: linear(config.value_dim.max(1), config.rank.max(1), device),
             cluster_delta: linear(config.rank.max(1), config.embed_dim.max(1), device),
-            cluster_value_norm: LayerNormConfig::new(config.value_dim.max(1)).init(device),
+            cluster_value_norm: DragonNorm::new(
+                &DragonNormConfig::default(),
+                config.value_dim.max(1),
+                device,
+            ),
             cluster_pool_out: linear(config.embed_dim.max(1), config.embed_dim.max(1), device),
             node_norm: LayerNormConfig::new(config.embed_dim.max(1)).init(device),
             cluster_norm: LayerNormConfig::new(config.embed_dim.max(1)).init(device),

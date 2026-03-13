@@ -39,7 +39,8 @@ pub(crate) use train::train_vision_backend;
 #[cfg(feature = "integration_test")]
 pub(crate) use train::train_vision_backend_for_test;
 pub use video::dataset::{
-    MovingMnistSplit, MovingMnistVideoDataLoader, MovingMnistVideoDataset,
-    MovingMnistVideoDatasetConfig, VideoClipBatch, VideoTargetHorizonCurriculum,
+    MovingMnistRenderedClip, MovingMnistSplit, MovingMnistVideoDataLoader,
+    MovingMnistVideoDataset, MovingMnistVideoDatasetConfig, VideoClipBatch,
+    VideoTargetHorizonCurriculum,
 };
 pub(crate) use video::models::{VisionVideoLejepaLosses, VisionVideoLejepaModel};

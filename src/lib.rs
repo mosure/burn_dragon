@@ -16,6 +16,8 @@ pub mod api {
     pub use burn_dragon_core::api as core;
     pub use burn_dragon_graph::api as graph;
     pub use burn_dragon_language::api as language;
+    pub use burn_dragon_multimodal::api as multimodal;
+    pub use burn_dragon_stream::api as stream;
     pub use burn_dragon_sudoku::api as sudoku;
     #[cfg(feature = "train")]
     pub use burn_dragon_train::api as train;
@@ -29,6 +31,8 @@ pub mod api {
         pub use burn_dragon_core::api::expert as core;
         pub use burn_dragon_graph::api::expert as graph;
         pub use burn_dragon_language;
+        pub use burn_dragon_multimodal;
+        pub use burn_dragon_stream;
         pub use burn_dragon_sudoku;
         pub use burn_dragon_vision;
         pub use burn_dragon_wgpu::api::expert as wgpu;
@@ -41,6 +45,8 @@ pub use burn_dragon_graph as graph;
 #[cfg(feature = "viz")]
 pub use bevy_dragon as viz;
 pub use burn_dragon_language as language;
+pub use burn_dragon_multimodal as multimodal;
+pub use burn_dragon_stream as stream;
 pub use burn_dragon_sudoku as sudoku;
 #[cfg(feature = "train")]
 pub use burn_dragon_train as train;

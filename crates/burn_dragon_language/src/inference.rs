@@ -26,6 +26,9 @@ pub fn build_model_config(overrides: &ModelOverrides, training_block_size: usize
     if let Some(dropout) = overrides.dropout {
         model_config.dropout = dropout;
     }
+    if let Some(normalization) = &overrides.normalization {
+        model_config.normalization = normalization.clone();
+    }
     if let Some(enabled) = overrides.fused_kernels {
         model_config.fused_kernels.enabled = enabled;
     }

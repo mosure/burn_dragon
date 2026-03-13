@@ -1487,3 +1487,59 @@ fn rho_stream_rejects_rollout_fused_without_forward_kernel() {
         "vision.rho_stream.wgpu_rollout_fused requires vision.rho_stream.wgpu_forward_kernel = true"
     ));
 }
+
+#[test]
+fn normalization_kind_parses_for_vision_model() {
+    let text = r#"
+            [dataset]
+            imagenet_root = "data/imagenet1k"
+            train_dir = "train"
+            val_dir = "val"
+
+            [training]
+            batch_size = 8
+            max_iters = 10
+            log_frequency = 2
+
+            [optimizer]
+            learning_rate = 0.001
+            weight_decay = 0.1
+
+            [vision]
+            image_size = 224
+            patch_size = 14
+            in_channels = 3
+            embed_dim = 256
+            steps = 4
+            n_head = 4
+            mlp_internal_dim_multiplier = 4
+            dropout = 0.1
+            projection_dim = 384
+            projection_hidden_dim = 512
+            use_cls_token = true
+            pos_encoding = "learned2d"
+            attention_mode = "row_l1"
+            fused_kernels = false
+
+            [vision.normalization]
+            kind = "derf"
+
+            [mode]
+            type = "lejepa"
+            views = 2
+            global_views = 2
+            local_views = 0
+            local_image_size = 224
+            local_min_scale = 0.2
+            local_max_scale = 0.2
+            min_view_overlap = 0.0
+            view_overlap_attempts = 1
+        "#;
+
+    let config: VisionTrainingConfig = toml::from_str(text).expect("parse config");
+    config.validate().expect("vision normalization config should validate");
+    assert_eq!(
+        config.vision.normalization.kind,
+        burn_dragon_core::DragonNormKind::Derf
+    );
+}

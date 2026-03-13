@@ -1,0 +1,30 @@
+[package]
+name = "burn_dragon_stream"
+description = "Payload-agnostic stream, reset, and TBPTT utilities for burn_dragon"
+version = "0.4.0"
+edition = "2024"
+authors = ["mosure <mitchell@mosure.me>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/mosure/burn_bdh"
+repository = "https://github.com/mosure/burn_bdh"
+readme = "../../README.md"
+
+[features]
+default = []
+benchmark = []
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+
+[dev-dependencies]
+criterion = { version = "0.7", features = ["html_reports"] }
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[[bench]]
+name = "stream_cursor"
+harness = false
+path = "benches/stream_cursor.rs"
+required-features = ["benchmark"]

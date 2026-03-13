@@ -43,3 +43,8 @@ required-features = ["benchmark"]
 name = "core_mhc_fb_bench"
 path = "src/bin/core_mhc_fb_bench.rs"
 required-features = ["benchmark"]
+
+[[bin]]
+name = "multimodal_vl_jepa_bench"
+path = "src/bin/multimodal_vl_jepa_bench.rs"
+required-features = ["benchmark"]

@@ -60,6 +60,7 @@ pub(crate) use tracing::info;
 pub(crate) use burn_cuda::Cuda;
 
 pub(crate) use burn::record::{BinFileRecorder, FullPrecisionSettings};
+pub(crate) use burn_dragon_core::{DragonNorm, DragonNormConfig};
 
 #[cfg(feature = "cli")]
 pub(crate) use crate::config::load_vision_training_config;

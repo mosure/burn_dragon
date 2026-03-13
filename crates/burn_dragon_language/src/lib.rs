@@ -59,6 +59,7 @@ pub mod api {
         pub use crate::checkpoint::{
             LanguageBurnpackExportReport, LanguageRunConfigSnapshot,
             default_checkpoint_dir, export_language_checkpoint_to_burnpack,
+            load_language_core_from_checkpoint, load_tokenizer_for_checkpoint,
             load_training_config_for_checkpoint, write_training_snapshot,
         };
     }
@@ -80,8 +81,8 @@ pub use config::{
 #[cfg(feature = "train")]
 pub use checkpoint::{
     LanguageBurnpackExportReport, LanguageRunConfigSnapshot, default_checkpoint_dir,
-    export_language_checkpoint_to_burnpack, load_training_config_for_checkpoint,
-    write_training_snapshot,
+    export_language_checkpoint_to_burnpack, load_language_core_from_checkpoint,
+    load_tokenizer_for_checkpoint, load_training_config_for_checkpoint, write_training_snapshot,
 };
 pub use generation::{
     ContextStrategy, GenerationProfileSnapshot, GenerationSettings, generate_text, generate_tokens,

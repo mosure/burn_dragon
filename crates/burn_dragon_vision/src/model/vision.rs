@@ -1,10 +1,10 @@
 use burn::module::{Module, Param};
-use burn::nn::{Dropout, DropoutConfig, LayerNorm, LayerNormConfig, Linear, LinearConfig};
+use burn::nn::{Dropout, DropoutConfig, Linear, LinearConfig};
 use burn::tensor::backend::Backend;
 use burn::tensor::{Distribution as TensorDistribution, Int, Tensor, TensorData, activation};
 
 use burn_dragon_core::{
-    BankedRhoState, FusedKernelConfig, ManifoldHyperConnections, StructuredBankRole,
+    BankedRhoState, DragonNorm, FusedKernelConfig, ManifoldHyperConnections, StructuredBankRole,
     StructuredRouteOperation, StructuredRoutePattern, StructuredRouteSpec, StructuredRoutingSpec,
     StructuredStepMode, StructuredTopologyState, lowrank_residual_step, mhc_merge_with_coefficients,
     mhc_split_with_coefficients, near_critical_residual_output_std, structured_dense_update_tokens,
@@ -100,13 +100,13 @@ pub struct VisionDragon<B: Backend> {
     pyramid_write_value_proj: Option<Linear<B>>,
     pyramid_y_gate_proj: Option<Linear<B>>,
     pyramid_delta_proj: Option<Linear<B>>,
-    pyramid_value_norm: Option<LayerNorm<B>>,
+    pyramid_value_norm: Option<DragonNorm<B>>,
     pyramid_hub_gate: Option<Linear<B>>,
     grid_height: usize,
     grid_width: usize,
     patch_embed: PatchEmbed<B>,
     dropout: Dropout,
-    token_norm: Option<LayerNorm<B>>,
+    token_norm: Option<DragonNorm<B>>,
     mhc_layers: Option<Vec<ManifoldHyperConnections<B>>>,
     eye_token: Option<Param<Tensor<B, 2>>>,
     encoder: Param<Tensor<B, 3>>,
@@ -125,7 +125,7 @@ impl<B: Backend> VisionDragon<B> {
         let patch_embed = PatchEmbed::new(&config, device);
         let dropout = DropoutConfig::new(config.dropout).init();
         let token_norm = if config.token_state_norm {
-            Some(LayerNormConfig::new(config.embed_dim).init(device))
+            Some(DragonNorm::new(&config.normalization, config.embed_dim, device))
         } else {
             None
         };
@@ -181,6 +181,7 @@ impl<B: Backend> VisionDragon<B> {
             config.projection_hidden_dim.max(1),
             config.projection_dim.max(1),
             config.dropout,
+            &config.normalization,
             device,
         );
 
@@ -236,7 +237,8 @@ impl<B: Backend> VisionDragon<B> {
                 LinearConfig::new(trm_graph.value_dim.max(1), trm_graph.rank.max(1)).init(device);
             let pyramid_delta_proj =
                 LinearConfig::new(trm_graph.rank.max(1), config.embed_dim).init(device);
-            let pyramid_value_norm = LayerNormConfig::new(trm_graph.value_dim.max(1)).init(device);
+            let pyramid_value_norm =
+                DragonNorm::new(&config.normalization, trm_graph.value_dim.max(1), device);
             let pyramid_hub_gate = if trm_graph.hub_count > 1 && trm_graph.hub_gates {
                 Some(LinearConfig::new(config.embed_dim, trm_graph.hub_count).init(device))
             } else {
@@ -465,6 +467,10 @@ impl<B: Backend> VisionDragon<B> {
         self.forward_tokens(patch.tokens)
     }
 
+    pub fn embed_images(&self, images: Tensor<B, 4>) -> PatchEmbedOutput<B> {
+        self.patch_embed.forward(images)
+    }
+
     pub fn forward_images_steps(
         &self,
         images: Tensor<B, 4>,
@@ -494,6 +500,16 @@ impl<B: Backend> VisionDragon<B> {
     ) -> VisionDragonOutput<B> {
         let patch = self.patch_embed.forward(images);
         self.forward_tokens_steps_rollout_unbounded(patch.tokens, steps, backprop_steps)
+    }
+
+    pub fn forward_images_embed_steps_rollout_unbounded(
+        &self,
+        images: Tensor<B, 4>,
+        steps: usize,
+        backprop_steps: usize,
+    ) -> VisionDragonOutput<B> {
+        let patch = self.patch_embed.forward(images);
+        self.forward_tokens_embed_steps_rollout_unbounded(patch.tokens, steps, backprop_steps)
     }
 
     pub fn forward_patches(

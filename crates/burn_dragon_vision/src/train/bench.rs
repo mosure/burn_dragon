@@ -525,6 +525,7 @@ impl<B: AutodiffBackend> VisionMaeTrainStepBench<B> {
         let in_channels = vision.in_channels;
         let recon_patch_dim = patch_size * patch_size * in_channels;
         let normalize_std = VisionAugmentationConfig::default().normalize_std;
+        let normalization = vision.normalization.clone();
         let model = VisionDragon::<B>::new(vision, device);
         let mae = VisionMaeModel::new(
             model,
@@ -539,6 +540,7 @@ impl<B: AutodiffBackend> VisionMaeTrainStepBench<B> {
                     patch_size,
                     in_channels,
                 },
+                normalization,
             },
             device,
         );
@@ -588,6 +590,7 @@ impl<B: AutodiffBackend> VisionLejepaTrainStepBench<B> {
         let in_channels = vision.in_channels;
         let recon_patch_dim = patch_size * patch_size * in_channels;
         let normalize_std = VisionAugmentationConfig::default().normalize_std;
+        let normalization = vision.normalization.clone();
         let model = VisionDragon::<B>::new(vision, device);
         let lejepa = VisionLejepaModel::new(
             model,
@@ -602,6 +605,7 @@ impl<B: AutodiffBackend> VisionLejepaTrainStepBench<B> {
                     patch_size,
                     in_channels,
                 },
+                normalization,
             },
             device,
         );

@@ -107,6 +107,7 @@ pub fn export_vision_encoder_checkpoint_to_burnpack(
                         patch_size: vision_config.patch_size,
                         in_channels: vision_config.in_channels,
                     },
+                    normalization: vision_config.normalization.clone(),
                 },
                 &device,
             );
@@ -153,6 +154,88 @@ pub fn export_vision_encoder_checkpoint_to_burnpack(
         run_dir: resolve_checkpoint_run_dir(checkpoint),
         bundle,
     })
+}
+
+pub fn load_vision_encoder_from_checkpoint<B: BackendTrait>(
+    checkpoint: &Path,
+    epoch: Option<usize>,
+    config_paths: &[PathBuf],
+    device: &B::Device,
+) -> Result<VisionDragon<B>> {
+    let (checkpoint_base, _epoch) = resolve_checkpoint_base(checkpoint, epoch)?;
+    let config = load_training_config_for_checkpoint(config_paths, checkpoint)?;
+    let vision_config = config.vision.build();
+    let rollout = resolve_vision_rollout(&config.training, vision_config.steps)?;
+
+    match &config.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            let model = VisionDragon::<B>::new(vision_config, device);
+            let mut distill_model = VisionDistillModel::new(model, distill.clone(), None, rollout);
+            let record = BinFileRecorder::<FullPrecisionSettings>::new()
+                .load::<<VisionDistillModel<B> as Module<B>>::Record>(
+                    checkpoint_base.clone(),
+                    device,
+                )
+                .map_err(|err| anyhow!(format_checkpoint_load_error(&checkpoint_base, err)))?;
+            distill_model = distill_model.load_record(record);
+            Ok(distill_model.model)
+        }
+        VisionTrainingModeConfig::Lejepa(lejepa) => {
+            let model = VisionDragon::<B>::new(vision_config.clone(), device);
+            let recon_patch_dim = vision_config
+                .patch_size
+                .saturating_mul(vision_config.patch_size)
+                .saturating_mul(vision_config.in_channels);
+            let num_classes = infer_image_dataset_num_classes(&config)?;
+            let mut lejepa_model = VisionLejepaModel::new(
+                model,
+                lejepa.clone(),
+                VisionLejepaInit {
+                    embed_dim: vision_config.embed_dim,
+                    num_classes,
+                    rollout,
+                    recon: VisionReconstructionInit {
+                        patch_dim: recon_patch_dim,
+                        normalize_std: config.augment.normalize_std,
+                        patch_size: vision_config.patch_size,
+                        in_channels: vision_config.in_channels,
+                    },
+                    normalization: vision_config.normalization.clone(),
+                },
+                device,
+            );
+            let record = BinFileRecorder::<FullPrecisionSettings>::new()
+                .load::<<VisionLejepaModel<B> as Module<B>>::Record>(
+                    checkpoint_base.clone(),
+                    device,
+                )
+                .map_err(|err| anyhow!(format_checkpoint_load_error(&checkpoint_base, err)))?;
+            lejepa_model = lejepa_model.load_record(record);
+            Ok(lejepa_model.model)
+        }
+        VisionTrainingModeConfig::VideoLejepa(video) => {
+            let model = VisionDragon::<B>::new(vision_config.clone(), device);
+            let mut video_model = VisionVideoLejepaModel::new(
+                model,
+                video.clone(),
+                &vision_config,
+                rollout,
+                infer_video_dataset_num_classes(&config)?,
+                device,
+            );
+            let record = BinFileRecorder::<FullPrecisionSettings>::new()
+                .load::<<VisionVideoLejepaModel<B> as Module<B>>::Record>(
+                    checkpoint_base.clone(),
+                    device,
+                )
+                .map_err(|err| anyhow!(format_checkpoint_load_error(&checkpoint_base, err)))?;
+            video_model = video_model.load_record(record);
+            Ok(video_model.frame_model)
+        }
+        _ => Err(anyhow!(
+            "vision encoder load currently supports only mode.type = \"distill\", \"lejepa\", or \"video_lejepa\""
+        )),
+    }
 }
 
 pub fn training_snapshot_path(run_dir: &Path) -> PathBuf {
@@ -330,6 +413,7 @@ mod tests {
                 num_classes: 1,
                 rollout,
                 recon,
+                normalization: vision_config.normalization.clone(),
             },
             &device,
         );

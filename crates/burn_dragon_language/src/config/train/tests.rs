@@ -422,6 +422,35 @@ fn y_neuron_recurrence_override_parses_and_validates_for_language_bdh() {
 }
 
 #[test]
+fn normalization_override_parses_and_validates_for_language_bdh() {
+    let text = r#"
+        [dataset]
+        cache_dir = "data"
+        type = "shakespeare"
+
+        [training]
+        block_size = 32
+        batch_size = 2
+        max_iters = 4
+        log_frequency = 1
+
+        [optimizer]
+        learning_rate = 0.001
+        weight_decay = 0.0
+
+        [generation]
+        prompt = "abc"
+
+        [model.normalization]
+        kind = "rms_norm"
+    "#;
+    let config: TrainingConfig = toml::from_str(text).expect("parse training config");
+    config.validate().expect("language normalization config should validate");
+    let normalization = config.model.normalization.expect("normalization override");
+    assert_eq!(normalization.kind, burn_dragon_core::DragonNormKind::RmsNorm);
+}
+
+#[test]
 fn y_sparse_recurrence_alias_parses_into_y_neuron_recurrence() {
     let text = r#"
         [dataset]

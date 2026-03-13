@@ -5,7 +5,7 @@ use burn::module::{
 use burn::tensor::backend::{AutodiffBackend, Backend};
 use serde::{Deserialize, Serialize};
 
-use burn_dragon_core::{FusedKernelConfig, ManifoldHyperConnectionsConfig};
+use burn_dragon_core::{DragonNormConfig, FusedKernelConfig, ManifoldHyperConnectionsConfig};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -567,7 +567,7 @@ impl<B: AutodiffBackend> AutodiffModule<B> for VisionRhoStreamConfig {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct VisionDragonConfig {
     pub image_size: usize,
     pub patch_size: usize,
@@ -586,6 +586,7 @@ pub struct VisionDragonConfig {
     pub num_eyes: usize,
     pub cross_eye_steps: usize,
     pub token_state_norm: bool,
+    pub normalization: DragonNormConfig,
     pub latent_activation: VisionLatentActivation,
     pub pos_encoding: SpatialPositionalEncodingKind,
     pub pos_max_height: usize,
@@ -621,6 +622,7 @@ impl Default for VisionDragonConfig {
             num_eyes: 1,
             cross_eye_steps: 0,
             token_state_norm: true,
+            normalization: DragonNormConfig::default(),
             latent_activation: VisionLatentActivation::default(),
             pos_encoding: SpatialPositionalEncodingKind::Learned2d,
             pos_max_height: grid,

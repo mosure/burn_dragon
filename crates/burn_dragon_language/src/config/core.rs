@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-use burn_dragon_core::{ManifoldHyperConnectionsConfig, RotaryEmbedding, YNeuronRecurrenceConfig};
+use burn_dragon_core::{
+    DragonNormConfig, ManifoldHyperConnectionsConfig, RotaryEmbedding, YNeuronRecurrenceConfig,
+};
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct GenerationConfig {
@@ -33,6 +35,7 @@ pub struct ModelOverrides {
     pub mlp_internal_dim_multiplier: Option<usize>,
     pub relu_threshold: Option<f32>,
     pub dropout: Option<f64>,
+    pub normalization: Option<DragonNormConfig>,
     pub fused_kernels: Option<bool>,
     pub block_size: Option<usize>,
     #[serde(alias = "rollout_fast_steps")]

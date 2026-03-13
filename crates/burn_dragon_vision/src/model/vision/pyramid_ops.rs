@@ -439,7 +439,7 @@ impl<B: Backend> VisionDragon<B> {
         msg: Tensor<B, 4>,
         pyramid_y_gate_proj: &Linear<B>,
         pyramid_delta_proj: &Linear<B>,
-        pyramid_value_norm: &LayerNorm<B>,
+        pyramid_value_norm: &DragonNorm<B>,
     ) -> Tensor<B, 4> {
         let [batch, dense_dim, height, width] = state.shape().dims::<4>();
         let [x_batch, rank, x_height, x_width] = x.shape().dims::<4>();
@@ -485,7 +485,7 @@ impl<B: Backend> VisionDragon<B> {
         coarse_msg: Tensor<B, 4>,
         pyramid_y_gate_proj: &Linear<B>,
         pyramid_delta_proj: &Linear<B>,
-        pyramid_value_norm: &LayerNorm<B>,
+        pyramid_value_norm: &DragonNorm<B>,
     ) -> (Tensor<B, 4>, Tensor<B, 4>) {
         let [batch, dense_dim, patch_height, patch_width] = patch_state.shape().dims::<4>();
         let [coarse_batch, coarse_dense_dim, coarse_height, coarse_width] =

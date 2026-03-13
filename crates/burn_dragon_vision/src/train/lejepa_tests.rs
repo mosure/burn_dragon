@@ -175,6 +175,7 @@ fn run_lejepa_recon_psnr_improves_on_toy_batch(rho_stream_enabled: bool, steps: 
         num_eyes: 1,
         cross_eye_steps: 0,
         token_state_norm: true,
+        normalization: burn_dragon_core::DragonNormConfig::default(),
         latent_activation: VisionLatentActivation::default(),
         pos_encoding: SpatialPositionalEncodingKind::Learned2d,
         pos_max_height: grid,
@@ -228,6 +229,7 @@ fn run_lejepa_recon_psnr_improves_on_toy_batch(rho_stream_enabled: bool, steps: 
                 patch_size: vision_config.patch_size,
                 in_channels: vision_config.in_channels,
             },
+            normalization: vision_config.normalization.clone(),
         },
         &device,
     );
@@ -312,6 +314,7 @@ fn lejepa_teacher_ema_lags_student_after_one_step() {
         num_eyes: 1,
         cross_eye_steps: 0,
         token_state_norm: true,
+        normalization: burn_dragon_core::DragonNormConfig::default(),
         latent_activation: VisionLatentActivation::default(),
         pos_encoding: SpatialPositionalEncodingKind::Learned2d,
         pos_max_height: grid,
@@ -358,6 +361,7 @@ fn lejepa_teacher_ema_lags_student_after_one_step() {
                 patch_size: vision_config.patch_size,
                 in_channels: vision_config.in_channels,
             },
+            normalization: vision_config.normalization.clone(),
         },
         &device,
     );
@@ -426,6 +430,7 @@ fn lejepa_load_record_rebuilds_teacher_from_student() {
         num_eyes: 1,
         cross_eye_steps: 0,
         token_state_norm: true,
+        normalization: burn_dragon_core::DragonNormConfig::default(),
         latent_activation: VisionLatentActivation::default(),
         pos_encoding: SpatialPositionalEncodingKind::Learned2d,
         pos_max_height: grid,
@@ -468,6 +473,7 @@ fn lejepa_load_record_rebuilds_teacher_from_student() {
                     patch_size: vision_config.patch_size,
                     in_channels: vision_config.in_channels,
                 },
+                normalization: vision_config.normalization.clone(),
             },
             &device,
         )

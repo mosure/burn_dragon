@@ -79,7 +79,11 @@ fn video_lejepa_trm_backbone_does_not_construct_temporal_tower_or_future_queries
 
     let mut perturbed = model.clone();
     perturbed.temporal_model = Some(BDH::<Backend>::new(
-        build_temporal_config(perturbed.embed_dim, &perturbed.config.temporal),
+        build_temporal_config(
+            perturbed.embed_dim,
+            &perturbed.config.temporal,
+            &vision.normalization,
+        ),
         &device,
     ));
     perturbed.future_queries = Some(Param::from_tensor(Tensor::<Backend, 2>::random(

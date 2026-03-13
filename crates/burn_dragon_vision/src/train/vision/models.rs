@@ -34,20 +34,22 @@ pub(crate) struct VisionReconstructionInit {
     pub(crate) in_channels: usize,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct VisionLejepaInit {
     pub(crate) embed_dim: usize,
     pub(crate) num_classes: usize,
     pub(crate) rollout: VisionRollout,
     pub(crate) recon: VisionReconstructionInit,
+    pub(crate) normalization: DragonNormConfig,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct VisionMaeInit {
     pub(crate) num_eyes: usize,
     pub(crate) embed_dim: usize,
     pub(crate) rollout: VisionRollout,
     pub(crate) recon: VisionReconstructionInit,
+    pub(crate) normalization: DragonNormConfig,
 }
 
 struct ReconCrossViewRequest<B: BackendTrait> {
@@ -164,13 +166,18 @@ fn collect_refinement_artifact_maps<B: BackendTrait>(
 
 #[derive(Module, Debug)]
 pub(crate) struct VisionProbe<B: BackendTrait> {
-    pub(crate) norm: LayerNorm<B>,
+    pub(crate) norm: DragonNorm<B>,
     pub(crate) head: Linear<B>,
 }
 
 impl<B: BackendTrait> VisionProbe<B> {
-    pub(crate) fn new(embed_dim: usize, num_classes: usize, device: &B::Device) -> Self {
-        let norm = LayerNormConfig::new(embed_dim).init(device);
+    pub(crate) fn new(
+        embed_dim: usize,
+        num_classes: usize,
+        norm_config: &DragonNormConfig,
+        device: &B::Device,
+    ) -> Self {
+        let norm = DragonNorm::new(norm_config, embed_dim, device);
         let head = LinearConfig::new(embed_dim, num_classes.max(1)).init(device);
         Self { norm, head }
     }
@@ -183,7 +190,7 @@ impl<B: BackendTrait> VisionProbe<B> {
 
 #[derive(Module, Debug)]
 pub(crate) struct VisionReconstructionHead<B: BackendTrait> {
-    pub(crate) norm: Option<LayerNorm<B>>,
+    pub(crate) norm: Option<DragonNorm<B>>,
     pub(crate) hidden: Option<Linear<B>>,
     pub(crate) hidden2: Option<Linear<B>>,
     pub(crate) out: Linear<B>,
@@ -195,10 +202,11 @@ impl<B: BackendTrait> VisionReconstructionHead<B> {
         hidden_dim: usize,
         patch_dim: usize,
         use_norm: bool,
+        norm_config: &DragonNormConfig,
         device: &B::Device,
     ) -> Self {
         let norm = if use_norm {
-            Some(LayerNormConfig::new(embed_dim).init(device))
+            Some(DragonNorm::new(norm_config, embed_dim, device))
         } else {
             None
         };
@@ -239,13 +247,17 @@ impl<B: BackendTrait> VisionReconstructionHead<B> {
 
 #[derive(Module, Debug)]
 pub(crate) struct VisionSaccadeHead<B: BackendTrait> {
-    pub(crate) norm: LayerNorm<B>,
+    pub(crate) norm: DragonNorm<B>,
     pub(crate) proj: Linear<B>,
 }
 
 impl<B: BackendTrait> VisionSaccadeHead<B> {
-    pub(crate) fn new(embed_dim: usize, device: &B::Device) -> Self {
-        let norm = LayerNormConfig::new(embed_dim).init(device);
+    pub(crate) fn new(
+        embed_dim: usize,
+        norm_config: &DragonNormConfig,
+        device: &B::Device,
+    ) -> Self {
+        let norm = DragonNorm::new(norm_config, embed_dim, device);
         let proj = LinearConfig::new(embed_dim, 3).init(device);
         Self { norm, proj }
     }
@@ -258,13 +270,18 @@ impl<B: BackendTrait> VisionSaccadeHead<B> {
 
 #[derive(Module, Debug)]
 pub(crate) struct VisionSaccadeProjection<B: BackendTrait> {
-    pub(crate) norm: LayerNorm<B>,
+    pub(crate) norm: DragonNorm<B>,
     pub(crate) proj: Linear<B>,
 }
 
 impl<B: BackendTrait> VisionSaccadeProjection<B> {
-    pub(crate) fn new(embed_dim: usize, out_dim: usize, device: &B::Device) -> Self {
-        let norm = LayerNormConfig::new(embed_dim).init(device);
+    pub(crate) fn new(
+        embed_dim: usize,
+        out_dim: usize,
+        norm_config: &DragonNormConfig,
+        device: &B::Device,
+    ) -> Self {
+        let norm = DragonNorm::new(norm_config, embed_dim, device);
         let proj = LinearConfig::new(embed_dim, out_dim).init(device);
         Self { norm, proj }
     }
@@ -328,8 +345,9 @@ impl<B: BackendTrait> VisionLejepaModel<B> {
             num_classes,
             rollout,
             recon: recon_init,
+            normalization,
         } = init;
-        let probe = VisionProbe::new(embed_dim, num_classes, device);
+        let probe = VisionProbe::new(embed_dim, num_classes, &normalization, device);
         let probe_loss = CrossEntropyLossConfig::new().init(device);
         let recon_weight = config.loss.recon.weight;
         let recon = if recon_weight > 0.0 {
@@ -341,6 +359,7 @@ impl<B: BackendTrait> VisionLejepaModel<B> {
                     config.loss.recon.hidden_dim,
                     recon_init.patch_dim,
                     config.loss.recon.recon_head_norm,
+                    &normalization,
                     device,
                 ))
             }
@@ -1077,12 +1096,14 @@ impl<B: BackendTrait> VisionMaeModel<B> {
             embed_dim,
             rollout,
             recon: recon_init,
+            normalization,
         } = init;
         let recon = VisionReconstructionHead::new(
             embed_dim,
             config.loss.recon.hidden_dim,
             recon_init.patch_dim,
             config.loss.recon.recon_head_norm,
+            &normalization,
             device,
         );
         let token = Tensor::<B, 2>::random(

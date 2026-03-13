@@ -122,6 +122,7 @@ impl<B: Backend> Attention<B> {
             let slopes = kernel
                 .alibi_slopes
                 .clone()
+                .filter(|slopes| !slopes.is_empty())
                 .unwrap_or_else(|| linear_attention::default_alibi_slopes(n_head));
             (true, Tensor::<B, 1>::from_floats(slopes.as_slice(), device))
         } else {

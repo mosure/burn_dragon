@@ -1,6 +1,6 @@
 use burn::tensor::{Int, Tensor, TensorData};
 use burn_ndarray::NdArray;
-use burn_dragon::api::{core, graph, language, vision};
+use burn_dragon::api::{core, graph, language, multimodal, stream, vision};
 
 type InferBackend = NdArray<f32>;
 
@@ -114,4 +114,61 @@ fn root_api_graph_surface_runs_with_executor() {
 fn root_api_train_surface_exposes_runtime_config() {
     let _cfg = burn_dragon::api::train::config::WgpuRuntimeConfig::default();
     let _bytes = burn_dragon::api::train::runtime::bytes_to_mb(1024 * 1024);
+}
+
+#[cfg(feature = "train")]
+#[test]
+fn root_api_multimodal_checkpoint_surface_exposes_exporter() {
+    let _export_fn = burn_dragon::api::multimodal::checkpoint::export_multimodal_checkpoint_to_burnpack;
+    let _default_dir = burn_dragon::api::multimodal::checkpoint::default_checkpoint_dir("runs/example");
+}
+
+#[cfg(feature = "train")]
+#[test]
+fn root_api_multimodal_runtime_surface_exposes_training_entrypoints() {
+    let _cfg = burn_dragon::api::multimodal::runtime::MultimodalTrainingConfig::default();
+    let _video_cfg = burn_dragon::api::multimodal::runtime::MultimodalVideoTrainingConfig::default();
+    let _load = burn_dragon::api::multimodal::runtime::load_multimodal_training_runtime_config;
+    let _load_video =
+        burn_dragon::api::multimodal::runtime::load_multimodal_video_training_runtime_config;
+    let _train = burn_dragon::api::multimodal::runtime::train_backend::<
+        burn_autodiff::Autodiff<burn_ndarray::NdArray<f32>>,
+        fn(&<burn_autodiff::Autodiff<burn_ndarray::NdArray<f32>> as burn::tensor::backend::Backend>::Device),
+    >;
+}
+
+#[test]
+fn root_api_stream_and_multimodal_surface_runs() {
+    let device = <InferBackend as burn::tensor::backend::Backend>::Device::default();
+    let window = stream::window::TbpttWindow::new(4, 2);
+    assert_eq!(window.detach_prefix_steps(), 2);
+
+    let mut config = multimodal::config::VlJepaDragonConfig::default();
+    config.vision.embed_dim = 16;
+    config.vision.projection_dim = 16;
+    config.vision.projection_hidden_dim = 16;
+    config.vision.steps = 1;
+    config.query_text.n_embd = 16;
+    config.target_text.n_embd = 16;
+    config.fusion.n_embd = 16;
+    config.query_text.n_head = 2;
+    config.target_text.n_head = 2;
+    config.fusion.n_head = 2;
+    config.fusion_dim = 16;
+    config.target_dim = 16;
+
+    let model = multimodal::model::VlJepaDragon::<InferBackend>::new(config, &device);
+    let batch = multimodal::data::VisionLanguageTripletBatch {
+        vision_x: Tensor::<InferBackend, 4>::zeros([1, 3, 32, 32], &device),
+        query_q_tokens: Tensor::<InferBackend, 2, Int>::zeros([1, 4], &device),
+        query_q_mask: None,
+        target_y_tokens: Tensor::<InferBackend, 2, Int>::zeros([1, 4], &device),
+        target_y_mask: None,
+    };
+    let output = model.forward_x_q_y(
+        batch,
+        model.init_state(),
+        multimodal::data::MultimodalStepMode::Observe,
+    );
+    assert_eq!(output.fusion.predicted_target_embedding.shape().dims::<2>(), [1, 16]);
 }

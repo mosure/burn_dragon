@@ -37,7 +37,9 @@ members = [
   "crates/burn_dragon_core",
   "crates/burn_dragon_cli",
   "crates/burn_dragon_language",
+  "crates/burn_dragon_multimodal",
   "crates/burn_dragon_sudoku",
+  "crates/burn_dragon_stream",
   "crates/burn_dragon_train",
   "crates/burn_dragon_wgpu",
   "crates/burn_dragon_vision",
@@ -65,6 +67,7 @@ cli = [
 train = [
   "burn_dragon_core/train",
   "burn_dragon_language/train",
+  "burn_dragon_multimodal/train",
   "burn_dragon_sudoku/train",
   "burn_dragon_train/train",
   "burn_dragon_vision/train",
@@ -90,7 +93,9 @@ burn_dragon_core = { path = "crates/burn_dragon_core", version = "0.4.0", defaul
 burn_dragon_checkpoint = { path = "crates/burn_dragon_checkpoint", version = "0.4.0", default-features = false }
 burn_dragon_graph = { path = "crates/burn_dragon_graph", version = "0.4.0", default-features = false }
 burn_dragon_language = { path = "crates/burn_dragon_language", version = "0.4.0", default-features = false }
+burn_dragon_multimodal = { path = "crates/burn_dragon_multimodal", version = "0.4.0", default-features = false }
 burn_dragon_sudoku = { path = "crates/burn_dragon_sudoku", version = "0.4.0", default-features = false }
+burn_dragon_stream = { path = "crates/burn_dragon_stream", version = "0.4.0", default-features = false }
 burn_dragon_train = { path = "crates/burn_dragon_train", version = "0.4.0", default-features = false, optional = true }
 burn_dragon_vision = { path = "crates/burn_dragon_vision", version = "0.4.0", default-features = false }
 burn_dragon_wgpu = { path = "crates/burn_dragon_wgpu", version = "0.4.0", default-features = false }

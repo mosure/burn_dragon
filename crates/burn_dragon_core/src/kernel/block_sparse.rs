@@ -1,4 +1,5 @@
 use burn::module::Content;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 use burn::module::{
@@ -8,7 +9,7 @@ use burn::module::{
 use burn::tensor::Tensor;
 use burn::tensor::backend::{AutodiffBackend, Backend};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlockPattern1d {
     block_size: usize,
     active_blocks: Option<HashSet<usize>>,
@@ -63,7 +64,7 @@ impl BlockPattern1d {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlockPattern2d {
     block_size: usize,
     active_pairs: Option<HashSet<(usize, usize)>>,
@@ -117,7 +118,7 @@ impl BlockPattern2d {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlockSparseConfig {
     pub latent: BlockPattern1d,
     pub time: BlockPattern2d,

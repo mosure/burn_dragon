@@ -130,6 +130,7 @@ impl SudokuModelConfig {
             vocab_size: VOCAB_SIZE,
             rollout_fast_steps_per_slow_step: 1,
             fused_kernels: fused,
+            normalization: burn_dragon_core::DragonNormConfig::default(),
             mhc: ManifoldHyperConnectionsConfig::default(),
             y_neuron_recurrence: Default::default(),
         }
@@ -236,7 +237,7 @@ impl<B: Backend> SudokuSaccadeModel<B> {
         ));
         let summary_norm = LayerNormConfig::new(model_config.n_embd).init(device);
         let cache_norm = LayerNormConfig::new(model_config.n_embd).init(device);
-        let halt_head = HaltHead::new(model_config.n_embd, device);
+        let halt_head = HaltHead::new(model_config.n_embd, &model_config.normalization, device);
         let policy_heads = config.policy_heads.max(1);
         let policy_head_dim = model_config.n_embd / policy_heads;
         let grid_positional = config.grid_positional;

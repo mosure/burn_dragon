@@ -115,6 +115,15 @@ pub(crate) struct MovingMnistVideoClip {
 }
 
 #[derive(Clone, Debug)]
+pub struct MovingMnistRenderedClip {
+    pub frames: Vec<f32>,
+    pub label: i64,
+    pub clip_len: usize,
+    pub channels: usize,
+    pub frame_size: usize,
+}
+
+#[derive(Clone, Debug)]
 struct MovingMnistVideoBatchData {
     frames: Vec<f32>,
     labels: Vec<i64>,
@@ -325,6 +334,20 @@ impl MovingMnistVideoDataset {
 
     fn render_clip(&self, index: usize) -> MovingMnistVideoClip {
         self.render_clip_with_extra_future(index, self.config.extra_future_frames)
+    }
+
+    pub fn rendered_clip(&self, index: usize) -> Option<MovingMnistRenderedClip> {
+        if index >= self.len() {
+            return None;
+        }
+        let clip = self.render_clip(index);
+        Some(MovingMnistRenderedClip {
+            frames: clip.frames,
+            label: clip.label,
+            clip_len: self.clip_len_with_extra_future(self.config.extra_future_frames),
+            channels: self.config.in_channels.max(1),
+            frame_size: self.config.frame_size.max(1),
+        })
     }
 
     pub(crate) fn get(&self, index: usize) -> Option<MovingMnistVideoClip> {

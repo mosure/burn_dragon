@@ -7,9 +7,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::kernel::{BlockPattern1d, BlockPattern2d, BlockSparseConfig};
 use crate::model::mhc::ManifoldHyperConnectionsConfig;
+use crate::model::norm::DragonNormConfig;
 use crate::positional::RotaryEmbedding;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct FusedKernelConfig {
     pub enabled: bool,
     pub wgpu_recurrent_kernel: bool,
@@ -248,7 +249,7 @@ impl ModuleDisplayDefault for YNeuronRecurrenceConfig {
 
 impl ModuleDisplay for YNeuronRecurrenceConfig {}
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct BDHConfig {
     pub n_layer: usize,
     pub n_embd: usize,
@@ -261,6 +262,7 @@ pub struct BDHConfig {
     /// Valid values: 1, 2, 4, 8, 16.
     pub rollout_fast_steps_per_slow_step: usize,
     pub fused_kernels: FusedKernelConfig,
+    pub normalization: DragonNormConfig,
     pub mhc: ManifoldHyperConnectionsConfig,
     pub y_neuron_recurrence: YNeuronRecurrenceConfig,
 }
@@ -277,6 +279,7 @@ impl Default for BDHConfig {
             vocab_size: 256,
             rollout_fast_steps_per_slow_step: 1,
             fused_kernels: FusedKernelConfig::default(),
+            normalization: DragonNormConfig::default(),
             mhc: ManifoldHyperConnectionsConfig::default(),
             y_neuron_recurrence: YNeuronRecurrenceConfig::default(),
         }

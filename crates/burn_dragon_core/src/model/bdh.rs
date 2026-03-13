@@ -11,12 +11,12 @@ use rand::prelude::*;
 use std::cmp::Ordering;
 
 use super::attention::Attention;
-use super::config::{BDHConfig, FusedKernelConfig};
-use super::config::YNeuronRecurrenceConfig;
+use super::config::{BDHConfig, FusedKernelConfig, YNeuronRecurrenceConfig};
 use super::init::{
     near_critical_embedding_initializer, near_critical_projection_std,
     near_critical_residual_output_std,
 };
+use super::norm::DragonNorm;
 use super::{
     ManifoldHyperConnections, mhc_merge_with_coefficients, mhc_split_with_coefficients,
 };
@@ -24,8 +24,6 @@ use super::residual_stream::lowrank_residual_step;
 #[cfg(feature = "viz")]
 use super::state::LayerVizState;
 use super::state::{LayerState, ModelState};
-
-const LAYER_NORM_EPS: f32 = 1e-5;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RecurrentPositionMode {
@@ -51,6 +49,7 @@ pub struct BDH<B: Backend> {
     y_neuron_recurrence: YNeuronRecurrenceConfig,
     embed: Embedding<B>,
     dropout: Dropout,
+    norm: DragonNorm<B>,
     attention: Attention<B>,
     mhc_layers: Option<Vec<ManifoldHyperConnections<B>>>,
     encoder: Param<Tensor<B, 3>>,
@@ -65,6 +64,7 @@ impl<B: Backend> BDH<B> {
             .with_initializer(near_critical_embedding_initializer(config.n_embd))
             .init(device);
         let dropout = DropoutConfig::new(config.dropout).init();
+        let norm = DragonNorm::new(&config.normalization, config.n_embd, device);
 
         let latent_per_head = config.latent_per_head();
         let latent_total = config.latent_total();
@@ -126,6 +126,7 @@ impl<B: Backend> BDH<B> {
             y_neuron_recurrence: config.y_neuron_recurrence,
             embed,
             dropout,
+            norm,
             attention,
             mhc_layers,
             encoder,
@@ -133,11 +134,6 @@ impl<B: Backend> BDH<B> {
             decoder,
             lm_head,
         }
-    }
-
-    fn layer_norm<const D: usize>(&self, tensor: Tensor<B, D>) -> Tensor<B, D> {
-        let (var, mean) = tensor.clone().var_mean_bias(D - 1);
-        tensor.sub(mean).div(var.add_scalar(LAYER_NORM_EPS).sqrt())
     }
 
     pub fn forward(&self, tokens: Tensor<B, 2, Int>) -> Tensor<B, 3> {
@@ -632,7 +628,7 @@ impl<B: Backend> BDH<B> {
         );
         let [batch, time, embd] = embedded.shape().dims::<3>();
         let mut current = embedded.reshape([batch, 1, time, embd]);
-        current = self.layer_norm(current);
+        current = self.norm.forward(current);
 
         let encoder_raw = self.encoder.val();
         let [heads, embd_enc, latent] = encoder_raw.shape().dims::<3>();
@@ -707,7 +703,7 @@ impl<B: Backend> BDH<B> {
                     )
                 },
                 |values| activation::relu(values),
-                |values| self.layer_norm(values),
+                |values| self.norm.forward(values),
             );
 
             #[cfg(feature = "viz")]
@@ -784,7 +780,7 @@ impl<B: Backend> BDH<B> {
                 beta,
             );
             current = if mhc.is_some() {
-                self.layer_norm(next)
+                self.norm.forward(next)
             } else {
                 next
             };
@@ -814,7 +810,7 @@ impl<B: Backend> BDH<B> {
             "model state layers mismatch"
         );
         let [batch, time, embd] = embedded.shape().dims::<3>();
-        let mut current = self.layer_norm(embedded.reshape([batch, 1, time, embd]));
+        let mut current = self.norm.forward(embedded.reshape([batch, 1, time, embd]));
 
         let encoder_raw = self.encoder.val();
         let [heads, embd_enc, latent] = encoder_raw.shape().dims::<3>();
@@ -892,7 +888,7 @@ impl<B: Backend> BDH<B> {
                         )
                     },
                     |values| activation::relu(values),
-                    |values| self.layer_norm(values),
+                    |values| self.norm.forward(values),
                 );
 
                 #[cfg(feature = "viz")]
@@ -966,7 +962,7 @@ impl<B: Backend> BDH<B> {
                     beta,
                 );
                 current = if mhc.is_some() {
-                    self.layer_norm(next)
+                    self.norm.forward(next)
                 } else {
                     next
                 };
@@ -1054,7 +1050,7 @@ impl<B: Backend> BDH<B> {
                         tail_plan.as_ref()
                     },
                 );
-                let a_dense = self.layer_norm(a_dense);
+                let a_dense = self.norm.forward(a_dense);
                 let y_gate = self.project_lowrank_positive(
                     a_dense,
                     encoder_v.clone(),
@@ -1066,8 +1062,8 @@ impl<B: Backend> BDH<B> {
                 let mixed = y_neuron.clone().swap_dims(1, 2);
                 let mixed_flat = mixed.reshape([flat_batch * chunk_len, heads * latent]);
                 let mlp_flat = mixed_flat.matmul(decoder.clone());
-                let mlp_out = self.layer_norm(mlp_flat.reshape([flat_batch, 1, chunk_len, branch_dim]));
-                next_tokens.push(self.layer_norm(current_token + mlp_out));
+                let mlp_out = self.norm.forward(mlp_flat.reshape([flat_batch, 1, chunk_len, branch_dim]));
+                next_tokens.push(self.norm.forward(current_token + mlp_out));
                 let y_neuron_last = y_neuron
                     .clone()
                     .slice_dim(2, (chunk_len - 1)..chunk_len);
@@ -1146,7 +1142,7 @@ impl<B: Backend> BDH<B> {
                 beta,
             );
             current = if mhc.is_some() {
-                self.layer_norm(next)
+                self.norm.forward(next)
             } else {
                 next
             };
@@ -1328,7 +1324,7 @@ mod tests {
 
         let embedded = model.embed.forward(tokens);
         let [batch, time, dim] = embedded.shape().dims::<3>();
-        let current = model.layer_norm(embedded.reshape([batch, 1, time, dim]));
+        let current = model.norm.forward(embedded.reshape([batch, 1, time, dim]));
         let mhc = model
             .mhc_layers
             .as_ref()
@@ -1373,13 +1369,13 @@ mod tests {
                 )
             },
             activation::relu,
-            |values| model.layer_norm(values),
+            |values| model.norm.forward(values),
         );
         let branch_out = output
             .next
             .reshape([branch_batch, branch_views, branch_time, branch_dim]);
         let manual = model
-            .layer_norm(mhc_merge_with_coefficients(
+            .norm.forward(mhc_merge_with_coefficients(
                 Some(mhc),
                 branch_out,
                 residuals_base,

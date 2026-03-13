@@ -18,7 +18,7 @@ use burn_ndarray::NdArray;
 use serde::{Deserialize, Serialize};
 
 use crate::config::load_training_config;
-use crate::tokenizer::Tokenizer;
+use crate::tokenizer::{SharedTokenizer, Tokenizer};
 use crate::{BDH, ModelOverrides, TrainingConfig, build_model_config};
 
 const RUN_CONFIG_FILE_NAME: &str = "config.json";
@@ -174,6 +174,52 @@ pub fn export_language_checkpoint_to_burnpack(
     })
 }
 
+pub fn load_tokenizer_for_checkpoint(
+    config_paths: &[PathBuf],
+    checkpoint: Option<&PathBuf>,
+    backend_name: &str,
+) -> Result<SharedTokenizer> {
+    let config = load_training_config_for_checkpoint(config_paths, checkpoint, backend_name)?;
+    let tokenizer_path = config
+        .dataset
+        .tokenizer
+        .storage_path(&config.dataset.cache_dir);
+    match tokenizer_path {
+        Some(path) => config
+            .dataset
+            .tokenizer
+            .load(&path)
+            .with_context(|| format!("failed to load tokenizer {}", path.display())),
+        None => config
+            .dataset
+            .tokenizer
+            .fit(std::iter::empty::<&str>())
+            .context("failed to initialize tokenizer"),
+    }
+}
+
+pub fn load_language_core_from_checkpoint<B: BackendTrait>(
+    checkpoint: &Path,
+    epoch: Option<usize>,
+    config_paths: &[PathBuf],
+    backend_name: &str,
+    device: &B::Device,
+) -> Result<BDH<B>> {
+    let (checkpoint_base, _epoch) = resolve_checkpoint_base(checkpoint, epoch)?;
+    let checkpoint_path = checkpoint.to_path_buf();
+    let config =
+        load_training_config_for_checkpoint(config_paths, Some(&checkpoint_path), backend_name)?;
+    let tokenizer = load_tokenizer_for_checkpoint(config_paths, Some(&checkpoint_path), backend_name)?;
+    let mut model_config = build_model_config(&config.model, config.training.block_size);
+    model_config.vocab_size = tokenizer.len();
+    let mut model = BDH::<B>::new(model_config, device);
+    let record = BinFileRecorder::<FullPrecisionSettings>::new()
+        .load::<<BDH<B> as Module<B>>::Record>(checkpoint_base.clone(), device)
+        .map_err(|err| anyhow!(format_checkpoint_load_error(&checkpoint_base, err)))?;
+    model = model.load_record(record);
+    Ok(model)
+}
+
 pub fn apply_run_config(config: &mut TrainingConfig, run_config: &LanguageRunConfigSnapshot) {
     let block_override = run_config
         .block_size
@@ -203,6 +249,9 @@ pub fn merge_model_overrides(base: &mut ModelOverrides, incoming: &ModelOverride
     }
     if let Some(value) = incoming.dropout {
         base.dropout = Some(value);
+    }
+    if let Some(value) = &incoming.normalization {
+        base.normalization = Some(value.clone());
     }
     if let Some(value) = incoming.fused_kernels {
         base.fused_kernels = Some(value);

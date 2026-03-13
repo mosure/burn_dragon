@@ -22,7 +22,7 @@ pub mod api {
 
     pub mod config {
         pub use crate::{
-            BDHConfig, FusedKernelConfig, ManifoldHyperConnectionCoefficientPolicy,
+            BDHConfig, DragonNormConfig, DragonNormKind, FusedKernelConfig, ManifoldHyperConnectionCoefficientPolicy,
             ManifoldHyperConnectionsConfig, YNeuronRecurrenceConfig,
         };
     }
@@ -36,7 +36,7 @@ pub mod api {
 
     pub mod recurrent {
         pub use crate::{
-            BDH, HaltHead, LowRankResidualOutput, StructuredDenseUpdateOutput,
+            BDH, DragonNorm, HaltHead, LowRankResidualOutput, StructuredDenseUpdateOutput,
             lowrank_residual_step, structured_dense_update_tokens,
         };
     }
@@ -66,7 +66,8 @@ pub use kernel::{BlockPattern1d, BlockPattern2d, BlockSparseConfig};
 #[cfg(feature = "viz")]
 pub use model::LayerVizState;
 pub use model::{
-    BDH, BDHConfig, BankedRhoState, FusedKernelConfig, HaltHead, LowRankResidualOutput,
+    BDH, BDHConfig, BankedRhoState, DragonNorm, DragonNormConfig, DragonNormKind,
+    FusedKernelConfig, HaltHead, LowRankResidualOutput,
     ManifoldHyperConnectionCoefficientPolicy, ManifoldHyperConnectionCoefficients,
     ManifoldHyperConnectionWidthOutput, ManifoldHyperConnections,
     ManifoldHyperConnectionsConfig, ModelState, StructuredBankRole, StructuredDenseUpdateOutput,

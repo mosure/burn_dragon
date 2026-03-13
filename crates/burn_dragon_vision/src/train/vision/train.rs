@@ -679,6 +679,7 @@ where
                     num_classes: train_dataset.num_classes(),
                     rollout,
                     recon,
+                    normalization: vision_config.normalization.clone(),
                 },
                 &device,
             ));
@@ -770,6 +771,7 @@ where
                     embed_dim: vision_config.embed_dim,
                     rollout,
                     recon,
+                    normalization: vision_config.normalization.clone(),
                 },
                 &device,
             ));

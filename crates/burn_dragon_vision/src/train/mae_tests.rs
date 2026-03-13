@@ -41,6 +41,7 @@ fn mae_pyramid_recon_loss_is_finite() {
         num_eyes: 1,
         cross_eye_steps: 0,
         token_state_norm: true,
+        normalization: burn_dragon_core::DragonNormConfig::default(),
         latent_activation: VisionLatentActivation::default(),
         pos_encoding: SpatialPositionalEncodingKind::Learned2d,
         pos_max_height: 2,
@@ -74,6 +75,7 @@ fn mae_pyramid_recon_loss_is_finite() {
         max_steps: 1,
         backprop_steps: 1,
     };
+    let normalization = vision_config.normalization.clone();
     let model = VisionDragon::<Backend>::new(vision_config, &device);
     let mae = VisionMaeModel::new(
         model,
@@ -88,6 +90,7 @@ fn mae_pyramid_recon_loss_is_finite() {
                 patch_size,
                 in_channels,
             },
+            normalization,
         },
         &device,
     );
@@ -126,6 +129,7 @@ fn mae_cross_view_forward_is_finite() {
         num_eyes: 2,
         cross_eye_steps: 0,
         token_state_norm: true,
+        normalization: burn_dragon_core::DragonNormConfig::default(),
         latent_activation: VisionLatentActivation::default(),
         pos_encoding: SpatialPositionalEncodingKind::Learned2d,
         pos_max_height: 2,
@@ -175,6 +179,7 @@ fn mae_cross_view_forward_is_finite() {
         max_steps: 1,
         backprop_steps: 1,
     };
+    let normalization = vision_config.normalization.clone();
     let model = VisionDragon::<Backend>::new(vision_config, &device);
     let mae = VisionMaeModel::new(
         model,
@@ -189,6 +194,7 @@ fn mae_cross_view_forward_is_finite() {
                 patch_size,
                 in_channels,
             },
+            normalization,
         },
         &device,
     );
@@ -355,6 +361,7 @@ fn mae_config_smoke_from_env() {
                 patch_size: vision_cfg.patch_size,
                 in_channels: vision_cfg.in_channels,
             },
+            normalization: vision_cfg.normalization.clone(),
         },
         &device,
     );
@@ -425,6 +432,7 @@ fn mae_recon_psnr_improves_on_toy_batch() {
         num_eyes: 1,
         cross_eye_steps: 0,
         token_state_norm: true,
+        normalization: burn_dragon_core::DragonNormConfig::default(),
         latent_activation: VisionLatentActivation::default(),
         pos_encoding: SpatialPositionalEncodingKind::Learned2d,
         pos_max_height: grid,
@@ -473,6 +481,7 @@ fn mae_recon_psnr_improves_on_toy_batch() {
                 patch_size: vision_config.patch_size,
                 in_channels: vision_config.in_channels,
             },
+            normalization: vision_config.normalization.clone(),
         },
         &device,
     );
@@ -549,6 +558,7 @@ fn identity_config_recon_loss_decreases() {
                 patch_size: vision_config.patch_size,
                 in_channels: vision_config.in_channels,
             },
+            normalization: vision_config.normalization.clone(),
         },
         &device,
     );

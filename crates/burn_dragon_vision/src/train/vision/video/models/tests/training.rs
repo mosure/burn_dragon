@@ -121,7 +121,7 @@ fn video_lejepa_train_pyramid_reports_rollout_metrics() {
     let vision = enable_pyramid_backbone(vision);
     let model = make_video_model::<Backend>(&vision, &video, &device);
     let batch = toy_video_batch_with_lengths::<Backend>(&device, 3, 2, 0);
-    let losses = model.forward_losses_train_pyramid(batch, 2, 2, true);
+    let losses = model.forward_losses_train_pyramid(batch, 2, 2, true, true);
 
     let inv_h2 = losses.rollout_inv_to_horizon[1]
         .clone()
@@ -193,7 +193,7 @@ fn video_lejepa_prediction_improves_on_toy_batch() {
     let mut model = make_video_model::<Backend>(&vision, &video, &device);
     let batch = toy_video_batch::<Backend>(&device);
 
-    let initial = model.forward_losses(batch.clone(), 2, 2, false, false);
+    let initial = model.forward_losses(batch.clone(), 2, 2, false, false, true);
     let initial_pred = initial
         .inv
         .to_data()
@@ -206,12 +206,12 @@ fn video_lejepa_prediction_improves_on_toy_batch() {
         .init::<Backend, VisionVideoLejepaModel<Backend>>();
     let lr: LearningRate = 2e-2;
     for _ in 0..40 {
-        let losses = model.forward_losses(batch.clone(), 2, 2, false, false);
+        let losses = model.forward_losses(batch.clone(), 2, 2, false, false, true);
         let grads = GradientsParams::from_grads(losses.total.clone().backward(), &model);
         model = model.optimize::<Backend, _>(&mut optimizer, lr, grads);
     }
 
-    let final_losses = model.forward_losses(batch, 2, 2, false, false);
+    let final_losses = model.forward_losses(batch, 2, 2, false, false, true);
     let final_pred = final_losses
         .inv
         .to_data()
@@ -236,7 +236,7 @@ fn debug_reconstruction_head_does_not_move_video_jepa_core() {
     let batch = toy_video_batch::<Backend>(&device);
 
     let before = model.forward_video(batch.clone(), 2, 2, 2);
-    let initial_losses = model.forward_losses(batch.clone(), 2, 2, false, false);
+    let initial_losses = model.forward_losses(batch.clone(), 2, 2, false, false, true);
     let initial_recon = initial_losses
         .recon
         .to_data()
@@ -249,13 +249,13 @@ fn debug_reconstruction_head_does_not_move_video_jepa_core() {
         .init::<Backend, VisionVideoLejepaModel<Backend>>();
     let lr: LearningRate = 2e-2;
     for _ in 0..20 {
-        let losses = model.forward_losses(batch.clone(), 2, 2, false, false);
+        let losses = model.forward_losses(batch.clone(), 2, 2, false, false, true);
         let grads = GradientsParams::from_grads(losses.total.clone().backward(), &model);
         model = model.optimize::<Backend, _>(&mut optimizer, lr, grads);
     }
 
     let after = model.forward_video(batch.clone(), 2, 2, 2);
-    let final_losses = model.forward_losses(batch, 2, 2, false, false);
+    let final_losses = model.forward_losses(batch, 2, 2, false, false, true);
     let final_recon = final_losses
         .recon
         .to_data()
@@ -341,7 +341,7 @@ fn video_lejepa_teacher_ema_lags_student_after_one_step() {
         .with_weight_decay(0.0)
         .init::<Backend, VisionVideoLejepaModel<Backend>>();
     let lr: LearningRate = 2e-2;
-    let losses = model.forward_losses(batch.clone(), 2, 2, false, false);
+    let losses = model.forward_losses(batch.clone(), 2, 2, false, false, true);
     let grads = GradientsParams::from_grads(losses.total.clone().backward(), &model);
     model = model.optimize::<Backend, _>(&mut optimizer, lr, grads);
 

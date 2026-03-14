@@ -2,6 +2,142 @@ use super::*;
 use burn_dragon_core::{
     target_major_decay_add, target_major_identity_read, target_major_outer_product,
 };
+use std::sync::{LazyLock, Mutex};
+use std::time::Instant;
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct StageAwareHostProfileSnapshot {
+    pub step_calls: u64,
+    pub coarse_only_step_calls: u64,
+    pub patch_local_ns: u64,
+    pub coarse_local_ns: u64,
+    pub patch_from_coarse_ns: u64,
+    pub hub_read_ns: u64,
+    pub patch_to_coarse_ns: u64,
+    pub hub_update_ns: u64,
+}
+
+static STAGE_AWARE_HOST_PROFILE: LazyLock<Mutex<StageAwareHostProfileSnapshot>> =
+    LazyLock::new(|| Mutex::new(StageAwareHostProfileSnapshot::default()));
+
+#[inline]
+fn stage_aware_host_profile_enabled() -> bool {
+    std::env::var_os("BDH_STAGE_PROFILE").is_some()
+}
+
+#[inline]
+fn stage_aware_profile_record(f: impl FnOnce(&mut StageAwareHostProfileSnapshot)) {
+    if !stage_aware_host_profile_enabled() {
+        return;
+    }
+    if let Ok(mut state) = STAGE_AWARE_HOST_PROFILE.lock() {
+        f(&mut state);
+    }
+}
+
+pub fn stage_aware_host_profile_reset() {
+    if let Ok(mut state) = STAGE_AWARE_HOST_PROFILE.lock() {
+        *state = StageAwareHostProfileSnapshot::default();
+    }
+}
+
+pub fn stage_aware_host_profile_snapshot() -> StageAwareHostProfileSnapshot {
+    STAGE_AWARE_HOST_PROFILE
+        .lock()
+        .map(|state| *state)
+        .unwrap_or_default()
+}
+
+#[derive(Clone)]
+pub(super) struct CompiledStageAwarePyramidLocalPlan<B: Backend> {
+    patch_plan: Option<CompiledLocalGridRhoPlan<B>>,
+    coarse_plan: Option<CompiledLocalGridRhoPlan<B>>,
+    patch_shape: LocalGridShape2d,
+    coarse_shape: LocalGridShape2d,
+    patch_neighborhood: LocalGridNeighborhood,
+    coarse_neighborhood: LocalGridNeighborhood,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct CompiledStageAwarePyramidLocalPlanSpec<'a, B: Backend> {
+    pub batch: usize,
+    pub patch_rank: usize,
+    pub coarse_rank: usize,
+    pub value_dim: usize,
+    pub patch_shape: LocalGridShape2d,
+    pub coarse_shape: LocalGridShape2d,
+    pub patch_neighborhood: LocalGridNeighborhood,
+    pub coarse_neighborhood: LocalGridNeighborhood,
+    pub device: &'a B::Device,
+}
+
+impl<B: Backend> CompiledStageAwarePyramidLocalPlan<B> {
+    pub(super) fn new(spec: CompiledStageAwarePyramidLocalPlanSpec<'_, B>) -> Self {
+        let patch_plan = (spec.patch_shape.token_count() > 1).then(|| {
+            CompiledLocalGridRhoPlan::new(
+                LocalGridRhoPlanSpec {
+                    batch: spec.batch,
+                    heads: spec.patch_rank.max(1),
+                    value_heads: 1,
+                    patch_tokens: spec.patch_shape.token_count(),
+                    latent: 1,
+                    embd: spec.value_dim.max(1),
+                    grid: spec.patch_shape,
+                    neighborhood: spec.patch_neighborhood,
+                },
+                spec.device,
+            )
+        });
+        let coarse_plan = (spec.coarse_shape.token_count() > 1).then(|| {
+            CompiledLocalGridRhoPlan::new(
+                LocalGridRhoPlanSpec {
+                    batch: spec.batch,
+                    heads: spec.coarse_rank.max(1),
+                    value_heads: 1,
+                    patch_tokens: spec.coarse_shape.token_count(),
+                    latent: 1,
+                    embd: spec.value_dim.max(1),
+                    grid: spec.coarse_shape,
+                    neighborhood: spec.coarse_neighborhood,
+                },
+                spec.device,
+            )
+        });
+
+        Self {
+            patch_plan,
+            coarse_plan,
+            patch_shape: spec.patch_shape,
+            coarse_shape: spec.coarse_shape,
+            patch_neighborhood: spec.patch_neighborhood,
+            coarse_neighborhood: spec.coarse_neighborhood,
+        }
+    }
+
+    pub(super) fn patch_plan(&self) -> Option<&CompiledLocalGridRhoPlan<B>> {
+        self.patch_plan.as_ref()
+    }
+
+    pub(super) fn coarse_plan(&self) -> Option<&CompiledLocalGridRhoPlan<B>> {
+        self.coarse_plan.as_ref()
+    }
+
+    pub(super) fn patch_shape(&self) -> LocalGridShape2d {
+        self.patch_shape
+    }
+
+    pub(super) fn coarse_shape(&self) -> LocalGridShape2d {
+        self.coarse_shape
+    }
+
+    pub(super) fn patch_neighborhood(&self) -> LocalGridNeighborhood {
+        self.patch_neighborhood
+    }
+
+    pub(super) fn coarse_neighborhood(&self) -> LocalGridNeighborhood {
+        self.coarse_neighborhood
+    }
+}
 
 // Retain the older pyramid helper surface for debug/reference use while the
 // active recurrent path migrates onto the shared structured-pyramid executor.
@@ -153,6 +289,76 @@ impl<B: Backend> VisionDragon<B> {
             .swap_dims(1, 3)
             .swap_dims(2, 3)
     }
+
+    pub(super) fn project_spatial_many(
+        &self,
+        input: Tensor<B, 4>,
+        layers: &[&Linear<B>],
+    ) -> Vec<Tensor<B, 4>> {
+        if layers.is_empty() {
+            return Vec::new();
+        }
+        // In the recurrent pyramid path, these "many" calls are usually just 2-4
+        // projections. Rebuilding concatenated weights/biases every step is more
+        // expensive than issuing the individual projections, so keep the hot small
+        // cases on the direct path and reserve fused concatenation for larger fans.
+        if layers.len() <= 4 {
+            return layers
+                .iter()
+                .map(|layer| self.project_spatial(input.clone(), layer))
+                .collect();
+        }
+        let [batch, dim, height, width] = input.shape().dims::<4>();
+        if batch == 0 || dim == 0 || height == 0 || width == 0 {
+            return layers
+                .iter()
+                .map(|layer| self.project_spatial(input.clone(), layer))
+                .collect();
+        }
+        let flat = input
+            .swap_dims(1, 3)
+            .swap_dims(1, 2)
+            .reshape([batch * height * width, dim]);
+        let out_dims: Vec<usize> = layers
+            .iter()
+            .map(|layer| layer.weight.val().shape().dims::<2>()[1])
+            .collect();
+        let fused_weight = Tensor::cat(
+            layers.iter().map(|layer| layer.weight.val()).collect(),
+            1,
+        );
+        let fused_bias = if layers.iter().any(|layer| layer.bias.is_some()) {
+            Some(Tensor::cat(
+                layers
+                    .iter()
+                    .zip(out_dims.iter())
+                    .map(|(layer, &out_dim)| {
+                        layer.bias.as_ref().map(|bias| bias.val()).unwrap_or_else(|| {
+                            Tensor::<B, 1>::zeros([out_dim], &flat.device())
+                        })
+                    })
+                    .collect(),
+                0,
+            ))
+        } else {
+            None
+        };
+        let fused = burn::tensor::module::linear(flat, fused_weight, fused_bias);
+        let mut outputs = Vec::with_capacity(layers.len());
+        let mut start = 0;
+        for &out_dim in &out_dims {
+            let projected = fused.clone().slice_dim(1, start..start + out_dim);
+            outputs.push(
+                projected
+                    .reshape([batch, height, width, out_dim])
+                    .swap_dims(1, 3)
+                    .swap_dims(2, 3),
+            );
+            start += out_dim;
+        }
+        outputs
+    }
+
 
     pub(super) fn project_spatial_pair(
         &self,
@@ -338,6 +544,7 @@ impl<B: Backend> VisionDragon<B> {
         &self,
         memory: Tensor<B, 5>,
         query: Tensor<B, 4>,
+        coarse_bank: bool,
     ) -> Tensor<B, 4> {
         let [batch, _, value_dim, height, width] = memory.shape().dims::<5>();
         if batch == 0 || value_dim == 0 || height == 0 || width == 0 {
@@ -347,9 +554,23 @@ impl<B: Backend> VisionDragon<B> {
             );
         }
         let mut acc = Tensor::<B, 4>::zeros([batch, value_dim, height, width], &memory.device());
-        let radius = self.trm_graph.local_radius.max(1) as isize;
-        let allow_diagonals = self.trm_graph.local_diagonals;
-        if self.trm_graph.local_self {
+        let radius = if coarse_bank {
+            self.trm_graph.coarse_local_radius_resolved()
+        } else {
+            self.trm_graph.local_radius
+        }
+        .max(1) as isize;
+        let allow_diagonals = if coarse_bank {
+            self.trm_graph.coarse_local_diagonals_resolved()
+        } else {
+            self.trm_graph.local_diagonals
+        };
+        let allow_self = if coarse_bank {
+            self.trm_graph.coarse_local_self_resolved()
+        } else {
+            self.trm_graph.local_self
+        };
+        if allow_self {
             acc = acc + self.pyramid_contract(memory.clone(), query.clone());
         }
         for dy in -radius..=radius {
@@ -367,6 +588,164 @@ impl<B: Backend> VisionDragon<B> {
             }
         }
         acc
+    }
+
+    pub(super) fn pyramid_patch_neighborhood(&self) -> LocalGridNeighborhood {
+        LocalGridNeighborhood {
+            radius: self.trm_graph.local_radius,
+            diagonals: self.trm_graph.local_diagonals,
+            self_edges: self.trm_graph.local_self,
+        }
+    }
+
+    pub(super) fn pyramid_coarse_neighborhood(&self) -> LocalGridNeighborhood {
+        LocalGridNeighborhood {
+            radius: self.trm_graph.coarse_local_radius_resolved(),
+            diagonals: self.trm_graph.coarse_local_diagonals_resolved(),
+            self_edges: self.trm_graph.coarse_local_self_resolved(),
+        }
+    }
+
+    pub(super) fn pyramid_spatial_tokens_to_local_grid(input: Tensor<B, 4>) -> Tensor<B, 4> {
+        let [batch, channels, height, width] = input.shape().dims::<4>();
+        Self::pyramid_tokens_target_major(input)
+            .swap_dims(1, 2)
+            .reshape([batch, channels, height * width, 1])
+    }
+
+    pub(super) fn pyramid_spatial_values_to_local_grid(input: Tensor<B, 4>) -> Tensor<B, 4> {
+        let [batch, channels, height, width] = input.shape().dims::<4>();
+        Self::pyramid_tokens_target_major(input).reshape([batch, 1, height * width, channels])
+    }
+
+    pub(super) fn pyramid_spatial_rho_to_local_grid(input: Tensor<B, 5>) -> Tensor<B, 5> {
+        let [batch, rank, value_dim, height, width] = input.shape().dims::<5>();
+        Self::pyramid_rho_to_target_major(input)
+            .swap_dims(1, 2)
+            .reshape([batch, rank, height * width, 1, value_dim])
+    }
+
+    pub(super) fn pyramid_local_grid_context_to_spatial(
+        input: Tensor<B, 4>,
+        shape: LocalGridShape2d,
+    ) -> Tensor<B, 4> {
+        let [batch, _, tokens, value_dim] = input.shape().dims::<4>();
+        let target_major = input.sum_dim(1).reshape([batch, tokens, value_dim]);
+        Self::pyramid_tokens_from_target_major(target_major, shape.height, shape.width)
+    }
+
+    pub(super) fn pyramid_local_grid_rho_to_target_major(input: Tensor<B, 5>) -> Tensor<B, 4> {
+        let [batch, rank, tokens, _, value_dim] = input.shape().dims::<5>();
+        input.reshape([batch, rank, tokens, value_dim]).swap_dims(1, 2)
+    }
+
+    pub(super) fn pyramid_local_grid_rho_to_spatial(
+        input: Tensor<B, 5>,
+        shape: LocalGridShape2d,
+    ) -> Tensor<B, 5> {
+        Self::pyramid_rho_from_target_major(
+            Self::pyramid_local_grid_rho_to_target_major(input),
+            shape.height,
+            shape.width,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn pyramid_local_step_with_plan(
+        &self,
+        query: Tensor<B, 4>,
+        value: Tensor<B, 4>,
+        rho: Tensor<B, 5>,
+        shape: LocalGridShape2d,
+        decay: Tensor<B, 1>,
+        plan: Option<&CompiledLocalGridRhoPlan<B>>,
+        _neighborhood: LocalGridNeighborhood,
+        coarse_bank: bool,
+        read_enabled: bool,
+        write_enabled: bool,
+    ) -> (Tensor<B, 4>, Tensor<B, 5>) {
+        let [batch, _, value_dim, height, width] = rho.shape().dims::<5>();
+        let zero_context = || {
+            Tensor::<B, 4>::zeros(
+                [batch.max(1), value_dim.max(1), height.max(1), width.max(1)],
+                &rho.device(),
+            )
+        };
+
+        if !read_enabled && !write_enabled {
+            let next_rho = Self::pyramid_rho_from_target_major(
+                target_major_decay_add(
+                    Self::pyramid_rho_to_target_major(rho.clone()),
+                    Tensor::<B, 4>::zeros(
+                        [
+                            batch.max(1),
+                            shape.token_count().max(1),
+                            rho.shape().dims::<5>()[1].max(1),
+                            value_dim.max(1),
+                        ],
+                        &rho.device(),
+                    ),
+                    decay,
+                ),
+                shape.height,
+                shape.width,
+            );
+            return (zero_context(), next_rho);
+        }
+
+        let fused_value = if write_enabled {
+            value.clone()
+        } else {
+            let [value_batch, value_channels, value_height, value_width] = value.shape().dims::<4>();
+            Tensor::<B, 4>::zeros(
+                [
+                    value_batch.max(1),
+                    value_channels.max(1),
+                    value_height.max(1),
+                    value_width.max(1),
+                ],
+                &value.device(),
+            )
+        };
+
+        if let Some(plan) = plan
+            && let Some(output) = try_fused_local_grid_rho_attention_wgpu_head_decay_with_plan(
+                &Self::pyramid_spatial_tokens_to_local_grid(query.clone()),
+                &Self::pyramid_spatial_values_to_local_grid(fused_value),
+                Some(&Self::pyramid_spatial_rho_to_local_grid(rho.clone())),
+                &decay,
+                plan,
+            )
+        {
+            let context = if read_enabled {
+                Self::pyramid_local_grid_context_to_spatial(output.context, shape)
+            } else {
+                zero_context()
+            };
+            let next_rho = Self::pyramid_local_grid_rho_to_spatial(output.rho, shape);
+            return (context, next_rho);
+        }
+
+        let context = if read_enabled {
+            self.pyramid_local_read(rho.clone(), query.clone(), coarse_bank)
+        } else {
+            zero_context()
+        };
+        let update = if write_enabled {
+            self.pyramid_outer_product(query, value)
+        } else {
+            Tensor::<B, 5>::zeros(rho.shape().dims::<5>(), &rho.device())
+        };
+        let next_rho = Self::pyramid_rho_from_target_major(
+            target_major_decay_add(
+                Self::pyramid_rho_to_target_major(rho),
+                Self::pyramid_rho_to_target_major(update),
+                decay,
+            ),
+            shape.height,
+            shape.width,
+        );
+        (context, next_rho)
     }
 
     pub(super) fn pyramid_cross_scale_read(
@@ -474,7 +853,7 @@ impl<B: Backend> VisionDragon<B> {
         self.apply_embed_norm_spatial(next)
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, dead_code)]
     pub(super) fn pyramid_update_states(
         &self,
         patch_state: Tensor<B, 4>,
@@ -610,9 +989,22 @@ impl<B: Backend> VisionDragon<B> {
             return (None, None);
         }
         let hub_gate = self.pyramid_hub_gate.as_ref();
-        let w8 = self.pyramid_hub_weights_single(h8, hub_count, hub_gate);
-        let w32 = self.pyramid_hub_weights_single(h32, hub_count, hub_gate);
-        (Some(w8), Some(w32))
+        if let Some(gate) = hub_gate {
+            let (w8, w32) = self.project_spatial_pair(h8, h32, gate);
+            let w8 = self.normalize_hub_weights(w8);
+            let w32 = self.normalize_hub_weights(w32);
+            (Some(w8), Some(w32))
+        } else {
+            let w8 = self.pyramid_hub_weights_single(h8, hub_count, None);
+            let w32 = self.pyramid_hub_weights_single(h32, hub_count, None);
+            (Some(w8), Some(w32))
+        }
+    }
+
+    pub(super) fn normalize_hub_weights(&self, weights: Tensor<B, 4>) -> Tensor<B, 4> {
+        let weights = activation::relu(weights);
+        let denom = weights.clone().sum_dim(1).add_scalar(ROW_NORM_EPS);
+        weights / denom
     }
 
     pub(super) fn pyramid_hub_weights_single(
@@ -625,9 +1017,7 @@ impl<B: Backend> VisionDragon<B> {
         let device = h.device();
         if let Some(gate) = hub_gate {
             let weights = self.project_spatial(h, gate);
-            let weights = activation::relu(weights);
-            let denom = weights.clone().sum_dim(1).add_scalar(ROW_NORM_EPS);
-            weights / denom
+            self.normalize_hub_weights(weights)
         } else {
             Tensor::<B, 4>::ones([batch, hub_count, height, width], &device)
                 .div_scalar(hub_count as f32)
@@ -648,68 +1038,147 @@ impl<B: Backend> VisionDragon<B> {
                 &hub.device(),
             );
         }
-        // Avoid the 6D broadcasted hub/query multiply here. On WGPU that fused path can
-        // materialize an oversized intermediate during training. A per-hub 5D multiply/sum
-        // keeps the working set bounded while preserving the same contraction.
-        let query_exp = query.unsqueeze_dim::<5>(2);
-        let mut reduced = Tensor::<B, 4>::zeros([batch, value_dim, height, width], &hub.device());
+        let tokens = height * width;
+        let hub_mat = hub.swap_dims(2, 3);
+        let query_mat = query.reshape([batch, 1, rank, tokens]);
+        let reduced = hub_mat.matmul(query_mat);
+        self.pyramid_reduce_hub_values(reduced, weights, height, width)
+    }
 
-        for hub_idx in 0..hubs {
-            let hub_slice = hub
-                .clone()
-                .slice_dim(1, hub_idx..hub_idx + 1)
-                .reshape([batch, rank, value_dim, 1, 1]);
-            let mut msg = hub_slice
-                .mul(query_exp.clone())
-                .sum_dims_squeeze::<4, usize>(&[1]);
-            if let Some(ref weights) = weights {
-                let hub_weight = weights
+    pub(super) fn pyramid_hub_read_pair(
+        &self,
+        hub: Tensor<B, 4>,
+        patch_query: Option<Tensor<B, 4>>,
+        coarse_query: Option<Tensor<B, 4>>,
+        patch_weights: Option<Tensor<B, 4>>,
+        coarse_weights: Option<Tensor<B, 4>>,
+    ) -> (Option<Tensor<B, 4>>, Option<Tensor<B, 4>>) {
+        match (patch_query, coarse_query) {
+            (None, None) => (None, None),
+            (Some(patch_query), None) => (
+                Some(self.pyramid_hub_read(hub, patch_query, patch_weights)),
+                None,
+            ),
+            (None, Some(coarse_query)) => (
+                None,
+                Some(self.pyramid_hub_read(hub, coarse_query, coarse_weights)),
+            ),
+            (Some(patch_query), Some(coarse_query)) => {
+                let [batch, hubs, rank, value_dim] = hub.shape().dims::<4>();
+                let [_, _, patch_height, patch_width] = patch_query.shape().dims::<4>();
+                let [_, _, coarse_height, coarse_width] = coarse_query.shape().dims::<4>();
+                let patch_tokens = patch_height * patch_width;
+                let coarse_tokens = coarse_height * coarse_width;
+                let total_tokens = patch_tokens + coarse_tokens;
+                let hub_mat = hub.swap_dims(2, 3);
+                let query = Tensor::cat(
+                    vec![
+                        patch_query.reshape([batch, rank, patch_tokens]),
+                        coarse_query.reshape([batch, rank, coarse_tokens]),
+                    ],
+                    2,
+                )
+                .reshape([batch, 1, rank, total_tokens]);
+                let reduced = hub_mat.matmul(query);
+                let patch_reduced = reduced
                     .clone()
-                    .slice_dim(1, hub_idx..hub_idx + 1)
-                    .reshape([batch, 1, height, width]);
-                msg = msg.mul(hub_weight);
+                    .slice_dim(3, 0..patch_tokens)
+                    .reshape([batch, hubs, value_dim, patch_tokens]);
+                let coarse_reduced = reduced
+                    .slice_dim(3, patch_tokens..total_tokens)
+                    .reshape([batch, hubs, value_dim, coarse_tokens]);
+                (
+                    Some(self.pyramid_reduce_hub_values(
+                        patch_reduced,
+                        patch_weights,
+                        patch_height,
+                        patch_width,
+                    )),
+                    Some(self.pyramid_reduce_hub_values(
+                        coarse_reduced,
+                        coarse_weights,
+                        coarse_height,
+                        coarse_width,
+                    )),
+                )
             }
-            reduced = reduced.add(msg);
         }
+    }
 
-        if weights.is_none() && hubs > 1 {
+
+    fn pyramid_reduce_hub_values(
+        &self,
+        values: Tensor<B, 4>,
+        weights: Option<Tensor<B, 4>>,
+        height: usize,
+        width: usize,
+    ) -> Tensor<B, 4> {
+        let [batch, hubs, value_dim, tokens] = values.shape().dims::<4>();
+        let mut reduced = values;
+        let has_weights = weights.is_some();
+        if let Some(weights) = weights {
+            let hub_weights = weights.reshape([batch, hubs, 1, tokens]);
+            reduced = reduced.mul(hub_weights);
+        }
+        let reduced = reduced.sum_dim(1);
+        let reduced = if !has_weights && hubs > 1 {
             reduced.div_scalar(hubs as f32)
         } else {
             reduced
-        }
+        };
+        reduced.reshape([batch, value_dim, height, width])
     }
 
     #[allow(clippy::too_many_arguments)]
     pub(super) fn pyramid_update_hub(
         &self,
         hub: Tensor<B, 4>,
-        u8: Tensor<B, 5>,
-        u32: Tensor<B, 5>,
+        u8: Option<Tensor<B, 5>>,
+        u32: Option<Tensor<B, 5>>,
         hub_w8: Option<Tensor<B, 4>>,
         hub_w32: Option<Tensor<B, 4>>,
         hub_count: usize,
         decay: Tensor<B, 1>,
     ) -> Tensor<B, 4> {
+        let zero_delta = || {
+            let [batch, hubs, rank, value_dim] = hub.shape().dims::<4>();
+            Tensor::<B, 4>::zeros([batch, hubs, rank, value_dim], &hub.device())
+        };
         if hub_count <= 1 {
-            let sum8 = u8.sum_dims_squeeze::<3, usize>(&[3, 4]);
-            let sum32 = u32.sum_dims_squeeze::<3, usize>(&[3, 4]);
-            let delta = (sum8 + sum32).unsqueeze_dim::<4>(1);
+            let sum8 = u8
+                .map(|u8| u8.sum_dims_squeeze::<3, usize>(&[3, 4]))
+                .unwrap_or_else(|| {
+                    let [batch, _, rank, value_dim] = hub.shape().dims::<4>();
+                    Tensor::<B, 3>::zeros([batch, rank, value_dim], &hub.device())
+                });
+            let sum32 = u32
+                .map(|u32| u32.sum_dims_squeeze::<3, usize>(&[3, 4]))
+                .unwrap_or_else(|| {
+                    let [batch, _, rank, value_dim] = hub.shape().dims::<4>();
+                    Tensor::<B, 3>::zeros([batch, rank, value_dim], &hub.device())
+                });
+            let delta = sum8.add(sum32).unsqueeze_dim::<4>(1);
             return target_major_decay_add(hub, delta, decay);
         }
 
-        let w8 = hub_w8.unwrap_or_else(|| {
-            let [batch, _, _, height, width] = u8.shape().dims::<5>();
-            Tensor::<B, 4>::ones([batch, hub_count, height, width], &u8.device())
-                .div_scalar(hub_count as f32)
+        let delta8 = u8.map(|u8| {
+            let w8 = hub_w8.unwrap_or_else(|| {
+                let [batch, _, _, height, width] = u8.shape().dims::<5>();
+                Tensor::<B, 4>::ones([batch, hub_count, height, width], &u8.device())
+                    .div_scalar(hub_count as f32)
+            });
+            self.trm_weighted_global_sum(u8, w8)
         });
-        let w32 = hub_w32.unwrap_or_else(|| {
-            let [batch, _, _, height, width] = u32.shape().dims::<5>();
-            Tensor::<B, 4>::ones([batch, hub_count, height, width], &u32.device())
-                .div_scalar(hub_count as f32)
+        let delta32 = u32.map(|u32| {
+            let w32 = hub_w32.unwrap_or_else(|| {
+                let [batch, _, _, height, width] = u32.shape().dims::<5>();
+                Tensor::<B, 4>::ones([batch, hub_count, height, width], &u32.device())
+                    .div_scalar(hub_count as f32)
+            });
+            self.trm_weighted_global_sum(u32, w32)
         });
-
-        let delta8 = self.trm_weighted_global_sum(u8, w8);
-        let delta32 = self.trm_weighted_global_sum(u32, w32);
+        let delta8 = delta8.unwrap_or_else(zero_delta);
+        let delta32 = delta32.unwrap_or_else(zero_delta);
         target_major_decay_add(hub, delta8 + delta32, decay)
     }
 
@@ -722,20 +1191,286 @@ impl<B: Backend> VisionDragon<B> {
                 &u.device(),
             );
         }
-        let mut outputs = Vec::with_capacity(hubs);
-        for hub_idx in 0..hubs {
-            let hub_weight = w
-                .clone()
-                .slice_dim(1, hub_idx..hub_idx + 1)
-                .reshape([batch, 1, 1, height, width]);
-            let weighted = u
-                .clone()
-                .mul(hub_weight)
-                .sum_dims_squeeze::<3, usize>(&[3, 4])
-                .unsqueeze_dim::<4>(1);
-            outputs.push(weighted);
-        }
-
-        Tensor::cat(outputs, 1)
+        let tokens = height * width;
+        u.reshape([batch, 1, rank, value_dim, tokens])
+            .mul(w.reshape([batch, hubs, 1, 1, tokens]))
+            .sum_dims_squeeze::<4, usize>(&[4])
     }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn pyramid_stage_aware_step_split_with_plan(
+        &self,
+        patch_query: Tensor<B, 4>,
+        patch_query_for_coarse: Tensor<B, 4>,
+        patch_query_for_global: Tensor<B, 4>,
+        patch_value: Tensor<B, 4>,
+        coarse_query: Tensor<B, 4>,
+        coarse_query_for_global: Tensor<B, 4>,
+        coarse_value: Tensor<B, 4>,
+        patch_rho: Tensor<B, 5>,
+        coarse_rho: Tensor<B, 5>,
+        global_rho: Tensor<B, 4>,
+        patch_hub_weights: Option<Tensor<B, 4>>,
+        coarse_hub_weights: Option<Tensor<B, 4>>,
+        patch_decay: Tensor<B, 1>,
+        coarse_decay: Tensor<B, 1>,
+        global_decay: Tensor<B, 1>,
+        bank_mode: &VisionTrmGraphBankModeConfig,
+        plan: &CompiledStageAwarePyramidLocalPlan<B>,
+    ) -> StructuredPyramidRhoStepOutput<B> {
+        stage_aware_profile_record(|state| {
+            state.step_calls += 1;
+        });
+        let [patch_batch, patch_value_dim, patch_height, patch_width] = patch_value.shape().dims::<4>();
+        let [coarse_batch, coarse_value_dim, coarse_height, coarse_width] =
+            coarse_value.shape().dims::<4>();
+        let patch_zero = || {
+            Tensor::<B, 4>::zeros(
+                [patch_batch, patch_value_dim, patch_height, patch_width],
+                &patch_value.device(),
+            )
+        };
+        let coarse_zero = || {
+            Tensor::<B, 4>::zeros(
+                [coarse_batch, coarse_value_dim, coarse_height, coarse_width],
+                &coarse_value.device(),
+            )
+        };
+        let coarse_rho_for_cross_scale = coarse_rho.clone();
+
+        let (patch_local_context, next_patch_rho) = {
+            let start = stage_aware_host_profile_enabled().then(Instant::now);
+            let output = self.pyramid_local_step_with_plan(
+                patch_query.clone(),
+                patch_value.clone(),
+                patch_rho,
+                plan.patch_shape(),
+                patch_decay,
+                plan.patch_plan(),
+                plan.patch_neighborhood(),
+                false,
+                bank_mode.patch_local_read,
+                bank_mode.patch_local_write,
+            );
+            if let Some(start) = start {
+                stage_aware_profile_record(|state| {
+                    state.patch_local_ns += start.elapsed().as_nanos() as u64;
+                });
+            }
+            output
+        };
+        let (coarse_local_context, next_coarse_local_rho) = {
+            let start = stage_aware_host_profile_enabled().then(Instant::now);
+            let output = self.pyramid_local_step_with_plan(
+                coarse_query.clone(),
+                coarse_value.clone(),
+                coarse_rho,
+                plan.coarse_shape(),
+                coarse_decay.clone(),
+                plan.coarse_plan(),
+                plan.coarse_neighborhood(),
+                true,
+                bank_mode.coarse_local_read,
+                bank_mode.coarse_local_write,
+            );
+            if let Some(start) = start {
+                stage_aware_profile_record(|state| {
+                    state.coarse_local_ns += start.elapsed().as_nanos() as u64;
+                });
+            }
+            output
+        };
+        let patch_from_coarse_context = if bank_mode.patch_from_coarse_read {
+            let start = stage_aware_host_profile_enabled().then(Instant::now);
+            let output = self.pyramid_cross_scale_read(
+                coarse_rho_for_cross_scale,
+                patch_query_for_coarse.clone(),
+                self.trm_graph.coarse_stride.max(1),
+            );
+            if let Some(start) = start {
+                stage_aware_profile_record(|state| {
+                    state.patch_from_coarse_ns += start.elapsed().as_nanos() as u64;
+                });
+            }
+            output
+        } else {
+            patch_zero()
+        };
+        let (patch_from_hub_context, coarse_from_hub_context) = {
+            let start = stage_aware_host_profile_enabled().then(Instant::now);
+            let output = self.pyramid_hub_read_pair(
+                global_rho.clone(),
+                bank_mode
+                    .patch_from_hub_read
+                    .then(|| patch_query_for_global.clone()),
+                bank_mode
+                    .coarse_from_hub_read
+                    .then(|| coarse_query_for_global.clone()),
+                patch_hub_weights.clone(),
+                coarse_hub_weights.clone(),
+            );
+            if let Some(start) = start {
+                stage_aware_profile_record(|state| {
+                    state.hub_read_ns += start.elapsed().as_nanos() as u64;
+                });
+            }
+            output
+        };
+        let patch_from_hub_context = patch_from_hub_context.unwrap_or_else(patch_zero);
+        let coarse_from_hub_context = coarse_from_hub_context.unwrap_or_else(coarse_zero);
+
+        let next_coarse_rho = if bank_mode.patch_to_coarse_write {
+            let start = stage_aware_host_profile_enabled().then(Instant::now);
+            let patch_to_coarse_update = self.pyramid_pool_outer(
+                self.pyramid_outer_product(patch_query_for_coarse, patch_value.clone()),
+                self.trm_graph.coarse_stride.max(1),
+            );
+            if let Some(start) = start {
+                stage_aware_profile_record(|state| {
+                    state.patch_to_coarse_ns += start.elapsed().as_nanos() as u64;
+                });
+            }
+            Self::pyramid_rho_from_target_major(
+                Self::pyramid_rho_to_target_major(next_coarse_local_rho.clone())
+                    .add(Self::pyramid_rho_to_target_major(patch_to_coarse_update)),
+                plan.coarse_shape().height,
+                plan.coarse_shape().width,
+            )
+        } else {
+            next_coarse_local_rho.clone()
+        };
+        let patch_to_global_update = bank_mode
+            .patch_to_global_write
+            .then(|| self.pyramid_outer_product(patch_query_for_global, patch_value));
+        let coarse_to_global_update = bank_mode
+            .coarse_to_global_write
+            .then(|| self.pyramid_outer_product(coarse_query_for_global, coarse_value));
+        let next_hub_rho = {
+            let start = stage_aware_host_profile_enabled().then(Instant::now);
+            let output = self.pyramid_update_hub(
+                global_rho,
+                patch_to_global_update,
+                coarse_to_global_update,
+                patch_hub_weights,
+                coarse_hub_weights,
+                self.trm_graph.hub_count.max(1),
+                global_decay,
+            );
+            if let Some(start) = start {
+                stage_aware_profile_record(|state| {
+                    state.hub_update_ns += start.elapsed().as_nanos() as u64;
+                });
+            }
+            output
+        };
+
+        StructuredPyramidRhoStepOutput {
+            patch_local_context,
+            coarse_local_context,
+            patch_from_coarse_context,
+            patch_from_hub_context,
+            coarse_from_hub_context,
+            next_patch_rho,
+            next_coarse_rho,
+            next_hub_rho,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn pyramid_stage_aware_coarse_only_step_with_plan(
+        &self,
+        coarse_query: Tensor<B, 4>,
+        coarse_query_for_global: Tensor<B, 4>,
+        coarse_value: Tensor<B, 4>,
+        coarse_rho: Tensor<B, 5>,
+        global_rho: Tensor<B, 4>,
+        coarse_hub_weights: Option<Tensor<B, 4>>,
+        coarse_decay: Tensor<B, 1>,
+        global_decay: Tensor<B, 1>,
+        bank_mode: &VisionTrmGraphBankModeConfig,
+        plan: &CompiledStageAwarePyramidLocalPlan<B>,
+    ) -> StructuredPyramidCoarseOnlyStepOutput<B> {
+        stage_aware_profile_record(|state| {
+            state.coarse_only_step_calls += 1;
+        });
+        let [coarse_batch, coarse_value_dim, coarse_height, coarse_width] =
+            coarse_value.shape().dims::<4>();
+        let coarse_zero = || {
+            Tensor::<B, 4>::zeros(
+                [
+                    coarse_batch.max(1),
+                    coarse_value_dim.max(1),
+                    coarse_height.max(1),
+                    coarse_width.max(1),
+                ],
+                &coarse_value.device(),
+            )
+        };
+        let (coarse_local_context, next_coarse_rho) = {
+            let start = stage_aware_host_profile_enabled().then(Instant::now);
+            let output = self.pyramid_local_step_with_plan(
+                coarse_query.clone(),
+                coarse_value.clone(),
+                coarse_rho,
+                plan.coarse_shape(),
+                coarse_decay,
+                plan.coarse_plan(),
+                plan.coarse_neighborhood(),
+                true,
+                bank_mode.coarse_local_read,
+                bank_mode.coarse_local_write,
+            );
+            if let Some(start) = start {
+                stage_aware_profile_record(|state| {
+                    state.coarse_local_ns += start.elapsed().as_nanos() as u64;
+                });
+            }
+            output
+        };
+        let coarse_from_hub_context = if bank_mode.coarse_from_hub_read {
+            let start = stage_aware_host_profile_enabled().then(Instant::now);
+            let output = self.pyramid_hub_read(
+                global_rho.clone(),
+                coarse_query_for_global.clone(),
+                coarse_hub_weights.clone(),
+            );
+            if let Some(start) = start {
+                stage_aware_profile_record(|state| {
+                    state.hub_read_ns += start.elapsed().as_nanos() as u64;
+                });
+            }
+            output
+        } else {
+            coarse_zero()
+        };
+        let coarse_to_global_update = bank_mode
+            .coarse_to_global_write
+            .then(|| self.pyramid_outer_product(coarse_query_for_global, coarse_value));
+        let next_hub_rho = {
+            let start = stage_aware_host_profile_enabled().then(Instant::now);
+            let output = self.pyramid_update_hub(
+                global_rho,
+                None,
+                coarse_to_global_update,
+                None,
+                coarse_hub_weights,
+                self.trm_graph.hub_count.max(1),
+                global_decay,
+            );
+            if let Some(start) = start {
+                stage_aware_profile_record(|state| {
+                    state.hub_update_ns += start.elapsed().as_nanos() as u64;
+                });
+            }
+            output
+        };
+
+        StructuredPyramidCoarseOnlyStepOutput {
+            coarse_local_context,
+            coarse_from_hub_context,
+            next_coarse_rho,
+            next_hub_rho,
+        }
+    }
+
 }

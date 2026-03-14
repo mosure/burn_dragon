@@ -5,7 +5,9 @@ use burn::module::{
 use burn::tensor::backend::{AutodiffBackend, Backend};
 use serde::{Deserialize, Serialize};
 
-use burn_dragon_core::{DragonNormConfig, FusedKernelConfig, ManifoldHyperConnectionsConfig};
+use burn_dragon_core::{
+    DragonNormConfig, FusedKernelConfig, ManifoldHyperConnectionsConfig, StructuredStepMode,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -82,8 +84,12 @@ pub enum VisionAttentionMode {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum VisionPatchEmbedMode {
+    /// Hierarchical ConvNeXt-style patch stem with depthwise and pointwise mixing.
     #[default]
     Conv,
+    /// Explicit alias for the ConvNeXt-style patch stem used by `Conv`.
+    #[serde(alias = "convnext")]
+    ConvNext,
     Linear,
     Identity,
 }
@@ -388,6 +394,106 @@ impl ModuleDisplay for VisionLatentActivation {}
 
 impl ModuleDisplay for VisionTrmGridMismatchPolicy {}
 
+impl ModuleDisplayDefault for VisionTrmGraphBankModeConfig {
+    fn content(&self, content: Content) -> Option<Content> {
+        content
+            .add("patch_local_read", &self.patch_local_read)
+            .add("patch_local_write", &self.patch_local_write)
+            .add("coarse_local_read", &self.coarse_local_read)
+            .add("coarse_local_write", &self.coarse_local_write)
+            .add("patch_from_coarse_read", &self.patch_from_coarse_read)
+            .add("patch_from_hub_read", &self.patch_from_hub_read)
+            .add("coarse_from_hub_read", &self.coarse_from_hub_read)
+            .add("patch_to_coarse_write", &self.patch_to_coarse_write)
+            .add("patch_to_global_write", &self.patch_to_global_write)
+            .add("coarse_to_global_write", &self.coarse_to_global_write)
+            .add("patch_decay_scale", &self.patch_decay_scale)
+            .add("coarse_decay_scale", &self.coarse_decay_scale)
+            .add("global_decay_scale", &self.global_decay_scale)
+            .optional()
+    }
+}
+
+impl ModuleDisplay for VisionTrmGraphBankModeConfig {}
+
+impl ModuleDisplayDefault for VisionTrmGraphBankScheduleConfig {
+    fn content(&self, content: Content) -> Option<Content> {
+        content
+            .add("observe", &self.observe)
+            .add("refine", &self.refine)
+            .add("predict", &self.predict)
+            .optional()
+    }
+}
+
+impl ModuleDisplay for VisionTrmGraphBankScheduleConfig {}
+
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct VisionTrmGraphBankModeConfig {
+    pub patch_local_read: bool,
+    pub patch_local_write: bool,
+    pub coarse_local_read: bool,
+    pub coarse_local_write: bool,
+    pub patch_from_coarse_read: bool,
+    pub patch_from_hub_read: bool,
+    pub coarse_from_hub_read: bool,
+    pub patch_to_coarse_write: bool,
+    pub patch_to_global_write: bool,
+    pub coarse_to_global_write: bool,
+    pub patch_decay_scale: f32,
+    pub coarse_decay_scale: f32,
+    pub global_decay_scale: f32,
+}
+
+impl Default for VisionTrmGraphBankModeConfig {
+    fn default() -> Self {
+        Self {
+            patch_local_read: true,
+            patch_local_write: true,
+            coarse_local_read: true,
+            coarse_local_write: true,
+            patch_from_coarse_read: true,
+            patch_from_hub_read: true,
+            coarse_from_hub_read: true,
+            patch_to_coarse_write: true,
+            patch_to_global_write: true,
+            coarse_to_global_write: true,
+            patch_decay_scale: 1.0,
+            coarse_decay_scale: 1.0,
+            global_decay_scale: 1.0,
+        }
+    }
+}
+
+impl VisionTrmGraphBankModeConfig {
+    pub fn coarse_only_predict_substep(&self) -> Self {
+        Self {
+            patch_local_read: false,
+            patch_local_write: false,
+            coarse_local_read: self.coarse_local_read,
+            coarse_local_write: self.coarse_local_write,
+            patch_from_coarse_read: false,
+            patch_from_hub_read: false,
+            coarse_from_hub_read: self.coarse_from_hub_read,
+            patch_to_coarse_write: false,
+            patch_to_global_write: false,
+            coarse_to_global_write: self.coarse_to_global_write,
+            patch_decay_scale: self.patch_decay_scale,
+            coarse_decay_scale: self.coarse_decay_scale,
+            global_decay_scale: self.global_decay_scale,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct VisionTrmGraphBankScheduleConfig {
+    pub observe: VisionTrmGraphBankModeConfig,
+    pub refine: VisionTrmGraphBankModeConfig,
+    pub predict: VisionTrmGraphBankModeConfig,
+}
+
 impl ModuleDisplayDefault for VisionTrmGraphConfig {
     fn content(&self, content: Content) -> Option<Content> {
         content
@@ -395,12 +501,20 @@ impl ModuleDisplayDefault for VisionTrmGraphConfig {
             .add("coarse_stride", &self.coarse_stride)
             .add("hub_count", &self.hub_count)
             .add("rank", &self.rank)
+            .add("patch_rank", &self.patch_rank)
+            .add("coarse_rank", &self.coarse_rank)
+            .add("global_rank", &self.global_rank)
             .add("value_dim", &self.value_dim)
             .add("local_radius", &self.local_radius)
             .add("local_diagonals", &self.local_diagonals)
             .add("local_self", &self.local_self)
+            .add("coarse_local_radius", &self.coarse_local_radius)
+            .add("coarse_local_diagonals", &self.coarse_local_diagonals)
+            .add("coarse_local_self", &self.coarse_local_self)
+            .add("predict_coarse_substeps", &self.predict_coarse_substeps)
             .add("decay", &self.decay)
             .add("hub_gates", &self.hub_gates)
+            .add("bank_schedule", &self.bank_schedule)
             .add("grid_mismatch_policy", &self.grid_mismatch_policy)
             .optional()
     }
@@ -415,12 +529,20 @@ pub struct VisionTrmGraphConfig {
     pub coarse_stride: usize,
     pub hub_count: usize,
     pub rank: usize,
+    pub patch_rank: Option<usize>,
+    pub coarse_rank: Option<usize>,
+    pub global_rank: Option<usize>,
     pub value_dim: usize,
     pub local_radius: usize,
     pub local_diagonals: bool,
     pub local_self: bool,
+    pub coarse_local_radius: Option<usize>,
+    pub coarse_local_diagonals: Option<bool>,
+    pub coarse_local_self: Option<bool>,
+    pub predict_coarse_substeps: usize,
     pub decay: f32,
     pub hub_gates: bool,
+    pub bank_schedule: VisionTrmGraphBankScheduleConfig,
     pub grid_mismatch_policy: VisionTrmGridMismatchPolicy,
 }
 
@@ -431,12 +553,20 @@ impl Default for VisionTrmGraphConfig {
             coarse_stride: 4,
             hub_count: 1,
             rank: 4,
+            patch_rank: None,
+            coarse_rank: None,
+            global_rank: None,
             value_dim: 32,
             local_radius: 1,
             local_diagonals: false,
             local_self: false,
+            coarse_local_radius: None,
+            coarse_local_diagonals: None,
+            coarse_local_self: None,
+            predict_coarse_substeps: 1,
             decay: 0.9,
             hub_gates: true,
+            bank_schedule: VisionTrmGraphBankScheduleConfig::default(),
             grid_mismatch_policy: VisionTrmGridMismatchPolicy::Error,
         }
     }
@@ -468,6 +598,57 @@ impl<B: Backend> Module<B> for VisionTrmGraphConfig {
     }
 
     fn into_record(self) -> Self::Record {}
+}
+
+impl VisionTrmGraphConfig {
+    pub fn patch_rank_resolved(&self) -> usize {
+        self.patch_rank.unwrap_or(self.rank).max(1)
+    }
+
+    pub fn coarse_rank_resolved(&self) -> usize {
+        self.coarse_rank.unwrap_or(self.rank).max(1)
+    }
+
+    pub fn global_rank_resolved(&self) -> usize {
+        self.global_rank.unwrap_or(self.rank).max(1)
+    }
+
+    pub fn coarse_local_radius_resolved(&self) -> usize {
+        self.coarse_local_radius.unwrap_or(self.local_radius)
+    }
+
+    pub fn coarse_local_diagonals_resolved(&self) -> bool {
+        self.coarse_local_diagonals.unwrap_or(self.local_diagonals)
+    }
+
+    pub fn coarse_local_self_resolved(&self) -> bool {
+        self.coarse_local_self.unwrap_or(self.local_self)
+    }
+
+    pub fn ranks_uniform(&self) -> bool {
+        let patch = self.patch_rank_resolved();
+        let coarse = self.coarse_rank_resolved();
+        let global = self.global_rank_resolved();
+        patch == coarse && coarse == global
+    }
+
+    pub fn uses_uniform_local_topology(&self) -> bool {
+        self.coarse_local_radius.is_none()
+            && self.coarse_local_diagonals.is_none()
+            && self.coarse_local_self.is_none()
+    }
+
+    pub fn bank_mode(&self, mode: StructuredStepMode) -> &VisionTrmGraphBankModeConfig {
+        match mode {
+            StructuredStepMode::Observe => &self.bank_schedule.observe,
+            StructuredStepMode::Refine => &self.bank_schedule.refine,
+            StructuredStepMode::Predict => &self.bank_schedule.predict,
+        }
+    }
+
+    pub fn uses_default_bank_schedule(&self) -> bool {
+        self.bank_schedule == VisionTrmGraphBankScheduleConfig::default()
+    }
 }
 
 impl<B: AutodiffBackend> AutodiffModule<B> for VisionTrmGraphConfig {

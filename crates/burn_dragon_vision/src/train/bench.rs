@@ -1,6 +1,7 @@
 use crate::config::VisionAugmentationConfig;
 use crate::train::gdpo;
 use crate::train::prelude::*;
+use std::time::Instant;
 use burn::optim::{GradientsAccumulator, GradientsParams, Optimizer};
 use burn::tensor::Distribution as TensorDistribution;
 use burn::tensor::backend::{AutodiffBackend, Backend as BackendTrait};
@@ -74,6 +75,18 @@ pub struct VisionVideoLejepaTrainStepBench<B: AutodiffBackend> {
     lr: LearningRate,
     rollout_steps: usize,
     backprop_steps: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct VisionVideoLejepaTrainStepPhaseTimes {
+    pub forward_ns: f64,
+    pub backward_ns: f64,
+    pub optimize_ns: f64,
+}
+
+pub struct VisionVideoLejepaTrainStepProfile<B: AutodiffBackend> {
+    pub loss: Tensor<B, 1>,
+    pub phases: VisionVideoLejepaTrainStepPhaseTimes,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -669,28 +682,81 @@ impl<B: AutodiffBackend> VisionVideoLejepaTrainStepBench<B> {
     }
 
     pub fn train_step(&mut self, batch: VideoClipBatch<B>) -> Tensor<B, 1> {
+        self.train_step_profile(batch).loss
+    }
+
+    pub fn train_step_profile(
+        &mut self,
+        batch: VideoClipBatch<B>,
+    ) -> VisionVideoLejepaTrainStepProfile<B> {
         let mut model = self.model.take().expect("video lejepa model");
-        let losses =
-            model.forward_losses(batch, self.rollout_steps, self.backprop_steps, false, false);
+        let forward_start = Instant::now();
+        let losses = if model.uses_pyramid_backbone() {
+            model.forward_losses_train_pyramid(
+                batch,
+                self.rollout_steps,
+                self.backprop_steps,
+                false,
+                false,
+            )
+        } else {
+            model.forward_losses(
+                batch,
+                self.rollout_steps,
+                self.backprop_steps,
+                false,
+                false,
+                false,
+            )
+        };
+        let forward_ns = forward_start.elapsed().as_nanos() as f64;
         let total = losses.total.clone()
             + losses
                 .probe_loss
                 .clone()
                 .mul_scalar(model.config.loss.probe_weight.max(0.0));
+        let backward_start = Instant::now();
         let grads = GradientsParams::from_grads(total.backward(), &model);
+        let backward_ns = backward_start.elapsed().as_nanos() as f64;
         let loss = losses.total.detach();
+        let optimize_start = Instant::now();
         model = model.optimize::<B, _>(&mut self.optimizer, self.lr, grads);
+        let optimize_ns = optimize_start.elapsed().as_nanos() as f64;
         self.model = Some(model);
-        loss
+        VisionVideoLejepaTrainStepProfile {
+            loss,
+            phases: VisionVideoLejepaTrainStepPhaseTimes {
+                forward_ns,
+                backward_ns,
+                optimize_ns,
+            },
+        }
     }
 
     pub fn forward_loss(&self, batch: VideoClipBatch<B>) -> Tensor<B, 1> {
-        self.model
-            .as_ref()
-            .expect("video lejepa model")
-            .forward_losses(batch, self.rollout_steps, self.backprop_steps, false, false)
-            .total
-            .detach()
+        let model = self.model.as_ref().expect("video lejepa model");
+        if model.uses_pyramid_backbone() {
+            model.forward_losses_train_pyramid(
+                batch,
+                self.rollout_steps,
+                self.backprop_steps,
+                false,
+                false,
+            )
+                .total
+                .detach()
+        } else {
+            model.forward_losses(
+                batch,
+                self.rollout_steps,
+                self.backprop_steps,
+                false,
+                false,
+                false,
+            )
+                .total
+                .detach()
+        }
     }
 }
 

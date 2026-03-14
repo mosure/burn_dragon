@@ -41,6 +41,7 @@ pub use vision::{
     ImageNetDatasetConfig, ImageNetSplit, MovingMnistSplit, MovingMnistVideoDataLoader,
     MovingMnistRenderedClip, MovingMnistVideoDataset, MovingMnistVideoDatasetConfig,
     VideoClipBatch, VideoTargetHorizonCurriculum, VisionNormalize,
+    VisionVideoTrainProfileSnapshot, video_train_profile_reset, video_train_profile_snapshot,
 };
 pub use vision::{VisionDistillCheckpointEvalSummary, eval_vision_distill_checkpoint_backend};
 pub(crate) use vision::{

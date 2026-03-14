@@ -12,7 +12,7 @@ fn video_lejepa_artifacts_include_full_clip_encoder_pca() {
     video.artifact_output = VisionArtifactOutputMode::Avi;
     let model = make_video_model::<Backend>(&vision, &video, &device);
     let batch = toy_video_batch_with_lengths::<Backend>(&device, 3, 2, 1);
-    let losses = model.forward_losses(batch, 2, 2, true, true);
+    let losses = model.forward_losses(batch, 2, 2, true, true, true);
     let artifacts = losses.artifacts.expect("artifacts");
 
     assert!(artifacts.views.is_none());
@@ -63,7 +63,7 @@ fn video_lejepa_artifacts_reference_maps_match_reference_encoder() {
     let forward = model.forward_video(batch.clone(), 2, 2, 6);
     let (_, _, expected_patch_steps, expected_pca_steps) =
         collect_video_feature_maps(forward.frame_patch_tokens, 1, false);
-    let losses = model.forward_losses(batch, 2, 2, true, true);
+    let losses = model.forward_losses(batch, 2, 2, true, true, true);
     let artifacts = losses.artifacts.expect("artifacts");
 
     let (_, _, expected_posterior_patch_steps, expected_posterior_pca_steps) =
@@ -204,7 +204,7 @@ fn video_lejepa_long_horizon_predictions_extend_beyond_training_target() {
         [2, 4, 4, 16]
     );
 
-    let losses = model.forward_losses(batch, 2, 2, true, true);
+    let losses = model.forward_losses(batch, 2, 2, true, true, true);
     let artifacts = losses.artifacts.expect("artifacts");
     let frames = artifacts.frames.expect("reference frames");
     let recon = artifacts.debug_recon_frames.expect("debug recon frames");

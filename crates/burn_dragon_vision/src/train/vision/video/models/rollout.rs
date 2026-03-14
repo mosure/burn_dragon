@@ -1,4 +1,5 @@
 use super::*;
+use crate::train::vision::video::dynamics::split_clip_observation_and_target_projections;
 
 type RolloutHorizonMetricArray<B> = [Tensor<B, 1>; VISION_ROLLOUT_HORIZON_COUNT];
 type RolloutHorizonMetricArrays<B> = (
@@ -65,14 +66,28 @@ impl<B: BackendTrait> VisionVideoLejepaModel<B> {
         let Some(step_mode_embeddings) = &self.step_mode_embeddings else {
             return patch_tokens;
         };
-        let [batch, patch_count, embed_dim] = patch_tokens.shape().dims::<3>();
+        let embed_dim = patch_tokens.shape().dims::<3>()[2];
         let bias = step_mode_embeddings
             .val()
             .slice_dim(0, mode.index()..mode.index() + 1)
-            .reshape([1, 1, embed_dim])
-            .repeat_dim(0, batch)
-            .repeat_dim(1, patch_count);
+            .reshape([1, 1, embed_dim]);
         patch_tokens + bias
+    }
+
+    pub(super) fn apply_step_mode_spatial(
+        &self,
+        patch_state: Tensor<B, 4>,
+        mode: StructuredStepMode,
+    ) -> Tensor<B, 4> {
+        let Some(step_mode_embeddings) = &self.step_mode_embeddings else {
+            return patch_state;
+        };
+        let embed_dim = patch_state.shape().dims::<4>()[1];
+        let bias = step_mode_embeddings
+            .val()
+            .slice_dim(0, mode.index()..mode.index() + 1)
+            .reshape([1, embed_dim, 1, 1]);
+        patch_state + bias
     }
 
     pub(super) fn refine_passes(&self) -> usize {
@@ -105,20 +120,17 @@ impl<B: BackendTrait> VisionVideoLejepaModel<B> {
         backprop_steps: usize,
         mode: StructuredStepMode,
     ) -> StructuredTopologyState<B> {
-        let mut patch_tokens = self.frame_model.pyramid_patch_tokens(&state);
-        let [batch, patch_count, embed_dim] = patch_tokens.shape().dims::<3>();
+        let mut patch_state = state.primary_state().clone();
+        let [batch, embed_dim, _height, _width] = patch_state.shape().dims::<4>();
         if let Some(global_condition) = global_condition {
             let cond = self
                 .patch_conditioner
                 .forward(global_condition)
-                .reshape([batch, 1, embed_dim])
-                .repeat_dim(1, patch_count);
-            patch_tokens = patch_tokens + cond;
+                .reshape([batch, embed_dim, 1, 1]);
+            patch_state = patch_state + cond;
         }
-        let patch_tokens = self.apply_step_mode(patch_tokens, mode);
-        let state = self
-            .frame_model
-            .pyramid_state_with_patch_tokens(state, patch_tokens);
+        let patch_state = self.apply_step_mode_spatial(patch_state, mode);
+        let state = self.frame_model.pyramid_state_with_patch_state(state, patch_state);
         self.frame_model
             .forward_pyramid_state_rollout_mode_unbounded(state, steps, backprop_steps, mode)
     }
@@ -267,13 +279,12 @@ impl<B: BackendTrait> VisionVideoLejepaModel<B> {
         backprop_steps: usize,
         mode: StructuredStepMode,
     ) -> VisionVideoRolloutOutput<B> {
-        let [batch, patch_count, embed_dim] = patch_tokens.shape().dims::<3>();
+        let [batch, _patch_count, embed_dim] = patch_tokens.shape().dims::<3>();
         let conditioned = if let Some(global_condition) = global_condition {
             let cond = self
                 .patch_conditioner
                 .forward(global_condition)
-                .reshape([batch, 1, embed_dim])
-                .repeat_dim(1, patch_count);
+                .reshape([batch, 1, embed_dim]);
             patch_tokens + cond
         } else {
             patch_tokens
@@ -837,14 +848,8 @@ impl<B: BackendTrait> VisionVideoLejepaModel<B> {
             .slice_dim(1, 0..future_len_all),
             future_patch_tokens,
             context_structured_state: None,
-            probe_logits: Tensor::<B, 2>::zeros(
-                [clip_frames.shape().dims::<5>()[0], 1],
-                &clip_frames.device(),
-            ),
-            probe_labels: Tensor::<B, 1, Int>::zeros(
-                [clip_frames.shape().dims::<5>()[0]],
-                &clip_frames.device(),
-            ),
+            probe_logits: None,
+            probe_labels: None,
             clip_frames,
             context_len,
             target_len,
@@ -862,15 +867,22 @@ impl<B: BackendTrait> VisionVideoLejepaModel<B> {
     ) -> VisionVideoForward<B> {
         let clip_frames = batch.clip_frames;
         let labels = batch.labels;
-        let [batch_size, clip_len, channels, height, width] = clip_frames.shape().dims::<5>();
+        let [batch_size, clip_len, _channels, _height, _width] = clip_frames.shape().dims::<5>();
         let context_len = batch.context_len.min(clip_len.saturating_sub(1)).max(1);
         let target_end = (context_len + batch.target_len).min(clip_len);
         let target_len = target_end.saturating_sub(context_len).max(1);
         let available_future_len = clip_len.saturating_sub(context_len).max(target_len);
         let future_len_all = available_future_len.min(future_len_requested.max(target_len));
-        let context_frames = clip_frames.clone().slice_dim(1, 0..context_len);
-        let context_observation_patch_tokens =
-            embed_clip_frames_raw_with_model(&self.frame_model, context_frames.clone());
+        let (context_observation_patch_tokens, context_target_proj, target_proj_all) =
+            split_clip_observation_and_target_projections(
+                &self.frame_model,
+                self.teacher_frame_model.as_ref(),
+                clip_frames.clone(),
+                context_len,
+                future_len_all,
+                steps,
+                self.projection_dim,
+            );
         let context_forward = if self.uses_pyramid_backbone() {
             self.filter_context_patch_latents_pyramid(
                 context_observation_patch_tokens,
@@ -883,48 +895,6 @@ impl<B: BackendTrait> VisionVideoLejepaModel<B> {
                 steps,
                 backprop_steps,
             )
-        };
-        let context_target_proj = if let Some(teacher) = &self.teacher_frame_model {
-            project_clip_frames_with_model(
-                teacher,
-                context_frames.clone(),
-                steps,
-                self.embed_dim,
-                self.projection_dim,
-            )
-            .detach()
-        } else {
-            project_clip_frames_with_model(
-                &self.frame_model,
-                context_frames.clone(),
-                steps,
-                self.embed_dim,
-                self.projection_dim,
-            )
-            .detach()
-        };
-        let future_target_frames = clip_frames
-            .clone()
-            .slice_dim(1, context_len..context_len + future_len_all)
-            .reshape([batch_size, future_len_all, channels, height, width]);
-        let target_proj_all = if let Some(teacher) = &self.teacher_frame_model {
-            project_clip_frames_with_model(
-                teacher,
-                future_target_frames,
-                steps,
-                self.embed_dim,
-                self.projection_dim,
-            )
-            .detach()
-        } else {
-            project_clip_frames_with_model(
-                &self.frame_model,
-                future_target_frames,
-                steps,
-                self.embed_dim,
-                self.projection_dim,
-            )
-            .detach()
         };
         let target_proj = target_proj_all.clone();
         let observation_proj = self
@@ -984,7 +954,11 @@ impl<B: BackendTrait> VisionVideoLejepaModel<B> {
             .clone()
             .slice_dim(1, (context_len - 1)..context_len)
             .reshape([batch_size, self.embed_dim]);
-        let probe_logits = self.probe.forward(context_summary.clone().detach());
+        let probe_logits = if self.config.loss.probe_weight > 0.0 {
+            Some(self.probe.forward(context_summary.clone().detach()))
+        } else {
+            None
+        };
         let cls_embed = Tensor::cat(
             vec![context_forward.cls_embed.clone(), future_cls_embed.clone()],
             1,
@@ -1014,7 +988,11 @@ impl<B: BackendTrait> VisionVideoLejepaModel<B> {
             future_patch_tokens,
             context_structured_state,
             probe_logits,
-            probe_labels: labels,
+            probe_labels: if self.config.loss.probe_weight > 0.0 {
+                Some(labels)
+            } else {
+                None
+            },
             clip_frames,
             context_len,
             target_len,

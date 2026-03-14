@@ -44,3 +44,6 @@ pub use video::dataset::{
     VideoTargetHorizonCurriculum,
 };
 pub(crate) use video::models::{VisionVideoLejepaLosses, VisionVideoLejepaModel};
+pub use video::models::{
+    VisionVideoTrainProfileSnapshot, video_train_profile_reset, video_train_profile_snapshot,
+};

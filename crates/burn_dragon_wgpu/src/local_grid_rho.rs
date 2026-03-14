@@ -296,7 +296,7 @@ where
     let copy_start = prof_enabled.then(Instant::now);
     let query_copy = query.clone();
     let value_copy = value.clone();
-    let rho_copy = rho.add_scalar(0.0);
+    let rho_copy = rho.clone();
     let decay_copy = decay.clone();
     let meta_copy = meta.clone();
     let copy_ns = copy_start
@@ -335,7 +335,7 @@ where
             state.total_ns = state.total_ns.saturating_add(start.elapsed().as_nanos());
             state.setup_ns = state.setup_ns.saturating_add(setup_ns);
             state.copy_ns = state.copy_ns.saturating_add(copy_ns);
-            state.transient_allocations = state.transient_allocations.saturating_add(5);
+            state.transient_allocations = state.transient_allocations.saturating_add(4);
             state.metadata_reuse_hits = state.metadata_reuse_hits.saturating_add(1);
             state.metadata_reuse_bytes = state
                 .metadata_reuse_bytes

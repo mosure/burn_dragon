@@ -60,11 +60,18 @@ pub mod kernels {
             try_fused_local_grid_rho_attention_wgpu_head_decay_with_plan,
         };
         pub use crate::structured_pyramid_rho::{
-            CompiledStructuredPyramidRhoPlan, StructuredPyramidProfileSnapshot,
-            StructuredPyramidRhoStepInput, StructuredPyramidRhoStepOutput,
+            CompiledStructuredPyramidRhoPlan, CompiledStructuredPyramidSplitPlan,
+            StructuredPyramidBankMode, StructuredPyramidCoarseOnlyNoPatchStepInput,
+            StructuredPyramidCoarseOnlyStepInput, StructuredPyramidCoarseOnlyStepOutput,
+            StructuredPyramidProfileSnapshot, StructuredPyramidRhoStepInput,
+            StructuredPyramidRhoStepOutput, StructuredPyramidSplitPlanSpec,
+            StructuredPyramidSplitRhoStepInput,
             StructuredPyramidShape, reference_structured_pyramid_rho_step,
             structured_pyramid_profile_reset, structured_pyramid_profile_snapshot,
             supports_structured_pyramid_rho_backend, try_fused_structured_pyramid_rho_step_wgpu,
+            try_fused_structured_pyramid_coarse_only_no_patch_step_wgpu_with_plan,
+            try_fused_structured_pyramid_coarse_only_step_wgpu_with_plan,
+            try_fused_structured_pyramid_split_step_wgpu_with_plan,
             try_fused_structured_pyramid_rho_step_wgpu_with_plan,
         };
         pub use crate::vision_rho::{

@@ -101,8 +101,8 @@ pub(crate) struct VisionVideoForward<B: BackendTrait> {
     pub(crate) future_cls_embed: Tensor<B, 3>,
     pub(crate) future_patch_tokens: Tensor<B, 4>,
     pub(crate) context_structured_state: Option<StructuredTopologyState<B>>,
-    pub(crate) probe_logits: Tensor<B, 2>,
-    pub(crate) probe_labels: Tensor<B, 1, Int>,
+    pub(crate) probe_logits: Option<Tensor<B, 2>>,
+    pub(crate) probe_labels: Option<Tensor<B, 1, Int>>,
     pub(crate) clip_frames: Tensor<B, 5>,
     pub(crate) context_len: usize,
     pub(crate) target_len: usize,
@@ -180,6 +180,41 @@ pub(crate) fn encode_clip_frames_with_model<B: BackendTrait>(
     (cls_embed, frame_patch_tokens, cls_proj)
 }
 
+fn project_clip_frames_with_model_only<B: BackendTrait>(
+    model: &VisionDragon<B>,
+    clip_frames: Tensor<B, 5>,
+    steps: usize,
+    projection_dim: usize,
+) -> Tensor<B, 3> {
+    let [batch_size, clip_len, channels, height, width] = clip_frames.shape().dims::<5>();
+    let flat_count = batch_size * clip_len;
+    let flat_frames = clip_frames.reshape([flat_count, channels, height, width]);
+    let chunk_size = VIDEO_FRAME_ENCODE_CHUNK.max(1);
+    let mut cls_proj_chunks = Vec::new();
+
+    for chunk_start in (0..flat_count).step_by(chunk_size) {
+        let chunk_end = (chunk_start + chunk_size).min(flat_count);
+        let chunk_len = chunk_end.saturating_sub(chunk_start);
+        if chunk_len == 0 {
+            continue;
+        }
+        let frames_chunk = flat_frames.clone().slice_dim(0, chunk_start..chunk_end);
+        let patch = model.patch_embed(frames_chunk);
+        let encoded = model.forward_tokens_embed_steps_rollout(patch.tokens, steps, steps);
+        let cls_proj_chunk = model
+            .project_tokens(encoded.cls_token.unsqueeze_dim::<3>(1))
+            .reshape([chunk_len, projection_dim.max(1)]);
+        cls_proj_chunks.push(cls_proj_chunk);
+    }
+
+    let cls_proj_flat = if cls_proj_chunks.len() == 1 {
+        cls_proj_chunks.pop().expect("missing cls projection chunk")
+    } else {
+        Tensor::cat(cls_proj_chunks, 0)
+    };
+    cls_proj_flat.reshape([batch_size, clip_len, projection_dim.max(1)])
+}
+
 pub(crate) fn embed_clip_frames_raw_with_model<B: BackendTrait>(
     model: &VisionDragon<B>,
     clip_frames: Tensor<B, 5>,
@@ -197,12 +232,91 @@ pub(crate) fn project_clip_frames_with_model<B: BackendTrait>(
     model: &VisionDragon<B>,
     clip_frames: Tensor<B, 5>,
     steps: usize,
-    embed_dim: usize,
     projection_dim: usize,
 ) -> Tensor<B, 3> {
-    let (_, _, cls_proj) =
-        encode_clip_frames_with_model(model, clip_frames, steps, steps, embed_dim, projection_dim);
-    cls_proj
+    project_clip_frames_with_model_only(model, clip_frames, steps, projection_dim)
+}
+
+pub(crate) fn split_clip_observation_and_target_projections<B: BackendTrait>(
+    model: &VisionDragon<B>,
+    teacher_model: Option<&VisionDragon<B>>,
+    clip_frames: Tensor<B, 5>,
+    context_len: usize,
+    future_len_all: usize,
+    steps: usize,
+    projection_dim: usize,
+) -> (Tensor<B, 4>, Tensor<B, 3>, Tensor<B, 3>) {
+    let context_clip_frames = clip_frames.clone().slice_dim(1, 0..context_len);
+    let context_observation_patch_tokens =
+        embed_clip_frames_raw_with_model(model, context_clip_frames);
+    let projected = if let Some(teacher) = teacher_model {
+        project_clip_frames_with_model(
+            teacher,
+            clip_frames,
+            steps,
+            projection_dim,
+        )
+        .detach()
+    } else {
+        project_clip_frames_with_model(
+            model,
+            clip_frames,
+            steps,
+            projection_dim,
+        )
+        .detach()
+    };
+    let context_target_proj = projected.clone().slice_dim(1, 0..context_len);
+    let target_proj_all = projected.slice_dim(1, context_len..context_len + future_len_all);
+    (
+        context_observation_patch_tokens,
+        context_target_proj,
+        target_proj_all,
+    )
+}
+
+pub(crate) fn split_clip_observation_and_target_projections_train<B: BackendTrait>(
+    model: &VisionDragon<B>,
+    teacher_model: Option<&VisionDragon<B>>,
+    clip_frames: Tensor<B, 5>,
+    context_len: usize,
+    future_len_all: usize,
+    steps: usize,
+    projection_dim: usize,
+    include_context_target_proj: bool,
+) -> (Tensor<B, 4>, Option<Tensor<B, 3>>, Tensor<B, 3>) {
+    if include_context_target_proj {
+        let (
+            context_observation_patch_tokens,
+            context_target_proj,
+            target_proj_all,
+        ) = split_clip_observation_and_target_projections(
+            model,
+            teacher_model,
+            clip_frames,
+            context_len,
+            future_len_all,
+            steps,
+            projection_dim,
+        );
+        return (
+            context_observation_patch_tokens,
+            Some(context_target_proj),
+            target_proj_all,
+        );
+    }
+
+    let context_clip_frames = clip_frames.clone().slice_dim(1, 0..context_len);
+    let context_observation_patch_tokens =
+        embed_clip_frames_raw_with_model(model, context_clip_frames);
+    let target_clip_frames = clip_frames
+        .slice_dim(1, context_len..context_len + future_len_all);
+    let target_proj_all = if let Some(teacher) = teacher_model {
+        project_clip_frames_with_model(teacher, target_clip_frames, steps, projection_dim).detach()
+    } else {
+        project_clip_frames_with_model(model, target_clip_frames, steps, projection_dim).detach()
+    };
+    (context_observation_patch_tokens, None, target_proj_all)
 }
 
 pub(crate) fn repeat_last_future_query<B: BackendTrait>(

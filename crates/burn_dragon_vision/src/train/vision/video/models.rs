@@ -1,9 +1,11 @@
 use crate::train::prelude::*;
 use crate::train::vision::video::dynamics::{
     VisionVideoContextForward, VisionVideoForward, VisionVideoObservationMerger,
-    VisionVideoPredictor, VisionVideoRolloutOutput, embed_clip_frames_raw_with_model,
-    encode_clip_frames_with_model, project_clip_frames_with_model, repeat_last_future_query,
+    VisionVideoPredictor, VisionVideoRolloutOutput, encode_clip_frames_with_model,
+    repeat_last_future_query, split_clip_observation_and_target_projections_train,
 };
+use std::sync::{LazyLock, Mutex};
+use std::time::Instant;
 use burn::nn::loss::CrossEntropyLossConfig;
 use burn_dragon_core::{
     BDH, BDHConfig, FusedKernelConfig, ModelState, RotaryEmbedding, StructuredStepMode,
@@ -85,6 +87,46 @@ type VideoArtifactMaps<B> = (
     Option<Tensor<B, 4>>,
     Option<Tensor<B, 5>>,
 );
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct VisionVideoTrainProfileSnapshot {
+    pub train_calls: u64,
+    pub split_projection_ns: u64,
+    pub context_rollout_ns: u64,
+    pub predict_rollout_ns: u64,
+    pub loss_heads_ns: u64,
+}
+
+static VIDEO_TRAIN_PROFILE: LazyLock<Mutex<VisionVideoTrainProfileSnapshot>> =
+    LazyLock::new(|| Mutex::new(VisionVideoTrainProfileSnapshot::default()));
+
+#[inline]
+fn video_train_profile_enabled() -> bool {
+    std::env::var_os("BDH_STAGE_PROFILE").is_some()
+}
+
+#[inline]
+fn video_train_profile_record(f: impl FnOnce(&mut VisionVideoTrainProfileSnapshot)) {
+    if !video_train_profile_enabled() {
+        return;
+    }
+    if let Ok(mut state) = VIDEO_TRAIN_PROFILE.lock() {
+        f(&mut state);
+    }
+}
+
+pub fn video_train_profile_reset() {
+    if let Ok(mut state) = VIDEO_TRAIN_PROFILE.lock() {
+        *state = VisionVideoTrainProfileSnapshot::default();
+    }
+}
+
+pub fn video_train_profile_snapshot() -> VisionVideoTrainProfileSnapshot {
+    VIDEO_TRAIN_PROFILE
+        .lock()
+        .map(|state| *state)
+        .unwrap_or_default()
+}
 
 fn collect_video_feature_maps<B: BackendTrait>(
     frame_patch_tokens: Tensor<B, 4>,
@@ -244,7 +286,7 @@ impl<B: BackendTrait> VisionVideoLejepaModel<B> {
         self
     }
 
-    fn uses_pyramid_backbone(&self) -> bool {
+    pub(crate) fn uses_pyramid_backbone(&self) -> bool {
         self.frame_model.pyramid_backbone_enabled()
     }
 
@@ -287,21 +329,31 @@ impl<B: BackendTrait> VisionVideoLejepaModel<B> {
         total
     }
 
-    fn forward_losses_train_pyramid(
+    pub(crate) fn forward_losses_train_pyramid(
         &self,
         batch: VideoClipBatch<B>,
         steps: usize,
         backprop_steps: usize,
         compute_rollout_metrics: bool,
+        compute_mode_separation: bool,
     ) -> VisionVideoLejepaLosses<B> {
+        video_train_profile_record(|state| {
+            state.train_calls += 1;
+        });
         let clip_frames = batch.clip_frames;
         let labels = batch.labels;
-        let [batch_size, clip_len, channels, height, width] = clip_frames.shape().dims::<5>();
+        let [batch_size, clip_len, _channels, height, width] = clip_frames.shape().dims::<5>();
         let context_len = batch.context_len.min(clip_len.saturating_sub(1)).max(1);
         let target_end = (context_len + batch.target_len).min(clip_len);
         let target_len = target_end.saturating_sub(context_len).max(1);
         let available_future_len = clip_len.saturating_sub(context_len).max(target_len);
-        let future_len_all = available_future_len;
+        // Plain train steps only supervise `target_len`, so avoid rolling/projecting the
+        // unsupervised tail unless rollout metrics explicitly request it.
+        let future_len_all = if compute_rollout_metrics {
+            available_future_len
+        } else {
+            target_len
+        };
         let projection_dim = self.projection_dim.max(1);
         let patch_count = ((height / self.frame_model.patch_size().max(1))
             * (width / self.frame_model.patch_size().max(1)))
@@ -312,52 +364,24 @@ impl<B: BackendTrait> VisionVideoLejepaModel<B> {
             compute_rollout_metrics || self.config.loss.debug_recon_weight > 0.0;
         let collect_predicted_proj = compute_rollout_metrics || self.config.loss.sigreg.enabled;
 
-        let context_frames = clip_frames.clone().slice_dim(1, 0..context_len);
-        let context_observation_patch_tokens =
-            embed_clip_frames_raw_with_model(&self.frame_model, context_frames.clone());
-        let context_target_proj = if let Some(teacher) = &self.teacher_frame_model {
-            project_clip_frames_with_model(
-                teacher,
-                context_frames.clone(),
-                steps,
-                self.embed_dim,
-                projection_dim,
-            )
-            .detach()
-        } else {
-            project_clip_frames_with_model(
+        let split_start = video_train_profile_enabled().then(Instant::now);
+        let include_context_target_proj = self.config.loss.observe_weight > 0.0;
+        let (context_observation_patch_tokens, context_target_proj, target_proj_all) =
+            split_clip_observation_and_target_projections_train(
                 &self.frame_model,
-                context_frames.clone(),
+                self.teacher_frame_model.as_ref(),
+                clip_frames.clone(),
+                context_len,
+                future_len_all,
                 steps,
-                self.embed_dim,
                 projection_dim,
-            )
-            .detach()
-        };
-
-        let future_target_frames = clip_frames
-            .clone()
-            .slice_dim(1, context_len..context_len + future_len_all)
-            .reshape([batch_size, future_len_all, channels, height, width]);
-        let target_proj_all = if let Some(teacher) = &self.teacher_frame_model {
-            project_clip_frames_with_model(
-                teacher,
-                future_target_frames,
-                steps,
-                self.embed_dim,
-                projection_dim,
-            )
-            .detach()
-        } else {
-            project_clip_frames_with_model(
-                &self.frame_model,
-                future_target_frames,
-                steps,
-                self.embed_dim,
-                projection_dim,
-            )
-            .detach()
-        };
+                include_context_target_proj,
+            );
+        if let Some(start) = split_start {
+            video_train_profile_record(|state| {
+                state.split_projection_ns += start.elapsed().as_nanos() as u64;
+            });
+        }
 
         let mut observe = zero.clone();
         let mut previous_state: Option<StructuredTopologyState<B>> = None;
@@ -368,6 +392,7 @@ impl<B: BackendTrait> VisionVideoLejepaModel<B> {
         };
         let mut last_refined_cls: Option<Tensor<B, 2>> = None;
 
+        let context_start = video_train_profile_enabled().then(Instant::now);
         for step_idx in 0..context_len {
             let observation = context_observation_patch_tokens
                 .clone()
@@ -408,41 +433,57 @@ impl<B: BackendTrait> VisionVideoLejepaModel<B> {
                     )
             };
 
-            let posterior_cls = self.frame_model.pyramid_summary(&posterior_state);
-            let observation_proj_step = self
-                .frame_model
-                .project_tokens(posterior_cls.clone().unsqueeze_dim::<3>(1))
-                .reshape([batch_size, projection_dim]);
-            let observation_target_step = context_target_proj
-                .clone()
-                .slice_dim(1, step_idx..step_idx + 1)
-                .reshape([batch_size, projection_dim]);
-            observe = observe
-                + (observation_proj_step - observation_target_step)
-                    .powf_scalar(2.0)
-                    .mean();
+            if include_context_target_proj {
+                let posterior_cls = self.frame_model.pyramid_summary(&posterior_state);
+                let observation_proj_step = self
+                    .frame_model
+                    .project_tokens(posterior_cls.unsqueeze_dim::<3>(1))
+                    .reshape([batch_size, projection_dim]);
+                let observation_target_step = context_target_proj
+                    .as_ref()
+                    .expect("context target projections should exist when observe loss is enabled")
+                    .clone()
+                    .slice_dim(1, step_idx..step_idx + 1)
+                    .reshape([batch_size, projection_dim]);
+                observe = observe
+                    + (observation_proj_step - observation_target_step)
+                        .powf_scalar(2.0)
+                        .mean();
+            }
 
             let refined_state =
                 self.maybe_refine_pyramid_state(posterior_state, steps, backprop_steps);
-            let refined_patch = self.frame_model.pyramid_patch_tokens(&refined_state);
-            let refined_cls = self.frame_model.pyramid_summary(&refined_state);
             if collect_patch_tokens {
+                let refined_patch = self.frame_model.pyramid_patch_tokens(&refined_state);
                 context_patch_tokens_detached.push(refined_patch.detach().unsqueeze_dim::<4>(1));
             }
+            let refined_cls = self.frame_model.pyramid_summary(&refined_state);
             last_refined_cls = Some(refined_cls);
             previous_state = Some(refined_state);
         }
+        if let Some(start) = context_start {
+            video_train_profile_record(|state| {
+                state.context_rollout_ns += start.elapsed().as_nanos() as u64;
+            });
+        }
 
-        observe = observe.div_scalar(context_len as f32);
+        if include_context_target_proj {
+            observe = observe.div_scalar(context_len as f32);
+        }
 
         let mut structured_state = previous_state.expect("pyramid context state missing");
         let context_summary = last_refined_cls.expect("pyramid context summary missing");
-        let mode_separation_ratio = self.mode_separation_ratio_structured(
-            structured_state.clone().detach(),
-            context_summary.clone().detach(),
-            steps,
-            backprop_steps,
-        );
+        let mut current_summary = context_summary.clone();
+        let mode_separation_ratio = if compute_mode_separation {
+            self.mode_separation_ratio_structured(
+                structured_state.clone().detach(),
+                context_summary.clone().detach(),
+                steps,
+                backprop_steps,
+            )
+        } else {
+            zero.clone()
+        };
 
         let mut prediction = zero.clone();
         let mut cosine = zero.clone();
@@ -456,16 +497,17 @@ impl<B: BackendTrait> VisionVideoLejepaModel<B> {
         } else {
             Vec::new()
         };
+        let predict_start = video_train_profile_enabled().then(Instant::now);
         for step_idx in 0..future_len_all {
-            let summary = self.frame_model.pyramid_summary(&structured_state);
             structured_state = self.rollout_pyramid_step(
                 structured_state,
-                Some(summary),
+                Some(current_summary),
                 steps,
                 backprop_steps,
                 StructuredStepMode::Predict,
             );
             let future_cls = self.frame_model.pyramid_summary(&structured_state);
+            current_summary = future_cls.clone();
             let predicted_proj_step = self
                 .predictor
                 .forward(future_cls.clone().unsqueeze_dim::<3>(1));
@@ -493,6 +535,11 @@ impl<B: BackendTrait> VisionVideoLejepaModel<B> {
                 structured_state = structured_state.detach();
             }
         }
+        if let Some(start) = predict_start {
+            video_train_profile_record(|state| {
+                state.predict_rollout_ns += start.elapsed().as_nanos() as u64;
+            });
+        }
 
         prediction = prediction.div_scalar(target_len as f32);
         cosine = cosine.div_scalar(target_len as f32);
@@ -510,6 +557,7 @@ impl<B: BackendTrait> VisionVideoLejepaModel<B> {
             zero.clone()
         };
 
+        let loss_heads_start = video_train_profile_enabled().then(Instant::now);
         let debug_recon = if self.config.loss.debug_recon_weight > 0.0 {
             let context_patch_tokens = Tensor::cat(context_patch_tokens_detached.clone(), 1);
             let future_patch_tokens = Tensor::cat(future_patch_tokens_detached.clone(), 1);
@@ -583,15 +631,24 @@ impl<B: BackendTrait> VisionVideoLejepaModel<B> {
             ],
         );
 
-        let probe_logits = self.probe.forward(context_summary.clone().detach());
-        let probe_loss = self
-            .probe_loss
-            .forward(probe_logits.clone(), labels.clone());
-        let probe_pred = probe_logits
-            .clone()
-            .argmax(1)
-            .reshape([labels.shape().dims::<1>()[0]]);
-        let probe_acc = probe_pred.equal(labels).float().mean();
+        let (probe_loss, probe_acc) = if self.config.loss.probe_weight > 0.0 {
+            let probe_logits = self.probe.forward(context_summary.clone().detach());
+            let probe_loss = self
+                .probe_loss
+                .forward(probe_logits.clone(), labels.clone());
+            let probe_pred = probe_logits
+                .argmax(1)
+                .reshape([labels.shape().dims::<1>()[0]]);
+            let probe_acc = probe_pred.equal(labels).float().mean();
+            (probe_loss, probe_acc)
+        } else {
+            (zero.clone(), zero.clone())
+        };
+        if let Some(start) = loss_heads_start {
+            video_train_profile_record(|state| {
+                state.loss_heads_ns += start.elapsed().as_nanos() as u64;
+            });
+        }
 
         VisionVideoLejepaLosses {
             total,
@@ -622,6 +679,7 @@ impl<B: BackendTrait> VisionVideoLejepaModel<B> {
         backprop_steps: usize,
         capture_artifacts: bool,
         compute_long_rollout_metrics: bool,
+        compute_mode_separation: bool,
     ) -> VisionVideoLejepaLosses<B> {
         let requested_future_len =
             if compute_long_rollout_metrics && self.config.artifact_future_frames > 0 {
@@ -651,7 +709,11 @@ impl<B: BackendTrait> VisionVideoLejepaModel<B> {
             forward.target_proj_all.clone(),
             supervision_mask.clone(),
         );
-        let mode_separation_ratio = self.mode_separation_ratio(&forward, steps, backprop_steps);
+        let mode_separation_ratio = if compute_mode_separation {
+            self.mode_separation_ratio(&forward, steps, backprop_steps)
+        } else {
+            zero.clone()
+        };
         let sigreg = if self.config.loss.sigreg.enabled {
             lejepa_sigreg_loss(
                 (forward.predicted_proj_all.clone() * supervision_mask.clone()).swap_dims(0, 1),
@@ -715,18 +777,29 @@ impl<B: BackendTrait> VisionVideoLejepaModel<B> {
                 ),
             ],
         );
-        let probe_loss = self
-            .probe_loss
-            .forward(forward.probe_logits.clone(), forward.probe_labels.clone());
-        let probe_pred = forward
-            .probe_logits
-            .clone()
-            .argmax(1)
-            .reshape([forward.probe_labels.shape().dims::<1>()[0]]);
-        let probe_acc = probe_pred
-            .equal(forward.probe_labels.clone())
-            .float()
-            .mean();
+        let (probe_loss, probe_acc) = if self.config.loss.probe_weight > 0.0 {
+            let probe_logits = forward
+                .probe_logits
+                .clone()
+                .expect("probe logits should exist when probe loss is enabled");
+            let probe_labels = forward
+                .probe_labels
+                .clone()
+                .expect("probe labels should exist when probe loss is enabled");
+            let probe_loss = self
+                .probe_loss
+                .forward(probe_logits.clone(), probe_labels.clone());
+            let probe_pred = probe_logits
+                .argmax(1)
+                .reshape([probe_labels.shape().dims::<1>()[0]]);
+            let probe_acc = probe_pred
+                .equal(probe_labels)
+                .float()
+                .mean();
+            (probe_loss, probe_acc)
+        } else {
+            (zero.clone(), zero.clone())
+        };
 
         let artifacts = if capture_artifacts && self.config.artifact_every > 0 {
             let [batch_size, clip_len, channels, height, width] =
@@ -811,10 +884,14 @@ impl<B: BackendTrait> VisionVideoLejepaModel<B> {
                         pca_rgb_steps: None,
                         debug_patch_norms_steps: None,
                         debug_pca_rgb_steps: None,
-                        probe_logits: Some(
-                            forward.probe_logits.clone().slice_dim(0, 0..image_count),
-                        ),
-                        labels: Some(forward.probe_labels.clone().slice_dim(0, 0..image_count)),
+                        probe_logits: forward
+                            .probe_logits
+                            .clone()
+                            .map(|tensor| tensor.slice_dim(0, 0..image_count)),
+                        labels: forward
+                            .probe_labels
+                            .clone()
+                            .map(|tensor| tensor.slice_dim(0, 0..image_count)),
                         legend: Some(vec![
                             "reference_last".to_string(),
                             "decoded_spatiotemporal_latent_last".to_string(),
@@ -836,10 +913,14 @@ impl<B: BackendTrait> VisionVideoLejepaModel<B> {
                         pca_rgb_steps: reference_pca_rgb_steps,
                         debug_patch_norms_steps: None,
                         debug_pca_rgb_steps: debug_recon.pca_rgb_steps.clone(),
-                        probe_logits: Some(
-                            forward.probe_logits.clone().slice_dim(0, 0..image_count),
-                        ),
-                        labels: Some(forward.probe_labels.clone().slice_dim(0, 0..image_count)),
+                        probe_logits: forward
+                            .probe_logits
+                            .clone()
+                            .map(|tensor| tensor.slice_dim(0, 0..image_count)),
+                        labels: forward
+                            .probe_labels
+                            .clone()
+                            .map(|tensor| tensor.slice_dim(0, 0..image_count)),
                         legend: Some(vec![
                             "reference_frame".to_string(),
                             "posterior_context_state_pca_rgb".to_string(),
@@ -1135,9 +1216,9 @@ impl<B: AutodiffBackend> TrainStep for VisionVideoLejepaModel<B> {
         let rollout_steps = self.rollout.sample_steps();
         let backprop_steps = self.rollout.backprop_steps(rollout_steps);
         let losses = if self.uses_pyramid_backbone() {
-            self.forward_losses_train_pyramid(batch, rollout_steps, backprop_steps, false)
+            self.forward_losses_train_pyramid(batch, rollout_steps, backprop_steps, false, false)
         } else {
-            self.forward_losses(batch, rollout_steps, backprop_steps, false, false)
+            self.forward_losses(batch, rollout_steps, backprop_steps, false, false, false)
         };
         let total_for_backprop = if let Some(weighted_probe) =
             self.weighted_loss_term(losses.probe_loss.clone(), self.config.loss.probe_weight)
@@ -1214,6 +1295,7 @@ impl<B: BackendTrait> ValidStep for VisionVideoLejepaModel<B> {
             backprop_steps,
             capture_artifacts,
             compute_long_rollout_metrics,
+            true,
         );
         let long_rollout_inv_to_horizon = if compute_long_rollout_metrics {
             losses.rollout_inv_to_horizon.clone().map(Some)

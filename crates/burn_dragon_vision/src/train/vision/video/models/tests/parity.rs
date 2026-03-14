@@ -62,7 +62,7 @@ fn wgpu_video_temporal_autodiff_matches_reference_after_one_step() {
         .init::<Backend, VisionVideoLejepaModel<Backend>>();
     let lr: LearningRate = 1e-3;
 
-    let reference_losses = reference.forward_losses(batch.clone(), 2, 2, false, false);
+    let reference_losses = reference.forward_losses(batch.clone(), 2, 2, false, false, true);
     let reference_total = reference_losses.total.clone()
         + reference_losses
             .probe_loss
@@ -77,7 +77,7 @@ fn wgpu_video_temporal_autodiff_matches_reference_after_one_step() {
     let reference_grads = GradientsParams::from_grads(reference_total.backward(), &reference);
     let reference = reference.optimize::<Backend, _>(&mut optimizer, lr, reference_grads);
 
-    let fused_losses = fused.forward_losses(batch.clone(), 2, 2, false, false);
+    let fused_losses = fused.forward_losses(batch.clone(), 2, 2, false, false, true);
     let fused_total = fused_losses.total.clone()
         + fused_losses
             .probe_loss

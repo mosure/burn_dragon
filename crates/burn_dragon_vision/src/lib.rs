@@ -37,11 +37,12 @@ pub mod api {
     pub mod model {
         pub use crate::model::{
             PatchEmbed, PatchEmbedOutput, PatchGrid, SpatialPositionalEncodingKind,
-            VisionAttentionMode, VisionBackboneKind, VisionCellularConfig,
+            StageAwareHostProfileSnapshot, VisionAttentionMode, VisionBackboneKind, VisionCellularConfig,
             VisionCellularState, VisionDragon, VisionDragonConfig, VisionDragonMultiOutput,
             VisionDragonOutput, VisionLatentActivation, VisionPatchEmbedMode,
             VisionPyramidConfig, VisionRhoStreamConfig, VisionTrmGraphConfig,
-            VisionTrmGridMismatchPolicy, patchify, pool_patch_tokens, unpatchify,
+            VisionTrmGridMismatchPolicy, patchify, pool_patch_tokens,
+            stage_aware_host_profile_reset, stage_aware_host_profile_snapshot, unpatchify,
         };
     }
 
@@ -77,6 +78,8 @@ pub mod api {
             MovingMnistRenderedClip, MovingMnistVideoDataset, MovingMnistVideoDatasetConfig,
             VideoClipBatch,
             VisionNormalize,
+            VisionVideoTrainProfileSnapshot, video_train_profile_reset,
+            video_train_profile_snapshot,
         };
     }
 
@@ -99,11 +102,12 @@ pub use foveation::{
     render_foveated_patch_with_radius, sigma_from_unit,
 };
 pub use model::{
-    PatchEmbed, PatchEmbedOutput, PatchGrid, SpatialPositionalEncodingKind, VisionAttentionMode,
-    VisionBackboneKind, VisionCellularConfig, VisionCellularState, VisionDragon,
+    PatchEmbed, PatchEmbedOutput, PatchGrid, SpatialPositionalEncodingKind, StageAwareHostProfileSnapshot,
+    VisionAttentionMode, VisionBackboneKind, VisionCellularConfig, VisionCellularState, VisionDragon,
     VisionDragonConfig, VisionDragonMultiOutput, VisionDragonOutput, VisionLatentActivation,
     VisionPatchEmbedMode, VisionPyramidConfig, VisionRhoStreamConfig, VisionTrmGraphConfig,
-    VisionTrmGridMismatchPolicy, patchify, pool_patch_tokens, unpatchify,
+    VisionTrmGridMismatchPolicy, patchify, pool_patch_tokens, stage_aware_host_profile_reset,
+    stage_aware_host_profile_snapshot, unpatchify,
 };
 #[cfg(feature = "train")]
 pub use train::{
@@ -111,7 +115,8 @@ pub use train::{
     ImageNetAugmentations, ImageNetBatch, ImageNetDataLoader, ImageNetDataset,
     ImageNetDatasetConfig, ImageNetSplit, MovingMnistSplit, MovingMnistVideoDataLoader,
     MovingMnistRenderedClip, MovingMnistVideoDataset, MovingMnistVideoDatasetConfig,
-    VideoClipBatch, VisionNormalize,
+    VideoClipBatch, VisionNormalize, VisionVideoTrainProfileSnapshot,
+    video_train_profile_reset, video_train_profile_snapshot,
 };
 
 #[cfg(feature = "train")]

@@ -93,15 +93,8 @@ fn make_rho_stream_model_with_decay<B: BackendTrait>(
     VisionDragon::<B>::new(config, device)
 }
 
-fn make_pyramid_model<B: BackendTrait>(device: &B::Device) -> VisionDragon<B> {
-    make_pyramid_model_with_kernel(device, false)
-}
-
-fn make_pyramid_model_with_kernel<B: BackendTrait>(
-    device: &B::Device,
-    kernel_enabled: bool,
-) -> VisionDragon<B> {
-    let config = VisionDragonConfig {
+fn make_pyramid_config() -> VisionDragonConfig {
+    VisionDragonConfig {
         image_size: 4,
         patch_size: 2,
         patch_embed_mode: VisionPatchEmbedMode::default(),
@@ -126,25 +119,92 @@ fn make_pyramid_model_with_kernel<B: BackendTrait>(
         pos_max_width: 2,
         attention_mode: VisionAttentionMode::RowL1,
         use_alibi: false,
-        fused_kernels: FusedKernelConfig {
-            enabled: kernel_enabled,
-            ..FusedKernelConfig::default()
-        },
+        fused_kernels: FusedKernelConfig::default(),
         mhc: ManifoldHyperConnectionsConfig::default(),
         trm_graph: VisionTrmGraphConfig {
             enabled: true,
             coarse_stride: 2,
             hub_count: 2,
             rank: 2,
+            patch_rank: None,
+            coarse_rank: None,
+            global_rank: None,
             value_dim: 4,
             local_radius: 1,
             local_diagonals: true,
             local_self: true,
+            coarse_local_radius: None,
+            coarse_local_diagonals: None,
+            coarse_local_self: None,
+            predict_coarse_substeps: 1,
             decay: 0.9,
             hub_gates: true,
+            bank_schedule: VisionTrmGraphBankScheduleConfig::default(),
             grid_mismatch_policy: VisionTrmGridMismatchPolicy::Error,
         },
         rho_stream: Default::default(),
+    }
+}
+
+fn make_pyramid_model<B: BackendTrait>(device: &B::Device) -> VisionDragon<B> {
+    make_pyramid_model_with_kernel(device, false)
+}
+
+fn make_pyramid_model_with_kernel<B: BackendTrait>(
+    device: &B::Device,
+    kernel_enabled: bool,
+) -> VisionDragon<B> {
+    let mut config = make_pyramid_config();
+    config.fused_kernels = FusedKernelConfig {
+        enabled: kernel_enabled,
+        ..FusedKernelConfig::default()
+    };
+    VisionDragon::<B>::new(config, device)
+}
+
+fn make_stage_aware_pyramid_config() -> VisionDragonConfig {
+    let mut config = make_pyramid_config();
+    config.image_size = 8;
+    config.patch_size = 2;
+    config.embed_dim = 8;
+    config.projection_dim = 8;
+    config.projection_hidden_dim = 16;
+    config.pos_max_height = 4;
+    config.pos_max_width = 4;
+    config.trm_graph.patch_rank = Some(1);
+    config.trm_graph.coarse_rank = Some(4);
+    config.trm_graph.global_rank = Some(2);
+    config.trm_graph.predict_coarse_substeps = 3;
+    config.trm_graph.bank_schedule = VisionTrmGraphBankScheduleConfig {
+        observe: VisionTrmGraphBankModeConfig::default(),
+        refine: VisionTrmGraphBankModeConfig::default(),
+        predict: VisionTrmGraphBankModeConfig {
+            patch_local_read: false,
+            patch_local_write: false,
+            patch_from_coarse_read: false,
+            patch_from_hub_read: true,
+            patch_to_coarse_write: false,
+            patch_to_global_write: false,
+            coarse_local_read: true,
+            coarse_local_write: true,
+            coarse_from_hub_read: true,
+            coarse_to_global_write: true,
+            patch_decay_scale: 1.0,
+            coarse_decay_scale: 1.0,
+            global_decay_scale: 1.0,
+        },
+    };
+    config
+}
+
+fn make_stage_aware_pyramid_model_with_kernel<B: BackendTrait>(
+    device: &B::Device,
+    kernel_enabled: bool,
+) -> VisionDragon<B> {
+    let mut config = make_stage_aware_pyramid_config();
+    config.fused_kernels = FusedKernelConfig {
+        enabled: kernel_enabled,
+        ..FusedKernelConfig::default()
     };
     VisionDragon::<B>::new(config, device)
 }
@@ -890,9 +950,9 @@ fn pyramid_hub_bank_produces_nonzero_patch_readout() {
     let x8 = activation::relu(model.project_spatial(
         h8.clone(),
         model
-            .pyramid_x_neuron_proj
+            .pyramid_patch_to_global_query_proj
             .as_ref()
-            .expect("pyramid x projection"),
+            .expect("pyramid global query projection"),
     ));
     let (hub_w8, _) = model.pyramid_hub_weights(h8, h32, model.trm_graph.hub_count.max(1));
     let zero_hub = Tensor::<Backend, 4>::zeros([1, 2, 2, 4], &device);
@@ -937,9 +997,9 @@ fn pyramid_project_spatial_pair_matches_individual_projection() {
     let h8 = state.patch_state().clone();
     let h32 = state.coarse_state().clone();
     let layer = model
-        .pyramid_x_neuron_proj
+        .pyramid_write_value_proj
         .as_ref()
-        .expect("pyramid x projection");
+        .expect("pyramid value projection");
 
     let single_h8 = model.project_spatial(h8.clone(), layer);
     let single_h32 = model.project_spatial(h32.clone(), layer);
@@ -985,21 +1045,21 @@ fn pyramid_update_states_matches_individual_updates() {
     let h8 = state.patch_state().clone();
     let h32 = state.coarse_state().clone();
     let x_proj = model
-        .pyramid_x_neuron_proj
+        .pyramid_patch_x_neuron_proj
         .as_ref()
-        .expect("pyramid x projection");
+        .expect("pyramid patch x projection");
     let v_proj = model
         .pyramid_write_value_proj
         .as_ref()
         .expect("pyramid value projection");
     let y_gate_proj = model
-        .pyramid_y_gate_proj
+        .pyramid_patch_y_gate_proj
         .as_ref()
-        .expect("pyramid y gate projection");
+        .expect("pyramid patch y gate projection");
     let delta_proj = model
-        .pyramid_delta_proj
+        .pyramid_patch_delta_proj
         .as_ref()
-        .expect("pyramid delta projection");
+        .expect("pyramid patch delta projection");
     let value_norm = model
         .pyramid_value_norm
         .as_ref()
@@ -1065,6 +1125,31 @@ fn pyramid_update_states_matches_individual_updates() {
 }
 
 #[test]
+fn pyramid_state_uses_scale_aware_rank_overrides() {
+    type Backend = NdArray<f32>;
+    let device = <Backend as BackendTrait>::Device::default();
+    let mut config = make_pyramid_config();
+    config.trm_graph.patch_rank = Some(3);
+    config.trm_graph.coarse_rank = Some(5);
+    config.trm_graph.global_rank = Some(2);
+    let model = VisionDragon::<Backend>::new(config, &device);
+    let tokens = Tensor::<Backend, 3>::from_data(
+        TensorData::new(vec![1.0; 16], [1, 4, 4]),
+        &device,
+    );
+
+    let state = model.pyramid_state_from_patch_tokens(tokens);
+
+    let patch_shape = state.patch_rho().shape().dims::<5>();
+    let coarse_shape = state.coarse_rho().shape().dims::<5>();
+    let global_shape = state.hub_rho().shape().dims::<4>();
+
+    assert_eq!(patch_shape[1], 3);
+    assert_eq!(coarse_shape[1], 5);
+    assert_eq!(global_shape[2], 2);
+}
+
+#[test]
 fn pyramid_predict_writes_patch_activity_into_hub_bank() {
     type Backend = NdArray<f32>;
     let device = <Backend as BackendTrait>::Device::default();
@@ -1086,6 +1171,44 @@ fn pyramid_predict_writes_patch_activity_into_hub_bank() {
     let max_abs = hub_vec.iter().map(|value| value.abs()).fold(0.0_f32, f32::max);
 
     assert!(max_abs > 1e-6, "predict should write patch/coarse activity into hub rho");
+}
+
+#[test]
+fn pyramid_predict_schedule_can_disable_patch_local_bank() {
+    type Backend = NdArray<f32>;
+    let device = <Backend as BackendTrait>::Device::default();
+    let default_model = make_pyramid_model::<Backend>(&device);
+    let mut scheduled_config = make_pyramid_config();
+    scheduled_config.trm_graph.bank_schedule.predict.patch_local_read = false;
+    scheduled_config.trm_graph.bank_schedule.predict.patch_local_write = false;
+    let scheduled_model = VisionDragon::<Backend>::new(scheduled_config, &device);
+    let tokens = Tensor::<Backend, 3>::from_data(
+        TensorData::new(vec![1.0; 16], [1, 4, 4]),
+        &device,
+    );
+
+    let default_state = default_model.predict_pyramid_state(
+        default_model.pyramid_state_from_patch_tokens(tokens.clone()),
+        2,
+        2,
+    );
+    let scheduled_state = scheduled_model.predict_pyramid_state(
+        scheduled_model.pyramid_state_from_patch_tokens(tokens),
+        2,
+        2,
+    );
+
+    let primary_diff = max_abs_diff(
+        scheduled_state.primary_state().clone(),
+        default_state.primary_state().clone(),
+    );
+    let patch_rho_diff = max_abs_diff(
+        scheduled_state.patch_rho().clone(),
+        default_state.patch_rho().clone(),
+    );
+
+    assert!(primary_diff > 1e-5, "predict schedule should change primary state");
+    assert!(patch_rho_diff > 1e-5, "predict schedule should change patch rho");
 }
 
 #[test]
@@ -1609,6 +1732,60 @@ fn pyramid_wgpu_autodiff_matches_reference_on_observe_refine_predict_sequence() 
     );
     assert!(
         max_abs_diff(fused_state.hub_rho().clone(), reference_state.hub_rho().clone()) <= 8e-2
+    );
+}
+
+#[cfg(all(feature = "train", not(target_arch = "wasm32")))]
+#[test]
+fn pyramid_wgpu_stage_aware_rollout_matches_reference_on_custom_schedule_and_ranks() {
+    let _guard = crate::train::wgpu_test_guard();
+    let device = <WgpuBackend as BackendTrait>::Device::default();
+    crate::train::init_wgpu_test_runtime(&device);
+    <WgpuBackend as BackendTrait>::seed(&device, 4_242);
+
+    let reference = make_stage_aware_pyramid_model_with_kernel::<WgpuBackend>(&device, false);
+    let fused = make_stage_aware_pyramid_model_with_kernel::<WgpuBackend>(&device, true)
+        .load_record(reference.clone().into_record());
+    assert!(supports_local_grid_rho_backend::<WgpuBackend>());
+
+    let tokens =
+        Tensor::<WgpuBackend, 3>::random([2, 16, 8], Distribution::Normal(0.0, 1.0), &device);
+    let reference_state = reference.pyramid_state_from_patch_tokens(tokens.clone());
+    let fused_state = fused.pyramid_state_from_patch_tokens(tokens);
+
+    let reference_state = reference.forward_pyramid_state_rollout_mode_unbounded(
+        reference_state,
+        3,
+        3,
+        StructuredStepMode::Predict,
+    );
+    let fused_state =
+        fused.forward_pyramid_state_rollout_mode_unbounded(fused_state, 3, 3, StructuredStepMode::Predict);
+
+    assert!(
+        max_abs_diff(
+            fused_state.primary_state().clone(),
+            reference_state.primary_state().clone(),
+        ) <= 6e-3
+    );
+    assert!(
+        max_abs_diff(
+            fused_state.context_state().clone(),
+            reference_state.context_state().clone(),
+        ) <= 6e-3
+    );
+    assert!(
+        max_abs_diff(fused_state.patch_rho().clone(), reference_state.patch_rho().clone())
+            <= 8e-4
+    );
+    assert!(
+        max_abs_diff(
+            fused_state.coarse_rho().clone(),
+            reference_state.coarse_rho().clone(),
+        ) <= 8e-4
+    );
+    assert!(
+        max_abs_diff(fused_state.hub_rho().clone(), reference_state.hub_rho().clone()) <= 8e-4
     );
 }
 

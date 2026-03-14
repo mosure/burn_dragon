@@ -82,7 +82,7 @@ fn wgpu_video_non_trm_train_horizon_curriculum_memory_stays_bounded() {
         let target_len = 2 + (step % 5);
         let batch =
             toy_video_batch_with_lengths::<Backend>(&device, 3, 6, 0).with_target_len(target_len);
-        let losses = model.forward_losses(batch, 2, 2, false, false);
+        let losses = model.forward_losses(batch, 2, 2, false, false, true);
         let total = losses.total.clone();
         let grads = GradientsParams::from_grads(total.backward(), &model);
         model = model.optimize::<Backend, _>(&mut optimizer, lr, grads);
@@ -134,7 +134,7 @@ fn wgpu_video_trm_train_memory_stays_bounded_fixed_horizon() {
     let mut snapshots = Vec::with_capacity(24);
     for step in 0..32 {
         let batch = toy_video_batch_with_lengths::<Backend>(&device, 4, 6, 0);
-        let losses = model.forward_losses_train_pyramid(batch, 2, 2, false);
+        let losses = model.forward_losses_train_pyramid(batch, 2, 2, false, true);
         let total = losses.total.clone();
         let grads = GradientsParams::from_grads(total.backward(), &model);
         model = model.optimize::<Backend, _>(&mut optimizer, lr, grads);

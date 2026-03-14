@@ -1543,3 +1543,340 @@ fn normalization_kind_parses_for_vision_model() {
         burn_dragon_core::DragonNormKind::Derf
     );
 }
+
+#[test]
+fn convnext_patch_embed_mode_parses_for_vision_model() {
+    let text = r#"
+            [dataset]
+            imagenet_root = "data/imagenet1k"
+            train_dir = "train"
+            val_dir = "val"
+
+            [training]
+            batch_size = 8
+            max_iters = 10
+            log_frequency = 2
+
+            [optimizer]
+            learning_rate = 0.001
+            weight_decay = 0.1
+
+            [vision]
+            image_size = 224
+            patch_size = 14
+            in_channels = 3
+            embed_dim = 256
+            steps = 4
+            n_head = 4
+            mlp_internal_dim_multiplier = 4
+            dropout = 0.1
+            projection_dim = 384
+            projection_hidden_dim = 512
+            use_cls_token = true
+            pos_encoding = "learned2d"
+            attention_mode = "row_l1"
+            patch_embed_mode = "conv_next"
+
+            [mode]
+            type = "lejepa"
+            views = 2
+            global_views = 2
+            local_views = 0
+            local_image_size = 224
+            local_min_scale = 0.2
+            local_max_scale = 0.2
+            min_view_overlap = 0.0
+            view_overlap_attempts = 1
+        "#;
+
+    let config: VisionTrainingConfig = toml::from_str(text).expect("parse config");
+    config.validate().expect("vision config should validate");
+    assert_eq!(config.vision.patch_embed_mode, VisionPatchEmbedMode::ConvNext);
+}
+
+#[test]
+fn convnext_patch_embed_mode_alias_parses_for_vision_model() {
+    let text = r#"
+            [dataset]
+            imagenet_root = "data/imagenet1k"
+            train_dir = "train"
+            val_dir = "val"
+
+            [training]
+            batch_size = 8
+            max_iters = 10
+            log_frequency = 2
+
+            [optimizer]
+            learning_rate = 0.001
+            weight_decay = 0.1
+
+            [vision]
+            image_size = 224
+            patch_size = 14
+            in_channels = 3
+            embed_dim = 256
+            steps = 4
+            n_head = 4
+            mlp_internal_dim_multiplier = 4
+            dropout = 0.1
+            projection_dim = 384
+            projection_hidden_dim = 512
+            use_cls_token = true
+            pos_encoding = "learned2d"
+            attention_mode = "row_l1"
+            patch_embed_mode = "convnext"
+
+            [mode]
+            type = "lejepa"
+            views = 2
+            global_views = 2
+            local_views = 0
+            local_image_size = 224
+            local_min_scale = 0.2
+            local_max_scale = 0.2
+            min_view_overlap = 0.0
+            view_overlap_attempts = 1
+        "#;
+
+    let config: VisionTrainingConfig = toml::from_str(text).expect("parse config");
+    config.validate().expect("vision config should validate");
+    assert_eq!(config.vision.patch_embed_mode, VisionPatchEmbedMode::ConvNext);
+}
+
+#[test]
+fn scaleaware_trm_rank_overrides_load_from_overlay_stack() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path = repo_root.join(
+        "config/vision/video_lejepa/moving_mnist_trm_norm_smoke_scaleaware_regionheavy_corefocus.toml",
+    );
+    let config =
+        load_vision_training_config(&[config_path]).expect("load scale-aware region-heavy config");
+
+    assert_eq!(config.vision.trm_graph.patch_rank, Some(32));
+    assert_eq!(config.vision.trm_graph.coarse_rank, Some(64));
+    assert_eq!(config.vision.trm_graph.global_rank, Some(8));
+    assert_eq!(config.vision.trm_graph.rank, 8);
+}
+
+#[test]
+fn trm_predict_bank_schedule_parses_from_config() {
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let overlay = r#"
+        [vision]
+        backbone = "pyramid"
+
+        [vision.trm_graph]
+        enabled = true
+
+        [vision.trm_graph.bank_schedule.predict]
+        patch_local_read = false
+        patch_local_write = false
+    "#;
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let overlay_path = std::env::temp_dir().join(format!("vision-trm-bank-schedule-{unique}.toml"));
+    fs::write(&overlay_path, overlay).expect("write overlay");
+    let config = load_vision_training_config(&[
+        repo_root.join("config/vision/base.toml"),
+        overlay_path.clone(),
+    ])
+    .expect("load config with bank schedule overlay");
+    let _ = fs::remove_file(overlay_path);
+
+    assert!(!config.vision.trm_graph.bank_schedule.predict.patch_local_read);
+    assert!(!config.vision.trm_graph.bank_schedule.predict.patch_local_write);
+    assert!(config.vision.trm_graph.bank_schedule.observe.patch_local_read);
+    assert!(config.vision.trm_graph.bank_schedule.observe.patch_local_write);
+}
+
+#[test]
+fn trm_predict_bank_decay_scales_parse_from_config() {
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let overlay = r#"
+        [vision]
+        backbone = "pyramid"
+
+        [vision.trm_graph]
+        enabled = true
+
+        [vision.trm_graph.bank_schedule.predict]
+        patch_decay_scale = 2.0
+        coarse_decay_scale = 0.5
+        global_decay_scale = 0.25
+    "#;
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let overlay_path =
+        std::env::temp_dir().join(format!("vision-trm-bank-decay-scales-{unique}.toml"));
+    fs::write(&overlay_path, overlay).expect("write overlay");
+    let config = load_vision_training_config(&[
+        repo_root.join("config/vision/base.toml"),
+        overlay_path.clone(),
+    ])
+    .expect("load config with bank schedule overlay");
+    let _ = fs::remove_file(overlay_path);
+
+    assert_eq!(config.vision.trm_graph.bank_schedule.predict.patch_decay_scale, 2.0);
+    assert_eq!(config.vision.trm_graph.bank_schedule.predict.coarse_decay_scale, 0.5);
+    assert_eq!(config.vision.trm_graph.bank_schedule.predict.global_decay_scale, 0.25);
+}
+
+#[test]
+fn trm_predict_coarse_substeps_parse_from_config() {
+    let text = r#"
+        [dataset]
+        moving_mnist_root = "data/moving_mnist"
+        source = "moving_mnist"
+
+        [training]
+        batch_size = 4
+        max_iters = 4
+        log_frequency = 1
+
+        [optimizer]
+        learning_rate = 0.001
+        weight_decay = 0.0
+
+        [vision]
+        image_size = 32
+        patch_size = 4
+        in_channels = 3
+        embed_dim = 64
+        steps = 4
+        n_head = 8
+        mlp_internal_dim_multiplier = 2
+        dropout = 0.0
+        projection_dim = 64
+        projection_hidden_dim = 64
+        pos_encoding = "rope"
+        backbone = "pyramid"
+
+        [vision.trm_graph]
+        enabled = true
+        predict_coarse_substeps = 3
+
+        [mode]
+        type = "video_lejepa"
+        context_frames = 2
+        target_frames = 2
+        predict_backprop_frames = 2
+    "#;
+
+    let config: VisionTrainingConfig = toml::from_str(text).expect("parse config");
+    config.validate().expect("vision config should validate");
+    assert_eq!(config.vision.trm_graph.predict_coarse_substeps, 3);
+}
+
+#[test]
+fn trm_coarse_local_topology_overrides_parse_from_config() {
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let overlay = r#"
+        [vision]
+        backbone = "pyramid"
+
+        [vision.trm_graph]
+        enabled = true
+        local_radius = 0
+        local_self = true
+        coarse_local_radius = 1
+        coarse_local_diagonals = false
+        coarse_local_self = true
+    "#;
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let overlay_path =
+        std::env::temp_dir().join(format!("vision-trm-coarse-topology-{unique}.toml"));
+    fs::write(&overlay_path, overlay).expect("write overlay");
+    let config = load_vision_training_config(&[
+        repo_root.join("config/vision/base.toml"),
+        overlay_path.clone(),
+    ])
+    .expect("load config with coarse topology overlay");
+    let _ = fs::remove_file(overlay_path);
+
+    assert_eq!(config.vision.trm_graph.local_radius, 0);
+    assert_eq!(config.vision.trm_graph.coarse_local_radius, Some(1));
+    assert_eq!(config.vision.trm_graph.coarse_local_diagonals, Some(false));
+    assert_eq!(config.vision.trm_graph.coarse_local_self, Some(true));
+}
+
+#[test]
+fn trm_self_only_local_topology_validates_with_zero_radius() {
+    let text = r#"
+        [dataset]
+        source = "moving_mnist"
+        max_records = 16
+
+        [training]
+        batch_size = 4
+        max_iters = 4
+        log_frequency = 1
+
+        [optimizer]
+        learning_rate = 0.0003
+        weight_decay = 0.0
+
+        [vision]
+        backbone = "pyramid"
+        image_size = 32
+        patch_size = 2
+        in_channels = 3
+        embed_dim = 64
+        steps = 2
+        n_head = 8
+        projection_dim = 32
+        projection_hidden_dim = 64
+
+        [vision.trm_graph]
+        enabled = true
+        local_radius = 0
+        local_self = true
+        coarse_local_radius = 1
+        coarse_local_self = true
+        coarse_stride = 2
+        rank = 16
+        value_dim = 16
+        hub_count = 2
+
+        [mode]
+        type = "video_lejepa"
+
+        [mode.video_lejepa]
+        context_frames = 2
+        target_frames = 2
+        predict_backprop_frames = 2
+    "#;
+
+    let config: VisionTrainingConfig = toml::from_str(text).expect("parse config");
+    config
+        .validate()
+        .expect("self-only zero-radius local topology should validate");
+}

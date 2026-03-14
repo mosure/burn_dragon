@@ -5,5 +5,5 @@ batch_size = 64
 n_layer = 4
 n_embd = 128
 n_head = 4
-mlp_internal_dim_multiplier = 4
+mlp_internal_dim_multiplier = 8
 dropout = 0.1

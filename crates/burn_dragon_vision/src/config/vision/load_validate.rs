@@ -98,11 +98,22 @@ pub(super) fn validate_vision_trm_graph(vision: &VisionModelConfig) -> Result<()
     if vision.trm_graph.rank == 0 {
         return Err(anyhow!("vision.trm_graph.rank must be > 0"));
     }
+    if vision.trm_graph.patch_rank == Some(0) {
+        return Err(anyhow!("vision.trm_graph.patch_rank must be > 0 when set"));
+    }
+    if vision.trm_graph.coarse_rank == Some(0) {
+        return Err(anyhow!("vision.trm_graph.coarse_rank must be > 0 when set"));
+    }
+    if vision.trm_graph.global_rank == Some(0) {
+        return Err(anyhow!("vision.trm_graph.global_rank must be > 0 when set"));
+    }
     if vision.trm_graph.value_dim == 0 {
         return Err(anyhow!("vision.trm_graph.value_dim must be > 0"));
     }
-    if vision.trm_graph.local_radius == 0 {
-        return Err(anyhow!("vision.trm_graph.local_radius must be > 0"));
+    if vision.trm_graph.local_radius == 0 && !vision.trm_graph.local_self {
+        return Err(anyhow!(
+            "vision.trm_graph.local_radius must be > 0 unless vision.trm_graph.local_self is true"
+        ));
     }
     if vision.trm_graph.hub_count == 0 {
         return Err(anyhow!("vision.trm_graph.hub_count must be > 0"));

@@ -113,7 +113,7 @@ impl<B: Backend> PatchEmbed<B> {
             .saturating_mul(patch_size)
             .saturating_mul(config.in_channels.max(1));
         let (stages, proj, linear) = match config.patch_embed_mode {
-            VisionPatchEmbedMode::Conv => {
+            VisionPatchEmbedMode::Conv | VisionPatchEmbedMode::ConvNext => {
                 let mut strides = patch_downsample_strides(patch_size);
                 if strides.is_empty() {
                     strides.push(1);
@@ -180,7 +180,7 @@ impl<B: Backend> PatchEmbed<B> {
 
     pub fn forward_raw(&self, images: Tensor<B, 4>) -> PatchEmbedOutput<B> {
         match self.mode {
-            VisionPatchEmbedMode::Conv => {
+            VisionPatchEmbedMode::Conv | VisionPatchEmbedMode::ConvNext => {
                 let [batch, channels, height, width] = images.shape().dims::<4>();
                 let device = images.device();
                 let patch_size = self.patch_size.max(1);

@@ -1,4 +1,5 @@
 use super::*;
+use crate::train::vision::video::dynamics::embed_clip_frames_raw_with_model;
 
 #[test]
 fn video_lejepa_forward_losses_are_finite() {
@@ -7,7 +8,7 @@ fn video_lejepa_forward_losses_are_finite() {
     let (vision, video) = make_video_configs(false, false, 1);
     let model = make_video_model::<Backend>(&vision, &video, &device);
     let batch = toy_video_batch::<Backend>(&device);
-    let losses = model.forward_losses(batch, 2, 2, false, false);
+    let losses = model.forward_losses(batch, 2, 2, false, false, true);
     for value in [
         losses.total,
         losses.inv,
@@ -42,7 +43,7 @@ fn video_lejepa_trm_backbone_forward_losses_are_finite() {
     let vision = enable_pyramid_backbone(vision);
     let model = make_video_model::<Backend>(&vision, &video, &device);
     let batch = toy_video_batch::<Backend>(&device);
-    let losses = model.forward_losses(batch, 2, 2, false, false);
+    let losses = model.forward_losses(batch, 2, 2, false, false, true);
     for value in [
         losses.total,
         losses.inv,

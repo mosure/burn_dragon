@@ -1,127 +1,88 @@
-# burn_dragon research program
+# burn_dragon autoresearch program
 
 This file defines the autonomous research loop for this repository.
 
-It is inspired by `autoresearch/program.md`, but it is adapted to the actual structure, crates, configs, metrics, and design priorities of `burn_dragon`.
+The goal is open-ended autoresearch: generate hypotheses, test them cheaply, keep what works, and avoid unnecessary attachment to prior architectural preferences.
 
 ## Mission
 
-Continuously improve two tracks:
+Continuously improve the repository by finding changes that measurably help at least one of:
 
-1. language Dragon on Shakespeare
-2. vision Dragon encoder on the current V-JEPA2-like path
+- model quality
+- training stability
+- inference or training speed
+- memory efficiency
+- reproducibility
+- usability of the existing training and evaluation paths
 
-Do this by running short, careful, reproducible experiments; keeping only improvements; and preserving the design integrity of the repository.
+Work from evidence, not attachment to a specific implementation, paper analogy, roadmap, or earlier experiment narrative.
 
-This program is not for multimodal work right now. Do not spend time on VL-JEPA or multimodal composition unless a language or vision change explicitly requires touching shared infrastructure.
+## Architectural north star
 
-## Scope
+The standing architectural bias for this program is Dragon itself.
 
-Primary tracks:
+The aim is to develop Dragon as a post-transformer architecture that can take on the kinds of problems current transformers handle across the repository's supported domains.
 
-- `language`: Shakespeare next-token training
-- `vision`: V-JEPA2-like Vision Dragon encoder iteration via the current `video_lejepa` / `Pyramid` path
-
-Secondary work only when justified by the active experiment:
-
-- `burn_dragon_core`
-- `burn_dragon_wgpu`
-- `burn_dragon_train`
-- `config/language/*`
-- `config/vision/*`
-- relevant docs, tests, and benches
-
-Do not introduce new crates for this program unless there is a clearly reusable core/framework need.
-
-## Design principles
-
-### 1. Bitter lesson first
-
-Prefer:
-
-- shared recurrent computation
-- scalable state topology
-- efficient kernels
-- simple, general mechanisms
-
-Avoid:
-
-- ad hoc auxiliary towers
-- clever one-off heads
-- brittle task-specific hacks that do not generalize
-
-### 2. Current API is the source of truth
-
-This repository is not a published stable library yet. Do not preserve obsolete paths just for compatibility.
-
-Prefer:
-
-- current curated `api` surfaces
-- current configs
-- current preferred backbones
-
-### 3. Canonical Dragon semantics matter
-
-Keep the model conceptually aligned with:
+Keep the Dragon core concepts legible when working on core model paths:
 
 - `x_neuron`
 - `y_gate`
 - `y_neuron`
 - `rho`
 
-Do not blur these with vague or transformer-generic terminology when changing core recurrent paths.
+This is a directional bias, not a freeze on experimentation. Question current implementations freely, but prefer work that strengthens Dragon as a general-purpose alternative rather than drifting into arbitrary one-off designs.
 
-### 4. Simplicity wins ties
+## Source of truth
 
-If two variants are similar in quality, prefer:
+Use the current repository state as ground truth:
 
-- simpler implementation
-- cleaner crate boundaries
-- lower VRAM
-- faster iteration
+- `README.md`
+- runnable code in `crates/*`
+- active configs in `config/*`
+- tests, benches, and examples that still compile and run
+- metrics produced by current run directories under `runs/`
 
-### 5. Keep the preferred paths preferred
+Do not use architectural roadmaps, specs, or progress trackers as the basis for experiment choice or evaluation. They may be useful historical artifacts, but they are not authoritative for autoresearch.
 
-Current preferred paths:
+Read only enough of the code and configs to support the current experiment. Do not mass-load unrelated files.
 
-- language: BDH with fused recurrent WGPU path when it is actually beneficial
-- vision: `Pyramid` backbone
+## Scope
 
-Do not create another parallel “research-only” vision backbone when the correct move is to improve `Pyramid`.
+Any repository-supported family is in scope if it has runnable code and a measurable outcome, including:
 
-## Read this first
+- language
+- vision
+- multimodal
+- graph
+- sudoku
+- shared infrastructure in core, stream, train, checkpoint, and WGPU paths
 
-Before starting a new line of experiments, review enough of these to understand the current state:
+Prefer directions with:
 
-- [README.md](./README.md)
-- [docs/dragon_framework_support_matrix.md](./docs/dragon_framework_support_matrix.md)
-- [docs/dragon_hatchling_alignment_spec.md](./docs/dragon_hatchling_alignment_spec.md)
-- [docs/vision_scale_aware_rho_roadmap.md](./docs/vision_scale_aware_rho_roadmap.md)
+- a cheap reproducible baseline
+- a clear validation metric
+- a short iteration loop
 
-For language:
+Language and vision may often be the cheapest places to iterate, but they are not the only valid targets.
 
-- `crates/burn_dragon_core/src/model/bdh.rs`
-- `crates/burn_dragon_core/src/model/norm.rs`
-- `crates/burn_dragon_core/src/model/config.rs`
-- `crates/burn_dragon_language/src/config/train/*`
-- `crates/burn_dragon_language/src/train/*`
-- `config/language/*.toml`
+## Research posture
 
-For vision:
+Treat this as search under uncertainty.
 
-- `crates/burn_dragon_vision/src/model/vision.rs`
-- `crates/burn_dragon_vision/src/model/vision/pyramid_ops.rs`
-- `crates/burn_dragon_vision/src/model/vision/config.rs`
-- `crates/burn_dragon_vision/src/train/vision/video/*`
-- `config/vision/video_lejepa/*`
+- Do not assume the current default config is optimal.
+- Do not assume an existing backbone, norm, state layout, or training recipe is privileged.
+- Do not keep pushing a line of work just because it matches earlier plans.
+- Do diversify when a direction stalls or repeatedly loses.
+- Do prefer experiments that teach something even when they fail.
+- Do favor changes that make Dragon more capable as a reusable post-transformer system.
 
-Read only enough to support the current experiment. Do not mass-load irrelevant files.
+When choosing between ideas, prioritize expected information gain per unit time.
 
 ## Build once, then reuse binaries
 
-Do not pay Cargo startup cost every run.
+Avoid paying Cargo startup cost every run when working through a loop.
 
-Recommended builds:
+Typical builds:
 
 ```bash
 cargo build -p burn_dragon_cli --no-default-features --features train --bin train
@@ -130,201 +91,228 @@ cargo build -p burn_dragon_cli --features benchmark --bins
 
 Use:
 
-- `target/debug/train` for training
-- benchmark bins under `target/debug/`
+- `target/debug/train` for training runs
+- benchmark bins under `target/debug/` when relevant
 
-## Results files
+If only one crate or bench matters for the current task, build the narrowest useful target.
 
-Keep two untracked TSVs at repo root:
+## Results file
 
-- `results_shakespeare.tsv`
-- `results_vjepa2.tsv`
+Keep one untracked TSV at repo root:
 
-Do not commit them.
+- `results_autoresearch.tsv`
 
-### `results_shakespeare.tsv`
-
-Header:
-
-```text
-commit	valid_loss	memory_gb	wall_seconds	status	description
-```
-
-### `results_vjepa2.tsv`
+Do not commit it.
 
 Header:
 
 ```text
-commit	valid_loss	inv_loss	iter_s	memory_gb	wall_seconds	status	description
+commit	track	config	primary_metric	primary_value	secondary_metrics	wall_seconds	memory_gb	status	description	run_dir
 ```
 
-Status values:
+Guidance:
 
-- `keep`
-- `discard`
-- `crash`
+- `track`: short family or subsystem label such as `language`, `vision`, `multimodal`, `graph`, `kernel`, or `train`
+- `config`: main config or benchmark identifier
+- `primary_metric`: the main metric used for the decision
+- `wall_seconds`: active training or benchmark wall time used for the decision; exclude one-time startup and compilation cost when comparing training variants
+- `secondary_metrics`: compact `key=value` pairs for supporting evidence
+- `secondary_metrics` should usually include throughput information such as `iter_s`, `tokens_s`, `samples_s`, or equivalent when training speed may affect fairness
+- `status`: `keep`, `discard`, `crash`, or `inconclusive`
 
-Use `0` values for crashes where needed.
+If you inherit older per-track TSVs, do not rely on them as the operating contract for this program.
 
-## Baselines
+## Experiment delimiter
 
-Always establish the baseline first for each fresh line of inquiry.
+The default delimiter for training experiments is a fixed wall-clock training budget.
 
-### Language baseline
+- Compare baseline and variant on the same task, same data split, and same active training wall time.
+- Exclude one-time startup, compile, and binary-build cost from that budget unless startup cost is itself the subject of the experiment.
+- Do not treat equal steps, equal epochs, or equal tokens as the main fairness rule when throughput differs materially.
+- If a change improves quality only by consuming much more training wall time, treat that as a throughput tradeoff rather than a clean architecture or pipeline win.
 
-Use the current Shakespeare smoke stack:
+For vision experiments, a fixed-time comparison is only meaningful after the run clears a minimum useful compute floor. If the workload is obviously underpowered, the result is not a trustworthy architecture-selection signal even if the wall-clock delimiter was respected.
 
-```bash
-target/debug/train language \
-  -c config/language/tiny.toml \
-  -c config/language/shakespeare_smoke.toml \
-  -c config/language/shakespeare_fused.toml \
-  --backend wgpu
-```
+## Vision compute floor
 
-If the active line of work is normalization, neuron-space, or recurrence, this is the baseline.
+Cheap vision smokes are allowed, but only for:
 
-Current practical guidance:
+- crash detection
+- gross regression detection
+- verifying that a structural change points in the right direction
 
-- `RMSNorm` is the strongest norm swap so far
-- `DyT` and `Derf` are not current defaults
-- `y_neuron` carry is experimental only
+Do not use underpowered vision runs to declare architectural winners.
 
-### Vision baseline
+Treat a vision experiment as underpowered when most of the following are true:
 
-Use the current cheap V-JEPA2-like `Pyramid` smoke:
+- GPU utilization is consistently low enough that the device is mostly waiting on host orchestration
+- VRAM footprint is tiny relative to the available device memory
+- the run is dominated by tiny fragmented structured steps instead of dense compute
+- candidate branches differ only by very small metric deltas while the model is still clearly below a realistic learning regime
+- the experiment family is so small that it cannot plausibly clear the current learning-noise floor
 
-```bash
-target/debug/train vision \
-  -c config/vision/base.toml \
-  -c config/vision/video_lejepa/moving_mnist_trm_norm_smoke.toml \
-  --backend wgpu
-```
+Underpowered runs may still be useful for directional filtering. They are not sufficient for claiming a best architecture.
 
-This is the default cheap structured-vision baseline for encoder iteration.
+When a vision family is underpowered:
 
-If the active line of work is specifically scale-aware `rho`, stage-local sharing, connectivity, or stems, this is the baseline.
+1. keep only gross directional lessons
+2. stop fine-grained scalar sweeps
+3. promote to a larger-capacity or more GPU-saturating baseline before continuing model selection
 
-### Promotion baseline
+Examples of acceptable promotions:
 
-Only after a cheap vision variant wins clearly, promote to a stronger config such as one of:
+- larger recurrent/state capacity
+- larger active training subset or longer fixed-time budget
+- larger batch if the path is stable
+- a more fused or less host-fragmented executor
+- a more realistic multi-stage memory path instead of a toy single-stage branch
 
-- `config/vision/video_lejepa/moving_mnist_trm_baseline.toml`
-- `config/vision/video_lejepa/moving_mnist_trm_perf_pilot.toml`
-- other explicitly stronger configs already present in `config/vision/video_lejepa/`
+### Vision performance protocol
 
-Do not jump to larger runs first.
+When a vision branch clears the old toy floor but still shows bursty, low-power behavior, treat it as an execution problem first, not an architecture-selection problem.
 
-## How to read results
+In that regime:
 
-Do not rely on stdout summaries. Read the run directory.
+1. Use GPU power draw as the primary operational signal.
+2. Use VRAM footprint and train-step throughput as secondary operational signals.
+3. Treat averaged GPU-util percentages as supporting context only.
+4. Pause fine-grained architecture sweeps until the main host-orchestration bottlenecks are benchmarked.
+5. Prefer executor and kernel work over more schedule or capacity micro-ablations.
 
-### Language
+Preferred order of attack:
 
-The latest language run directory is typically under `runs/<name>/`.
+1. benchmark and identify the dominant host-side structured bucket
+2. fuse the remaining coarse/patch spatial structured path
+3. fuse the hub/global path
+4. reduce host-driven recurrent substep orchestration
+5. only then resume architecture selection inside the denser training regime
 
-Important files:
+## Baseline policy
 
-- `valid/epoch-*/Loss.log`
-- `train/epoch-*/Loss.log`
+Always establish a baseline before claiming an improvement.
+
+For each new line of inquiry:
+
+1. Pick the cheapest existing config or benchmark that still exercises the behavior you plan to change.
+2. Run the baseline and record it.
+3. Change one idea, or one tightly related bundle of ideas.
+4. Compare against the baseline on the same task and the same fixed active training-time budget.
+
+Do not jump straight to large runs unless the small run cannot observe the behavior of interest.
+
+If multiple cheap baselines exist, prefer the one with:
+
+- clearer metrics
+- lower cost
+- lower variance
+- better coverage of the code you are modifying
+
+## How to choose experiments
+
+Pick experiments from measurable uncertainty in the current codebase, not from ideological preference.
+
+Good starting categories:
+
+- architecture changes
+- optimizer or schedule changes
+- state layout or recurrence changes
+- normalization changes
+- dataflow or train-step changes
+- kernel and memory-path improvements
+- config simplifications
+- benchmark or test additions that expose hidden regressions
+
+Useful heuristics:
+
+- exploit a recent win when follow-on variants are cheap
+- explore neglected but plausible directions when the current line stalls
+- prefer changes with a clear pass/fail signal
+- prefer one sharp hypothesis over a large mixed patch
+
+## How to evaluate results
+
+Do not rely on stdout summaries alone. Inspect the run directory and task artifacts.
+
+Common places to inspect:
+
 - `config.json`
 - `experiment.log`
+- validation loss logs
+- train throughput or iteration speed logs
+- task-specific artifacts under `artifacts/`
 
-Example metric extraction:
-
-```bash
-latest=$(find runs -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' | sort -nr | head -1 | cut -d' ' -f2-)
-tail -n 1 "$latest/valid/epoch-1/Loss.log"
-```
-
-Lower valid loss is better.
-
-### Vision
-
-The latest vision run directory is typically under `runs/vision/<name>/`.
-
-Important files:
-
-- `valid/epoch-*/Loss.log`
-- `valid/epoch-*/video_lejepa_inv_loss.log`
-- `valid/epoch-*/video_lejepa_long_rollout_inv_to_h*.log`
-- `train/epoch-*/Iteration_Speed.log`
-- `artifacts/`
-
-Example metric extraction:
+Generic discovery example:
 
 ```bash
-latest=$(find runs/vision -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' | sort -nr | head -1 | cut -d' ' -f2-)
-tail -n 1 "$latest/valid/epoch-1/Loss.log"
-tail -n 1 "$latest/valid/epoch-1/video_lejepa_inv_loss.log"
-tail -n 1 "$latest/train/epoch-1/Iteration_Speed.log"
+latest=$(find runs -mindepth 1 -maxdepth 3 -type d -printf '%T@ %p\n' | sort -nr | head -1 | cut -d' ' -f2-)
+find "$latest" -maxdepth 3 -type f | rg 'Loss|loss|Speed|Throughput|memory|experiment\.log|config\.json|artifacts'
 ```
 
-For vision, do not optimize one metric blindly.
+Use a primary metric that matches the task. For training experiments, the usual question is: what task quality did this variant reach within the fixed active wall-clock budget?
 
-Keep a change only if it is good on the whole picture:
+Typical priorities are:
 
-1. overall valid loss
-2. invariant latent loss
-3. long-rollout invariant metrics when available
-4. throughput
-5. VRAM
+1. task quality reached within the fixed training-time budget
+2. stability and reproducibility within that budget
+3. throughput, especially when it changes how much learning fits inside the budget
+4. memory usage
+5. implementation complexity
 
-If metrics conflict:
+Do not optimize one metric blindly if the broader result is clearly worse.
 
-- prefer variants that improve or preserve overall valid loss
-- then prefer lower invariant loss
-- then prefer better long-rollout behavior
-- then prefer faster/simpler variants
+A slower variant is not a clean win just because it eventually reaches a better metric after running much longer. Under this program, quality gains must survive the fixed-time comparison.
+
+For cheap vision JEPA work, prefer a pair of primary metrics:
+
+1. the core JEPA metric you actually care about, such as invariant or long-horizon predictive error
+2. a practical training metric such as composite validation loss or throughput
+
+If a branch only wins by tiny changes in the JEPA metric while the run is clearly underpowered, mark the result as directional or inconclusive instead of promoting it as the new default.
 
 ## What you may change
 
 You may modify any relevant files in:
 
-- `crates/burn_dragon_core`
-- `crates/burn_dragon_wgpu`
-- `crates/burn_dragon_train`
-- `crates/burn_dragon_language`
-- `crates/burn_dragon_vision`
-- `config/language`
-- `config/vision`
-- relevant tests/benches/docs
+- `crates/*`
+- `config/*`
+- relevant tests, benches, examples, and docs
 
-You may:
+You may change:
 
-- change architecture
-- change optimizer and LR schedules
-- change neuron-space size
-- change norms
-- change recurrent topology
-- change stems and positive maps
-- change train-step organization
-- add or refine benchmarks/tests
+- model structure
+- training logic
+- kernels
+- optimizer settings
+- schedules
+- configs
+- tests and benchmarks
+- evaluation code
 
-You must keep crate boundaries clean.
+Keep crate boundaries clean and avoid unrelated refactors.
 
-## What you should not do casually
+## What not to do casually
 
-- do not spend time on multimodal
-- do not add new dependencies
-- do not add a new vision backbone family when `Pyramid` should be improved instead
-- do not add ugly special-case heads unless the gain is very clear
-- do not change deployment/export code unless your experiment requires it
-- do not quietly ignore VRAM pathologies, low GPU utilization, or host-transfer regressions
+- do not add new dependencies or crates without a clear reusable need
+- do not preserve obsolete paths just for compatibility
+- do not introduce complexity without a measurable upside
+- do not ignore regressions in VRAM, throughput, or stability
+- do not edit unrelated deployment or export code unless the experiment touches it
+- do not keep retrying a repeatedly losing idea without changing the hypothesis
 
 ## Experiment loop
 
 Loop continuously until interrupted by the user or blocked by a real issue.
 
-1. Check git state and current local changes.
-2. Pick one experiment idea or one tightly related bundle of changes.
-3. Make the change cleanly.
-4. Run targeted unit tests first.
-5. Run the cheap training smoke for the relevant track.
-6. Read metrics from the run directory.
-7. Record the result in the appropriate TSV.
-8. Keep the change only if it is a clear win by the rules below.
-9. If it is not a win, revert only your own changes and try the next idea.
+1. Check git state and understand any existing local changes.
+2. Choose one experiment with a clear success criterion.
+3. Make the smallest clean change that tests the idea.
+4. Run targeted tests first.
+5. Run the cheapest relevant training, eval, or benchmark baseline if needed.
+6. Run the changed version on the same target and active training-time budget.
+7. Read metrics from the run directory or benchmark output.
+8. Record the outcome in `results_autoresearch.tsv`.
+9. Keep the change only if the evidence supports it.
+10. If the result is negative or inconclusive, adjust the hypothesis and continue.
 
 Do not stop to ask whether to continue after every run. Continue the loop.
 
@@ -332,135 +320,88 @@ Do not stop to ask whether to continue after every run. Continue the loop.
 
 ### Keep a change if
 
-- it clearly improves the primary metric
-- or it preserves the primary metric and meaningfully improves:
-  - speed
-  - VRAM
-  - simplicity
-  - long-horizon/refinement behavior
+- it clearly improves the primary metric within the same fixed training-time budget
+- or it preserves the primary metric while materially improving speed, memory, stability, or simplicity
+- or it exposes a useful new benchmark or regression test with low maintenance cost
 
 ### Discard a change if
 
-- it worsens the primary metric without a compelling tradeoff
-- it regresses speed materially with no quality gain
-- it increases VRAM substantially with no quality gain
-- it adds ugly complexity for a marginal gain
+- it worsens the main task without a compelling tradeoff
+- it adds substantial complexity for marginal gain
+- it regresses speed or memory without quality benefit
+- it improves quality only by taking materially longer wall-clock training time
+- it makes behavior harder to reproduce or reason about
 
-### Crash handling
+### Mark inconclusive if
+
+- the metric noise is too high to call
+- the run budget was too small to observe the intended effect
+- baseline and variant were not measured at matched active training-time budgets
+- the implementation changed too many variables at once
+- the vision run is obviously underpowered and therefore below a trustworthy architecture-selection signal floor
+
+In inconclusive cases, simplify the experiment or rerun with a more stable setup before drawing conclusions.
+
+## Crash handling
 
 If a run crashes:
 
-- fix obvious implementation mistakes and rerun
-- if the idea is structurally bad, log it as `crash` and move on
+- fix obvious implementation mistakes and rerun if the idea is still sound
+- record `crash` if the variant is unstable or structurally bad
+- move on when the failure teaches enough
 
-If a run exceeds the intended smoke budget badly, kill it and mark it as failure.
-
-## Track-specific research priorities
-
-## Language: Shakespeare
-
-Focus on:
-
-- neuron-space / `rho` capacity
-- practical norms (`RMSNorm` first)
-- fused recurrent efficiency
-- avoiding pathological host transfers or low GPU utilization
-- simple recurrence changes that survive the smoke loop
-
-Good language lines of inquiry:
-
-1. larger neuron-space with bounded VRAM
-2. `RMSNorm` defaults and retuning
-3. fused recurrent path quality/perf tuning
-4. better startup autotune and effective-batch policy
-5. carefully constrained `y_neuron` carry only if it earns its keep
-
-Bad language lines of inquiry:
-
-- chasing `DyT` / `Derf` endlessly when they are clearly behind
-- exact `y_neuron` carry paths that destroy throughput
-
-## Vision: V-JEPA2-like encoder
-
-Focus on:
-
-- `Pyramid` only
-- scale-aware `rho` banks
-- stage-local sharing
-- bank connectivity and activation schedules
-- local stem + positive map
-- test-time latent refinement that genuinely improves metrics
-
-Follow [docs/vision_scale_aware_rho_roadmap.md](./docs/vision_scale_aware_rho_roadmap.md).
-
-Good vision lines of inquiry:
-
-1. heterogeneous patch/coarse/global bank sizes
-2. stage-local sharing instead of uniform sharing
-3. explicit bank enable/read/write schedules by mode
-4. local stem / positive map ablations
-5. directional local banks only after the above are stable
-
-Bad vision lines of inquiry:
-
-- making heads the main capacity lever
-- per-neuron bespoke `rho`
-- adding large explicit auxiliary readout towers
-- jumping to large datasets before the cheap ladder is won
+If a run greatly exceeds the intended smoke budget, terminate it, record the outcome, and shrink the test.
 
 ## Cheap-first promotion policy
 
-Never promote a variant to larger runs unless it wins on the cheap ladder.
+Earn expensive runs.
 
-### Language promotion
+- Start with smoke, tiny, or otherwise bounded configs when possible.
+- Promote only after a cheap run shows a repeatable fixed-time win or a strong reason to believe the cheap proxy is misleading.
+- For infra or kernel work, prefer targeted benches before large training runs.
 
-Promote only if:
+Large runs are for confirmation, not for discovering whether an idea obviously fails.
 
-- valid loss improves
-- or valid loss is flat while throughput/VRAM improve meaningfully
+For vision specifically:
 
-### Vision promotion
+- use cheap single-stage smokes to reject obviously bad topology or schedule ideas
+- do not stay in a toy single-stage family once the branch differences are down in the likely noise floor
+- if GPU utilization remains poor and the family is still learning below the task noise floor, promote before continuing ablations
+- once promoted, compare branches only inside the promoted regime; do not mix conclusions from underpowered and promoted runs
 
-Promote only if:
-
-- cheap smoke valid loss improves or stays flat
-- invariant loss improves
-- no major throughput or memory regression
-- extra refine depth helps, or at least does not reveal a broken refinement story
-
-## Quality bar for merged/kept changes
+## Quality bar for kept changes
 
 Before keeping a nontrivial change, run:
 
 - relevant unit tests
 - relevant targeted integration tests
-- `cargo clippy` on touched crates with `-D warnings`
+- relevant benchmarks when making performance claims
+- `cargo clippy` on touched crates with `-D warnings` when practical
 
-For kernel or recurrent changes, also run:
-
-- the relevant benchmark bin
-- the relevant bounded-memory regression if it exists
+If behavior, config usage, or benchmarks changed materially, update the corresponding docs or examples after the result is accepted.
 
 ## Notes on working in this repository
 
 - The worktree may already be dirty. Do not revert unrelated changes.
-- Use focused commits.
+- Use focused commits when committing.
 - Prefer `rg` for search.
-- Use the current config overlay pattern instead of inventing new ad hoc flags.
-- Reuse the current benchmark and run-directory flow instead of building a parallel system.
+- Prefer existing config overlay patterns over ad hoc flags.
+- Reuse the current run-directory and benchmark flow instead of inventing a parallel system unless the system itself is the subject of research.
 
 ## Default operating posture
 
-Be autonomous.
+Be autonomous, empirical, and open-ended.
 
-The program is:
+The loop is:
 
-- baseline
-- change
+- establish baseline
+- form hypothesis
+- make a focused change
 - test
 - run
 - measure
+- record
 - keep or discard
 - repeat
 
-Keep iterating on Shakespeare and the V-JEPA2-like vision encoder until interrupted, with the cheap smoke ladders as the gate for further promotion.
+Optimize for learning rate and verified improvement, not for preserving prior architectural commitments.

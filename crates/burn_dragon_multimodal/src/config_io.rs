@@ -2,8 +2,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use serde_json::Value as JsonValue;
 
 pub(crate) fn load_merged_config<T>(config_paths: &[PathBuf]) -> Result<T>
@@ -37,10 +37,7 @@ fn load_config_value(path: &Path) -> Result<JsonValue> {
                 .with_context(|| format!("failed to parse {}", path.display()))?;
             serde_json::to_value(value).context("failed to convert TOML config to JSON value")
         }
-        _ => Err(anyhow!(
-            "config {} must use .json or .toml",
-            path.display()
-        )),
+        _ => Err(anyhow!("config {} must use .json or .toml", path.display())),
     }
 }
 

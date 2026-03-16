@@ -78,6 +78,5 @@ pub(crate) use crate::train::pipeline::*;
 pub(crate) use crate::train::teacher::*;
 
 pub(crate) use crate::train::metrics::{
-    DeviceMemoryMetric, DeviceMetric, LossValue, MemoryCleanupMetric, MetricsBackend,
-    ScalarMetric,
+    DeviceMemoryMetric, DeviceMetric, LossValue, MemoryCleanupMetric, MetricsBackend, ScalarMetric,
 };

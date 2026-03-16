@@ -1,4 +1,5 @@
 use super::*;
+use burn_dragon_train::LearningRateScheduleConfig;
 
 #[test]
 fn distill_mode_parses() {
@@ -40,6 +41,7 @@ fn distill_mode_parses() {
             [mode]
             type = "distill"
             rollout_supervision_frames = 3
+            rollout_supervision_stride = 2
             rollout_supervision_power = 1.5
             rollout_sampling_power = 1.25
 
@@ -63,6 +65,7 @@ fn distill_mode_parses() {
                 assert_eq!(teacher.feature_dim, 384);
                 assert_eq!(teacher.patch_tokens, Some(256));
                 assert_eq!(distill.rollout_supervision_frames, 3);
+                assert_eq!(distill.rollout_supervision_stride, 2);
                 assert!((distill.rollout_supervision_power - 1.5).abs() < f32::EPSILON);
                 assert!((distill.rollout_sampling_power - 1.25).abs() < f32::EPSILON);
             }
@@ -145,6 +148,118 @@ fn distill_rejects_negative_rollout_sampling_power() {
     assert!(
         err.to_string()
             .contains("mode.rollout_sampling_power must be >= 0")
+    );
+}
+
+#[test]
+fn distill_rejects_zero_rollout_supervision_stride() {
+    let text = r#"
+            [dataset]
+            imagenet_root = "data/imagenette2-160"
+            train_dir = "train"
+            val_dir = "val"
+
+            [training]
+            batch_size = 8
+            max_iters = 10
+            log_frequency = 2
+
+            [optimizer]
+            learning_rate = 0.001
+            weight_decay = 0.1
+
+            [vision]
+            image_size = 224
+            patch_size = 14
+            in_channels = 3
+            embed_dim = 256
+            steps = 4
+            n_head = 4
+            mlp_internal_dim_multiplier = 4
+            dropout = 0.1
+            projection_dim = 384
+            projection_hidden_dim = 512
+            use_cls_token = true
+            pos_encoding = "rope"
+            attention_mode = "row_l1"
+
+            [mode]
+            type = "distill"
+            rollout_supervision_stride = 0
+
+            [mode.teacher]
+            type = "features"
+            train_cls_path = "train_cls.bin"
+            train_patch_path = "train_patch.bin"
+            val_cls_path = "val_cls.bin"
+            val_patch_path = "val_patch.bin"
+            feature_dim = 384
+            patch_tokens = 256
+        "#;
+
+    let err = toml::from_str::<VisionTrainingConfig>(text)
+        .expect("parse config")
+        .validate()
+        .expect_err("zero rollout supervision stride should be rejected");
+    assert!(
+        err.to_string()
+            .contains("mode.rollout_supervision_stride must be > 0 for distill mode")
+    );
+}
+
+#[test]
+fn distill_rejects_zero_rollout_supervision_explicit_step() {
+    let text = r#"
+            [dataset]
+            imagenet_root = "data/imagenette2-160"
+            train_dir = "train"
+            val_dir = "val"
+
+            [training]
+            batch_size = 8
+            max_iters = 10
+            log_frequency = 2
+
+            [optimizer]
+            learning_rate = 0.001
+            weight_decay = 0.1
+
+            [vision]
+            image_size = 224
+            patch_size = 14
+            in_channels = 3
+            embed_dim = 256
+            steps = 4
+            n_head = 4
+            mlp_internal_dim_multiplier = 4
+            dropout = 0.1
+            projection_dim = 384
+            projection_hidden_dim = 512
+            use_cls_token = true
+            pos_encoding = "rope"
+            attention_mode = "row_l1"
+
+            [mode]
+            type = "distill"
+            rollout_supervision_explicit_steps = [0, 4, 8]
+
+            [mode.teacher]
+            type = "features"
+            train_cls_path = "train_cls.bin"
+            train_patch_path = "train_patch.bin"
+            val_cls_path = "val_cls.bin"
+            val_patch_path = "val_patch.bin"
+            feature_dim = 384
+            patch_tokens = 256
+        "#;
+
+    let err = toml::from_str::<VisionTrainingConfig>(text)
+        .expect("parse config")
+        .validate()
+        .expect_err("zero rollout supervision explicit step should be rejected");
+    assert!(
+        err.to_string()
+            .contains("mode.rollout_supervision_explicit_steps entries must be > 0")
     );
 }
 
@@ -1537,7 +1652,9 @@ fn normalization_kind_parses_for_vision_model() {
         "#;
 
     let config: VisionTrainingConfig = toml::from_str(text).expect("parse config");
-    config.validate().expect("vision normalization config should validate");
+    config
+        .validate()
+        .expect("vision normalization config should validate");
     assert_eq!(
         config.vision.normalization.kind,
         burn_dragon_core::DragonNormKind::Derf
@@ -1591,7 +1708,10 @@ fn convnext_patch_embed_mode_parses_for_vision_model() {
 
     let config: VisionTrainingConfig = toml::from_str(text).expect("parse config");
     config.validate().expect("vision config should validate");
-    assert_eq!(config.vision.patch_embed_mode, VisionPatchEmbedMode::ConvNext);
+    assert_eq!(
+        config.vision.patch_embed_mode,
+        VisionPatchEmbedMode::ConvNext
+    );
 }
 
 #[test]
@@ -1641,7 +1761,10 @@ fn convnext_patch_embed_mode_alias_parses_for_vision_model() {
 
     let config: VisionTrainingConfig = toml::from_str(text).expect("parse config");
     config.validate().expect("vision config should validate");
-    assert_eq!(config.vision.patch_embed_mode, VisionPatchEmbedMode::ConvNext);
+    assert_eq!(
+        config.vision.patch_embed_mode,
+        VisionPatchEmbedMode::ConvNext
+    );
 }
 
 #[test]
@@ -1660,6 +1783,2786 @@ fn scaleaware_trm_rank_overrides_load_from_overlay_stack() {
     assert_eq!(config.vision.trm_graph.coarse_rank, Some(64));
     assert_eq!(config.vision.trm_graph.global_rank, Some(8));
     assert_eq!(config.vision.trm_graph.rank, 8);
+}
+
+#[test]
+fn imagenette_dinov2_pyramid_stageaware_smoke_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path = repo_root
+        .join("config/vision/distill/imagenette_dinov2_vits14_pyramid_stageaware_smoke.toml");
+    let config = load_vision_training_config(&[config_path]).expect("load pyramid distill smoke");
+
+    assert_eq!(
+        config
+            .vision
+            .resolved_backbone_kind()
+            .expect("resolved backbone"),
+        VisionBackboneKind::Pyramid
+    );
+    assert_eq!(config.vision.trm_graph.patch_rank, Some(1));
+    assert_eq!(config.vision.trm_graph.coarse_rank, Some(96));
+    assert_eq!(config.vision.trm_graph.global_rank, Some(8));
+    assert_eq!(config.vision.trm_graph.predict_coarse_substeps, 1);
+    assert!(
+        !config
+            .vision
+            .trm_graph
+            .bank_schedule
+            .predict
+            .patch_local_read
+    );
+    assert!(
+        !config
+            .vision
+            .trm_graph
+            .bank_schedule
+            .predict
+            .patch_local_write
+    );
+    assert!(
+        !config
+            .vision
+            .trm_graph
+            .bank_schedule
+            .predict
+            .patch_from_coarse_read
+    );
+    assert!(
+        !config
+            .vision
+            .trm_graph
+            .bank_schedule
+            .predict
+            .patch_to_coarse_write
+    );
+}
+
+#[test]
+fn imagenette_dinov2_dense_short_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path =
+        repo_root.join("config/vision/distill/imagenette_dinov2_vits14_dense_short.toml");
+    let config = load_vision_training_config(&[config_path]).expect("load dense distill short");
+
+    assert_eq!(
+        config
+            .vision
+            .resolved_backbone_kind()
+            .expect("resolved backbone"),
+        VisionBackboneKind::Dense
+    );
+    assert_eq!(config.training.batch_size, 96);
+    assert_eq!(config.dataset.max_records, Some(2048));
+    assert_eq!(config.training.max_iters, 128);
+}
+
+#[test]
+fn imagenette_dinov2_dense_fixedtime90_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path =
+        repo_root.join("config/vision/distill/imagenette_dinov2_vits14_dense_fixedtime90.toml");
+    let config =
+        load_vision_training_config(&[config_path]).expect("load dense distill fixedtime90");
+
+    assert_eq!(
+        config
+            .vision
+            .resolved_backbone_kind()
+            .expect("resolved backbone"),
+        VisionBackboneKind::Dense
+    );
+    assert_eq!(config.training.batch_size, 96);
+    assert_eq!(config.dataset.max_records, Some(10752));
+    assert_eq!(config.training.max_iters, 112);
+}
+
+#[test]
+fn imagenette_dinov2_dense_h6_short_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path =
+        repo_root.join("config/vision/distill/imagenette_dinov2_vits14_dense_h6_short.toml");
+    let config = load_vision_training_config(&[config_path]).expect("load dense h6 short");
+
+    assert_eq!(
+        config
+            .vision
+            .resolved_backbone_kind()
+            .expect("resolved backbone"),
+        VisionBackboneKind::Dense
+    );
+    assert_eq!(config.training.batch_size, 48);
+    assert_eq!(config.dataset.max_records, Some(2048));
+    assert_eq!(config.training.max_iters, 128);
+    assert_eq!(config.training.rollout_max_steps, Some(6));
+    assert_eq!(config.training.rollout_backprop_steps, Some(3));
+    assert_eq!(config.vision.steps, 6);
+    match config.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            assert_eq!(distill.rollout_supervision_frames, 1);
+            assert!((distill.rollout_supervision_power - 1.0).abs() < f32::EPSILON);
+            assert!((distill.rollout_sampling_power - 0.5).abs() < f32::EPSILON);
+        }
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn imagenette_dinov2_dense_h6_fixedtime120_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path =
+        repo_root.join("config/vision/distill/imagenette_dinov2_vits14_dense_h6_fixedtime120.toml");
+    let config = load_vision_training_config(&[config_path]).expect("load dense h6 fixedtime120");
+
+    assert_eq!(
+        config
+            .vision
+            .resolved_backbone_kind()
+            .expect("resolved backbone"),
+        VisionBackboneKind::Dense
+    );
+    assert_eq!(config.training.batch_size, 48);
+    assert_eq!(config.dataset.max_records, Some(12288));
+    assert_eq!(config.training.max_iters, 256);
+    assert_eq!(config.training.rollout_max_steps, Some(6));
+    assert_eq!(config.training.rollout_backprop_steps, Some(3));
+    assert_eq!(config.vision.steps, 6);
+    match config.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            assert_eq!(distill.rollout_supervision_frames, 1);
+            assert!((distill.rollout_supervision_power - 1.0).abs() < f32::EPSILON);
+            assert!((distill.rollout_sampling_power - 0.5).abs() < f32::EPSILON);
+        }
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn imagenette_dinov2_dense_h8_short_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path =
+        repo_root.join("config/vision/distill/imagenette_dinov2_vits14_dense_h8_short.toml");
+    let config = load_vision_training_config(&[config_path]).expect("load dense h8 short");
+
+    assert_eq!(
+        config
+            .vision
+            .resolved_backbone_kind()
+            .expect("resolved backbone"),
+        VisionBackboneKind::Dense
+    );
+    assert_eq!(config.training.batch_size, 40);
+    assert_eq!(config.dataset.max_records, Some(2048));
+    assert_eq!(config.training.max_iters, 128);
+    assert_eq!(config.training.rollout_max_steps, Some(8));
+    assert_eq!(config.training.rollout_backprop_steps, Some(3));
+    assert_eq!(config.vision.steps, 8);
+    match config.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            assert_eq!(distill.rollout_supervision_frames, 1);
+            assert!((distill.rollout_supervision_power - 1.0).abs() < f32::EPSILON);
+            assert!((distill.rollout_sampling_power - 0.5).abs() < f32::EPSILON);
+        }
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn imagenette_dinov2_dense_h8_fixedtime120_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path =
+        repo_root.join("config/vision/distill/imagenette_dinov2_vits14_dense_h8_fixedtime120.toml");
+    let config = load_vision_training_config(&[config_path]).expect("load dense h8 fixedtime120");
+
+    assert_eq!(
+        config
+            .vision
+            .resolved_backbone_kind()
+            .expect("resolved backbone"),
+        VisionBackboneKind::Dense
+    );
+    assert_eq!(config.training.batch_size, 40);
+    assert_eq!(config.dataset.max_records, Some(12288));
+    assert_eq!(config.training.max_iters, 256);
+    assert_eq!(config.training.rollout_max_steps, Some(8));
+    assert_eq!(config.training.rollout_backprop_steps, Some(3));
+    assert_eq!(config.vision.steps, 8);
+    match config.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            assert_eq!(distill.rollout_supervision_frames, 1);
+            assert!((distill.rollout_supervision_power - 1.0).abs() < f32::EPSILON);
+            assert!((distill.rollout_sampling_power - 0.5).abs() < f32::EPSILON);
+        }
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn imagenette_dinov2_dense_h8_deepbias_short_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path = repo_root
+        .join("config/vision/distill/imagenette_dinov2_vits14_dense_h8_deepbias_short.toml");
+    let config = load_vision_training_config(&[config_path]).expect("load dense h8 deepbias short");
+
+    assert_eq!(
+        config
+            .vision
+            .resolved_backbone_kind()
+            .expect("resolved backbone"),
+        VisionBackboneKind::Dense
+    );
+    assert_eq!(config.training.batch_size, 40);
+    assert_eq!(config.dataset.max_records, Some(2048));
+    assert_eq!(config.training.max_iters, 128);
+    assert_eq!(config.training.rollout_max_steps, Some(8));
+    assert_eq!(config.training.rollout_backprop_steps, Some(3));
+    assert_eq!(config.vision.steps, 8);
+    match config.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            assert_eq!(distill.rollout_supervision_frames, 1);
+            assert!((distill.rollout_supervision_power - 1.0).abs() < f32::EPSILON);
+            assert!((distill.rollout_sampling_power - 1.5).abs() < f32::EPSILON);
+        }
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn imagenette_dinov2_dense_h10_short_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path =
+        repo_root.join("config/vision/distill/imagenette_dinov2_vits14_dense_h10_short.toml");
+    let config = load_vision_training_config(&[config_path]).expect("load dense h10 short");
+
+    assert_eq!(
+        config
+            .vision
+            .resolved_backbone_kind()
+            .expect("resolved backbone"),
+        VisionBackboneKind::Dense
+    );
+    assert_eq!(config.training.batch_size, 40);
+    assert_eq!(config.dataset.max_records, Some(2048));
+    assert_eq!(config.training.max_iters, 128);
+    assert_eq!(config.training.rollout_max_steps, Some(10));
+    assert_eq!(config.training.rollout_backprop_steps, Some(3));
+    assert_eq!(config.vision.steps, 10);
+    match config.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            assert_eq!(distill.rollout_supervision_frames, 1);
+            assert!((distill.rollout_supervision_power - 1.0).abs() < f32::EPSILON);
+            assert!((distill.rollout_sampling_power - 0.5).abs() < f32::EPSILON);
+        }
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn imagenette_dinov2_dense_h10_wide_short_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path =
+        repo_root.join("config/vision/distill/imagenette_dinov2_vits14_dense_h10_wide_short.toml");
+    let config = load_vision_training_config(&[config_path]).expect("load dense h10 wide short");
+
+    assert_eq!(
+        config
+            .vision
+            .resolved_backbone_kind()
+            .expect("resolved backbone"),
+        VisionBackboneKind::Dense
+    );
+    assert_eq!(config.training.batch_size, 40);
+    assert_eq!(config.dataset.max_records, Some(2048));
+    assert_eq!(config.training.max_iters, 128);
+    assert_eq!(config.training.rollout_max_steps, Some(10));
+    assert_eq!(config.training.rollout_backprop_steps, Some(3));
+    assert_eq!(config.vision.steps, 10);
+    assert_eq!(config.vision.embed_dim, 192);
+    assert_eq!(config.vision.n_head, 6);
+    assert_eq!(config.vision.projection_hidden_dim, 512);
+    match config.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            assert_eq!(distill.rollout_supervision_frames, 1);
+            assert!((distill.rollout_supervision_power - 1.0).abs() < f32::EPSILON);
+            assert!((distill.rollout_sampling_power - 0.5).abs() < f32::EPSILON);
+        }
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn imagenette_dinov2_dense_h10_multiframe2_short_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path = repo_root
+        .join("config/vision/distill/imagenette_dinov2_vits14_dense_h10_multiframe2_short.toml");
+    let config =
+        load_vision_training_config(&[config_path]).expect("load dense h10 multiframe2 short");
+
+    assert_eq!(
+        config
+            .vision
+            .resolved_backbone_kind()
+            .expect("resolved backbone"),
+        VisionBackboneKind::Dense
+    );
+    assert_eq!(config.training.batch_size, 40);
+    assert_eq!(config.dataset.max_records, Some(2048));
+    assert_eq!(config.training.max_iters, 128);
+    assert_eq!(config.training.rollout_max_steps, Some(10));
+    assert_eq!(config.training.rollout_backprop_steps, Some(3));
+    assert_eq!(config.vision.steps, 10);
+    match config.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            assert_eq!(distill.rollout_supervision_frames, 2);
+            assert!((distill.rollout_supervision_power - 1.0).abs() < f32::EPSILON);
+            assert!((distill.rollout_sampling_power - 0.5).abs() < f32::EPSILON);
+            assert!((distill.rollout_improvement_weight - 0.0).abs() < f32::EPSILON);
+        }
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn imagenette_dinov2_dense_h10_proj512_short_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path = repo_root
+        .join("config/vision/distill/imagenette_dinov2_vits14_dense_h10_proj512_short.toml");
+    let config = load_vision_training_config(&[config_path]).expect("load dense h10 proj512 short");
+
+    assert_eq!(
+        config
+            .vision
+            .resolved_backbone_kind()
+            .expect("resolved backbone"),
+        VisionBackboneKind::Dense
+    );
+    assert_eq!(config.training.batch_size, 40);
+    assert_eq!(config.dataset.max_records, Some(2048));
+    assert_eq!(config.training.max_iters, 128);
+    assert_eq!(config.training.rollout_max_steps, Some(10));
+    assert_eq!(config.training.rollout_backprop_steps, Some(3));
+    assert_eq!(config.vision.steps, 10);
+    assert_eq!(config.vision.embed_dim, 128);
+    assert_eq!(config.vision.n_head, 4);
+    assert_eq!(config.vision.projection_hidden_dim, 512);
+    match config.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            assert_eq!(distill.rollout_supervision_frames, 1);
+            assert!((distill.rollout_supervision_power - 1.0).abs() < f32::EPSILON);
+            assert!((distill.rollout_sampling_power - 0.5).abs() < f32::EPSILON);
+        }
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn imagenette_dinov2_dense_h10_deepbias_short_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path = repo_root
+        .join("config/vision/distill/imagenette_dinov2_vits14_dense_h10_deepbias_short.toml");
+    let config =
+        load_vision_training_config(&[config_path]).expect("load dense h10 deepbias short");
+
+    assert_eq!(
+        config
+            .vision
+            .resolved_backbone_kind()
+            .expect("resolved backbone"),
+        VisionBackboneKind::Dense
+    );
+    assert_eq!(config.training.batch_size, 40);
+    assert_eq!(config.dataset.max_records, Some(2048));
+    assert_eq!(config.training.max_iters, 128);
+    assert_eq!(config.training.rollout_max_steps, Some(10));
+    assert_eq!(config.training.rollout_backprop_steps, Some(3));
+    assert_eq!(config.vision.steps, 10);
+    match config.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            assert_eq!(distill.rollout_supervision_frames, 1);
+            assert!((distill.rollout_supervision_power - 1.0).abs() < f32::EPSILON);
+            assert!((distill.rollout_sampling_power - 1.0).abs() < f32::EPSILON);
+        }
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn imagenette_dinov2_dense_h10_wide_deepbias_short_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path = repo_root
+        .join("config/vision/distill/imagenette_dinov2_vits14_dense_h10_wide_deepbias_short.toml");
+    let config =
+        load_vision_training_config(&[config_path]).expect("load dense h10 wide deepbias short");
+
+    assert_eq!(
+        config
+            .vision
+            .resolved_backbone_kind()
+            .expect("resolved backbone"),
+        VisionBackboneKind::Dense
+    );
+    assert_eq!(config.training.batch_size, 40);
+    assert_eq!(config.dataset.max_records, Some(2048));
+    assert_eq!(config.training.max_iters, 128);
+    assert_eq!(config.training.rollout_max_steps, Some(10));
+    assert_eq!(config.training.rollout_backprop_steps, Some(3));
+    assert_eq!(config.vision.steps, 10);
+    assert_eq!(config.vision.embed_dim, 192);
+    assert_eq!(config.vision.n_head, 6);
+    assert_eq!(config.vision.projection_hidden_dim, 512);
+    match config.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            assert_eq!(distill.rollout_supervision_frames, 1);
+            assert!((distill.rollout_supervision_power - 1.0).abs() < f32::EPSILON);
+            assert!((distill.rollout_sampling_power - 1.0).abs() < f32::EPSILON);
+        }
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn imagenette_dinov2_dense_h10_deepbias1p5_short_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path = repo_root
+        .join("config/vision/distill/imagenette_dinov2_vits14_dense_h10_deepbias1p5_short.toml");
+    let config =
+        load_vision_training_config(&[config_path]).expect("load dense h10 deepbias1p5 short");
+
+    assert_eq!(
+        config
+            .vision
+            .resolved_backbone_kind()
+            .expect("resolved backbone"),
+        VisionBackboneKind::Dense
+    );
+    assert_eq!(config.training.batch_size, 40);
+    assert_eq!(config.dataset.max_records, Some(2048));
+    assert_eq!(config.training.max_iters, 128);
+    assert_eq!(config.training.rollout_max_steps, Some(10));
+    assert_eq!(config.training.rollout_backprop_steps, Some(3));
+    assert_eq!(config.vision.steps, 10);
+    match config.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            assert_eq!(distill.rollout_supervision_frames, 1);
+            assert!((distill.rollout_supervision_power - 1.0).abs() < f32::EPSILON);
+            assert!((distill.rollout_sampling_power - 1.5).abs() < f32::EPSILON);
+        }
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn imagenette_dinov2_dense_h10_rel2pct_short_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path = repo_root
+        .join("config/vision/distill/imagenette_dinov2_vits14_dense_h10_rel2pct_short.toml");
+    let config = load_vision_training_config(&[config_path]).expect("load dense h10 rel2pct short");
+
+    assert_eq!(
+        config
+            .vision
+            .resolved_backbone_kind()
+            .expect("resolved backbone"),
+        VisionBackboneKind::Dense
+    );
+    assert_eq!(config.training.batch_size, 40);
+    assert_eq!(config.dataset.max_records, Some(2048));
+    assert_eq!(config.training.max_iters, 128);
+    assert_eq!(config.training.rollout_max_steps, Some(10));
+    assert_eq!(config.training.rollout_backprop_steps, Some(3));
+    assert_eq!(config.vision.steps, 10);
+    match config.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            assert_eq!(distill.rollout_supervision_frames, 1);
+            assert!((distill.rollout_supervision_power - 1.0).abs() < f32::EPSILON);
+            assert!((distill.rollout_sampling_power - 0.5).abs() < f32::EPSILON);
+            assert!((distill.loss.rel_weight - 0.02).abs() < f32::EPSILON);
+            assert!((distill.loss.rel_tau - 0.07).abs() < f32::EPSILON);
+            assert_eq!(distill.loss.rel_sample_tokens, Some(64));
+        }
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn imagenette_dinov2_dense_h10_rel1pct_short_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path = repo_root
+        .join("config/vision/distill/imagenette_dinov2_vits14_dense_h10_rel1pct_short.toml");
+    let config = load_vision_training_config(&[config_path]).expect("load dense h10 rel1pct short");
+
+    assert_eq!(
+        config
+            .vision
+            .resolved_backbone_kind()
+            .expect("resolved backbone"),
+        VisionBackboneKind::Dense
+    );
+    assert_eq!(config.training.batch_size, 40);
+    assert_eq!(config.dataset.max_records, Some(2048));
+    assert_eq!(config.training.max_iters, 128);
+    assert_eq!(config.training.rollout_max_steps, Some(10));
+    assert_eq!(config.training.rollout_backprop_steps, Some(3));
+    assert_eq!(config.vision.steps, 10);
+    match config.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            assert_eq!(distill.rollout_supervision_frames, 1);
+            assert!((distill.rollout_supervision_power - 1.0).abs() < f32::EPSILON);
+            assert!((distill.rollout_sampling_power - 0.5).abs() < f32::EPSILON);
+            assert!((distill.loss.rel_weight - 0.01).abs() < f32::EPSILON);
+            assert!((distill.loss.rel_tau - 0.07).abs() < f32::EPSILON);
+            assert_eq!(distill.loss.rel_sample_tokens, Some(64));
+        }
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn imagenette_dinov2_dense_h10_bptt6_short_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path =
+        repo_root.join("config/vision/distill/imagenette_dinov2_vits14_dense_h10_bptt6_short.toml");
+    let config = load_vision_training_config(&[config_path]).expect("load dense h10 bptt6 short");
+
+    assert_eq!(
+        config
+            .vision
+            .resolved_backbone_kind()
+            .expect("resolved backbone"),
+        VisionBackboneKind::Dense
+    );
+    assert_eq!(config.training.batch_size, 40);
+    assert_eq!(config.dataset.max_records, Some(2048));
+    assert_eq!(config.training.max_iters, 128);
+    assert_eq!(config.training.rollout_max_steps, Some(10));
+    assert_eq!(config.training.rollout_backprop_steps, Some(6));
+    assert_eq!(config.vision.steps, 10);
+    match config.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            assert_eq!(distill.rollout_supervision_frames, 1);
+            assert!((distill.rollout_supervision_power - 1.0).abs() < f32::EPSILON);
+            assert!((distill.rollout_sampling_power - 0.5).abs() < f32::EPSILON);
+        }
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn imagenette_dinov2_dense_h10_refinegain_short_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path = repo_root
+        .join("config/vision/distill/imagenette_dinov2_vits14_dense_h10_refinegain_short.toml");
+    let config =
+        load_vision_training_config(&[config_path]).expect("load dense h10 refinegain short");
+
+    assert_eq!(
+        config
+            .vision
+            .resolved_backbone_kind()
+            .expect("resolved backbone"),
+        VisionBackboneKind::Dense
+    );
+    assert_eq!(config.training.batch_size, 40);
+    assert_eq!(config.dataset.max_records, Some(2048));
+    assert_eq!(config.training.max_iters, 128);
+    assert_eq!(config.training.rollout_max_steps, Some(10));
+    assert_eq!(config.training.rollout_backprop_steps, Some(3));
+    assert_eq!(config.vision.steps, 10);
+    match config.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            assert_eq!(distill.rollout_supervision_frames, 3);
+            assert!((distill.rollout_supervision_power - 1.25).abs() < f32::EPSILON);
+            assert!((distill.rollout_sampling_power - 1.0).abs() < f32::EPSILON);
+            assert!((distill.rollout_improvement_weight - 0.25).abs() < f32::EPSILON);
+            assert!((distill.rollout_improvement_margin - 0.0).abs() < f32::EPSILON);
+        }
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn imagenette_dinov2_dense_h10_multiframe_short_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path = repo_root
+        .join("config/vision/distill/imagenette_dinov2_vits14_dense_h10_multiframe_short.toml");
+    let config =
+        load_vision_training_config(&[config_path]).expect("load dense h10 multiframe short");
+
+    assert_eq!(
+        config
+            .vision
+            .resolved_backbone_kind()
+            .expect("resolved backbone"),
+        VisionBackboneKind::Dense
+    );
+    assert_eq!(config.training.batch_size, 40);
+    assert_eq!(config.dataset.max_records, Some(2048));
+    assert_eq!(config.training.max_iters, 128);
+    assert_eq!(config.training.rollout_max_steps, Some(10));
+    assert_eq!(config.training.rollout_backprop_steps, Some(3));
+    assert_eq!(config.vision.steps, 10);
+    match config.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            assert_eq!(distill.rollout_supervision_frames, 3);
+            assert!((distill.rollout_supervision_power - 1.25).abs() < f32::EPSILON);
+            assert!((distill.rollout_sampling_power - 1.0).abs() < f32::EPSILON);
+        }
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn imagenette_dinov2_dense_h10_fixedtime120_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path = repo_root
+        .join("config/vision/distill/imagenette_dinov2_vits14_dense_h10_fixedtime120.toml");
+    let config = load_vision_training_config(&[config_path]).expect("load dense h10 fixedtime120");
+
+    assert_eq!(
+        config
+            .vision
+            .resolved_backbone_kind()
+            .expect("resolved backbone"),
+        VisionBackboneKind::Dense
+    );
+    assert_eq!(config.training.batch_size, 40);
+    assert_eq!(config.dataset.max_records, Some(12288));
+    assert_eq!(config.training.max_iters, 256);
+    assert_eq!(config.training.rollout_max_steps, Some(10));
+    assert_eq!(config.training.rollout_backprop_steps, Some(3));
+    assert_eq!(config.vision.steps, 10);
+    match config.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            assert_eq!(distill.rollout_supervision_frames, 1);
+            assert!((distill.rollout_supervision_power - 1.0).abs() < f32::EPSILON);
+            assert!((distill.rollout_sampling_power - 0.5).abs() < f32::EPSILON);
+        }
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn imagenette_dinov2_dense_h10_deepbias_promoted_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path = repo_root
+        .join("config/vision/distill/imagenette_dinov2_vits14_dense_h10_deepbias_promoted.toml");
+    let config =
+        load_vision_training_config(&[config_path]).expect("load dense h10 deepbias promoted");
+
+    assert_eq!(
+        config
+            .vision
+            .resolved_backbone_kind()
+            .expect("resolved backbone"),
+        VisionBackboneKind::Dense
+    );
+    assert_eq!(config.training.batch_size, 40);
+    assert_eq!(config.dataset.max_records, Some(12288));
+    assert_eq!(config.training.epochs, Some(2));
+    assert_eq!(config.training.max_iters, 640);
+    assert_eq!(config.training.rollout_max_steps, Some(10));
+    assert_eq!(config.training.rollout_backprop_steps, Some(3));
+    assert_eq!(config.vision.steps, 10);
+    match config.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            assert_eq!(distill.rollout_supervision_frames, 1);
+            assert!((distill.rollout_supervision_power - 1.0).abs() < f32::EPSILON);
+            assert!((distill.rollout_sampling_power - 1.0).abs() < f32::EPSILON);
+        }
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn imagenette_dinov2_dense_h10_deepbias_promoted_bptt4_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path = repo_root.join(
+        "config/vision/distill/imagenette_dinov2_vits14_dense_h10_deepbias_promoted_bptt4.toml",
+    );
+    let config = load_vision_training_config(&[config_path])
+        .expect("load dense h10 deepbias promoted bptt4");
+
+    assert_eq!(
+        config
+            .vision
+            .resolved_backbone_kind()
+            .expect("resolved backbone"),
+        VisionBackboneKind::Dense
+    );
+    assert_eq!(config.training.batch_size, 40);
+    assert_eq!(config.dataset.max_records, Some(12288));
+    assert_eq!(config.training.epochs, Some(2));
+    assert_eq!(config.training.max_iters, 640);
+    assert_eq!(config.training.rollout_max_steps, Some(10));
+    assert_eq!(config.training.rollout_backprop_steps, Some(4));
+    assert_eq!(config.vision.steps, 10);
+    match config.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            assert_eq!(distill.rollout_supervision_frames, 1);
+            assert!((distill.rollout_supervision_power - 1.0).abs() < f32::EPSILON);
+            assert!((distill.rollout_sampling_power - 1.0).abs() < f32::EPSILON);
+        }
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn imagenette_dinov2_dense_h10_deepbias_promoted_e3_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path = repo_root
+        .join("config/vision/distill/imagenette_dinov2_vits14_dense_h10_deepbias_promoted_e3.toml");
+    let config =
+        load_vision_training_config(&[config_path]).expect("load dense h10 deepbias promoted e3");
+
+    assert_eq!(
+        config
+            .vision
+            .resolved_backbone_kind()
+            .expect("resolved backbone"),
+        VisionBackboneKind::Dense
+    );
+    assert_eq!(config.training.batch_size, 40);
+    assert_eq!(config.dataset.max_records, Some(12288));
+    assert_eq!(config.training.epochs, Some(3));
+    assert_eq!(config.training.max_iters, 960);
+    assert_eq!(config.training.rollout_max_steps, Some(10));
+    assert_eq!(config.training.rollout_backprop_steps, Some(3));
+    assert_eq!(config.vision.steps, 10);
+    match config.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            assert_eq!(distill.rollout_supervision_frames, 1);
+            assert!((distill.rollout_supervision_power - 1.0).abs() < f32::EPSILON);
+            assert!((distill.rollout_sampling_power - 1.0).abs() < f32::EPSILON);
+        }
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn imagenette_dinov2_dense_h10_deepbias_promoted_e3_schedmatch_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path = repo_root.join(
+        "config/vision/distill/imagenette_dinov2_vits14_dense_h10_deepbias_promoted_e3_schedmatch.toml",
+    );
+    let config = load_vision_training_config(&[config_path])
+        .expect("load dense h10 deepbias promoted e3 schedmatch");
+
+    assert_eq!(
+        config
+            .vision
+            .resolved_backbone_kind()
+            .expect("resolved backbone"),
+        VisionBackboneKind::Dense
+    );
+    assert_eq!(config.training.batch_size, 40);
+    assert_eq!(config.dataset.max_records, Some(12288));
+    assert_eq!(config.training.epochs, Some(3));
+    assert_eq!(config.training.max_iters, 960);
+    assert_eq!(config.training.rollout_max_steps, Some(10));
+    assert_eq!(config.training.rollout_backprop_steps, Some(3));
+    assert_eq!(config.vision.steps, 10);
+    match config.optimizer.lr_schedule {
+        Some(LearningRateScheduleConfig::Cosine { num_iters, .. }) => {
+            assert_eq!(num_iters, Some(960));
+        }
+        other => panic!("expected cosine lr schedule, got {other:?}"),
+    }
+    match config.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            assert_eq!(distill.rollout_supervision_frames, 1);
+            assert!((distill.rollout_supervision_power - 1.0).abs() < f32::EPSILON);
+            assert!((distill.rollout_sampling_power - 1.0).abs() < f32::EPSILON);
+        }
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn imagenette_dinov2_dense_h10_deepbias_promoted_schedmatch_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path = repo_root.join(
+        "config/vision/distill/imagenette_dinov2_vits14_dense_h10_deepbias_promoted_schedmatch.toml",
+    );
+    let config = load_vision_training_config(&[config_path])
+        .expect("load dense h10 deepbias promoted schedmatch");
+
+    assert_eq!(
+        config
+            .vision
+            .resolved_backbone_kind()
+            .expect("resolved backbone"),
+        VisionBackboneKind::Dense
+    );
+    assert_eq!(config.training.batch_size, 40);
+    assert_eq!(config.dataset.max_records, Some(12288));
+    assert_eq!(config.training.epochs, Some(2));
+    assert_eq!(config.training.max_iters, 640);
+    assert_eq!(config.training.rollout_max_steps, Some(10));
+    assert_eq!(config.training.rollout_backprop_steps, Some(3));
+    assert_eq!(config.vision.steps, 10);
+    match config.optimizer.lr_schedule {
+        Some(LearningRateScheduleConfig::Cosine { num_iters, .. }) => {
+            assert_eq!(num_iters, Some(640));
+        }
+        other => panic!("expected cosine lr schedule, got {other:?}"),
+    }
+    match config.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            assert_eq!(distill.rollout_supervision_frames, 1);
+            assert!((distill.rollout_supervision_power - 1.0).abs() < f32::EPSILON);
+            assert!((distill.rollout_sampling_power - 1.0).abs() < f32::EPSILON);
+        }
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn imagenette_dinov2_dense_h10_deepbias1p25_promoted_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path = repo_root.join(
+        "config/vision/distill/imagenette_dinov2_vits14_dense_h10_deepbias1p25_promoted.toml",
+    );
+    let config =
+        load_vision_training_config(&[config_path]).expect("load dense h10 deepbias1p25 promoted");
+
+    assert_eq!(
+        config
+            .vision
+            .resolved_backbone_kind()
+            .expect("resolved backbone"),
+        VisionBackboneKind::Dense
+    );
+    assert_eq!(config.training.batch_size, 40);
+    assert_eq!(config.dataset.max_records, Some(12288));
+    assert_eq!(config.training.epochs, Some(2));
+    assert_eq!(config.training.max_iters, 640);
+    assert_eq!(config.training.rollout_max_steps, Some(10));
+    assert_eq!(config.training.rollout_backprop_steps, Some(3));
+    assert_eq!(config.vision.steps, 10);
+    match config.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            assert_eq!(distill.rollout_supervision_frames, 1);
+            assert!((distill.rollout_supervision_power - 1.0).abs() < f32::EPSILON);
+            assert!((distill.rollout_sampling_power - 1.25).abs() < f32::EPSILON);
+        }
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn imagenette_dinov2_dense_h10_deepbias_refinegain2pct_promoted_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path = repo_root.join(
+        "config/vision/distill/imagenette_dinov2_vits14_dense_h10_deepbias_refinegain2pct_promoted.toml",
+    );
+    let config = load_vision_training_config(&[config_path])
+        .expect("load dense h10 deepbias refinegain2pct promoted");
+
+    assert_eq!(
+        config
+            .vision
+            .resolved_backbone_kind()
+            .expect("resolved backbone"),
+        VisionBackboneKind::Dense
+    );
+    assert_eq!(config.training.batch_size, 40);
+    assert_eq!(config.dataset.max_records, Some(12288));
+    assert_eq!(config.training.epochs, Some(2));
+    assert_eq!(config.training.max_iters, 640);
+    assert_eq!(config.training.rollout_max_steps, Some(10));
+    assert_eq!(config.training.rollout_backprop_steps, Some(3));
+    assert_eq!(config.vision.steps, 10);
+    match config.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            assert_eq!(distill.rollout_supervision_frames, 2);
+            assert!((distill.rollout_supervision_power - 1.0).abs() < f32::EPSILON);
+            assert!((distill.rollout_sampling_power - 1.0).abs() < f32::EPSILON);
+            assert!((distill.rollout_improvement_weight - 0.02).abs() < f32::EPSILON);
+            assert!((distill.rollout_improvement_margin - 0.0).abs() < f32::EPSILON);
+        }
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn imagenette_dinov2_dense_h10_deepbias_rel0p5pct_promoted_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path = repo_root.join(
+        "config/vision/distill/imagenette_dinov2_vits14_dense_h10_deepbias_rel0p5pct_promoted.toml",
+    );
+    let config = load_vision_training_config(&[config_path])
+        .expect("load dense h10 deepbias rel0p5pct promoted");
+
+    assert_eq!(
+        config
+            .vision
+            .resolved_backbone_kind()
+            .expect("resolved backbone"),
+        VisionBackboneKind::Dense
+    );
+    assert_eq!(config.training.batch_size, 40);
+    assert_eq!(config.dataset.max_records, Some(12288));
+    assert_eq!(config.training.epochs, Some(2));
+    assert_eq!(config.training.max_iters, 640);
+    assert_eq!(config.training.rollout_max_steps, Some(10));
+    assert_eq!(config.training.rollout_backprop_steps, Some(3));
+    assert_eq!(config.vision.steps, 10);
+    match config.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            assert_eq!(distill.rollout_supervision_frames, 1);
+            assert!((distill.rollout_supervision_power - 1.0).abs() < f32::EPSILON);
+            assert!((distill.rollout_sampling_power - 1.0).abs() < f32::EPSILON);
+            assert!((distill.loss.rel_weight - 0.005).abs() < f32::EPSILON);
+        }
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn imagenette_dinov2_dense_h10_mid_deepbias_promoted_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path = repo_root.join(
+        "config/vision/distill/imagenette_dinov2_vits14_dense_h10_mid_deepbias_promoted.toml",
+    );
+    let config =
+        load_vision_training_config(&[config_path]).expect("load dense h10 mid deepbias promoted");
+
+    assert_eq!(
+        config
+            .vision
+            .resolved_backbone_kind()
+            .expect("resolved backbone"),
+        VisionBackboneKind::Dense
+    );
+    assert_eq!(config.training.batch_size, 40);
+    assert_eq!(config.dataset.max_records, Some(12288));
+    assert_eq!(config.training.epochs, Some(2));
+    assert_eq!(config.training.max_iters, 640);
+    assert_eq!(config.training.rollout_max_steps, Some(10));
+    assert_eq!(config.training.rollout_backprop_steps, Some(3));
+    assert_eq!(config.vision.steps, 10);
+    assert_eq!(config.vision.embed_dim, 160);
+    assert_eq!(config.vision.n_head, 5);
+    assert_eq!(config.vision.projection_hidden_dim, 448);
+    match config.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            assert_eq!(distill.rollout_supervision_frames, 1);
+            assert!((distill.rollout_supervision_power - 1.0).abs() < f32::EPSILON);
+            assert!((distill.rollout_sampling_power - 1.0).abs() < f32::EPSILON);
+        }
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn imagenette_dinov2_dense_h12_short_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path =
+        repo_root.join("config/vision/distill/imagenette_dinov2_vits14_dense_h12_short.toml");
+    let config = load_vision_training_config(&[config_path]).expect("load dense h12 short");
+
+    assert_eq!(
+        config
+            .vision
+            .resolved_backbone_kind()
+            .expect("resolved backbone"),
+        VisionBackboneKind::Dense
+    );
+    assert_eq!(config.training.batch_size, 40);
+    assert_eq!(config.dataset.max_records, Some(2048));
+    assert_eq!(config.training.max_iters, 128);
+    assert_eq!(config.training.rollout_max_steps, Some(12));
+    assert_eq!(config.training.rollout_backprop_steps, Some(3));
+    assert_eq!(config.vision.steps, 12);
+    match config.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            assert_eq!(distill.rollout_supervision_frames, 1);
+            assert!((distill.rollout_supervision_power - 1.0).abs() < f32::EPSILON);
+            assert!((distill.rollout_sampling_power - 0.5).abs() < f32::EPSILON);
+        }
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn imagenette_dinov2_dense_h10_deepbias_fixedtime120_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path = repo_root.join(
+        "config/vision/distill/imagenette_dinov2_vits14_dense_h10_deepbias_fixedtime120.toml",
+    );
+    let config =
+        load_vision_training_config(&[config_path]).expect("load dense h10 deepbias fixedtime120");
+
+    assert_eq!(
+        config
+            .vision
+            .resolved_backbone_kind()
+            .expect("resolved backbone"),
+        VisionBackboneKind::Dense
+    );
+    assert_eq!(config.training.batch_size, 40);
+    assert_eq!(config.dataset.max_records, Some(12288));
+    assert_eq!(config.training.max_iters, 256);
+    assert_eq!(config.training.rollout_max_steps, Some(10));
+    assert_eq!(config.training.rollout_backprop_steps, Some(3));
+    assert_eq!(config.vision.steps, 10);
+    match config.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            assert_eq!(distill.rollout_supervision_frames, 1);
+            assert!((distill.rollout_supervision_power - 1.0).abs() < f32::EPSILON);
+            assert!((distill.rollout_sampling_power - 1.0).abs() < f32::EPSILON);
+        }
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn imagenette_dinov2_dense_h10_multiframe_fixedtime120_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path = repo_root.join(
+        "config/vision/distill/imagenette_dinov2_vits14_dense_h10_multiframe_fixedtime120.toml",
+    );
+    let config = load_vision_training_config(&[config_path])
+        .expect("load dense h10 multiframe fixedtime120");
+
+    assert_eq!(
+        config
+            .vision
+            .resolved_backbone_kind()
+            .expect("resolved backbone"),
+        VisionBackboneKind::Dense
+    );
+    assert_eq!(config.training.batch_size, 40);
+    assert_eq!(config.dataset.max_records, Some(12288));
+    assert_eq!(config.training.max_iters, 256);
+    assert_eq!(config.training.rollout_max_steps, Some(10));
+    assert_eq!(config.training.rollout_backprop_steps, Some(3));
+    assert_eq!(config.vision.steps, 10);
+    match config.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            assert_eq!(distill.rollout_supervision_frames, 3);
+            assert!((distill.rollout_supervision_power - 1.25).abs() < f32::EPSILON);
+            assert!((distill.rollout_sampling_power - 1.0).abs() < f32::EPSILON);
+        }
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn moving_mnist_trm_stageaware_hybrid_compute_floor_dense_b160_vv_noaux_coarsesub1_h8_short_loads()
+{
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path = repo_root.join(
+        "config/vision/video_lejepa/moving_mnist_trm_stageaware_hybrid_compute_floor_dense_b160_vv_noaux_coarsesub1_h8_short.toml",
+    );
+    let config = load_vision_training_config(&[config_path]).expect("load video h8 transfer short");
+
+    assert_eq!(
+        config
+            .vision
+            .resolved_backbone_kind()
+            .expect("resolved backbone"),
+        VisionBackboneKind::Pyramid
+    );
+    assert_eq!(config.training.batch_size, 160);
+    assert_eq!(config.training.max_iters, 32);
+    assert_eq!(config.vision.steps, 8);
+    assert_eq!(config.vision.trm_graph.predict_coarse_substeps, 1);
+    match config.mode {
+        VisionTrainingModeConfig::VideoLejepa(video) => {
+            assert_eq!(video.target_frames, 6);
+        }
+        other => panic!("expected video lejepa mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn moving_mnist_trm_stageaware_hybrid_compute_floor_dense_b160_vv_jepaonly_coarsesub1_h8_short_loads()
+ {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path = repo_root.join(
+        "config/vision/video_lejepa/moving_mnist_trm_stageaware_hybrid_compute_floor_dense_b160_vv_jepaonly_coarsesub1_h8_short.toml",
+    );
+    let config =
+        load_vision_training_config(&[config_path]).expect("load video h8 jepa-only short");
+
+    assert_eq!(
+        config
+            .vision
+            .resolved_backbone_kind()
+            .expect("resolved backbone"),
+        VisionBackboneKind::Pyramid
+    );
+    assert_eq!(config.training.batch_size, 160);
+    assert_eq!(config.training.max_iters, 32);
+    assert_eq!(config.vision.steps, 8);
+    assert_eq!(config.vision.trm_graph.predict_coarse_substeps, 1);
+    match config.mode {
+        VisionTrainingModeConfig::VideoLejepa(video) => {
+            assert_eq!(video.target_frames, 6);
+            assert!((video.loss.observe_weight - 0.0).abs() < f32::EPSILON);
+        }
+        other => panic!("expected video lejepa mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn moving_mnist_trm_stageaware_hybrid_compute_floor_dense_b160_vv_noaux_coarsesub1_h8_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path = repo_root.join(
+        "config/vision/video_lejepa/moving_mnist_trm_stageaware_hybrid_compute_floor_dense_b160_vv_noaux_coarsesub1_h8.toml",
+    );
+    let config = load_vision_training_config(&[config_path]).expect("load video h8 transfer");
+
+    assert_eq!(
+        config
+            .vision
+            .resolved_backbone_kind()
+            .expect("resolved backbone"),
+        VisionBackboneKind::Pyramid
+    );
+    assert_eq!(config.training.batch_size, 160);
+    assert_eq!(config.training.max_iters, 96);
+    assert_eq!(config.vision.steps, 8);
+    assert_eq!(config.vision.trm_graph.predict_coarse_substeps, 1);
+    match config.mode {
+        VisionTrainingModeConfig::VideoLejepa(video) => {
+            assert_eq!(video.target_frames, 6);
+            assert!((video.loss.observe_weight - 1.0).abs() < f32::EPSILON);
+        }
+        other => panic!("expected video lejepa mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn canonical_video_transfer_horizon6_promo2_experiment_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path = repo_root.join(
+        "config/vision/video_lejepa/experiments/transfer/moving_mnist_trm_norm_smoke_horizon6_promo2.toml",
+    );
+    let config =
+        load_vision_training_config(&[config_path]).expect("load canonical video transfer promo2");
+
+    assert_eq!(config.training.max_iters, 128);
+    assert_eq!(config.training.batch_size, 8);
+    match config.mode {
+        VisionTrainingModeConfig::VideoLejepa(video) => {
+            assert_eq!(video.target_frames, 6);
+        }
+        other => panic!("expected video lejepa mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn canonical_video_diagnostics_radius0_noself_experiment_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path = repo_root.join(
+        "config/vision/video_lejepa/experiments/diagnostics/moving_mnist_trm_norm_smoke_scaleaware_regiondominant_predict_nocoarse_global2x_hub6_radius0_noself.toml",
+    );
+    let config = load_vision_training_config(&[config_path])
+        .expect("load canonical video diagnostics radius0 noself");
+
+    assert_eq!(config.vision.trm_graph.local_radius, 0);
+    assert!(!config.vision.trm_graph.local_self);
+}
+
+#[test]
+fn video_experiments_compat_transfer_shim_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path = repo_root.join(
+        "config/vision/video_lejepa/experiments/moving_mnist_trm_norm_smoke_horizon6_promo2.toml",
+    );
+    let config =
+        load_vision_training_config(&[config_path]).expect("load compatibility transfer shim");
+
+    match config.mode {
+        VisionTrainingModeConfig::VideoLejepa(video) => {
+            assert_eq!(video.target_frames, 6);
+        }
+        other => panic!("expected video lejepa mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn imagenette_dinov2_dense_h8_convnext_short_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path = repo_root
+        .join("config/vision/distill/imagenette_dinov2_vits14_dense_h8_convnext_short.toml");
+    let config = load_vision_training_config(&[config_path]).expect("load dense h8 convnext short");
+
+    assert_eq!(
+        config
+            .vision
+            .resolved_backbone_kind()
+            .expect("resolved backbone"),
+        VisionBackboneKind::Dense
+    );
+    assert_eq!(
+        config.vision.patch_embed_mode,
+        VisionPatchEmbedMode::ConvNext
+    );
+    assert_eq!(config.training.batch_size, 40);
+    assert_eq!(config.training.max_iters, 128);
+    assert_eq!(config.training.rollout_max_steps, Some(8));
+    assert_eq!(config.vision.steps, 8);
+}
+
+#[test]
+fn imagenette_dinov2_cellular_h8_short_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path =
+        repo_root.join("config/vision/distill/imagenette_dinov2_vits14_cellular_h8_short.toml");
+    let config = load_vision_training_config(&[config_path]).expect("load cellular h8 short");
+
+    assert_eq!(
+        config
+            .vision
+            .resolved_backbone_kind()
+            .expect("resolved backbone"),
+        VisionBackboneKind::Cellular
+    );
+    assert_eq!(config.training.batch_size, 64);
+    assert_eq!(config.dataset.max_records, Some(2048));
+    assert_eq!(config.training.max_iters, 128);
+    assert_eq!(config.training.rollout_max_steps, Some(8));
+    assert_eq!(config.training.rollout_backprop_steps, Some(3));
+    assert_eq!(config.vision.steps, 8);
+    assert!(config.vision.rho_stream.enabled);
+    assert!(config.vision.rho_stream.wgpu_forward_kernel);
+    assert!(config.vision.rho_stream.wgpu_rollout_fused);
+    match config.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            assert_eq!(distill.rollout_supervision_frames, 1);
+            assert!((distill.rollout_supervision_power - 1.0).abs() < f32::EPSILON);
+            assert!((distill.rollout_sampling_power - 0.5).abs() < f32::EPSILON);
+        }
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn imagenette_dinov2_cellular_h8_short_b40_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path =
+        repo_root.join("config/vision/distill/imagenette_dinov2_vits14_cellular_h8_short_b40.toml");
+    let config = load_vision_training_config(&[config_path]).expect("load cellular h8 short b40");
+
+    assert_eq!(
+        config
+            .vision
+            .resolved_backbone_kind()
+            .expect("resolved backbone"),
+        VisionBackboneKind::Cellular
+    );
+    assert_eq!(config.training.batch_size, 40);
+    assert_eq!(config.dataset.max_records, Some(2048));
+    assert_eq!(config.training.max_iters, 128);
+    assert_eq!(config.training.rollout_max_steps, Some(8));
+    assert_eq!(config.training.rollout_backprop_steps, Some(3));
+    assert_eq!(config.vision.steps, 8);
+}
+
+#[test]
+fn imagenette_dinov2_cellular_h8_short_b24_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path =
+        repo_root.join("config/vision/distill/imagenette_dinov2_vits14_cellular_h8_short_b24.toml");
+    let config = load_vision_training_config(&[config_path]).expect("load cellular h8 short b24");
+
+    assert_eq!(
+        config
+            .vision
+            .resolved_backbone_kind()
+            .expect("resolved backbone"),
+        VisionBackboneKind::Cellular
+    );
+    assert_eq!(config.training.batch_size, 24);
+    assert_eq!(config.dataset.max_records, Some(2048));
+    assert_eq!(config.training.max_iters, 128);
+    assert_eq!(config.training.rollout_max_steps, Some(8));
+    assert_eq!(config.training.rollout_backprop_steps, Some(3));
+    assert_eq!(config.vision.steps, 8);
+}
+
+#[test]
+fn imagenette_dinov2_pyramid_stageaware_short_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path = repo_root
+        .join("config/vision/distill/imagenette_dinov2_vits14_pyramid_stageaware_short.toml");
+    let config = load_vision_training_config(&[config_path]).expect("load pyramid distill short");
+
+    assert_eq!(
+        config
+            .vision
+            .resolved_backbone_kind()
+            .expect("resolved backbone"),
+        VisionBackboneKind::Pyramid
+    );
+    assert_eq!(config.training.batch_size, 96);
+    assert_eq!(config.dataset.max_records, Some(2048));
+    assert_eq!(config.training.max_iters, 128);
+    assert_eq!(config.vision.trm_graph.predict_coarse_substeps, 1);
+}
+
+#[test]
+fn imagenette_dinov2_pyramid_stageaware_refine2_smoke_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path = repo_root.join(
+        "config/vision/distill/imagenette_dinov2_vits14_pyramid_stageaware_refine2_smoke.toml",
+    );
+    let config =
+        load_vision_training_config(&[config_path]).expect("load pyramid distill refine2 smoke");
+
+    assert_eq!(config.vision.trm_graph.predict_coarse_substeps, 2);
+}
+
+#[test]
+fn imagenette_dinov2_pyramid_stageaware_refine2_coarse96_short_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path = repo_root.join(
+        "config/vision/distill/imagenette_dinov2_vits14_pyramid_stageaware_refine2_coarse96_short.toml",
+    );
+    let config = load_vision_training_config(&[config_path])
+        .expect("load pyramid distill refine2 coarse96 short");
+
+    assert_eq!(config.training.batch_size, 96);
+    assert_eq!(config.dataset.max_records, Some(2048));
+    assert_eq!(config.vision.trm_graph.predict_coarse_substeps, 2);
+    assert_eq!(config.vision.trm_graph.coarse_rank, Some(96));
+}
+
+#[test]
+fn imagenette_dinov2_pyramid_stageaware_refine2_coarse96_densepolicy_short_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path = repo_root.join(
+        "config/vision/distill/imagenette_dinov2_vits14_pyramid_stageaware_refine2_coarse96_densepolicy_short.toml",
+    );
+    let config = load_vision_training_config(&[config_path])
+        .expect("load pyramid distill refine2 coarse96 densepolicy short");
+
+    assert_eq!(config.training.batch_size, 96);
+    assert_eq!(config.dataset.max_records, Some(2048));
+    assert_eq!(config.vision.trm_graph.predict_coarse_substeps, 2);
+    assert_eq!(config.vision.trm_graph.coarse_rank, Some(96));
+    match config.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            assert_eq!(distill.rollout_supervision_frames, 1);
+            assert!((distill.rollout_supervision_power - 1.0).abs() < f32::EPSILON);
+            assert!((distill.rollout_sampling_power - 0.0).abs() < f32::EPSILON);
+        }
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn imagenette_dinov2_pyramid_stageaware_refine2_coarse96_densepolicy_fixedtime90_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path = repo_root.join(
+        "config/vision/distill/imagenette_dinov2_vits14_pyramid_stageaware_refine2_coarse96_densepolicy_fixedtime90.toml",
+    );
+    let config = load_vision_training_config(&[config_path])
+        .expect("load pyramid distill refine2 coarse96 densepolicy fixedtime90");
+
+    assert_eq!(config.training.batch_size, 96);
+    assert_eq!(config.dataset.max_records, Some(5376));
+    assert_eq!(config.training.max_iters, 56);
+    assert_eq!(config.vision.trm_graph.predict_coarse_substeps, 2);
+    assert_eq!(config.vision.trm_graph.coarse_rank, Some(96));
+    match config.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            assert_eq!(distill.rollout_supervision_frames, 1);
+            assert!((distill.rollout_supervision_power - 1.0).abs() < f32::EPSILON);
+            assert!((distill.rollout_sampling_power - 0.0).abs() < f32::EPSILON);
+        }
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn imagenette_dinov2_pyramid_stageaware_refine2_coarse96_densepolicy_h10_deepbias_promoted_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path = repo_root.join(
+        "config/vision/distill/imagenette_dinov2_vits14_pyramid_stageaware_refine2_coarse96_densepolicy_h10_deepbias_promoted.toml",
+    );
+    let config = load_vision_training_config(&[config_path])
+        .expect("load pyramid distill refine2 coarse96 densepolicy h10 deepbias promoted");
+
+    assert_eq!(
+        config
+            .vision
+            .resolved_backbone_kind()
+            .expect("resolved backbone"),
+        VisionBackboneKind::Pyramid
+    );
+    assert_eq!(config.training.batch_size, 40);
+    assert_eq!(config.dataset.max_records, Some(12288));
+    assert_eq!(config.training.epochs, Some(2));
+    assert_eq!(config.training.max_iters, 640);
+    assert_eq!(config.training.rollout_max_steps, Some(10));
+    assert_eq!(config.training.rollout_backprop_steps, Some(3));
+    assert_eq!(config.vision.steps, 10);
+    assert_eq!(config.vision.trm_graph.predict_coarse_substeps, 2);
+    assert_eq!(config.vision.trm_graph.coarse_rank, Some(96));
+    match config.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            assert_eq!(distill.rollout_supervision_frames, 1);
+            assert!((distill.rollout_supervision_power - 1.0).abs() < f32::EPSILON);
+            assert!((distill.rollout_sampling_power - 1.0).abs() < f32::EPSILON);
+        }
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn imagenette_dinov2_pyramid_stageaware_refine2_coarse96_densepolicy_h8_deepbias0p5_280_short_loads()
+ {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path = repo_root.join(
+        "config/vision/distill/imagenette_dinov2_vits14_pyramid_stageaware_refine2_coarse96_densepolicy_h8_deepbias0p5_280_short.toml",
+    );
+    let config = load_vision_training_config(&[config_path])
+        .expect("load pyramid distill refine2 coarse96 densepolicy h8 deepbias0p5 280 short");
+
+    assert_eq!(
+        config
+            .vision
+            .resolved_backbone_kind()
+            .expect("resolved backbone"),
+        VisionBackboneKind::Pyramid
+    );
+    assert_eq!(config.vision.image_size, 280);
+    assert_eq!(config.vision.steps, 8);
+    assert_eq!(config.training.batch_size, 24);
+    assert_eq!(config.training.epochs, Some(1));
+    assert_eq!(config.training.max_iters, 128);
+    assert_eq!(config.training.rollout_max_steps, Some(8));
+    assert_eq!(config.training.rollout_backprop_steps, Some(3));
+    assert_eq!(config.vision.trm_graph.predict_coarse_substeps, 2);
+    assert_eq!(config.vision.trm_graph.coarse_rank, Some(96));
+    match config.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            assert_eq!(distill.rollout_supervision_frames, 1);
+            assert!((distill.rollout_supervision_power - 1.0).abs() < f32::EPSILON);
+            assert!((distill.rollout_sampling_power - 0.5).abs() < f32::EPSILON);
+            match distill.teacher {
+                VisionTeacherConfig::Features(teacher) => {
+                    assert_eq!(teacher.patch_tokens, Some(400));
+                }
+                other => panic!("expected feature teacher, got {other:?}"),
+            }
+        }
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn imagenette_dinov2_dense_h10_deepbias_ff6_promoted_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path = repo_root.join(
+        "config/vision/distill/imagenette_dinov2_vits14_dense_h10_deepbias_ff6_promoted.toml",
+    );
+    let config =
+        load_vision_training_config(&[config_path]).expect("load dense h10 deepbias ff6 promoted");
+
+    assert_eq!(
+        config
+            .vision
+            .resolved_backbone_kind()
+            .expect("resolved backbone"),
+        VisionBackboneKind::Dense
+    );
+    assert_eq!(config.training.batch_size, 40);
+    assert_eq!(config.dataset.max_records, Some(12288));
+    assert_eq!(config.training.epochs, Some(2));
+    assert_eq!(config.training.max_iters, 640);
+    assert_eq!(config.training.rollout_max_steps, Some(10));
+    assert_eq!(config.training.rollout_backprop_steps, Some(3));
+    assert_eq!(config.vision.steps, 10);
+    assert_eq!(config.vision.mlp_internal_dim_multiplier, 6);
+    match config.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            assert_eq!(distill.rollout_supervision_frames, 1);
+            assert!((distill.rollout_supervision_power - 1.0).abs() < f32::EPSILON);
+            assert!((distill.rollout_sampling_power - 1.0).abs() < f32::EPSILON);
+        }
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn imagenette_dinov2_dense_h10_deepbias_ff5_promoted_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path = repo_root.join(
+        "config/vision/distill/imagenette_dinov2_vits14_dense_h10_deepbias_ff5_promoted.toml",
+    );
+    let config =
+        load_vision_training_config(&[config_path]).expect("load dense h10 deepbias ff5 promoted");
+
+    assert_eq!(
+        config
+            .vision
+            .resolved_backbone_kind()
+            .expect("resolved backbone"),
+        VisionBackboneKind::Dense
+    );
+    assert_eq!(config.training.batch_size, 40);
+    assert_eq!(config.dataset.max_records, Some(12288));
+    assert_eq!(config.training.epochs, Some(2));
+    assert_eq!(config.training.max_iters, 640);
+    assert_eq!(config.training.rollout_max_steps, Some(10));
+    assert_eq!(config.training.rollout_backprop_steps, Some(3));
+    assert_eq!(config.vision.steps, 10);
+    assert_eq!(config.vision.mlp_internal_dim_multiplier, 5);
+    match config.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            assert_eq!(distill.rollout_supervision_frames, 1);
+            assert!((distill.rollout_supervision_power - 1.0).abs() < f32::EPSILON);
+            assert!((distill.rollout_sampling_power - 1.0).abs() < f32::EPSILON);
+        }
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn imagenette_dinov2_dense_h10_deepbias_ff5_rel0p25pct_promoted_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path = repo_root.join(
+        "config/vision/distill/imagenette_dinov2_vits14_dense_h10_deepbias_ff5_rel0p25pct_promoted.toml",
+    );
+    let config = load_vision_training_config(&[config_path])
+        .expect("load dense h10 deepbias ff5 rel0p25 promoted");
+
+    assert_eq!(
+        config
+            .vision
+            .resolved_backbone_kind()
+            .expect("resolved backbone"),
+        VisionBackboneKind::Dense
+    );
+    assert_eq!(config.vision.mlp_internal_dim_multiplier, 5);
+    match config.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            assert!((distill.rollout_sampling_power - 1.0).abs() < f32::EPSILON);
+            assert!((distill.loss.rel_weight - 0.0025).abs() < f32::EPSILON);
+        }
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn imagenette_dinov2_dense_h10_deepbias_224_short_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path = repo_root
+        .join("config/vision/distill/imagenette_dinov2_vits14_dense_h10_deepbias_224_short.toml");
+    let config =
+        load_vision_training_config(&[config_path]).expect("load dense h10 deepbias 224 short");
+
+    assert_eq!(config.vision.image_size, 224);
+    assert_eq!(config.augment.image_size, 224);
+    assert_eq!(config.augment.resize_short, 256);
+    assert_eq!(config.training.batch_size, 64);
+    match config.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            match distill.teacher {
+                VisionTeacherConfig::Features(teacher) => {
+                    assert_eq!(teacher.patch_tokens, Some(256));
+                    assert!(teacher.train_patch_path.to_string_lossy().ends_with(
+                        "data/imagenette2-160/features/dinov2_vits14_224/train_patch.bin"
+                    ));
+                }
+                other => panic!("expected feature teacher, got {other:?}"),
+            }
+        }
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn imagenette_dinov2_dense_h10_deepbias_ff5_224_short_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path = repo_root.join(
+        "config/vision/distill/imagenette_dinov2_vits14_dense_h10_deepbias_ff5_224_short.toml",
+    );
+    let config =
+        load_vision_training_config(&[config_path]).expect("load dense h10 deepbias ff5 224 short");
+
+    assert_eq!(config.vision.image_size, 224);
+    assert_eq!(config.vision.mlp_internal_dim_multiplier, 5);
+    assert_eq!(config.training.batch_size, 64);
+    match config.mode {
+        VisionTrainingModeConfig::Distill(distill) => match distill.teacher {
+            VisionTeacherConfig::Features(teacher) => {
+                assert_eq!(teacher.patch_tokens, Some(256));
+            }
+            other => panic!("expected feature teacher, got {other:?}"),
+        },
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn imagenette_dinov2_dense_h10_deepbias_ff5_224_fixedtime120_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path = repo_root.join(
+        "config/vision/distill/imagenette_dinov2_vits14_dense_h10_deepbias_ff5_224_fixedtime120.toml",
+    );
+    let config = load_vision_training_config(&[config_path])
+        .expect("load dense h10 deepbias ff5 224 fixedtime120");
+
+    assert_eq!(config.vision.image_size, 224);
+    assert_eq!(config.vision.mlp_internal_dim_multiplier, 5);
+    assert_eq!(config.training.max_iters, 256);
+    assert_eq!(config.dataset.max_records, Some(12288));
+}
+
+#[test]
+fn imagenette_dinov2_dense_h10_deepbias_ff6_224_fixedtime120_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path = repo_root.join(
+        "config/vision/distill/imagenette_dinov2_vits14_dense_h10_deepbias_ff6_224_fixedtime120.toml",
+    );
+    let config = load_vision_training_config(&[config_path])
+        .expect("load dense h10 deepbias ff6 224 fixedtime120");
+
+    assert_eq!(config.vision.image_size, 224);
+    assert_eq!(config.vision.mlp_internal_dim_multiplier, 6);
+    assert_eq!(config.training.max_iters, 256);
+    assert_eq!(config.dataset.max_records, Some(12288));
+}
+
+#[test]
+fn imagenette_dinov2_dense_h10_deepbias_ff6_224_promoted_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path = repo_root.join(
+        "config/vision/distill/imagenette_dinov2_vits14_dense_h10_deepbias_ff6_224_promoted.toml",
+    );
+    let config = load_vision_training_config(&[config_path])
+        .expect("load dense h10 deepbias ff6 224 promoted");
+
+    assert_eq!(config.vision.image_size, 224);
+    assert_eq!(config.vision.mlp_internal_dim_multiplier, 6);
+    assert_eq!(config.training.epochs, Some(2));
+    assert_eq!(config.training.max_iters, 640);
+}
+
+#[test]
+fn imagenette_dinov2_dense_h10_deepbias_ff7_224_fixedtime120_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path = repo_root.join(
+        "config/vision/distill/imagenette_dinov2_vits14_dense_h10_deepbias_ff7_224_fixedtime120.toml",
+    );
+    let config = load_vision_training_config(&[config_path])
+        .expect("load dense h10 deepbias ff7 224 fixedtime120");
+
+    assert_eq!(config.vision.image_size, 224);
+    assert_eq!(config.vision.mlp_internal_dim_multiplier, 7);
+    assert_eq!(config.training.max_iters, 256);
+    assert_eq!(config.dataset.max_records, Some(12288));
+}
+
+#[test]
+fn imagenette_dinov2_dense_h10_deepbias_ff6_224_promoted_proj512_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path = repo_root.join(
+        "config/vision/distill/imagenette_dinov2_vits14_dense_h10_deepbias_ff6_224_promoted_proj512.toml",
+    );
+    let config = load_vision_training_config(&[config_path])
+        .expect("load dense h10 deepbias ff6 224 promoted proj512");
+
+    assert_eq!(config.vision.image_size, 224);
+    assert_eq!(config.vision.mlp_internal_dim_multiplier, 6);
+    assert_eq!(config.vision.projection_hidden_dim, 512);
+    assert_eq!(config.training.epochs, Some(2));
+    assert_eq!(config.training.max_iters, 640);
+}
+
+#[test]
+fn imagenette_dinov2_dense_h12_deepbias_ff6_224_promoted_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path = repo_root.join(
+        "config/vision/distill/imagenette_dinov2_vits14_dense_h12_deepbias_ff6_224_promoted.toml",
+    );
+    let config = load_vision_training_config(&[config_path])
+        .expect("load dense h12 deepbias ff6 224 promoted");
+
+    assert_eq!(config.vision.image_size, 224);
+    assert_eq!(config.vision.steps, 12);
+    assert_eq!(config.vision.mlp_internal_dim_multiplier, 6);
+    assert_eq!(config.training.rollout_max_steps, Some(12));
+    assert_eq!(config.training.epochs, Some(2));
+    assert_eq!(config.training.max_iters, 640);
+}
+
+#[test]
+fn imagenette_dinov2_dense_h10_deepbias_ff6_280_fixedtime120_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path = repo_root.join(
+        "config/vision/distill/imagenette_dinov2_vits14_dense_h10_deepbias_ff6_280_fixedtime120.toml",
+    );
+    let config = load_vision_training_config(&[config_path])
+        .expect("load dense h10 deepbias ff6 280 fixedtime120");
+
+    assert_eq!(config.vision.image_size, 280);
+    assert_eq!(config.vision.mlp_internal_dim_multiplier, 6);
+    match &config.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            match &distill.teacher {
+                VisionTeacherConfig::Features(teacher) => {
+                    assert!(teacher.train_patch_path.ends_with(
+                        "data/imagenette2-160/features/dinov2_vits14_280/train_patch.bin"
+                    ));
+                    assert_eq!(teacher.patch_tokens, Some(400));
+                }
+                other => panic!("expected feature teacher, got {other:?}"),
+            }
+        }
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+    assert_eq!(config.training.max_iters, 256);
+    assert_eq!(config.augment.image_size, 280);
+    assert_eq!(config.augment.resize_short, 320);
+}
+
+#[test]
+fn imagenette_dinov2_dense_h10_deepbias_ff6_280_promoted_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path = repo_root.join(
+        "config/vision/distill/imagenette_dinov2_vits14_dense_h10_deepbias_ff6_280_promoted.toml",
+    );
+    let config = load_vision_training_config(&[config_path])
+        .expect("load dense h10 deepbias ff6 280 promoted");
+
+    assert_eq!(config.vision.image_size, 280);
+    assert_eq!(config.vision.mlp_internal_dim_multiplier, 6);
+    assert_eq!(config.training.epochs, Some(2));
+    assert_eq!(config.training.max_iters, 384);
+    match &config.mode {
+        VisionTrainingModeConfig::Distill(distill) => match &distill.teacher {
+            VisionTeacherConfig::Features(teacher) => {
+                assert_eq!(teacher.patch_tokens, Some(400));
+            }
+            other => panic!("expected feature teacher, got {other:?}"),
+        },
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn imagenette_dinov2_dense_h10_deepbias_ff6_280_promoted_longer_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path = repo_root.join(
+        "config/vision/distill/imagenette_dinov2_vits14_dense_h10_deepbias_ff6_280_promoted_longer.toml",
+    );
+    let config = load_vision_training_config(&[config_path])
+        .expect("load dense h10 deepbias ff6 280 promoted longer");
+
+    assert_eq!(config.vision.image_size, 280);
+    assert_eq!(config.vision.mlp_internal_dim_multiplier, 6);
+    assert_eq!(config.training.epochs, Some(2));
+    assert_eq!(config.training.max_iters, 512);
+    match &config.mode {
+        VisionTrainingModeConfig::Distill(distill) => match &distill.teacher {
+            VisionTeacherConfig::Features(teacher) => {
+                assert_eq!(teacher.patch_tokens, Some(400));
+            }
+            other => panic!("expected feature teacher, got {other:?}"),
+        },
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn imagenette_dinov2_dense_h12_deepbias_ff6_280_promoted_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path = repo_root.join(
+        "config/vision/distill/imagenette_dinov2_vits14_dense_h12_deepbias_ff6_280_promoted.toml",
+    );
+    let config = load_vision_training_config(&[config_path])
+        .expect("load dense h12 deepbias ff6 280 promoted");
+
+    assert_eq!(config.vision.image_size, 280);
+    assert_eq!(config.vision.mlp_internal_dim_multiplier, 6);
+    assert_eq!(config.vision.steps, 12);
+    assert_eq!(config.training.epochs, Some(2));
+    assert_eq!(config.training.max_iters, 384);
+    assert_eq!(config.training.rollout_max_steps, Some(12));
+    match &config.mode {
+        VisionTrainingModeConfig::Distill(distill) => match &distill.teacher {
+            VisionTeacherConfig::Features(teacher) => {
+                assert_eq!(teacher.patch_tokens, Some(400));
+            }
+            other => panic!("expected feature teacher, got {other:?}"),
+        },
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn imagenette_dinov2_dense_h10_deepbias_ff5_280_promoted_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path = repo_root.join(
+        "config/vision/distill/imagenette_dinov2_vits14_dense_h10_deepbias_ff5_280_promoted.toml",
+    );
+    let config = load_vision_training_config(&[config_path])
+        .expect("load dense h10 deepbias ff5 280 promoted");
+
+    assert_eq!(config.vision.image_size, 280);
+    assert_eq!(config.vision.mlp_internal_dim_multiplier, 5);
+    assert_eq!(config.vision.steps, 10);
+    assert_eq!(config.training.epochs, Some(2));
+    assert_eq!(config.training.max_iters, 384);
+    match &config.mode {
+        VisionTrainingModeConfig::Distill(distill) => match &distill.teacher {
+            VisionTeacherConfig::Features(teacher) => {
+                assert_eq!(teacher.patch_tokens, Some(400));
+            }
+            other => panic!("expected feature teacher, got {other:?}"),
+        },
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn imagenette_dinov2_dense_h8_deepbias_ff6_280_promoted_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path = repo_root.join(
+        "config/vision/distill/imagenette_dinov2_vits14_dense_h8_deepbias_ff6_280_promoted.toml",
+    );
+    let config = load_vision_training_config(&[config_path])
+        .expect("load dense h8 deepbias ff6 280 promoted");
+
+    assert_eq!(config.vision.image_size, 280);
+    assert_eq!(config.vision.mlp_internal_dim_multiplier, 6);
+    assert_eq!(config.vision.steps, 8);
+    assert_eq!(config.training.epochs, Some(2));
+    assert_eq!(config.training.max_iters, 384);
+    assert_eq!(config.training.rollout_max_steps, Some(8));
+    match &config.mode {
+        VisionTrainingModeConfig::Distill(distill) => match &distill.teacher {
+            VisionTeacherConfig::Features(teacher) => {
+                assert_eq!(teacher.patch_tokens, Some(400));
+            }
+            other => panic!("expected feature teacher, got {other:?}"),
+        },
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn imagenette_dinov2_dense_h8_deepbias0p5_ff6_280_promoted_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path = repo_root.join(
+        "config/vision/distill/imagenette_dinov2_vits14_dense_h8_deepbias0p5_ff6_280_promoted.toml",
+    );
+    let config = load_vision_training_config(&[config_path])
+        .expect("load dense h8 deepbias0p5 ff6 280 promoted");
+
+    assert_eq!(config.vision.image_size, 280);
+    assert_eq!(config.vision.mlp_internal_dim_multiplier, 6);
+    assert_eq!(config.vision.steps, 8);
+    assert_eq!(config.training.epochs, Some(2));
+    assert_eq!(config.training.max_iters, 384);
+    assert_eq!(config.training.rollout_max_steps, Some(8));
+    match &config.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            assert!((distill.rollout_sampling_power - 0.5).abs() < f32::EPSILON);
+            match &distill.teacher {
+                VisionTeacherConfig::Features(teacher) => {
+                    assert_eq!(teacher.patch_tokens, Some(400));
+                }
+                other => panic!("expected feature teacher, got {other:?}"),
+            }
+        }
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn imagenette_dinov2_dense_h10_deepbias0p5_ff6_280_promoted_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path = repo_root.join(
+        "config/vision/distill/imagenette_dinov2_vits14_dense_h10_deepbias0p5_ff6_280_promoted.toml",
+    );
+    let config = load_vision_training_config(&[config_path])
+        .expect("load dense h10 deepbias0p5 ff6 280 promoted");
+
+    assert_eq!(config.vision.image_size, 280);
+    assert_eq!(config.vision.mlp_internal_dim_multiplier, 6);
+    assert_eq!(config.vision.steps, 10);
+    assert_eq!(config.training.epochs, Some(2));
+    assert_eq!(config.training.max_iters, 384);
+    assert_eq!(config.training.rollout_max_steps, Some(10));
+    match &config.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            assert!((distill.rollout_sampling_power - 0.5).abs() < f32::EPSILON);
+            match &distill.teacher {
+                VisionTeacherConfig::Features(teacher) => {
+                    assert_eq!(teacher.patch_tokens, Some(400));
+                }
+                other => panic!("expected feature teacher, got {other:?}"),
+            }
+        }
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn imagenette_dinov2_dense_h8_deepbias0p75_ff6_280_promoted_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path = repo_root.join(
+        "config/vision/distill/imagenette_dinov2_vits14_dense_h8_deepbias0p75_ff6_280_promoted.toml",
+    );
+    let config = load_vision_training_config(&[config_path])
+        .expect("load dense h8 deepbias0p75 ff6 280 promoted");
+
+    assert_eq!(config.vision.image_size, 280);
+    assert_eq!(config.vision.mlp_internal_dim_multiplier, 6);
+    assert_eq!(config.vision.steps, 8);
+    assert_eq!(config.training.epochs, Some(2));
+    assert_eq!(config.training.max_iters, 384);
+    assert_eq!(config.training.rollout_max_steps, Some(8));
+    match &config.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            assert!((distill.rollout_sampling_power - 0.75).abs() < f32::EPSILON);
+            match &distill.teacher {
+                VisionTeacherConfig::Features(teacher) => {
+                    assert_eq!(teacher.patch_tokens, Some(400));
+                }
+                other => panic!("expected feature teacher, got {other:?}"),
+            }
+        }
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn imagenette_dinov2_dense_h10_deepbias_ff6_224_promoted_stride2_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config = repo_root.join(
+        "config/vision/distill/imagenette_dinov2_vits14_dense_h10_deepbias_ff6_224_promoted_stride2.toml",
+    );
+    let loaded = load_vision_training_config(&[config]).expect("load stride2 promoted 224 config");
+    match loaded.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            assert_eq!(distill.rollout_supervision_stride, 2);
+        }
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn imagenette_dinov2_dense_h10_deepbias_ff6_224_promoted_stride4_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config = repo_root.join(
+        "config/vision/distill/imagenette_dinov2_vits14_dense_h10_deepbias_ff6_224_promoted_stride4.toml",
+    );
+    let loaded = load_vision_training_config(&[config]).expect("load stride4 promoted 224 config");
+    match loaded.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            assert_eq!(distill.rollout_supervision_stride, 4);
+        }
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn imagenette_dinov2_dense_h8_deepbias0p5_ff6_280_promoted_stride2_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config = repo_root.join(
+        "config/vision/distill/imagenette_dinov2_vits14_dense_h8_deepbias0p5_ff6_280_promoted_stride2.toml",
+    );
+    let loaded = load_vision_training_config(&[config]).expect("load stride2 promoted 280 config");
+    match loaded.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            assert_eq!(distill.rollout_supervision_stride, 2);
+        }
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn imagenette_dinov2_dense_h8_deepbias0p5_ff6_280_promoted_stride4_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config = repo_root.join(
+        "config/vision/distill/imagenette_dinov2_vits14_dense_h8_deepbias0p5_ff6_280_promoted_stride4.toml",
+    );
+    let loaded = load_vision_training_config(&[config]).expect("load stride4 promoted 280 config");
+    match loaded.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            assert_eq!(distill.rollout_supervision_stride, 4);
+        }
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn imagenette_dinov2_dense_h10_deepbias_ff6_280_promoted_stride2_experiment_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config = repo_root.join(
+        "config/vision/distill/experiments/imagenette_dinov2_vits14_dense_h10_deepbias_ff6_280_promoted_stride2.toml",
+    );
+    let loaded =
+        load_vision_training_config(&[config]).expect("load stride2 promoted 280 h10 experiment");
+    match loaded.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            assert_eq!(distill.rollout_supervision_stride, 2);
+        }
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn imagenette_dinov2_dense_h8_deepbias0p5_ff6_280_promoted_stride3_experiment_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config = repo_root.join(
+        "config/vision/distill/experiments/imagenette_dinov2_vits14_dense_h8_deepbias0p5_ff6_280_promoted_stride3.toml",
+    );
+    let loaded =
+        load_vision_training_config(&[config]).expect("load stride3 promoted 280 h8 experiment");
+    match loaded.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            assert_eq!(distill.rollout_supervision_stride, 3);
+            assert!((distill.rollout_sampling_power - 0.5).abs() < f32::EPSILON);
+        }
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn imagenette_dinov2_dense_h8_deepbias0p5_ff6_280_promoted_multiframe4_stride3_experiment_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config = repo_root.join(
+        "config/vision/distill/experiments/imagenette_dinov2_vits14_dense_h8_deepbias0p5_ff6_280_promoted_multiframe4_stride3.toml",
+    );
+    let loaded = load_vision_training_config(&[config])
+        .expect("load multiframe4 stride3 promoted 280 h8 experiment");
+    match loaded.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            assert_eq!(distill.rollout_supervision_frames, 4);
+            assert_eq!(distill.rollout_supervision_stride, 3);
+            assert!((distill.rollout_supervision_power - 1.0).abs() < f32::EPSILON);
+            assert!((distill.rollout_sampling_power - 0.5).abs() < f32::EPSILON);
+        }
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn imagenette_dinov2_dense_h8_deepbias0p5_ff6_280_promoted_multiframe4_stride3_min4_experiment_loads()
+ {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config = repo_root.join(
+        "config/vision/distill/experiments/imagenette_dinov2_vits14_dense_h8_deepbias0p5_ff6_280_promoted_multiframe4_stride3_min4.toml",
+    );
+    let loaded = load_vision_training_config(&[config])
+        .expect("load multiframe4 stride3 min4 promoted 280 h8 experiment");
+    assert_eq!(loaded.training.rollout_min_steps, Some(4));
+    match loaded.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            assert_eq!(distill.rollout_supervision_frames, 4);
+            assert_eq!(distill.rollout_supervision_stride, 3);
+            assert!(distill.rollout_supervision_include_step1);
+            assert!((distill.rollout_sampling_power - 0.5).abs() < f32::EPSILON);
+        }
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn imagenette_dinov2_dense_h8_deepbias0p5_ff6_280_promoted_multiframe4_stride3_min4_nos1_experiment_loads()
+ {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config = repo_root.join(
+        "config/vision/distill/experiments/imagenette_dinov2_vits14_dense_h8_deepbias0p5_ff6_280_promoted_multiframe4_stride3_min4_nos1.toml",
+    );
+    let loaded = load_vision_training_config(&[config])
+        .expect("load multiframe4 stride3 min4 no-s1 promoted 280 h8 experiment");
+    assert_eq!(loaded.training.rollout_min_steps, Some(4));
+    match loaded.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            assert_eq!(distill.rollout_supervision_frames, 4);
+            assert_eq!(distill.rollout_supervision_stride, 3);
+            assert!(!distill.rollout_supervision_include_step1);
+            assert!((distill.rollout_sampling_power - 0.5).abs() < f32::EPSILON);
+        }
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn imagenette_dinov2_dense_h8_deepbias0p5_ff6_280_promoted_multiframe2_stride3_min4_nos1_experiment_loads()
+ {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config = repo_root.join(
+        "config/vision/distill/experiments/imagenette_dinov2_vits14_dense_h8_deepbias0p5_ff6_280_promoted_multiframe2_stride3_min4_nos1.toml",
+    );
+    let loaded = load_vision_training_config(&[config])
+        .expect("load multiframe2 stride3 min4 no-s1 promoted 280 h8 experiment");
+    assert_eq!(loaded.training.rollout_min_steps, Some(4));
+    match loaded.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            assert_eq!(distill.rollout_supervision_frames, 2);
+            assert_eq!(distill.rollout_supervision_stride, 3);
+            assert!(!distill.rollout_supervision_include_step1);
+            assert!((distill.rollout_sampling_power - 0.5).abs() < f32::EPSILON);
+        }
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn imagenette_dinov2_dense_h8_deepbias0p5_ff6_280_promoted_explicit48_experiment_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config = repo_root.join(
+        "config/vision/distill/experiments/imagenette_dinov2_vits14_dense_h8_deepbias0p5_ff6_280_promoted_explicit48.toml",
+    );
+    let loaded =
+        load_vision_training_config(&[config]).expect("load explicit48 promoted 280 h8 experiment");
+    assert_eq!(loaded.training.rollout_min_steps, Some(4));
+    match loaded.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            assert_eq!(distill.rollout_supervision_explicit_steps, vec![4, 8]);
+            assert!((distill.rollout_supervision_power - 1.25).abs() < f32::EPSILON);
+            assert!((distill.rollout_sampling_power - 0.5).abs() < f32::EPSILON);
+        }
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn canonical_quality_family_explicit48_experiment_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config = repo_root.join(
+        "config/vision/distill/experiments/quality/imagenette_dinov2_vits14_dense_h8_deepbias0p5_ff6_280_promoted_explicit48.toml",
+    );
+    let loaded =
+        load_vision_training_config(&[config]).expect("load canonical quality explicit48 config");
+    assert_eq!(loaded.training.rollout_min_steps, Some(4));
+    match loaded.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            assert_eq!(distill.rollout_supervision_explicit_steps, vec![4, 8]);
+            assert!((distill.rollout_supervision_power - 1.25).abs() < f32::EPSILON);
+        }
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn imagenette_dinov2_dense_h10_deepbias_ff6_224_efficiency_bs128_fused_explicit48_experiment_loads()
+{
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config = repo_root.join(
+        "config/vision/distill/experiments/imagenette_dinov2_vits14_dense_h10_deepbias_ff6_224_efficiency_prefetch8_device_preprocessed_teachercache_bs128_fused_explicit48.toml",
+    );
+    let loaded = load_vision_training_config(&[config])
+        .expect("load explicit48 fused efficiency 224 h10 experiment");
+    match loaded.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            assert_eq!(distill.rollout_supervision_explicit_steps, vec![4, 8]);
+            assert!(!distill.rollout_supervision_include_step1);
+            assert!((distill.rollout_supervision_power - 1.25).abs() < f32::EPSILON);
+            assert!((distill.rollout_sampling_power - 0.5).abs() < f32::EPSILON);
+        }
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn canonical_efficiency_family_sparse248_metriclight_experiment_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config = repo_root.join(
+        "config/vision/distill/experiments/efficiency/imagenette_dinov2_vits14_dense_h8_deepbias0p5_ff6_280_efficiency_prefetch8_device_preprocessed_teachercache_bs64_fused_scores_sparse248_metriclight.toml",
+    );
+    let loaded = load_vision_training_config(&[config])
+        .expect("load canonical efficiency sparse248 metric-light config");
+    match loaded.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            assert_eq!(distill.rollout_supervision_groups, 1);
+            assert!(!distill.rollout_supervision_include_step1);
+            assert!((distill.rollout_supervision_power - 1.25).abs() < f32::EPSILON);
+        }
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn canonical_archive_efficiency_accum2_experiment_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config = repo_root.join(
+        "config/vision/distill/experiments/archive/imagenette_dinov2_vits14_dense_h10_deepbias_ff6_224_efficiency_accum2.toml",
+    );
+    let loaded =
+        load_vision_training_config(&[config]).expect("load canonical archive efficiency accum2");
+    assert_eq!(loaded.training.gradient_accumulation_steps, 2);
+    assert_eq!(loaded.training.max_iters, 128);
+}
+
+#[test]
+fn canonical_archive_convnext_short_experiment_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config = repo_root.join(
+        "config/vision/distill/experiments/archive/imagenette_dinov2_vits14_dense_h8_convnext_short.toml",
+    );
+    let loaded =
+        load_vision_training_config(&[config]).expect("load canonical archive convnext short");
+    assert_eq!(loaded.training.batch_size, 40);
+    assert_eq!(loaded.vision.patch_embed_mode, VisionPatchEmbedMode::ConvNext);
+}
+
+#[test]
+fn imagenette_dinov2_dense_h8_deepbias0p5_ff6_280_efficiency_bs64_fused_scores_sparse248_metriclight_experiment_loads()
+{
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config = repo_root.join(
+        "config/vision/distill/experiments/imagenette_dinov2_vits14_dense_h8_deepbias0p5_ff6_280_efficiency_prefetch8_device_preprocessed_teachercache_bs64_fused_scores_sparse248_metriclight.toml",
+    );
+    let loaded = load_vision_training_config(&[config])
+        .expect("load sparse248 metric-light fused-scores efficiency 280 h8 experiment");
+    match loaded.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            assert_eq!(distill.rollout_supervision_groups, 1);
+            assert_eq!(
+                distill.rollout_supervision_explicit_groups,
+                vec![vec![4, 8], vec![4, 8], vec![4, 8], vec![2, 4, 8]]
+            );
+            assert!(!distill.rollout_supervision_include_step1);
+            assert!((distill.rollout_supervision_power - 1.25).abs() < f32::EPSILON);
+            assert!((distill.rollout_sampling_power - 0.5).abs() < f32::EPSILON);
+        }
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn canonical_diagnostics_family_smoke_overlay_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config = repo_root.join(
+        "config/vision/distill/experiments/diagnostics/vision_smoke_dinov2_vits14_280_eval_overlay.toml",
+    );
+    let loaded =
+        load_vision_training_config(&[config]).expect("load canonical diagnostics smoke overlay");
+    assert_eq!(
+        loaded.dataset.imagenet_root,
+        PathBuf::from("data/vision_smoke/imagenet")
+    );
+    assert_eq!(loaded.training.batch_size, 8);
+}
+
+#[test]
+fn imagenette_dinov2_dense_h8_deepbias0p5_ff6_280_promoted_multiframe2_stride3_min4_nos1_pow125_experiment_loads()
+ {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config = repo_root.join(
+        "config/vision/distill/experiments/imagenette_dinov2_vits14_dense_h8_deepbias0p5_ff6_280_promoted_multiframe2_stride3_min4_nos1_pow125.toml",
+    );
+    let loaded = load_vision_training_config(&[config])
+        .expect("load multiframe2 stride3 min4 no-s1 pow125 promoted 280 h8 experiment");
+    assert_eq!(loaded.training.rollout_min_steps, Some(4));
+    match loaded.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            assert_eq!(distill.rollout_supervision_frames, 2);
+            assert_eq!(distill.rollout_supervision_stride, 3);
+            assert!(!distill.rollout_supervision_include_step1);
+            assert!((distill.rollout_supervision_power - 1.25).abs() < f32::EPSILON);
+            assert!((distill.rollout_sampling_power - 0.5).abs() < f32::EPSILON);
+        }
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn imagenette_dinov2_dense_h8_deepbias0p5_ff6_280_promoted_stride2_longer_experiment_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config = repo_root.join(
+        "config/vision/distill/experiments/imagenette_dinov2_vits14_dense_h8_deepbias0p5_ff6_280_promoted_stride2_longer.toml",
+    );
+    let loaded = load_vision_training_config(&[config])
+        .expect("load stride2 longer promoted 280 h8 experiment");
+    assert_eq!(loaded.training.max_iters, 512);
+    match loaded.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            assert_eq!(distill.rollout_supervision_stride, 2);
+            assert!((distill.rollout_sampling_power - 0.5).abs() < f32::EPSILON);
+        }
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn vision_smoke_dinov2_dense_h10_deepbias_ff6_224_eval_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config = repo_root.join(
+        "config/vision/distill/vision_smoke_dinov2_vits14_dense_h10_deepbias_ff6_224_eval.toml",
+    );
+    let loaded =
+        load_vision_training_config(&[config]).expect("load smoke eval promoted 224 config");
+    assert_eq!(
+        loaded.dataset.imagenet_root,
+        PathBuf::from("data/vision_smoke/imagenet")
+    );
+    let distill = match loaded.mode {
+        VisionTrainingModeConfig::Distill(distill) => distill,
+        _ => panic!("expected distill mode"),
+    };
+    let teacher = match distill.teacher {
+        VisionTeacherConfig::Features(teacher) => teacher,
+        _ => panic!("expected feature teacher"),
+    };
+    assert!(
+        teacher
+            .val_patch_path
+            .ends_with("data/vision_smoke/features/dinov2_vits14_224/val_patch.bin")
+    );
+}
+
+#[test]
+fn vision_smoke_dinov2_dense_h8_deepbias0p5_ff6_280_eval_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config = repo_root.join(
+        "config/vision/distill/vision_smoke_dinov2_vits14_dense_h8_deepbias0p5_ff6_280_eval.toml",
+    );
+    let loaded =
+        load_vision_training_config(&[config]).expect("load smoke eval promoted 280 config");
+    assert_eq!(
+        loaded.dataset.imagenet_root,
+        PathBuf::from("data/vision_smoke/imagenet")
+    );
+    let distill = match loaded.mode {
+        VisionTrainingModeConfig::Distill(distill) => distill,
+        _ => panic!("expected distill mode"),
+    };
+    let teacher = match distill.teacher {
+        VisionTeacherConfig::Features(teacher) => teacher,
+        _ => panic!("expected feature teacher"),
+    };
+    assert!(
+        teacher
+            .val_patch_path
+            .ends_with("data/vision_smoke/features/dinov2_vits14_280/val_patch.bin")
+    );
+}
+
+#[test]
+fn imagenette_dinov2_pyramid_stageaware_h10_deepbias_promoted_stride2_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config = repo_root.join(
+        "config/vision/distill/imagenette_dinov2_vits14_pyramid_stageaware_refine2_coarse96_densepolicy_h10_deepbias_promoted_stride2.toml",
+    );
+    let loaded = load_vision_training_config(&[config])
+        .expect("load pyramid stage-aware stride2 promoted config");
+    match loaded.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            assert_eq!(distill.rollout_supervision_stride, 2);
+        }
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn imagenette_dinov2_dense_h8_deepbias0p625_ff6_280_promoted_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path = repo_root.join(
+        "config/vision/distill/imagenette_dinov2_vits14_dense_h8_deepbias0p625_ff6_280_promoted.toml",
+    );
+    let config = load_vision_training_config(&[config_path])
+        .expect("load dense h8 deepbias0p625 ff6 280 promoted");
+
+    assert_eq!(config.vision.image_size, 280);
+    assert_eq!(config.vision.mlp_internal_dim_multiplier, 6);
+    assert_eq!(config.vision.steps, 8);
+    assert_eq!(config.training.epochs, Some(2));
+    assert_eq!(config.training.max_iters, 384);
+    assert_eq!(config.training.rollout_max_steps, Some(8));
+    match &config.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            assert!((distill.rollout_sampling_power - 0.625).abs() < f32::EPSILON);
+            match &distill.teacher {
+                VisionTeacherConfig::Features(teacher) => {
+                    assert_eq!(teacher.patch_tokens, Some(400));
+                }
+                other => panic!("expected feature teacher, got {other:?}"),
+            }
+        }
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn imagenette_dinov2_dense_h8_deepbias0p6_ff6_280_promoted_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path = repo_root.join(
+        "config/vision/distill/imagenette_dinov2_vits14_dense_h8_deepbias0p6_ff6_280_promoted.toml",
+    );
+    let config = load_vision_training_config(&[config_path])
+        .expect("load dense h8 deepbias0p6 ff6 280 promoted");
+
+    assert_eq!(config.vision.image_size, 280);
+    assert_eq!(config.vision.mlp_internal_dim_multiplier, 6);
+    assert_eq!(config.vision.steps, 8);
+    assert_eq!(config.training.epochs, Some(2));
+    assert_eq!(config.training.max_iters, 384);
+    assert_eq!(config.training.rollout_max_steps, Some(8));
+    match &config.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            assert!((distill.rollout_sampling_power - 0.6).abs() < f32::EPSILON);
+            match &distill.teacher {
+                VisionTeacherConfig::Features(teacher) => {
+                    assert_eq!(teacher.patch_tokens, Some(400));
+                }
+                other => panic!("expected feature teacher, got {other:?}"),
+            }
+        }
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn imagenette_dinov2_dense_h9_deepbias0p5_ff6_280_promoted_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path = repo_root.join(
+        "config/vision/distill/imagenette_dinov2_vits14_dense_h9_deepbias0p5_ff6_280_promoted.toml",
+    );
+    let config = load_vision_training_config(&[config_path])
+        .expect("load dense h9 deepbias0p5 ff6 280 promoted");
+
+    assert_eq!(config.vision.image_size, 280);
+    assert_eq!(config.vision.mlp_internal_dim_multiplier, 6);
+    assert_eq!(config.vision.steps, 9);
+    assert_eq!(config.training.epochs, Some(2));
+    assert_eq!(config.training.max_iters, 384);
+    assert_eq!(config.training.rollout_max_steps, Some(9));
+    match &config.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            assert!((distill.rollout_sampling_power - 0.5).abs() < f32::EPSILON);
+            match &distill.teacher {
+                VisionTeacherConfig::Features(teacher) => {
+                    assert_eq!(teacher.patch_tokens, Some(400));
+                }
+                other => panic!("expected feature teacher, got {other:?}"),
+            }
+        }
+        other => panic!("expected distill mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn imagenette_dinov2_dense_h8_deepbias0p5_ff6_280_promoted_min2_loads() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let config_path = repo_root.join(
+        "config/vision/distill/imagenette_dinov2_vits14_dense_h8_deepbias0p5_ff6_280_promoted_min2.toml",
+    );
+    let config = load_vision_training_config(&[config_path])
+        .expect("load dense h8 deepbias0p5 ff6 280 promoted min2");
+
+    assert_eq!(config.vision.image_size, 280);
+    assert_eq!(config.vision.mlp_internal_dim_multiplier, 6);
+    assert_eq!(config.vision.steps, 8);
+    assert_eq!(config.training.epochs, Some(2));
+    assert_eq!(config.training.max_iters, 384);
+    assert_eq!(config.training.rollout_min_steps, Some(2));
+    assert_eq!(config.training.rollout_max_steps, Some(8));
+    match &config.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            assert!((distill.rollout_sampling_power - 0.5).abs() < f32::EPSILON);
+            match &distill.teacher {
+                VisionTeacherConfig::Features(teacher) => {
+                    assert_eq!(teacher.patch_tokens, Some(400));
+                }
+                other => panic!("expected feature teacher, got {other:?}"),
+            }
+        }
+        other => panic!("expected distill mode, got {other:?}"),
+    }
 }
 
 #[test]
@@ -1695,10 +4598,38 @@ fn trm_predict_bank_schedule_parses_from_config() {
     .expect("load config with bank schedule overlay");
     let _ = fs::remove_file(overlay_path);
 
-    assert!(!config.vision.trm_graph.bank_schedule.predict.patch_local_read);
-    assert!(!config.vision.trm_graph.bank_schedule.predict.patch_local_write);
-    assert!(config.vision.trm_graph.bank_schedule.observe.patch_local_read);
-    assert!(config.vision.trm_graph.bank_schedule.observe.patch_local_write);
+    assert!(
+        !config
+            .vision
+            .trm_graph
+            .bank_schedule
+            .predict
+            .patch_local_read
+    );
+    assert!(
+        !config
+            .vision
+            .trm_graph
+            .bank_schedule
+            .predict
+            .patch_local_write
+    );
+    assert!(
+        config
+            .vision
+            .trm_graph
+            .bank_schedule
+            .observe
+            .patch_local_read
+    );
+    assert!(
+        config
+            .vision
+            .trm_graph
+            .bank_schedule
+            .observe
+            .patch_local_write
+    );
 }
 
 #[test]
@@ -1736,9 +4667,33 @@ fn trm_predict_bank_decay_scales_parse_from_config() {
     .expect("load config with bank schedule overlay");
     let _ = fs::remove_file(overlay_path);
 
-    assert_eq!(config.vision.trm_graph.bank_schedule.predict.patch_decay_scale, 2.0);
-    assert_eq!(config.vision.trm_graph.bank_schedule.predict.coarse_decay_scale, 0.5);
-    assert_eq!(config.vision.trm_graph.bank_schedule.predict.global_decay_scale, 0.25);
+    assert_eq!(
+        config
+            .vision
+            .trm_graph
+            .bank_schedule
+            .predict
+            .patch_decay_scale,
+        2.0
+    );
+    assert_eq!(
+        config
+            .vision
+            .trm_graph
+            .bank_schedule
+            .predict
+            .coarse_decay_scale,
+        0.5
+    );
+    assert_eq!(
+        config
+            .vision
+            .trm_graph
+            .bank_schedule
+            .predict
+            .global_decay_scale,
+        0.25
+    );
 }
 
 #[test]
@@ -1879,4 +4834,118 @@ fn trm_self_only_local_topology_validates_with_zero_radius() {
     config
         .validate()
         .expect("self-only zero-radius local topology should validate");
+}
+
+#[test]
+fn active_docs_and_program_reference_existing_vision_configs() {
+    fn extract_config_paths(text: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let needle = "config/vision/";
+        let bytes = text.as_bytes();
+        let mut start = 0usize;
+        while let Some(offset) = text[start..].find(needle) {
+            let path_start = start + offset;
+            let mut end = path_start;
+            while end < bytes.len() {
+                let ch = bytes[end] as char;
+                let valid = ch.is_ascii_alphanumeric()
+                    || matches!(ch, '/' | '_' | '-' | '.');
+                if !valid {
+                    break;
+                }
+                end += 1;
+                if text[path_start..end].ends_with(".toml") {
+                    out.push(text[path_start..end].to_string());
+                    break;
+                }
+            }
+            start = end.max(path_start + needle.len());
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let files = [
+        repo_root.join("program.md"),
+        repo_root.join("docs/vision/vision_dinov2_distill_roadmap.md"),
+        repo_root.join("docs/vision/vision_gpu_training_efficiency_roadmap.md"),
+        repo_root.join("docs/vision/vision_recurrent_block_training_roadmap.md"),
+        repo_root.join("docs/vision/vision_surface_cleanup_roadmap.md"),
+        repo_root.join("docs/vision/vision_surface_inventory.md"),
+        repo_root.join("docs/video/video_shared_core_trm_roadmap.md"),
+    ];
+
+    let mut missing = Vec::new();
+    for file in files {
+        let text = std::fs::read_to_string(&file)
+            .unwrap_or_else(|err| panic!("read {:?}: {err}", file));
+        for rel_path in extract_config_paths(&text) {
+            let abs_path = repo_root.join(&rel_path);
+            if !abs_path.exists() {
+                missing.push(format!("{} -> {}", file.display(), rel_path));
+            }
+        }
+    }
+
+    assert!(
+        missing.is_empty(),
+        "missing config references in active docs/program:\n{}",
+        missing.join("\n")
+    );
+}
+
+#[test]
+fn distill_rollout_supervision_groups_must_be_positive() {
+    let text = r#"
+        [dataset]
+        source = "imagenet"
+        train_dir = "train"
+        val_dir = "val"
+        max_records = 16
+
+        [training]
+        batch_size = 4
+        max_iters = 4
+        log_frequency = 1
+
+        [optimizer]
+        learning_rate = 0.0003
+        weight_decay = 0.0
+
+        [vision]
+        image_size = 32
+        patch_size = 4
+        in_channels = 3
+        embed_dim = 64
+        steps = 4
+        n_head = 8
+        projection_dim = 32
+        projection_hidden_dim = 64
+
+        [mode]
+        type = "distill"
+        rollout_supervision_groups = 0
+
+        [mode.teacher]
+        type = "features"
+        train_cls_path = "train_cls.bin"
+        train_patch_path = "train_patch.bin"
+        val_cls_path = "val_cls.bin"
+        val_patch_path = "val_patch.bin"
+        feature_dim = 32
+        patch_tokens = 64
+    "#;
+
+    let config: VisionTrainingConfig = toml::from_str(text).expect("parse config");
+    let err = config.validate().expect_err("groups=0 should fail");
+    assert!(
+        err.to_string()
+            .contains("mode.rollout_supervision_groups must be > 0"),
+        "unexpected error: {err}"
+    );
 }

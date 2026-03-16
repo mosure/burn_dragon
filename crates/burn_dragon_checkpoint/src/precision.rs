@@ -4,9 +4,7 @@ use std::path::{Path, PathBuf};
 
 use burn::tensor::{DType, TensorData};
 
-use crate::parts::{
-    BURNPACK_HEADER_SIZE, read_burnpack_metadata, write_burnpack_file,
-};
+use crate::parts::{BURNPACK_HEADER_SIZE, read_burnpack_metadata, write_burnpack_file};
 use crate::policy::{BurnpackLoadPolicy, burnpack_path};
 
 const TENSOR_ALIGNMENT: u64 = 256;
@@ -18,7 +16,10 @@ const fn align_offset(offset: u64, alignment: u64) -> u64 {
 
 #[inline]
 fn aligned_data_section_start(metadata_size: usize) -> usize {
-    align_offset((BURNPACK_HEADER_SIZE + metadata_size) as u64, TENSOR_ALIGNMENT) as usize
+    align_offset(
+        (BURNPACK_HEADER_SIZE + metadata_size) as u64,
+        TENSOR_ALIGNMENT,
+    ) as usize
 }
 
 /// Float precision used when materializing burnpack deployment weights.
@@ -65,9 +66,14 @@ fn convert_burnpack_float_precision(
     output_burnpack: &Path,
     target_dtype: DType,
 ) -> Result<(), String> {
-    let mut source = fs::File::open(source_burnpack)
-        .map_err(|err| format!("failed to open source burnpack {}: {err}", source_burnpack.display()))?;
-    let (version, metadata_size, mut metadata) = read_burnpack_metadata(&mut source, source_burnpack)?;
+    let mut source = fs::File::open(source_burnpack).map_err(|err| {
+        format!(
+            "failed to open source burnpack {}: {err}",
+            source_burnpack.display()
+        )
+    })?;
+    let (version, metadata_size, mut metadata) =
+        read_burnpack_metadata(&mut source, source_burnpack)?;
     let data_start = aligned_data_section_start(metadata_size as usize) as u64;
 
     let mut descriptors = metadata.tensors.into_iter().collect::<Vec<_>>();
@@ -102,12 +108,16 @@ fn convert_burnpack_float_precision(
             converted.bytes.to_vec()
         };
 
-        let tensor_len = u64::try_from(converted_bytes.len())
-            .map_err(|_| format!("tensor `{name}` byte length overflow: {}", converted_bytes.len()))?;
+        let tensor_len = u64::try_from(converted_bytes.len()).map_err(|_| {
+            format!(
+                "tensor `{name}` byte length overflow: {}",
+                converted_bytes.len()
+            )
+        })?;
         let aligned_start = align_offset(next_offset, TENSOR_ALIGNMENT);
-        let end_offset = aligned_start
-            .checked_add(tensor_len)
-            .ok_or_else(|| format!("tensor `{name}` data offset overflow: {aligned_start} + {tensor_len}"))?;
+        let end_offset = aligned_start.checked_add(tensor_len).ok_or_else(|| {
+            format!("tensor `{name}` data offset overflow: {aligned_start} + {tensor_len}")
+        })?;
         descriptor.dtype = serialize_dtype(converted_dtype)?;
         descriptor.data_offsets = (aligned_start, end_offset);
         next_offset = end_offset;
@@ -116,9 +126,10 @@ fn convert_burnpack_float_precision(
     }
 
     metadata.tensors = converted_descriptors;
-    metadata
-        .metadata
-        .insert("precision".to_string(), dtype_precision_label(target_dtype).to_string());
+    metadata.metadata.insert(
+        "precision".to_string(),
+        dtype_precision_label(target_dtype).to_string(),
+    );
     write_burnpack_file(output_burnpack, version, &metadata, converted_payloads)
 }
 
@@ -171,18 +182,24 @@ fn read_tensor_payload(
         ));
     }
     let len = end - start;
-    let len_usize =
-        usize::try_from(len).map_err(|_| format!("tensor `{tensor_name}` byte length overflow: {len}"))?;
-    let seek_offset = data_start
-        .checked_add(start)
-        .ok_or_else(|| format!("tensor `{tensor_name}` data offset overflow: {data_start} + {start}"))?;
-    source
-        .seek(SeekFrom::Start(seek_offset))
-        .map_err(|err| format!("failed to seek tensor `{tensor_name}` in {}: {err}", source_path.display()))?;
+    let len_usize = usize::try_from(len)
+        .map_err(|_| format!("tensor `{tensor_name}` byte length overflow: {len}"))?;
+    let seek_offset = data_start.checked_add(start).ok_or_else(|| {
+        format!("tensor `{tensor_name}` data offset overflow: {data_start} + {start}")
+    })?;
+    source.seek(SeekFrom::Start(seek_offset)).map_err(|err| {
+        format!(
+            "failed to seek tensor `{tensor_name}` in {}: {err}",
+            source_path.display()
+        )
+    })?;
     let mut bytes = vec![0u8; len_usize];
-    source
-        .read_exact(&mut bytes)
-        .map_err(|err| format!("failed to read tensor `{tensor_name}` bytes from {}: {err}", source_path.display()))?;
+    source.read_exact(&mut bytes).map_err(|err| {
+        format!(
+            "failed to read tensor `{tensor_name}` bytes from {}: {err}",
+            source_path.display()
+        )
+    })?;
     Ok(bytes)
 }
 
@@ -195,7 +212,8 @@ fn parse_dtype(value: &ciborium::Value) -> Result<DType, String> {
 }
 
 fn serialize_dtype(dtype: DType) -> Result<ciborium::Value, String> {
-    ciborium::value::Value::serialized(&dtype).map_err(|err| format!("failed to serialize dtype {dtype:?}: {err}"))
+    ciborium::value::Value::serialized(&dtype)
+        .map_err(|err| format!("failed to serialize dtype {dtype:?}: {err}"))
 }
 
 #[cfg(test)]
@@ -231,12 +249,14 @@ mod tests {
         TestBackend::seed(&device, 1337);
         let model = TinyModel::<TestBackend>::new(&device);
         let dir = tempdir().expect("tempdir");
-        let source = save_model_to_burnpack(&model, &dir.path().join("tiny")).expect("save f32 burnpack");
+        let source =
+            save_model_to_burnpack(&model, &dir.path().join("tiny")).expect("save f32 burnpack");
         let output = convert_burnpack_precision(
             source.as_path(),
             &dir.path().join("tiny"),
             BurnpackFloatPrecision::F16,
-            BurnpackLoadPolicy::default().with_precision(crate::policy::BurnpackPrecisionPreference::PreferF16),
+            BurnpackLoadPolicy::default()
+                .with_precision(crate::policy::BurnpackPrecisionPreference::PreferF16),
         )
         .expect("convert f16");
 

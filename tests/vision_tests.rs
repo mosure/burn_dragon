@@ -1,11 +1,11 @@
 use burn::tensor::backend::Backend as BackendTrait;
 use burn::tensor::{Distribution, Tensor};
+use burn_dragon::core::{FusedKernelConfig, ManifoldHyperConnectionsConfig};
 use burn_dragon::vision::{
     PatchEmbed, PatchGrid, SpatialPositionalEncodingKind, VisionAttentionMode, VisionBackboneKind,
     VisionDragon, VisionDragonConfig, VisionLatentActivation, VisionPatchEmbedMode,
     pool_patch_tokens,
 };
-use burn_dragon::core::{FusedKernelConfig, ManifoldHyperConnectionsConfig};
 use burn_ndarray::NdArray;
 
 #[test]

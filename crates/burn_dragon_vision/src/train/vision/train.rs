@@ -1,6 +1,7 @@
 use super::distill_runtime::{DistillDatasetRequest, build_distill_datasets_and_teacher};
 use super::video::dataset::MovingMnistVideoLoaderConfig;
 use crate::train::prelude::*;
+use std::time::Instant;
 
 pub fn train_vision_backend<B, Init>(
     config: &VisionTrainingConfig,
@@ -12,6 +13,12 @@ where
     B::Device: Clone,
     Init: Fn(&B::Device),
 {
+    let stage_profile = crate::train::profile::enabled();
+    if stage_profile {
+        crate::train::profile::reset();
+    }
+    let train_wall_start = stage_profile.then(Instant::now);
+
     let device = B::Device::default();
     B::seed(&device, 1337);
     init_backend(&device);
@@ -571,6 +578,14 @@ where
     write_latest_run(&run_root, &run_name)?;
     crate::write_training_snapshot(config, &run_dir)?;
     info!("vision run name: {run_name}");
+    info!(
+        "vision training batching: micro_batch_size={} gradient_accumulation_steps={} effective_batch_size={}",
+        training.batch_size,
+        training.gradient_accumulation_steps,
+        training
+            .batch_size
+            .saturating_mul(training.gradient_accumulation_steps.max(1))
+    );
     let context = VisionTrainEnvironment {
         run_dir: &run_dir,
         run_name: &run_name,
@@ -931,6 +946,23 @@ where
     }
 
     info!("Vision training complete on {backend_name}");
+    if let Some(start) = train_wall_start {
+        let elapsed_ns = start.elapsed().as_nanos();
+        let snapshot = crate::train::profile::snapshot();
+        info!(
+            "[stage-profile][training] total_ns={elapsed_ns} dataloader_cpu_ns={} dataloader_image_load_ns={} dataloader_image_transform_ns={} dataloader_teacher_load_ns={} dataloader_tensor_copy_ns={} dataloader_host_to_device_copy_bytes={} host_sync_points={} forward_ns={} loss_backward_ns={} train_steps={}",
+            snapshot.dataloader_cpu_ns,
+            snapshot.dataloader_image_load_ns,
+            snapshot.dataloader_image_transform_ns,
+            snapshot.dataloader_teacher_load_ns,
+            snapshot.dataloader_tensor_copy_ns,
+            snapshot.dataloader_host_to_device_copy_bytes,
+            snapshot.host_sync_points,
+            snapshot.forward_ns,
+            snapshot.loss_backward_ns,
+            snapshot.train_steps,
+        );
+    }
 
     Ok(())
 }

@@ -57,15 +57,14 @@ pub fn device_memory_usage_safe<B: BackendTrait>(device: &B::Device) -> Option<D
 where
     B::Device: 'static,
 {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| device_memory_usage::<B>(device)))
-        .ok()
-        .flatten()
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        device_memory_usage::<B>(device)
+    }))
+    .ok()
+    .flatten()
 }
 
-pub fn cleanup_device_memory<B: BackendTrait>(
-    device: &B::Device,
-    allow_cuda_cleanup: bool,
-) -> bool
+pub fn cleanup_device_memory<B: BackendTrait>(device: &B::Device, allow_cuda_cleanup: bool) -> bool
 where
     B::Device: 'static,
 {

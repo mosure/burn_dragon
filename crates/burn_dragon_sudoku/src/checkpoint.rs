@@ -55,7 +55,8 @@ pub fn export_sudoku_checkpoint_to_burnpack(
     options: &BurnpackBundleExportOptions,
 ) -> Result<SudokuBurnpackExportReport> {
     let (checkpoint_base, epoch) = resolve_checkpoint_base(checkpoint, epoch)?;
-    let (model_config, core_wgpu) = load_model_export_config_for_checkpoint(config_paths, checkpoint)?;
+    let (model_config, core_wgpu) =
+        load_model_export_config_for_checkpoint(config_paths, checkpoint)?;
 
     let device = <ExportBackend as BackendTrait>::Device::default();
     ExportBackend::seed(&device, 1337);
@@ -92,7 +93,10 @@ pub(crate) fn resolve_checkpoint_run_dir(checkpoint: &Path) -> Option<PathBuf> {
     resolve_checkpoint_run_dir_shared(checkpoint)
 }
 
-pub(crate) fn resolve_checkpoint_base(path: &Path, epoch: Option<usize>) -> Result<(PathBuf, usize)> {
+pub(crate) fn resolve_checkpoint_base(
+    path: &Path,
+    epoch: Option<usize>,
+) -> Result<(PathBuf, usize)> {
     resolve_checkpoint_base_shared(path, epoch)
 }
 

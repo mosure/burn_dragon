@@ -1,16 +1,22 @@
+//! Intermediate `video_lejepa` training model surface.
+//!
+//! `VisionVideoLejepaModel` remains crate-private on purpose while the video stack is still in the
+//! hybrid/intermediate phase. Shared-core TRM migration work should treat this module as the
+//! current implementation seam, not as the final public video API.
+
+use super::profile::{video_train_profile_enabled, video_train_profile_record};
 use crate::train::prelude::*;
 use crate::train::vision::video::dynamics::{
     VisionVideoContextForward, VisionVideoForward, VisionVideoObservationMerger,
     VisionVideoPredictor, VisionVideoRolloutOutput, encode_clip_frames_with_model,
     repeat_last_future_query, split_clip_observation_and_target_projections_train,
 };
-use std::sync::{LazyLock, Mutex};
-use std::time::Instant;
 use burn::nn::loss::CrossEntropyLossConfig;
 use burn_dragon_core::{
     BDH, BDHConfig, FusedKernelConfig, ModelState, RotaryEmbedding, StructuredStepMode,
     StructuredTopologyState,
 };
+use std::time::Instant;
 
 mod rollout;
 #[cfg(test)]
@@ -88,46 +94,6 @@ type VideoArtifactMaps<B> = (
     Option<Tensor<B, 5>>,
 );
 
-#[derive(Clone, Copy, Debug, Default)]
-pub struct VisionVideoTrainProfileSnapshot {
-    pub train_calls: u64,
-    pub split_projection_ns: u64,
-    pub context_rollout_ns: u64,
-    pub predict_rollout_ns: u64,
-    pub loss_heads_ns: u64,
-}
-
-static VIDEO_TRAIN_PROFILE: LazyLock<Mutex<VisionVideoTrainProfileSnapshot>> =
-    LazyLock::new(|| Mutex::new(VisionVideoTrainProfileSnapshot::default()));
-
-#[inline]
-fn video_train_profile_enabled() -> bool {
-    std::env::var_os("BDH_STAGE_PROFILE").is_some()
-}
-
-#[inline]
-fn video_train_profile_record(f: impl FnOnce(&mut VisionVideoTrainProfileSnapshot)) {
-    if !video_train_profile_enabled() {
-        return;
-    }
-    if let Ok(mut state) = VIDEO_TRAIN_PROFILE.lock() {
-        f(&mut state);
-    }
-}
-
-pub fn video_train_profile_reset() {
-    if let Ok(mut state) = VIDEO_TRAIN_PROFILE.lock() {
-        *state = VisionVideoTrainProfileSnapshot::default();
-    }
-}
-
-pub fn video_train_profile_snapshot() -> VisionVideoTrainProfileSnapshot {
-    VIDEO_TRAIN_PROFILE
-        .lock()
-        .map(|state| *state)
-        .unwrap_or_default()
-}
-
 fn collect_video_feature_maps<B: BackendTrait>(
     frame_patch_tokens: Tensor<B, 4>,
     image_count: usize,
@@ -194,22 +160,20 @@ impl<B: BackendTrait> VisionVideoLejepaModel<B> {
                 device,
             ))
         };
-        let predictor =
-            VisionVideoPredictor::new(
-                embed_dim,
-                predictor_hidden_dim,
-                projection_dim,
-                &vision.normalization,
-                device,
-            );
-        let patch_conditioner =
-            VisionVideoPredictor::new(
-                embed_dim,
-                predictor_hidden_dim,
-                embed_dim,
-                &vision.normalization,
-                device,
-            );
+        let predictor = VisionVideoPredictor::new(
+            embed_dim,
+            predictor_hidden_dim,
+            projection_dim,
+            &vision.normalization,
+            device,
+        );
+        let patch_conditioner = VisionVideoPredictor::new(
+            embed_dim,
+            predictor_hidden_dim,
+            embed_dim,
+            &vision.normalization,
+            device,
+        );
         let observation_merger =
             VisionVideoObservationMerger::new(embed_dim, &vision.normalization, device);
         let step_mode_embeddings = if config.temporal.mode_embeddings {
@@ -792,10 +756,7 @@ impl<B: BackendTrait> VisionVideoLejepaModel<B> {
             let probe_pred = probe_logits
                 .argmax(1)
                 .reshape([probe_labels.shape().dims::<1>()[0]]);
-            let probe_acc = probe_pred
-                .equal(probe_labels)
-                .float()
-                .mean();
+            let probe_acc = probe_pred.equal(probe_labels).float().mean();
             (probe_loss, probe_acc)
         } else {
             (zero.clone(), zero.clone())

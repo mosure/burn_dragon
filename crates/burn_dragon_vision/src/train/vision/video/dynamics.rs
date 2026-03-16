@@ -250,21 +250,9 @@ pub(crate) fn split_clip_observation_and_target_projections<B: BackendTrait>(
     let context_observation_patch_tokens =
         embed_clip_frames_raw_with_model(model, context_clip_frames);
     let projected = if let Some(teacher) = teacher_model {
-        project_clip_frames_with_model(
-            teacher,
-            clip_frames,
-            steps,
-            projection_dim,
-        )
-        .detach()
+        project_clip_frames_with_model(teacher, clip_frames, steps, projection_dim).detach()
     } else {
-        project_clip_frames_with_model(
-            model,
-            clip_frames,
-            steps,
-            projection_dim,
-        )
-        .detach()
+        project_clip_frames_with_model(model, clip_frames, steps, projection_dim).detach()
     };
     let context_target_proj = projected.clone().slice_dim(1, 0..context_len);
     let target_proj_all = projected.slice_dim(1, context_len..context_len + future_len_all);
@@ -286,19 +274,16 @@ pub(crate) fn split_clip_observation_and_target_projections_train<B: BackendTrai
     include_context_target_proj: bool,
 ) -> (Tensor<B, 4>, Option<Tensor<B, 3>>, Tensor<B, 3>) {
     if include_context_target_proj {
-        let (
-            context_observation_patch_tokens,
-            context_target_proj,
-            target_proj_all,
-        ) = split_clip_observation_and_target_projections(
-            model,
-            teacher_model,
-            clip_frames,
-            context_len,
-            future_len_all,
-            steps,
-            projection_dim,
-        );
+        let (context_observation_patch_tokens, context_target_proj, target_proj_all) =
+            split_clip_observation_and_target_projections(
+                model,
+                teacher_model,
+                clip_frames,
+                context_len,
+                future_len_all,
+                steps,
+                projection_dim,
+            );
         return (
             context_observation_patch_tokens,
             Some(context_target_proj),
@@ -309,8 +294,7 @@ pub(crate) fn split_clip_observation_and_target_projections_train<B: BackendTrai
     let context_clip_frames = clip_frames.clone().slice_dim(1, 0..context_len);
     let context_observation_patch_tokens =
         embed_clip_frames_raw_with_model(model, context_clip_frames);
-    let target_clip_frames = clip_frames
-        .slice_dim(1, context_len..context_len + future_len_all);
+    let target_clip_frames = clip_frames.slice_dim(1, context_len..context_len + future_len_all);
     let target_proj_all = if let Some(teacher) = teacher_model {
         project_clip_frames_with_model(teacher, target_clip_frames, steps, projection_dim).detach()
     } else {

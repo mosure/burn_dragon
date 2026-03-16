@@ -2944,9 +2944,12 @@ dependencies = [
  "burn_dragon",
  "burn_dragon_sudoku",
  "burn_dragon_wgpu",
+ "bytemuck",
  "clap 4.5.60",
  "ctrlc",
+ "image",
  "pollster",
+ "rand 0.8.5",
  "serde",
  "serde_json",
  "wgpu 26.0.1",
@@ -4306,8 +4309,6 @@ dependencies = [
 [[package]]
 name = "cubecl-cuda"
 version = "0.10.0-pre.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bd2323944b693f94e843d83c96bdb7f831ec0a074b9b3dd5f1d3ee3fba4d60c0"
 dependencies = [
  "bytemuck",
  "cubecl-common 0.10.0-pre.2",

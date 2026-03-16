@@ -1,4 +1,7 @@
 use crate::train::prelude::*;
+use burn::tensor::activation;
+use rand::prelude::SliceRandom;
+use std::time::Instant;
 
 use super::models::{DistillTeacherModel, VisionDistillModel};
 
@@ -9,15 +12,104 @@ type RolloutMetricArrays<B> = (
     RolloutMetricTensorArray<B>,
 );
 
-fn rollout_supervision_steps(total_steps: usize, frames: usize) -> Vec<usize> {
+fn rollout_supervision_steps(
+    total_steps: usize,
+    frames: usize,
+    stride: usize,
+    include_step1: bool,
+) -> Vec<usize> {
     if total_steps == 0 {
         return Vec::new();
     }
-    let mut steps = select_trajectory_indices(total_steps, frames.max(1))
-        .into_iter()
-        .map(|index| index + 1)
+    let stride = stride.max(1);
+    let candidates = (1..=total_steps)
+        .filter(|step| {
+            *step == total_steps
+                || (include_step1 && *step == 1)
+                || (*step > 1 && ((*step - 1) % stride) == 0)
+        })
         .collect::<Vec<_>>();
+    let mut steps = if candidates.len() <= frames.max(1) {
+        candidates
+    } else {
+        select_trajectory_indices(candidates.len(), frames.max(1))
+            .into_iter()
+            .map(|index| candidates[index])
+            .collect::<Vec<_>>()
+    };
     steps.push(total_steps);
+    steps.sort_unstable();
+    steps.dedup();
+    steps
+}
+
+fn rollout_supervision_explicit_steps(total_steps: usize, steps: &[usize]) -> Vec<usize> {
+    if total_steps == 0 {
+        return Vec::new();
+    }
+    let mut filtered = steps
+        .iter()
+        .copied()
+        .filter(|step| *step > 0 && *step <= total_steps)
+        .collect::<Vec<_>>();
+    if filtered.is_empty() {
+        filtered.push(total_steps);
+    }
+    filtered.sort_unstable();
+    filtered.dedup();
+    filtered
+}
+
+fn sample_rollout_supervision_groups<R: Rng + ?Sized>(
+    rollout: &VisionRollout,
+    frames: usize,
+    stride: usize,
+    groups: usize,
+    explicit_steps: &[usize],
+    explicit_groups: &[Vec<usize>],
+    include_step1: bool,
+    sampling_power: f32,
+    rng: &mut R,
+) -> Vec<Vec<usize>> {
+    if !explicit_groups.is_empty() {
+        let normalized_groups = explicit_groups
+            .iter()
+            .map(|steps| rollout_supervision_explicit_steps(rollout.max_steps.max(1), steps))
+            .filter(|steps| !steps.is_empty())
+            .collect::<Vec<_>>();
+        let mut supervision_groups = Vec::with_capacity(groups.max(1));
+        for _ in 0..groups.max(1) {
+            let chosen = normalized_groups
+                .choose(rng)
+                .expect("explicit rollout supervision groups")
+                .clone();
+            supervision_groups.push(chosen);
+        }
+        return supervision_groups;
+    }
+    if !explicit_steps.is_empty() {
+        let normalized =
+            rollout_supervision_explicit_steps(rollout.max_steps.max(1), explicit_steps);
+        return vec![normalized; groups.max(1)];
+    }
+    let mut supervision_groups = Vec::with_capacity(groups.max(1));
+    for _ in 0..groups.max(1) {
+        let sampled_steps = sample_rollout_steps(rollout, sampling_power, rng);
+        supervision_groups.push(rollout_supervision_steps(
+            sampled_steps,
+            frames,
+            stride,
+            include_step1,
+        ));
+    }
+    supervision_groups
+}
+
+fn merge_rollout_supervision_groups(groups: &[Vec<usize>]) -> Vec<usize> {
+    let mut steps = groups
+        .iter()
+        .flat_map(|group| group.iter().copied())
+        .collect::<Vec<_>>();
     steps.sort_unstable();
     steps.dedup();
     steps
@@ -134,6 +226,92 @@ fn aggregate_rollout_terms<B: BackendTrait>(
     }
 }
 
+fn rollout_improvement_penalty<B: BackendTrait>(
+    supervision_steps: &[usize],
+    terms_by_step: &[(usize, VisionDistillationLossTerms<B>)],
+    margin: f32,
+) -> Tensor<B, 1> {
+    let device = terms_by_step
+        .first()
+        .map(|(_, terms)| terms.total.device())
+        .expect("distill improvement penalty requires at least one evaluated step");
+    if supervision_steps.len() < 2 {
+        return Tensor::<B, 1>::zeros([1], &device);
+    }
+
+    let mut penalty = Tensor::<B, 1>::zeros([1], &device);
+    let mut pair_count = 0.0f32;
+    let mut previous: Option<&VisionDistillationLossTerms<B>> = None;
+    for step in supervision_steps {
+        let terms = terms_by_step
+            .iter()
+            .find(|(candidate, _)| candidate == step)
+            .map(|(_, terms)| terms)
+            .expect("improvement step should be evaluated");
+        if let Some(prev_terms) = previous {
+            let step_penalty = activation::relu(
+                terms
+                    .total
+                    .clone()
+                    .sub(prev_terms.total.clone())
+                    .add_scalar(margin),
+            );
+            penalty = penalty + step_penalty;
+            pair_count += 1.0;
+        }
+        previous = Some(terms);
+    }
+
+    if pair_count == 0.0 {
+        Tensor::<B, 1>::zeros([1], &device)
+    } else {
+        penalty.mul_scalar(1.0 / pair_count)
+    }
+}
+
+fn aggregate_rollout_supervision_groups<B: BackendTrait>(
+    supervision_groups: &[Vec<usize>],
+    terms_by_step: &[(usize, VisionDistillationLossTerms<B>)],
+    power: f32,
+    improvement_weight: f32,
+    improvement_margin: f32,
+) -> (VisionDistillationLossTerms<B>, Tensor<B, 1>) {
+    let device = terms_by_step
+        .first()
+        .map(|(_, terms)| terms.total.device())
+        .expect("distill aggregation requires at least one evaluated step");
+    let mut total = Tensor::<B, 1>::zeros([1], &device);
+    let mut patch = Tensor::<B, 1>::zeros([1], &device);
+    let mut cls = Tensor::<B, 1>::zeros([1], &device);
+    let mut relational = Tensor::<B, 1>::zeros([1], &device);
+    let mut improvement_penalty = Tensor::<B, 1>::zeros([1], &device);
+    let groups = supervision_groups.len().max(1) as f32;
+
+    for supervision_steps in supervision_groups {
+        let aggregated = aggregate_rollout_terms(supervision_steps, terms_by_step, power);
+        total = total + aggregated.total;
+        patch = patch + aggregated.patch;
+        cls = cls + aggregated.cls;
+        relational = relational + aggregated.relational;
+        if improvement_weight > 0.0 {
+            improvement_penalty = improvement_penalty
+                + rollout_improvement_penalty(supervision_steps, terms_by_step, improvement_margin)
+                    .mul_scalar(improvement_weight);
+        }
+    }
+
+    let inv_groups = 1.0 / groups.max(1.0);
+    (
+        VisionDistillationLossTerms {
+            total: total.mul_scalar(inv_groups),
+            patch: patch.mul_scalar(inv_groups),
+            cls: cls.mul_scalar(inv_groups),
+            relational: relational.mul_scalar(inv_groups),
+        },
+        improvement_penalty.mul_scalar(inv_groups),
+    )
+}
+
 fn teacher_targets_train<B: AutodiffBackend>(
     teacher: &Option<DistillTeacherModel<B>>,
     images: Tensor<B, 4>,
@@ -174,12 +352,15 @@ impl<B: BackendTrait> VisionDistillModel<B> {
         teacher_cls: Tensor<B, 2>,
         steps: &[usize],
     ) -> Vec<(usize, VisionDistillationLossTerms<B>)> {
-        let mut outputs = Vec::with_capacity(steps.len());
-        for step in steps {
-            let backprop_steps = self.rollout.backprop_steps(*step);
-            let output =
-                self.model
-                    .forward_images_steps_rollout(images.clone(), *step, backprop_steps);
+        let schedule = steps
+            .iter()
+            .map(|step| (*step, self.rollout.backprop_steps(*step)))
+            .collect::<Vec<_>>();
+        let rollout_outputs = self
+            .model
+            .forward_images_steps_rollout_schedule(images, &schedule);
+        let mut outputs = Vec::with_capacity(rollout_outputs.len());
+        for (step, output) in rollout_outputs {
             let terms = vision_distillation_loss_terms(
                 output.patch_tokens,
                 teacher_patch.clone(),
@@ -187,7 +368,7 @@ impl<B: BackendTrait> VisionDistillModel<B> {
                 teacher_cls.clone(),
                 &self.loss,
             );
-            outputs.push((*step, terms));
+            outputs.push((step, terms));
         }
         outputs
     }
@@ -199,14 +380,15 @@ impl<B: BackendTrait> VisionDistillModel<B> {
         teacher_cls: Tensor<B, 2>,
         steps: &[usize],
     ) -> Vec<(usize, VisionDistillationLossTerms<B>)> {
-        let mut outputs = Vec::with_capacity(steps.len());
-        for step in steps {
-            let backprop_steps = self.rollout.backprop_steps(*step);
-            let output = self.model.forward_images_steps_rollout_unbounded(
-                images.clone(),
-                *step,
-                backprop_steps,
-            );
+        let schedule = steps
+            .iter()
+            .map(|step| (*step, self.rollout.backprop_steps(*step)))
+            .collect::<Vec<_>>();
+        let rollout_outputs = self
+            .model
+            .forward_images_steps_rollout_schedule_unbounded(images, &schedule);
+        let mut outputs = Vec::with_capacity(rollout_outputs.len());
+        for (step, output) in rollout_outputs {
             let terms = vision_distillation_loss_terms(
                 output.patch_tokens,
                 teacher_patch.clone(),
@@ -214,17 +396,53 @@ impl<B: BackendTrait> VisionDistillModel<B> {
                 teacher_cls.clone(),
                 &self.loss,
             );
-            outputs.push((*step, terms));
+            outputs.push((step, terms));
         }
         outputs
     }
 }
 
-impl<B: AutodiffBackend> TrainStep for VisionDistillModel<B> {
-    type Input = ImageNetBatch<B>;
-    type Output = VisionTrainItem<B>;
+impl<B: AutodiffBackend> VisionDistillModel<B> {
+    fn forward_train_terms(
+        &self,
+        images: Tensor<B, 4>,
+        teacher_patch: Tensor<B, 3>,
+        teacher_cls: Tensor<B, 2>,
+    ) -> (
+        VisionDistillationLossTerms<B>,
+        Tensor<B, 1>,
+        Vec<(usize, VisionDistillationLossTerms<B>)>,
+    ) {
+        let mut rng = thread_rng();
+        let supervision_groups = sample_rollout_supervision_groups(
+            &self.rollout,
+            self.rollout_supervision_frames,
+            self.rollout_supervision_stride,
+            self.rollout_supervision_groups,
+            &self.rollout_supervision_explicit_steps,
+            &self.rollout_supervision_explicit_groups,
+            self.rollout_supervision_include_step1,
+            self.rollout_sampling_power,
+            &mut rng,
+        );
+        let evaluated_steps = merge_rollout_supervision_groups(&supervision_groups);
+        let terms_by_step = self.evaluate_distill_steps_bounded(
+            images,
+            teacher_patch,
+            teacher_cls,
+            &evaluated_steps,
+        );
+        let (aggregated, improvement_penalty) = aggregate_rollout_supervision_groups(
+            &supervision_groups,
+            &terms_by_step,
+            self.rollout_supervision_power,
+            self.rollout_improvement_weight,
+            self.rollout_improvement_margin,
+        );
+        (aggregated, improvement_penalty, terms_by_step)
+    }
 
-    fn step(&self, batch: ImageNetBatch<B>) -> TrainOutput<VisionTrainItem<B>> {
+    pub(crate) fn forward_train_total_loss(&self, batch: ImageNetBatch<B>) -> Tensor<B, 1> {
         let ImageNetBatch {
             images,
             teacher_patch,
@@ -235,31 +453,50 @@ impl<B: AutodiffBackend> TrainStep for VisionDistillModel<B> {
         let teacher_images = images.clone();
         let (teacher_patch, teacher_cls) =
             teacher_targets_train(&self.teacher, teacher_images, teacher_patch, teacher_cls);
+        let (aggregated, improvement_penalty, _) =
+            self.forward_train_terms(images, teacher_patch, teacher_cls);
 
-        let mut rng = thread_rng();
-        let sampled_steps =
-            sample_rollout_steps(&self.rollout, self.rollout_sampling_power, &mut rng);
-        let supervision_steps =
-            rollout_supervision_steps(sampled_steps, self.rollout_supervision_frames);
-        let evaluated_steps = supervision_steps.clone();
-        let terms_by_step = self.evaluate_distill_steps_bounded(
+        aggregated.total + improvement_penalty
+    }
+}
+
+impl<B: AutodiffBackend> TrainStep for VisionDistillModel<B> {
+    type Input = ImageNetBatch<B>;
+    type Output = VisionTrainItem<B>;
+
+    fn step(&self, batch: ImageNetBatch<B>) -> TrainOutput<VisionTrainItem<B>> {
+        let prof_enabled = crate::train::profile::enabled();
+        let forward_start = prof_enabled.then(Instant::now);
+        let ImageNetBatch {
             images,
             teacher_patch,
             teacher_cls,
-            &evaluated_steps,
-        );
-        let aggregated = aggregate_rollout_terms(
-            &supervision_steps,
-            &terms_by_step,
-            self.rollout_supervision_power,
-        );
+            ..
+        } = batch;
+
+        let teacher_images = images.clone();
+        let (teacher_patch, teacher_cls) =
+            teacher_targets_train(&self.teacher, teacher_images, teacher_patch, teacher_cls);
+        let (aggregated, improvement_penalty, terms_by_step) =
+            self.forward_train_terms(images, teacher_patch, teacher_cls);
+        let total = aggregated.total.clone() + improvement_penalty;
         let (rollout_total, rollout_patch, rollout_cls) =
             rollout_metric_arrays(&aggregated.total.device(), &terms_by_step);
-        let grads = aggregated.total.clone().backward();
+        let forward_ns = forward_start
+            .map(|start| start.elapsed().as_nanos())
+            .unwrap_or_default();
+        let loss_backward_start = prof_enabled.then(Instant::now);
+        let grads = total.clone().backward();
+        let loss_backward_ns = loss_backward_start
+            .map(|start| start.elapsed().as_nanos())
+            .unwrap_or_default();
+        if prof_enabled {
+            crate::train::profile::record_train_step(forward_ns, loss_backward_ns);
+        }
         let zero = Tensor::<B, 1>::zeros([1], &aggregated.total.device());
 
         let item = VisionTrainItem::new(
-            aggregated.total,
+            total,
             aggregated.patch,
             aggregated.cls,
             zero.clone(),
@@ -343,7 +580,7 @@ mod tests {
     use burn::optim::{AdamWConfig, Optimizer};
     use burn::tensor::Distribution;
     use burn_autodiff::Autodiff;
-    use burn_dragon_core::FusedKernelConfig;
+    use burn_dragon_core::{FusedAttentionExecutor, FusedKernelConfig};
     use burn_ndarray::NdArray;
 
     type Backend = Autodiff<NdArray<f32>>;
@@ -352,6 +589,16 @@ mod tests {
         device: &<Backend as BackendTrait>::Device,
         steps: usize,
     ) -> VisionDistillModel<Backend> {
+        make_distill_model_with_executor(device, steps, FusedAttentionExecutor::AttentionContext)
+    }
+
+    fn make_distill_model_with_executor(
+        device: &<Backend as BackendTrait>::Device,
+        steps: usize,
+        attention_executor: FusedAttentionExecutor,
+    ) -> VisionDistillModel<Backend> {
+        let mut fused_kernels = FusedKernelConfig::default();
+        fused_kernels.attention_executor = attention_executor;
         let vision = VisionDragonConfig {
             image_size: 8,
             patch_size: 4,
@@ -369,7 +616,7 @@ mod tests {
             pos_max_height: 2,
             pos_max_width: 2,
             attention_mode: VisionAttentionMode::RowL1,
-            fused_kernels: FusedKernelConfig::default(),
+            fused_kernels,
             trm_graph: Default::default(),
             rho_stream: Default::default(),
             ..VisionDragonConfig::default()
@@ -538,6 +785,171 @@ mod tests {
     }
 
     #[test]
+    fn rollout_supervision_stride_selects_sparse_blocks_and_keeps_final_step() {
+        assert_eq!(
+            rollout_supervision_steps(8, 8, 1, true),
+            vec![1, 2, 3, 4, 5, 6, 7, 8]
+        );
+        assert_eq!(
+            rollout_supervision_steps(8, 8, 2, true),
+            vec![1, 3, 5, 7, 8]
+        );
+        assert_eq!(rollout_supervision_steps(8, 3, 2, true), vec![1, 5, 8]);
+        assert_eq!(rollout_supervision_steps(8, 2, 4, true), vec![1, 8]);
+    }
+
+    #[test]
+    fn rollout_supervision_groups_merge_and_dedup_steps() {
+        let groups = vec![vec![1, 3, 4], vec![1, 2, 4], vec![2, 4]];
+        assert_eq!(merge_rollout_supervision_groups(&groups), vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn rollout_supervision_stride_has_no_effect_when_frames_is_one() {
+        assert_eq!(rollout_supervision_steps(8, 1, 1, true), vec![8]);
+        assert_eq!(rollout_supervision_steps(8, 1, 2, true), vec![8]);
+        assert_eq!(rollout_supervision_steps(8, 1, 3, true), vec![8]);
+        assert_eq!(rollout_supervision_steps(8, 1, 4, true), vec![8]);
+        assert_eq!(rollout_supervision_steps(8, 1, 4, false), vec![8]);
+    }
+
+    #[test]
+    fn rollout_supervision_can_skip_step_one() {
+        assert_eq!(rollout_supervision_steps(8, 4, 3, false), vec![4, 7, 8]);
+        assert_eq!(rollout_supervision_steps(8, 2, 3, false), vec![4, 8]);
+        assert_eq!(rollout_supervision_steps(4, 4, 3, false), vec![4]);
+    }
+
+    #[test]
+    fn rollout_supervision_explicit_steps_clip_and_dedup() {
+        assert_eq!(
+            rollout_supervision_explicit_steps(8, &[8, 4, 4, 12, 0, 2]),
+            vec![2, 4, 8]
+        );
+        assert_eq!(rollout_supervision_explicit_steps(8, &[0, 9]), vec![8]);
+        assert_eq!(
+            rollout_supervision_explicit_steps(0, &[1, 2, 3]),
+            Vec::<usize>::new()
+        );
+    }
+
+    #[test]
+    fn rollout_supervision_explicit_steps_override_sampling_groups() {
+        let rollout = VisionRollout {
+            min_steps: 1,
+            max_steps: 12,
+            backprop_steps: 4,
+        };
+        let mut rng = StdRng::seed_from_u64(11);
+        let groups = sample_rollout_supervision_groups(
+            &rollout,
+            4,
+            3,
+            2,
+            &[4, 8, 12],
+            &[],
+            true,
+            1.25,
+            &mut rng,
+        );
+        assert_eq!(groups, vec![vec![4, 8, 12], vec![4, 8, 12]]);
+    }
+
+    #[test]
+    fn rollout_supervision_explicit_groups_sample_candidates() {
+        let rollout = VisionRollout {
+            min_steps: 1,
+            max_steps: 12,
+            backprop_steps: 4,
+        };
+        let mut rng = StdRng::seed_from_u64(7);
+        let groups = sample_rollout_supervision_groups(
+            &rollout,
+            4,
+            3,
+            4,
+            &[],
+            &[vec![4, 8], vec![2, 4, 8]],
+            false,
+            1.25,
+            &mut rng,
+        );
+        assert_eq!(groups.len(), 4);
+        for group in groups {
+            assert!(group == vec![4, 8] || group == vec![2, 4, 8]);
+        }
+    }
+
+    #[test]
+    fn grouped_rollout_aggregation_matches_single_group_contract() {
+        let device = Default::default();
+        let model = make_distill_model(&device, 4);
+        let images = Tensor::<Backend, 4>::random([2, 3, 8, 8], Distribution::Default, &device);
+        let batch = teacher_batch(&model.model, images.clone(), 4);
+        let (teacher_patch, teacher_cls) =
+            teacher_targets_valid(batch.teacher_patch, batch.teacher_cls);
+        let supervision_steps = vec![1, 4];
+        let terms_by_step = model.evaluate_distill_steps_bounded(
+            images,
+            teacher_patch,
+            teacher_cls,
+            &supervision_steps,
+        );
+
+        let expected_terms = aggregate_rollout_terms(
+            &supervision_steps,
+            &terms_by_step,
+            model.rollout_supervision_power,
+        );
+        let expected_penalty = rollout_improvement_penalty(
+            &supervision_steps,
+            &terms_by_step,
+            model.rollout_improvement_margin,
+        )
+        .mul_scalar(model.rollout_improvement_weight);
+        let (grouped_terms, grouped_penalty) = aggregate_rollout_supervision_groups(
+            &[supervision_steps],
+            &terms_by_step,
+            model.rollout_supervision_power,
+            model.rollout_improvement_weight,
+            model.rollout_improvement_margin,
+        );
+
+        let expected_total = expected_terms
+            .total
+            .into_data()
+            .to_vec::<f32>()
+            .expect("expected total")[0];
+        let grouped_total = grouped_terms
+            .total
+            .into_data()
+            .to_vec::<f32>()
+            .expect("grouped total")[0];
+        let expected_patch = expected_terms
+            .patch
+            .into_data()
+            .to_vec::<f32>()
+            .expect("expected patch")[0];
+        let grouped_patch = grouped_terms
+            .patch
+            .into_data()
+            .to_vec::<f32>()
+            .expect("grouped patch")[0];
+        let expected_penalty = expected_penalty
+            .into_data()
+            .to_vec::<f32>()
+            .expect("expected penalty")[0];
+        let grouped_penalty = grouped_penalty
+            .into_data()
+            .to_vec::<f32>()
+            .expect("grouped penalty")[0];
+
+        assert!((expected_total - grouped_total).abs() <= 1e-6);
+        assert!((expected_patch - grouped_patch).abs() <= 1e-6);
+        assert!((expected_penalty - grouped_penalty).abs() <= 1e-6);
+    }
+
+    #[test]
     fn distill_unbounded_eval_emits_metrics_beyond_train_horizon() {
         let device = Default::default();
         let model = make_distill_model(&device, 4);
@@ -555,5 +967,216 @@ mod tests {
 
         let steps = terms.into_iter().map(|(step, _)| step).collect::<Vec<_>>();
         assert_eq!(steps, vec![1, 2, 4, 8]);
+    }
+
+    fn assert_tensor_close_vec(actual: Tensor<Backend, 3>, expected: Tensor<Backend, 3>, tol: f32) {
+        let actual = actual
+            .into_data()
+            .to_vec::<f32>()
+            .expect("actual tensor data");
+        let expected = expected
+            .into_data()
+            .to_vec::<f32>()
+            .expect("expected tensor data");
+        assert_eq!(actual.len(), expected.len());
+        for (index, (a, b)) in actual.into_iter().zip(expected.into_iter()).enumerate() {
+            assert!(
+                (a - b).abs() <= tol,
+                "tensor mismatch at index {index}: actual={a}, expected={b}, tol={tol}"
+            );
+        }
+    }
+
+    fn assert_tensor_close_cls(actual: Tensor<Backend, 2>, expected: Tensor<Backend, 2>, tol: f32) {
+        let actual = actual.into_data().to_vec::<f32>().expect("actual cls data");
+        let expected = expected
+            .into_data()
+            .to_vec::<f32>()
+            .expect("expected cls data");
+        assert_eq!(actual.len(), expected.len());
+        for (index, (a, b)) in actual.into_iter().zip(expected.into_iter()).enumerate() {
+            assert!(
+                (a - b).abs() <= tol,
+                "cls mismatch at index {index}: actual={a}, expected={b}, tol={tol}"
+            );
+        }
+    }
+
+    #[test]
+    fn dense_rollout_schedule_matches_repeated_public_rollout() {
+        let device = Default::default();
+        let model = make_distill_model(&device, 8);
+        let images = Tensor::<Backend, 4>::random([2, 3, 8, 8], Distribution::Default, &device);
+        let schedule = vec![(2usize, 2usize), (4usize, 3usize), (8usize, 3usize)];
+
+        let scheduled = model
+            .model
+            .forward_images_steps_rollout_schedule(images.clone(), &schedule);
+
+        assert_eq!(scheduled.len(), schedule.len());
+        for ((scheduled_step, scheduled_output), (step, backprop_steps)) in
+            scheduled.into_iter().zip(schedule.into_iter())
+        {
+            assert_eq!(scheduled_step, step);
+            let repeated =
+                model
+                    .model
+                    .forward_images_steps_rollout(images.clone(), step, backprop_steps);
+            assert_tensor_close_vec(scheduled_output.patch_tokens, repeated.patch_tokens, 1e-6);
+            assert_tensor_close_cls(scheduled_output.cls_token, repeated.cls_token, 1e-6);
+        }
+    }
+
+    #[test]
+    fn dense_scores_only_schedule_matches_repeated_public_rollout() {
+        let device = Default::default();
+        let model = make_distill_model_with_executor(&device, 8, FusedAttentionExecutor::ScoresOnly);
+        let images = Tensor::<Backend, 4>::random([2, 3, 8, 8], Distribution::Default, &device);
+        let schedule = vec![(2usize, 2usize), (4usize, 3usize), (8usize, 3usize)];
+
+        let scheduled = model
+            .model
+            .forward_images_steps_rollout_schedule(images.clone(), &schedule);
+
+        assert_eq!(scheduled.len(), schedule.len());
+        for ((scheduled_step, scheduled_output), (step, backprop_steps)) in
+            scheduled.into_iter().zip(schedule.into_iter())
+        {
+            assert_eq!(scheduled_step, step);
+            let repeated =
+                model
+                    .model
+                    .forward_images_steps_rollout(images.clone(), step, backprop_steps);
+            assert_tensor_close_vec(scheduled_output.patch_tokens, repeated.patch_tokens, 1e-6);
+            assert_tensor_close_cls(scheduled_output.cls_token, repeated.cls_token, 1e-6);
+        }
+    }
+
+    #[test]
+    fn dense_scores_only_schedule_matches_repeated_public_rollout_broader_mixed_backprop() {
+        let device = Default::default();
+        let model = make_distill_model_with_executor(&device, 8, FusedAttentionExecutor::ScoresOnly);
+        let images = Tensor::<Backend, 4>::random([2, 3, 8, 8], Distribution::Default, &device);
+        let schedule = vec![(1usize, 1usize), (2usize, 2usize), (4usize, 3usize), (8usize, 3usize)];
+
+        let scheduled = model
+            .model
+            .forward_images_steps_rollout_schedule(images.clone(), &schedule);
+
+        assert_eq!(scheduled.len(), schedule.len());
+        for ((scheduled_step, scheduled_output), (step, backprop_steps)) in
+            scheduled.into_iter().zip(schedule.into_iter())
+        {
+            assert_eq!(scheduled_step, step);
+            let repeated =
+                model
+                    .model
+                    .forward_images_steps_rollout(images.clone(), step, backprop_steps);
+            assert_tensor_close_vec(scheduled_output.patch_tokens, repeated.patch_tokens, 1e-6);
+            assert_tensor_close_cls(scheduled_output.cls_token, repeated.cls_token, 1e-6);
+        }
+    }
+
+    fn make_distill_model_for_resolution(
+        device: &<Backend as BackendTrait>::Device,
+        image_size: usize,
+        patch_size: usize,
+        steps: usize,
+    ) -> VisionDistillModel<Backend> {
+        let grid = image_size.div_ceil(patch_size).max(1);
+        let vision = VisionDragonConfig {
+            image_size,
+            patch_size,
+            backbone: VisionBackboneKind::Dense,
+            in_channels: 3,
+            embed_dim: 16,
+            steps,
+            n_head: 2,
+            mlp_internal_dim_multiplier: 2,
+            dropout: 0.0,
+            projection_dim: 12,
+            projection_hidden_dim: 24,
+            use_cls_token: true,
+            pos_encoding: SpatialPositionalEncodingKind::Rope,
+            pos_max_height: grid,
+            pos_max_width: grid,
+            attention_mode: VisionAttentionMode::RowL1,
+            fused_kernels: FusedKernelConfig::default(),
+            trm_graph: Default::default(),
+            rho_stream: Default::default(),
+            ..VisionDragonConfig::default()
+        };
+        VisionDistillModel::new(
+            VisionDragon::<Backend>::new(vision, device),
+            VisionDistillConfig {
+                rollout_supervision_frames: 3,
+                rollout_supervision_power: 1.0,
+                rollout_sampling_power: 0.0,
+                ..VisionDistillConfig::default()
+            },
+            None,
+            VisionRollout {
+                min_steps: steps,
+                max_steps: steps,
+                backprop_steps: steps,
+            },
+        )
+    }
+
+    #[test]
+    fn distill_supports_multiple_square_resolutions() {
+        let device = Default::default();
+
+        for &image_size in &[8usize, 12, 16] {
+            let patch_size = 4usize;
+            let steps = 4usize;
+            let grid = image_size.div_ceil(patch_size).max(1);
+            let expected_tokens = grid * grid;
+            let model = make_distill_model_for_resolution(&device, image_size, patch_size, steps);
+            let images = Tensor::<Backend, 4>::random(
+                [2, 3, image_size, image_size],
+                Distribution::Default,
+                &device,
+            );
+            let batch = teacher_batch(&model.model, images.clone(), steps);
+            let patch_shape = batch
+                .teacher_patch
+                .as_ref()
+                .expect("teacher patch tokens")
+                .shape()
+                .dims::<3>();
+            assert_eq!(patch_shape[1], expected_tokens);
+
+            let loss = model
+                .forward_train_total_loss(batch.clone())
+                .into_data()
+                .to_vec::<f32>()
+                .expect("train loss")[0];
+            assert!(
+                loss.is_finite(),
+                "loss should be finite at image_size={image_size}"
+            );
+
+            let (teacher_patch, teacher_cls) =
+                teacher_targets_valid(batch.teacher_patch, batch.teacher_cls);
+            let terms = model.evaluate_distill_steps_unbounded(
+                images,
+                teacher_patch,
+                teacher_cls,
+                &[1, steps],
+            );
+            let final_total = terms
+                .iter()
+                .find(|(step, _)| *step == steps)
+                .map(|(_, terms)| terms.total.clone())
+                .expect("final step total")
+                .into_data()
+                .to_vec::<f32>()
+                .expect("final total")[0];
+            assert!(
+                final_total.is_finite(),
+                "final rollout total should be finite at image_size={image_size}"
+            );
+        }
     }
 }

@@ -95,7 +95,10 @@ pub(crate) fn resolve_checkpoint_run_dir(checkpoint: &Path) -> Option<PathBuf> {
     resolve_checkpoint_run_dir_shared(checkpoint)
 }
 
-pub(crate) fn resolve_checkpoint_base(path: &Path, epoch: Option<usize>) -> Result<(PathBuf, usize)> {
+pub(crate) fn resolve_checkpoint_base(
+    path: &Path,
+    epoch: Option<usize>,
+) -> Result<(PathBuf, usize)> {
     resolve_checkpoint_base_shared(path, epoch)
 }
 
@@ -105,8 +108,9 @@ fn load_graph_config_file(path: &Path) -> Result<GraphDragonConfig> {
     match path.extension().and_then(|ext| ext.to_str()) {
         Some("json") => serde_json::from_str(&contents)
             .with_context(|| format!("failed to parse {}", path.display())),
-        Some("toml") => toml::from_str(&contents)
-            .with_context(|| format!("failed to parse {}", path.display())),
+        Some("toml") => {
+            toml::from_str(&contents).with_context(|| format!("failed to parse {}", path.display()))
+        }
         _ => Err(anyhow!(
             "graph export config {} must use .json or .toml",
             path.display()
@@ -148,8 +152,8 @@ mod tests {
         let config = test_config();
 
         write_graph_config_snapshot(&config, &run_dir).expect("write graph snapshot");
-        let loaded =
-            load_graph_config_for_checkpoint(&[], &run_dir.join("checkpoint")).expect("load graph snapshot");
+        let loaded = load_graph_config_for_checkpoint(&[], &run_dir.join("checkpoint"))
+            .expect("load graph snapshot");
 
         assert!(graph_config_snapshot_path(&run_dir).is_file());
         assert_eq!(loaded, config);

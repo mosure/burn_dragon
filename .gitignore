@@ -22,3 +22,41 @@ output/
 runs/
 sandbox/
 train_logs/
+config/local/*
+!config/local/README.md
+
+# Baseline-only config policy for active model trees.
+# Keep only curated baseline aliases (`smoke`, `tiny`, `small`, `base`, etc.)
+# visible by default; treat root overlays / experiments / archive as local churn.
+config/language/*
+!config/language/baselines/
+!config/language/baselines/**
+config/vision/distill/*
+!config/vision/distill/baselines/
+!config/vision/distill/baselines/**
+config/vision/video_lejepa/*
+!config/vision/video_lejepa/baselines/
+!config/vision/video_lejepa/baselines/**
+config/multimodal/
+
+# Local config docs should stay out of normal commits.
+config/README.md
+config/**/README.md
+
+# Local planning / status / experiment-result surfaces should not be committed.
+# Keep repo-facing assets under docs/assets/ visible.
+docs/*
+!docs/assets/
+!docs/assets/**
+docs/README.md
+docs/artifacts/
+docs/core/
+docs/hatchling/
+docs/language/
+docs/multimodal/
+docs/video/
+docs/vision/
+program.md
+results_autoresearch.tsv
+results_*.tsv
+*.exp.tsv

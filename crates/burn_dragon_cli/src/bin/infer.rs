@@ -19,10 +19,10 @@ use burn_dragon::checkpoint::{
 use burn_dragon::core::BDH;
 use burn_dragon::language::{
     ContextStrategy, ContextStrategyConfig, GenerationConfig, TrainingConfig,
-    apply_wgpu_fused_core_override, build_model_config, generate_text, generate_tokens_chunked,
-    default_checkpoint_dir, generation_profile_reset, generation_profile_snapshot,
-    load_training_config_for_checkpoint, prefill_state, resolve_context_strategy,
-    sample_next_token,
+    apply_wgpu_fused_core_override, build_model_config, build_model_config_with_tokenizer,
+    default_checkpoint_dir, generate_text, generate_tokens_chunked, generation_profile_reset,
+    generation_profile_snapshot, load_training_config_for_checkpoint, prefill_state,
+    resolve_context_strategy, sample_next_token,
 };
 use burn_dragon::train::WgpuGenerationExecutor;
 use burn_dragon::train::wgpu::init_runtime;
@@ -49,6 +49,14 @@ struct VizRuntime<B: Backend> {
     stop: Arc<AtomicBool>,
 }
 
+fn default_or_explicit_config_paths(default_base: &str, explicit: &[PathBuf]) -> Vec<PathBuf> {
+    if explicit.is_empty() {
+        vec![PathBuf::from(default_base)]
+    } else {
+        explicit.to_vec()
+    }
+}
+
 pub fn main() {
     if let Err(err) = run() {
         eprintln!("error: {err:#}");
@@ -58,10 +66,12 @@ pub fn main() {
 
 fn run() -> Result<()> {
     let args = Args::parse();
-    let mut config_paths = vec![PathBuf::from("config/language/base.toml")];
-    config_paths.extend(args.config.clone());
-    let config =
-        load_training_config_for_checkpoint(&config_paths, args.checkpoint.as_ref(), backend_name(args.backend))?;
+    let config_paths = default_or_explicit_config_paths("config/language/base.toml", &args.config);
+    let config = load_training_config_for_checkpoint(
+        &config_paths,
+        args.checkpoint.as_ref(),
+        backend_name(args.backend),
+    )?;
 
     #[cfg(feature = "viz")]
     let use_viz = args.viz;
@@ -115,6 +125,27 @@ fn run() -> Result<()> {
                 ))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::default_or_explicit_config_paths;
+    use std::path::PathBuf;
+
+    #[test]
+    fn default_or_explicit_config_paths_uses_default_only_when_no_explicit_configs() {
+        assert_eq!(
+            default_or_explicit_config_paths("config/language/base.toml", &[]),
+            vec![PathBuf::from("config/language/base.toml")]
+        );
+        assert_eq!(
+            default_or_explicit_config_paths(
+                "config/language/base.toml",
+                &[PathBuf::from("config/language/custom.toml")]
+            ),
+            vec![PathBuf::from("config/language/custom.toml")]
+        );
     }
 }
 
@@ -180,24 +211,24 @@ where
         .unwrap_or_else(|| default_checkpoint_dir(backend_name));
     let (checkpoint_base, epoch) = resolve_checkpoint_base(&checkpoint_dir, args.epoch)?;
 
-    let mut model_config = build_model_config(&config.model, config.training.block_size);
+    let mut model_config = build_model_config_with_tokenizer(
+        &config.model,
+        config.training.block_size,
+        tokenizer.as_ref(),
+    )?;
     apply_wgpu_fused_core_override(
         &mut model_config,
         backend_name,
         config.wgpu.inference.fused_core_recurrent,
         config.wgpu.inference.fused_core_rollout,
     );
-    model_config.vocab_size = tokenizer.len();
     let burnpack_policy =
         BurnpackLoadPolicy::default().with_precision(BurnpackPrecisionPreference::PreferF16);
     let burnpack_candidates = candidate_burnpack_paths(&checkpoint_base, burnpack_policy);
     let (model, checkpoint_display) = if let Some((model, _result)) =
-        try_load_model_from_burnpack_candidates(
-            &burnpack_candidates,
-            "BDH model",
-            true,
-            || BDH::<B>::new(model_config.clone(), &device),
-        )
+        try_load_model_from_burnpack_candidates(&burnpack_candidates, "BDH model", true, || {
+            BDH::<B>::new(model_config.clone(), &device)
+        })
         .map_err(|err| anyhow!(err))?
     {
         (model, format_burnpack_checkpoint(&burnpack_candidates))
@@ -219,9 +250,8 @@ where
     let mut generation = config.generation.clone();
     apply_generation_overrides(&mut generation, args, config.training.block_size);
 
-    let status_msg = format!(
-        "Loaded epoch {epoch} from {checkpoint_display} using {backend_name} backend.",
-    );
+    let status_msg =
+        format!("Loaded epoch {epoch} from {checkpoint_display} using {backend_name} backend.",);
     let stage_profile = std::env::var_os("BDH_STAGE_PROFILE").is_some();
     if stage_profile {
         generation_profile_reset();

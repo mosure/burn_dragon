@@ -8,6 +8,8 @@
 //! - [`api::graph`]
 //! - [`api::expert`] for lower-level kernel-plan access
 
+mod dense_attention;
+mod dense_scores;
 mod fusion_compat;
 mod local_grid_rho;
 mod profiling;
@@ -21,7 +23,7 @@ pub mod api {
     //!
     //! This mirrors the active kernel families instead of exposing the entire file/module layout.
 
-    pub use crate::kernels::{graph, recurrent, spatial};
+    pub use crate::kernels::{attention, graph, recurrent, spatial};
 
     pub mod expert {
         //! Lower-level fused-kernel surface for advanced callers.
@@ -31,6 +33,17 @@ pub mod api {
 }
 
 pub mod kernels {
+    pub mod attention {
+        pub use crate::dense_attention::{
+            CompiledDenseAttentionPlan, supports_dense_attention_backend,
+            try_fused_dense_row_l1_attention_wgpu, try_fused_dense_row_l1_attention_wgpu_with_plan,
+        };
+        pub use crate::dense_scores::{
+            CompiledDenseScoresPlan, supports_dense_scores_backend,
+            try_fused_dense_row_l1_scores_wgpu, try_fused_dense_row_l1_scores_wgpu_with_plan,
+        };
+    }
+
     pub mod graph {
         pub use crate::sparse_graph_rho::{
             SparseGraphCsr, SparseGraphRhoAttentionError, SparseGraphRhoAttentionOutput,
@@ -54,8 +67,7 @@ pub mod kernels {
             CompiledLocalGridRhoPlan, LocalGridNeighborhood, LocalGridRhoAttentionOutput,
             LocalGridRhoPlanSpec, LocalGridRhoProfileSnapshot, LocalGridShape2d,
             local_grid_rho_profile_reset, local_grid_rho_profile_snapshot,
-            supports_local_grid_rho_backend,
-            try_fused_local_grid_rho_attention_wgpu,
+            supports_local_grid_rho_backend, try_fused_local_grid_rho_attention_wgpu,
             try_fused_local_grid_rho_attention_wgpu_head_decay,
             try_fused_local_grid_rho_attention_wgpu_head_decay_with_plan,
         };
@@ -64,15 +76,15 @@ pub mod kernels {
             StructuredPyramidBankMode, StructuredPyramidCoarseOnlyNoPatchStepInput,
             StructuredPyramidCoarseOnlyStepInput, StructuredPyramidCoarseOnlyStepOutput,
             StructuredPyramidProfileSnapshot, StructuredPyramidRhoStepInput,
-            StructuredPyramidRhoStepOutput, StructuredPyramidSplitPlanSpec,
-            StructuredPyramidSplitRhoStepInput,
-            StructuredPyramidShape, reference_structured_pyramid_rho_step,
+            StructuredPyramidRhoStepOutput, StructuredPyramidShape, StructuredPyramidSplitPlanSpec,
+            StructuredPyramidSplitRhoStepInput, reference_structured_pyramid_rho_step,
             structured_pyramid_profile_reset, structured_pyramid_profile_snapshot,
-            supports_structured_pyramid_rho_backend, try_fused_structured_pyramid_rho_step_wgpu,
+            supports_structured_pyramid_rho_backend,
             try_fused_structured_pyramid_coarse_only_no_patch_step_wgpu_with_plan,
             try_fused_structured_pyramid_coarse_only_step_wgpu_with_plan,
-            try_fused_structured_pyramid_split_step_wgpu_with_plan,
+            try_fused_structured_pyramid_rho_step_wgpu,
             try_fused_structured_pyramid_rho_step_wgpu_with_plan,
+            try_fused_structured_pyramid_split_step_wgpu_with_plan,
         };
         pub use crate::vision_rho::{
             VisionRhoAttentionOutput, supports_vision_rho_backend,

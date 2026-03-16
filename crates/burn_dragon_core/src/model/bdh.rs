@@ -3,27 +3,28 @@ use burn::nn::{Dropout, DropoutConfig, Embedding, EmbeddingConfig};
 use burn::tensor::backend::Backend;
 use burn::tensor::{Distribution as TensorDistribution, Int, Tensor, TensorData, activation};
 use burn_dragon_wgpu::api::recurrent::{
-    CompiledRecurrentAttentionPlan, supports_recurrent_backend,
-    try_fused_recurrent_attention_wgpu, try_fused_recurrent_attention_wgpu_with_plan,
+    CompiledRecurrentAttentionPlan, supports_recurrent_backend, try_fused_recurrent_attention_wgpu,
+    try_fused_recurrent_attention_wgpu_with_plan,
 };
 use rand::distributions::{Distribution, WeightedIndex};
 use rand::prelude::*;
 use std::cmp::Ordering;
 
 use super::attention::Attention;
-use super::config::{BDHConfig, FusedKernelConfig, YNeuronRecurrenceConfig};
+use super::config::{
+    BDHConfig, ClockedSlowMemoryConfig, FusedKernelConfig, SummaryMemoryConfig,
+    YNeuronRecurrenceConfig,
+};
 use super::init::{
     near_critical_embedding_initializer, near_critical_projection_std,
     near_critical_residual_output_std,
 };
 use super::norm::DragonNorm;
-use super::{
-    ManifoldHyperConnections, mhc_merge_with_coefficients, mhc_split_with_coefficients,
-};
 use super::residual_stream::lowrank_residual_step;
 #[cfg(feature = "viz")]
 use super::state::LayerVizState;
 use super::state::{LayerState, ModelState};
+use super::{ManifoldHyperConnections, mhc_merge_with_coefficients, mhc_split_with_coefficients};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RecurrentPositionMode {
@@ -47,11 +48,13 @@ pub struct BDH<B: Backend> {
     rollout_fast_steps_per_slow_step: usize,
     kernel: FusedKernelConfig,
     y_neuron_recurrence: YNeuronRecurrenceConfig,
+    clocked_slow_memory: ClockedSlowMemoryConfig,
+    summary_memory: SummaryMemoryConfig,
     embed: Embedding<B>,
     dropout: Dropout,
     norm: DragonNorm<B>,
     attention: Attention<B>,
-    mhc_layers: Option<Vec<ManifoldHyperConnections<B>>>,
+    mhc_layers: Option<Vec<Option<ManifoldHyperConnections<B>>>>,
     encoder: Param<Tensor<B, 3>>,
     encoder_v: Param<Tensor<B, 3>>,
     decoder: Param<Tensor<B, 2>>,
@@ -101,9 +104,24 @@ impl<B: Backend> BDH<B> {
         let mhc_layers = if config.mhc.enabled
             && (config.mhc.resolved_num_streams() > 1 || config.mhc.resolved_num_views() > 1)
         {
+            let first_mhc_layer = config
+                .mhc
+                .last_layers
+                .map(|last_layers| config.n_layer.max(1).saturating_sub(last_layers))
+                .unwrap_or(0);
             Some(
                 (0..config.n_layer.max(1))
-                    .map(|layer_index| ManifoldHyperConnections::new(&config.mhc, layer_index, device))
+                    .map(|layer_index| {
+                        if layer_index >= first_mhc_layer {
+                            Some(ManifoldHyperConnections::new(
+                                &config.mhc,
+                                layer_index,
+                                device,
+                            ))
+                        } else {
+                            None
+                        }
+                    })
                     .collect(),
             )
         } else {
@@ -124,6 +142,8 @@ impl<B: Backend> BDH<B> {
             rollout_fast_steps_per_slow_step: config.rollout_fast_steps_per_slow_step,
             kernel: config.fused_kernels,
             y_neuron_recurrence: config.y_neuron_recurrence,
+            clocked_slow_memory: config.clocked_slow_memory,
+            summary_memory: config.summary_memory,
             embed,
             dropout,
             norm,
@@ -141,6 +161,15 @@ impl<B: Backend> BDH<B> {
         self.forward_with_state(tokens, &mut state)
     }
 
+    pub fn forward_with_summary_event_mask(
+        &self,
+        tokens: Tensor<B, 2, Int>,
+        summary_event_mask: Tensor<B, 2, Int>,
+    ) -> Tensor<B, 3> {
+        let mut state = self.init_state();
+        self.forward_with_state_and_summary_event_mask(tokens, summary_event_mask, &mut state)
+    }
+
     pub fn forward_with_hidden(&self, tokens: Tensor<B, 2, Int>) -> (Tensor<B, 3>, Tensor<B, 3>) {
         let mut state = self.init_state();
         self.forward_with_hidden_and_state(tokens, &mut state)
@@ -156,6 +185,14 @@ impl<B: Backend> BDH<B> {
 
     pub fn forward_fast(&self, tokens: Tensor<B, 2, Int>) -> Tensor<B, 3> {
         self.forward(tokens)
+    }
+
+    pub fn forward_fast_with_summary_event_mask(
+        &self,
+        tokens: Tensor<B, 2, Int>,
+        summary_event_mask: Tensor<B, 2, Int>,
+    ) -> Tensor<B, 3> {
+        self.forward_with_summary_event_mask(tokens, summary_event_mask)
     }
 
     pub fn generate(
@@ -360,6 +397,75 @@ impl<B: Backend> BDH<B> {
         }
     }
 
+    fn clocked_slow_memory_applies_to_layer(&self, layer_idx: usize) -> bool {
+        if !self.clocked_slow_memory.enabled {
+            return false;
+        }
+        match self.clocked_slow_memory.last_layers {
+            Some(last_layers) => {
+                if last_layers == 0 {
+                    return false;
+                }
+                let first_slow_layer = self.n_layer.saturating_sub(last_layers);
+                layer_idx >= first_slow_layer
+            }
+            None => true,
+        }
+    }
+
+    fn summary_memory_applies_to_layer(&self, layer_idx: usize) -> bool {
+        if !self.summary_memory.enabled {
+            return false;
+        }
+        match self.summary_memory.last_layers {
+            Some(last_layers) => {
+                if last_layers == 0 {
+                    return false;
+                }
+                let first_summary_layer = self.n_layer.saturating_sub(last_layers);
+                layer_idx >= first_summary_layer
+            }
+            None => true,
+        }
+    }
+
+    fn summary_memory_uses_write_trigger(&self) -> bool {
+        self.summary_memory
+            .write_trigger_token_ids
+            .as_ref()
+            .is_some_and(|ids| !ids.is_empty())
+    }
+
+    fn resolve_clocked_slow_hidden(
+        &self,
+        layer_state: &LayerState<B>,
+        batch: usize,
+        views: usize,
+        dim: usize,
+    ) -> Option<Tensor<B, 4>> {
+        match layer_state.clocked_slow_hidden.as_ref() {
+            Some(hidden) if hidden.shape().dims::<4>() == [batch, views, 1, dim] => {
+                Some(hidden.clone())
+            }
+            _ => None,
+        }
+    }
+
+    fn resolve_summary_memory_hidden(
+        &self,
+        layer_state: &LayerState<B>,
+        batch: usize,
+        views: usize,
+        dim: usize,
+    ) -> Option<Tensor<B, 4>> {
+        match layer_state.summary_memory_hidden.as_ref() {
+            Some(hidden) if hidden.shape().dims::<4>() == [batch, views, 1, dim] => {
+                Some(hidden.clone())
+            }
+            _ => None,
+        }
+    }
+
     fn stabilize_y_neuron_state(&self, y_neuron_state: Tensor<B, 3>) -> Tensor<B, 3> {
         let Some(state_rms_cap) = self.y_neuron_recurrence.state_rms_cap else {
             return y_neuron_state;
@@ -382,9 +488,10 @@ impl<B: Backend> BDH<B> {
         if self.y_neuron_recurrence.carry_in_scale == 0.0 {
             return x_neuron;
         }
-        x_neuron + y_neuron_state
-            .unsqueeze_dim::<4>(2)
-            .mul_scalar(self.y_neuron_recurrence.carry_in_scale)
+        x_neuron
+            + y_neuron_state
+                .unsqueeze_dim::<4>(2)
+                .mul_scalar(self.y_neuron_recurrence.carry_in_scale)
     }
 
     fn update_y_neuron_state(
@@ -395,9 +502,9 @@ impl<B: Backend> BDH<B> {
         let [batch, heads, time, latent] = y_neuron.shape().dims::<4>();
         debug_assert_eq!(time, 1, "token-wise y_neuron recurrence expects time=1");
         let current_state = y_neuron.reshape([batch, heads, latent]);
-        let next_state = previous_state.mul_scalar(self.y_neuron_recurrence.state_decay).add(
-            current_state.mul_scalar(self.y_neuron_recurrence.state_update_scale),
-        );
+        let next_state = previous_state
+            .mul_scalar(self.y_neuron_recurrence.state_decay)
+            .add(current_state.mul_scalar(self.y_neuron_recurrence.state_update_scale));
         self.stabilize_y_neuron_state(next_state)
     }
 
@@ -460,19 +567,282 @@ impl<B: Backend> BDH<B> {
         context
     }
 
+    fn forward_branch_clocked_slow_layer(
+        &self,
+        branch_input: Tensor<B, 4>,
+        layer_state: &mut LayerState<B>,
+        start_pos: usize,
+        position_mode: RecurrentPositionMode,
+    ) -> Tensor<B, 4> {
+        let [branch_batch, branch_views, branch_time, branch_dim] =
+            branch_input.shape().dims::<4>();
+        if branch_time == 0 {
+            layer_state.clocked_slow_hidden = None;
+            return branch_input;
+        }
+
+        let chunk_tokens = self
+            .clocked_slow_memory
+            .chunk_tokens
+            .max(1)
+            .min(branch_time.max(1));
+
+        if branch_time == 1
+            && chunk_tokens > 1
+            && start_pos % chunk_tokens != 0
+            && let Some(cached) = self.resolve_clocked_slow_hidden(
+                layer_state,
+                branch_batch,
+                branch_views,
+                branch_dim,
+            )
+        {
+            return branch_input + cached.mul_scalar(self.clocked_slow_memory.residual_scale);
+        }
+
+        let flat_batch = branch_batch * branch_views;
+        let encoder_raw = self.encoder.val();
+        let [heads, embd_enc, latent] = encoder_raw.shape().dims::<3>();
+        let encoder = encoder_raw.reshape([1, heads, embd_enc, latent]);
+
+        let encoder_v_raw = self.encoder_v.val();
+        let [heads_v, embd_v, latent_v] = encoder_v_raw.shape().dims::<3>();
+        let encoder_v = encoder_v_raw.reshape([1, heads_v, embd_v, latent_v]);
+        let decoder = self.decoder.val();
+        let fused = self.kernel.enabled;
+        let latent_pattern = &self.kernel.block_sparse.latent;
+        let sparse_mask = if fused && latent_pattern.is_sparse() {
+            Some(latent_pattern.mask::<B>(latent, &branch_input.device()))
+        } else {
+            None
+        };
+
+        let mut next_chunks = Vec::with_capacity(branch_time.div_ceil(chunk_tokens));
+        let mut last_slow_hidden = None;
+        for (slow_idx, chunk_start) in (0..branch_time).step_by(chunk_tokens).enumerate() {
+            let chunk_end = (chunk_start + chunk_tokens).min(branch_time);
+            let chunk_len = chunk_end - chunk_start;
+            let chunk = branch_input.clone().slice_dim(2, chunk_start..chunk_end);
+            let summary = chunk.clone().mean_dim(2);
+            let summary_flat = summary.reshape([flat_batch, 1, 1, branch_dim]);
+            let slow_pos = match position_mode {
+                RecurrentPositionMode::Sequential => start_pos / chunk_tokens + slow_idx,
+                RecurrentPositionMode::Fixed => start_pos / chunk_tokens,
+            };
+            let output = lowrank_residual_step(
+                summary_flat,
+                encoder.clone(),
+                encoder_v.clone(),
+                decoder.clone(),
+                &self.dropout,
+                fused,
+                self.kernel.relu_threshold,
+                true,
+                latent_pattern,
+                sparse_mask.clone(),
+                |query, value| {
+                    self.recurrent_attention_with_plan(
+                        query,
+                        value,
+                        layer_state,
+                        slow_pos,
+                        position_mode,
+                        None,
+                    )
+                },
+                activation::relu,
+                |values| self.norm.forward(values),
+            );
+            let slow_hidden = output
+                .next
+                .reshape([branch_batch, branch_views, 1, branch_dim]);
+            last_slow_hidden = Some(slow_hidden.clone());
+            let broadcast = slow_hidden.repeat_dim(2, chunk_len);
+            next_chunks.push(chunk + broadcast.mul_scalar(self.clocked_slow_memory.residual_scale));
+        }
+        layer_state.clocked_slow_hidden = last_slow_hidden;
+        Tensor::cat(next_chunks, 2)
+    }
+
+    fn forward_branch_summary_memory(
+        &self,
+        branch_input: Tensor<B, 4>,
+        layer_state: &mut LayerState<B>,
+        start_pos: usize,
+        summary_event_mask: Option<Tensor<B, 2, Int>>,
+    ) -> Tensor<B, 4> {
+        let [branch_batch, branch_views, branch_time, branch_dim] =
+            branch_input.shape().dims::<4>();
+        if branch_time == 0 {
+            layer_state.summary_memory_hidden = None;
+            return branch_input;
+        }
+
+        let chunk_tokens = self.summary_memory.chunk_tokens.max(1);
+        if branch_time == 1
+            && chunk_tokens > 1
+            && start_pos % chunk_tokens != 0
+            && let Some(cached) = self.resolve_summary_memory_hidden(
+                layer_state,
+                branch_batch,
+                branch_views,
+                branch_dim,
+            )
+        {
+            return branch_input + cached.mul_scalar(self.summary_memory.residual_scale);
+        }
+
+        let mut next_chunks = Vec::with_capacity(branch_time.div_ceil(chunk_tokens));
+        let mut carry =
+            self.resolve_summary_memory_hidden(layer_state, branch_batch, branch_views, branch_dim);
+        for chunk_start in (0..branch_time).step_by(chunk_tokens) {
+            let chunk_end = (chunk_start + chunk_tokens).min(branch_time);
+            let chunk_len = chunk_end - chunk_start;
+            let chunk = branch_input.clone().slice_dim(2, chunk_start..chunk_end);
+            let summary = chunk.clone().mean_dim(2);
+            let branch_out = match carry.as_ref() {
+                Some(previous) => {
+                    let broadcast = previous.clone().repeat_dim(2, chunk_len);
+                    chunk + broadcast.mul_scalar(self.summary_memory.residual_scale)
+                }
+                None => chunk,
+            };
+            let next_carry = match carry {
+                Some(previous) => {
+                    let updated = self.update_summary_memory_hidden(previous.clone(), summary);
+                    if self.summary_memory_uses_write_trigger() {
+                        let gate = self.summary_memory_event_gate(
+                            summary_event_mask.as_ref(),
+                            chunk_start,
+                            chunk_end,
+                            branch_batch,
+                            &branch_input.device(),
+                        );
+                        previous
+                            .mul(gate.clone().neg().add_scalar(1.0))
+                            .add(updated.mul(gate))
+                    } else {
+                        updated
+                    }
+                }
+                None => {
+                    let updated = summary.mul_scalar(self.summary_memory.state_update_scale);
+                    if self.summary_memory_uses_write_trigger() {
+                        let gate = self.summary_memory_event_gate(
+                            summary_event_mask.as_ref(),
+                            chunk_start,
+                            chunk_end,
+                            branch_batch,
+                            &branch_input.device(),
+                        );
+                        updated.mul(gate)
+                    } else {
+                        updated
+                    }
+                }
+            };
+            next_chunks.push(branch_out);
+            carry = Some(next_carry);
+        }
+        layer_state.summary_memory_hidden = carry;
+        Tensor::cat(next_chunks, 2)
+    }
+
+    fn summary_memory_event_gate(
+        &self,
+        summary_event_mask: Option<&Tensor<B, 2, Int>>,
+        chunk_start: usize,
+        chunk_end: usize,
+        branch_batch: usize,
+        device: &B::Device,
+    ) -> Tensor<B, 4> {
+        let Some(summary_event_mask) = summary_event_mask else {
+            return Tensor::<B, 4>::zeros([branch_batch, 1, 1, 1], device);
+        };
+        let hits = summary_event_mask
+            .clone()
+            .slice_dim(1, chunk_start..chunk_end)
+            .float()
+            .sum_dim(1)
+            .reshape([branch_batch, 1, 1, 1]);
+        hits.clone().div(hits.add_scalar(1.0e-6))
+    }
+
+    fn update_summary_memory_hidden(
+        &self,
+        previous: Tensor<B, 4>,
+        summary: Tensor<B, 4>,
+    ) -> Tensor<B, 4> {
+        let ungated = previous
+            .clone()
+            .mul_scalar(self.summary_memory.state_decay)
+            .add(
+                summary
+                    .clone()
+                    .mul_scalar(self.summary_memory.state_update_scale),
+            );
+        let threshold = self.summary_memory.surprise_gate_threshold;
+        if threshold <= 0.0 {
+            return ungated;
+        }
+
+        let gate_logits = activation::relu(
+            (summary.clone() - previous.clone())
+                .abs()
+                .mean_dim(3)
+                .mean_dim(2)
+                .sub_scalar(threshold)
+                .mul_scalar(self.summary_memory.surprise_gate_sharpness),
+        );
+        let gate = gate_logits.clone().div(gate_logits.add_scalar(1.0));
+        previous
+            .mul(gate.clone().neg().add_scalar(1.0))
+            .add(ungated.mul(gate))
+    }
+
+    fn prepare_language_mhc_residuals(
+        &self,
+        residuals: Tensor<B, 4>,
+        mhc: Option<&ManifoldHyperConnections<B>>,
+    ) -> Tensor<B, 4> {
+        let Some(mhc) = mhc else {
+            return residuals;
+        };
+        let target_streams = mhc.num_streams().max(1);
+        let [_, streams, _, _] = residuals.shape().dims::<4>();
+        if streams == target_streams {
+            residuals
+        } else if streams == 1 && target_streams > 1 {
+            residuals.repeat_dim(1, target_streams)
+        } else {
+            residuals
+        }
+    }
+
+    fn collapse_language_streams(&self, current: Tensor<B, 4>) -> Tensor<B, 3> {
+        let [batch, streams, time, dim] = current.shape().dims();
+        if streams == 1 {
+            current.reshape([batch, time, dim])
+        } else {
+            current.mean_dim(1).reshape([batch, time, dim])
+        }
+    }
+
     fn forward_with_state_impl(
         &self,
         tokens: Tensor<B, 2, Int>,
         state: &mut ModelState<B>,
+        summary_event_mask: Option<Tensor<B, 2, Int>>,
     ) -> (Tensor<B, 3>, Tensor<B, 3>) {
         let embedded = self.embed.forward(tokens);
-        self.forward_with_state_from_embedded(embedded, state)
+        self.forward_with_state_from_embedded(embedded, state, summary_event_mask)
     }
 
     fn forward_with_state_from_embedded(
         &self,
         embedded: Tensor<B, 3>,
         state: &mut ModelState<B>,
+        summary_event_mask: Option<Tensor<B, 2, Int>>,
     ) -> (Tensor<B, 3>, Tensor<B, 3>) {
         if self.rollout_fast_steps_per_slow_step <= 1 {
             let start_pos = state.position;
@@ -482,16 +852,22 @@ impl<B: Backend> BDH<B> {
                 start_pos,
                 true,
                 RecurrentPositionMode::Sequential,
+                summary_event_mask,
             );
         }
 
         match self.rollout_executor_mode() {
-            RolloutExecutorMode::HostLoop => {
-                self.forward_with_state_from_embedded_rollout_host_loop(embedded, state)
-            }
-            RolloutExecutorMode::WgpuFused => {
-                self.forward_with_state_from_embedded_rollout_fused(embedded, state)
-            }
+            RolloutExecutorMode::HostLoop => self
+                .forward_with_state_from_embedded_rollout_host_loop(
+                    embedded,
+                    state,
+                    summary_event_mask,
+                ),
+            RolloutExecutorMode::WgpuFused => self.forward_with_state_from_embedded_rollout_fused(
+                embedded,
+                state,
+                summary_event_mask,
+            ),
         }
     }
 
@@ -499,6 +875,7 @@ impl<B: Backend> BDH<B> {
         &self,
         embedded: Tensor<B, 3>,
         state: &mut ModelState<B>,
+        summary_event_mask: Option<Tensor<B, 2, Int>>,
     ) -> (Tensor<B, 3>, Tensor<B, 3>) {
         assert_eq!(
             state.layers.len(),
@@ -518,6 +895,9 @@ impl<B: Backend> BDH<B> {
         let mut logits_slow = Vec::with_capacity(slow_steps);
         for slow_idx in 0..slow_steps {
             let token_embedded = embedded.clone().slice_dim(1, slow_idx..slow_idx + 1);
+            let token_summary_event_mask = summary_event_mask
+                .as_ref()
+                .map(|mask| mask.clone().slice_dim(1, slow_idx..slow_idx + 1));
             let start_pos = state.position;
             let mut hidden_last = None;
             let mut logits_last = None;
@@ -528,6 +908,7 @@ impl<B: Backend> BDH<B> {
                     start_pos,
                     false,
                     RecurrentPositionMode::Sequential,
+                    token_summary_event_mask.clone(),
                 );
                 hidden_last = Some(hidden);
                 logits_last = Some(logits);
@@ -544,6 +925,7 @@ impl<B: Backend> BDH<B> {
         &self,
         embedded: Tensor<B, 3>,
         state: &mut ModelState<B>,
+        summary_event_mask: Option<Tensor<B, 2, Int>>,
     ) -> (Tensor<B, 3>, Tensor<B, 3>) {
         assert_eq!(
             state.layers.len(),
@@ -566,6 +948,9 @@ impl<B: Backend> BDH<B> {
         for slow_idx in 0..slow_steps {
             let token_embedded = embedded.clone().slice_dim(1, slow_idx..slow_idx + 1);
             let rollout_embedded = token_embedded.repeat_dim(1, fast_steps);
+            let token_summary_event_mask = summary_event_mask
+                .as_ref()
+                .map(|mask| mask.clone().slice_dim(1, slow_idx..slow_idx + 1));
             let start_pos = state.position;
             let hidden_rollout = self.forward_hidden_with_state_from_embedded_single_pass(
                 rollout_embedded,
@@ -573,6 +958,7 @@ impl<B: Backend> BDH<B> {
                 start_pos,
                 false,
                 RecurrentPositionMode::Fixed,
+                token_summary_event_mask,
             );
             let last = fast_steps - 1;
             let hidden_last = hidden_rollout.slice_dim(1, last..fast_steps);
@@ -592,6 +978,7 @@ impl<B: Backend> BDH<B> {
         start_pos: usize,
         advance_position: bool,
         position_mode: RecurrentPositionMode,
+        summary_event_mask: Option<Tensor<B, 2, Int>>,
     ) -> (Tensor<B, 3>, Tensor<B, 3>) {
         let hidden = self.forward_hidden_with_state_from_embedded_single_pass(
             embedded,
@@ -599,6 +986,7 @@ impl<B: Backend> BDH<B> {
             start_pos,
             advance_position,
             position_mode,
+            summary_event_mask,
         );
         let logits = self.project_hidden_to_logits(hidden.clone());
         (hidden, logits)
@@ -611,6 +999,7 @@ impl<B: Backend> BDH<B> {
         start_pos: usize,
         advance_position: bool,
         position_mode: RecurrentPositionMode,
+        summary_event_mask: Option<Tensor<B, 2, Int>>,
     ) -> Tensor<B, 3> {
         if self.y_neuron_recurrence.enabled {
             return self.forward_hidden_with_state_from_embedded_single_pass_y_neuron_recurrence(
@@ -645,21 +1034,60 @@ impl<B: Backend> BDH<B> {
         } else {
             None
         };
-        let mhc_coefficients = self
-            .mhc_layers
-            .as_ref()
-            .map(|layers| layers.iter().map(|mhc| mhc.coefficients()).collect::<Vec<_>>());
+        let mhc_coefficients = self.mhc_layers.as_ref().map(|layers| {
+            layers
+                .iter()
+                .map(|mhc| mhc.as_ref().map(|mhc| mhc.coefficients()))
+                .collect::<Vec<_>>()
+        });
 
         for (layer_idx, layer_state) in state.layers.iter_mut().enumerate() {
             let mhc = self
                 .mhc_layers
                 .as_ref()
-                .and_then(|layers| layers.get(layer_idx));
+                .and_then(|layers| layers.get(layer_idx))
+                .and_then(|mhc| mhc.as_ref());
             let mhc_coefficients = mhc_coefficients
                 .as_ref()
-                .and_then(|coefficients| coefficients.get(layer_idx));
+                .and_then(|coefficients| coefficients.get(layer_idx))
+                .and_then(|coefficients| coefficients.as_ref());
+            let current_residuals = self.prepare_language_mhc_residuals(current, mhc);
             let (branch_input, residuals_base, beta) =
-                mhc_split_with_coefficients(mhc, current, mhc_coefficients);
+                mhc_split_with_coefficients(mhc, current_residuals, mhc_coefficients);
+            let branch_input = if self.summary_memory_applies_to_layer(layer_idx) {
+                self.forward_branch_summary_memory(
+                    branch_input,
+                    layer_state,
+                    start_pos,
+                    summary_event_mask.clone(),
+                )
+            } else {
+                layer_state.summary_memory_hidden = None;
+                branch_input
+            };
+
+            if self.clocked_slow_memory_applies_to_layer(layer_idx) {
+                let branch_out = self.forward_branch_clocked_slow_layer(
+                    branch_input,
+                    layer_state,
+                    start_pos,
+                    position_mode,
+                );
+                let next = mhc_merge_with_coefficients(
+                    mhc,
+                    branch_out,
+                    residuals_base,
+                    mhc_coefficients,
+                    beta,
+                );
+                current = if mhc.is_some() {
+                    self.norm.forward(next)
+                } else {
+                    next
+                };
+                continue;
+            }
+            layer_state.clocked_slow_hidden = None;
 
             let [branch_batch, branch_views, branch_time, branch_dim] =
                 branch_input.shape().dims::<4>();
@@ -745,11 +1173,8 @@ impl<B: Backend> BDH<B> {
                     Some(rho) => {
                         let dims = rho.shape().dims::<4>();
                         if dims == [flat_batch, heads, latent, self.n_embd] {
-                            let rho_energy = rho
-                                .clone()
-                                .abs()
-                                .sum_dim(3)
-                                .div_scalar(self.n_embd as f32);
+                            let rho_energy =
+                                rho.clone().abs().sum_dim(3).div_scalar(self.n_embd as f32);
                             let rho_energy = rho_energy
                                 .reshape([viz_batch, viz_views, heads, latent])
                                 .mean_dim(1)
@@ -771,7 +1196,10 @@ impl<B: Backend> BDH<B> {
                 });
             }
 
-            let branch_out = output.next.reshape([branch_batch, branch_views, branch_time, branch_dim]);
+            let branch_out =
+                output
+                    .next
+                    .reshape([branch_batch, branch_views, branch_time, branch_dim]);
             let next = mhc_merge_with_coefficients(
                 mhc,
                 branch_out,
@@ -786,9 +1214,8 @@ impl<B: Backend> BDH<B> {
             };
         }
 
-        let [batch, streams, time, dim] = current.shape().dims();
-        debug_assert_eq!(streams, 1, "language BDH currently expects one output stream");
-        let hidden = current.reshape([batch, time, dim]);
+        let hidden = self.collapse_language_streams(current);
+        let [_batch, time, _dim] = hidden.shape().dims::<3>();
         if advance_position {
             state.position = state.position.saturating_add(time);
         }
@@ -827,27 +1254,33 @@ impl<B: Backend> BDH<B> {
         } else {
             None
         };
-        let mhc_coefficients = self
-            .mhc_layers
-            .as_ref()
-            .map(|layers| layers.iter().map(|mhc| mhc.coefficients()).collect::<Vec<_>>());
+        let mhc_coefficients = self.mhc_layers.as_ref().map(|layers| {
+            layers
+                .iter()
+                .map(|mhc| mhc.as_ref().map(|mhc| mhc.coefficients()))
+                .collect::<Vec<_>>()
+        });
 
         for (layer_idx, layer_state) in state.layers.iter_mut().enumerate() {
             let mhc = self
                 .mhc_layers
                 .as_ref()
-                .and_then(|layers| layers.get(layer_idx));
+                .and_then(|layers| layers.get(layer_idx))
+                .and_then(|mhc| mhc.as_ref());
             let mhc_coefficients = mhc_coefficients
                 .as_ref()
-                .and_then(|coefficients| coefficients.get(layer_idx));
+                .and_then(|coefficients| coefficients.get(layer_idx))
+                .and_then(|coefficients| coefficients.as_ref());
+            let current_residuals = self.prepare_language_mhc_residuals(current, mhc);
             let (branch_input, residuals_base, beta) =
-                mhc_split_with_coefficients(mhc, current, mhc_coefficients);
+                mhc_split_with_coefficients(mhc, current_residuals, mhc_coefficients);
+            layer_state.clocked_slow_hidden = None;
+            layer_state.summary_memory_hidden = None;
 
             let [branch_batch, branch_views, branch_time, branch_dim] =
                 branch_input.shape().dims::<4>();
             let flat_batch = branch_batch * branch_views;
-            let branch_flat =
-                branch_input.reshape([flat_batch, 1, branch_time, branch_dim]);
+            let branch_flat = branch_input.reshape([flat_batch, 1, branch_time, branch_dim]);
             if !self.y_neuron_recurrence_applies_to_layer(layer_idx) {
                 layer_state.y_neuron_state = None;
                 let fused_recurrent_plan = if self.kernel.enabled
@@ -925,11 +1358,8 @@ impl<B: Backend> BDH<B> {
                         Some(rho) => {
                             let dims = rho.shape().dims::<4>();
                             if dims == [flat_batch, heads, latent, self.n_embd] {
-                                let rho_energy = rho
-                                    .clone()
-                                    .abs()
-                                    .sum_dim(3)
-                                    .div_scalar(self.n_embd as f32);
+                                let rho_energy =
+                                    rho.clone().abs().sum_dim(3).div_scalar(self.n_embd as f32);
                                 let rho_energy = rho_energy
                                     .reshape([viz_batch, viz_views, heads, latent])
                                     .mean_dim(1)
@@ -951,9 +1381,10 @@ impl<B: Backend> BDH<B> {
                     });
                 }
 
-                let branch_out = output
-                    .next
-                    .reshape([branch_batch, branch_views, branch_time, branch_dim]);
+                let branch_out =
+                    output
+                        .next
+                        .reshape([branch_batch, branch_views, branch_time, branch_dim]);
                 let next = mhc_merge_with_coefficients(
                     mhc,
                     branch_out,
@@ -1030,10 +1461,8 @@ impl<B: Backend> BDH<B> {
                 let chunk_end = (chunk_start + chunk_tokens).min(branch_time);
                 let chunk_len = chunk_end - chunk_start;
                 let x_neuron_base = x_base.clone().slice_dim(2, chunk_start..chunk_end);
-                let x_neuron =
-                    self.inject_y_neuron_state(x_neuron_base, y_neuron_state.clone());
-                let current_token =
-                    branch_flat.clone().slice_dim(2, chunk_start..chunk_end);
+                let x_neuron = self.inject_y_neuron_state(x_neuron_base, y_neuron_state.clone());
+                let current_token = branch_flat.clone().slice_dim(2, chunk_start..chunk_end);
                 let token_position = match position_mode {
                     RecurrentPositionMode::Sequential => start_pos + chunk_start,
                     RecurrentPositionMode::Fixed => start_pos,
@@ -1062,11 +1491,11 @@ impl<B: Backend> BDH<B> {
                 let mixed = y_neuron.clone().swap_dims(1, 2);
                 let mixed_flat = mixed.reshape([flat_batch * chunk_len, heads * latent]);
                 let mlp_flat = mixed_flat.matmul(decoder.clone());
-                let mlp_out = self.norm.forward(mlp_flat.reshape([flat_batch, 1, chunk_len, branch_dim]));
+                let mlp_out = self
+                    .norm
+                    .forward(mlp_flat.reshape([flat_batch, 1, chunk_len, branch_dim]));
                 next_tokens.push(self.norm.forward(current_token + mlp_out));
-                let y_neuron_last = y_neuron
-                    .clone()
-                    .slice_dim(2, (chunk_len - 1)..chunk_len);
+                let y_neuron_last = y_neuron.clone().slice_dim(2, (chunk_len - 1)..chunk_len);
                 y_neuron_state = self.update_y_neuron_state(y_neuron_state, y_neuron_last);
 
                 #[cfg(feature = "viz")]
@@ -1106,11 +1535,8 @@ impl<B: Backend> BDH<B> {
                     Some(rho) => {
                         let dims = rho.shape().dims::<4>();
                         if dims == [flat_batch, heads, latent, self.n_embd] {
-                            let rho_energy = rho
-                                .clone()
-                                .abs()
-                                .sum_dim(3)
-                                .div_scalar(self.n_embd as f32);
+                            let rho_energy =
+                                rho.clone().abs().sum_dim(3).div_scalar(self.n_embd as f32);
                             let rho_energy = rho_energy
                                 .reshape([viz_batch, viz_views, heads, latent])
                                 .mean_dim(1)
@@ -1132,8 +1558,12 @@ impl<B: Backend> BDH<B> {
                 });
             }
 
-            let branch_out =
-                Tensor::cat(next_tokens, 2).reshape([branch_batch, branch_views, branch_time, branch_dim]);
+            let branch_out = Tensor::cat(next_tokens, 2).reshape([
+                branch_batch,
+                branch_views,
+                branch_time,
+                branch_dim,
+            ]);
             let next = mhc_merge_with_coefficients(
                 mhc,
                 branch_out,
@@ -1148,9 +1578,8 @@ impl<B: Backend> BDH<B> {
             };
         }
 
-        let [batch, streams, time, dim] = current.shape().dims();
-        debug_assert_eq!(streams, 1, "language BDH currently expects one output stream");
-        let hidden = current.reshape([batch, time, dim]);
+        let hidden = self.collapse_language_streams(current);
+        let [_batch, time, _dim] = hidden.shape().dims::<3>();
         if advance_position {
             state.position = state.position.saturating_add(time);
         }
@@ -1171,7 +1600,18 @@ impl<B: Backend> BDH<B> {
         tokens: Tensor<B, 2, Int>,
         state: &mut ModelState<B>,
     ) -> Tensor<B, 3> {
-        let (_hidden, logits) = self.forward_with_state_impl(tokens, state);
+        let (_hidden, logits) = self.forward_with_state_impl(tokens, state, None);
+        logits
+    }
+
+    pub fn forward_with_state_and_summary_event_mask(
+        &self,
+        tokens: Tensor<B, 2, Int>,
+        summary_event_mask: Tensor<B, 2, Int>,
+        state: &mut ModelState<B>,
+    ) -> Tensor<B, 3> {
+        let (_hidden, logits) =
+            self.forward_with_state_impl(tokens, state, Some(summary_event_mask));
         logits
     }
 
@@ -1180,7 +1620,16 @@ impl<B: Backend> BDH<B> {
         tokens: Tensor<B, 2, Int>,
         state: &mut ModelState<B>,
     ) -> (Tensor<B, 3>, Tensor<B, 3>) {
-        self.forward_with_state_impl(tokens, state)
+        self.forward_with_state_impl(tokens, state, None)
+    }
+
+    pub fn forward_with_hidden_and_state_and_summary_event_mask(
+        &self,
+        tokens: Tensor<B, 2, Int>,
+        summary_event_mask: Tensor<B, 2, Int>,
+        state: &mut ModelState<B>,
+    ) -> (Tensor<B, 3>, Tensor<B, 3>) {
+        self.forward_with_state_impl(tokens, state, Some(summary_event_mask))
     }
 
     pub fn forward_with_state_embedded(
@@ -1188,7 +1637,7 @@ impl<B: Backend> BDH<B> {
         embedded: Tensor<B, 3>,
         state: &mut ModelState<B>,
     ) -> Tensor<B, 3> {
-        let (_hidden, logits) = self.forward_with_state_from_embedded(embedded, state);
+        let (_hidden, logits) = self.forward_with_state_from_embedded(embedded, state, None);
         logits
     }
 
@@ -1197,7 +1646,11 @@ impl<B: Backend> BDH<B> {
         embedded: Tensor<B, 3>,
         state: &mut ModelState<B>,
     ) -> (Tensor<B, 3>, Tensor<B, 3>) {
-        self.forward_with_state_from_embedded(embedded, state)
+        self.forward_with_state_from_embedded(embedded, state, None)
+    }
+
+    pub fn summary_memory_write_trigger_token_ids(&self) -> Option<&[u32]> {
+        self.summary_memory.write_trigger_token_ids.as_deref()
     }
 }
 
@@ -1318,7 +1771,8 @@ mod tests {
             },
             &device,
         );
-        let tokens = Tensor::<Backend, 2, Int>::from_data(TensorData::new(vec![1, 2, 3], [1, 3]), &device);
+        let tokens =
+            Tensor::<Backend, 2, Int>::from_data(TensorData::new(vec![1, 2, 3], [1, 3]), &device);
         let mut state = model.init_state();
         let (hidden, _logits) = model.forward_with_hidden_and_state(tokens.clone(), &mut state);
 
@@ -1330,6 +1784,7 @@ mod tests {
             .as_ref()
             .expect("mhc layers")
             .first()
+            .and_then(|mhc| mhc.as_ref())
             .expect("first mhc");
         let coeffs = mhc.coefficients();
         let (branch_input, residuals_base, beta) =
@@ -1339,13 +1794,22 @@ mod tests {
         let branch_flat =
             branch_input.reshape([branch_batch * branch_views, 1, branch_time, branch_dim]);
 
-        let encoder = model.encoder.val().reshape([1, 1, dim, model.mlp_internal_dim_multiplier * dim]);
+        let encoder =
+            model
+                .encoder
+                .val()
+                .reshape([1, 1, dim, model.mlp_internal_dim_multiplier * dim]);
         let encoder_v =
-            model.encoder_v.val().reshape([1, 1, dim, model.mlp_internal_dim_multiplier * dim]);
+            model
+                .encoder_v
+                .val()
+                .reshape([1, 1, dim, model.mlp_internal_dim_multiplier * dim]);
         let decoder = model.decoder.val();
         let mut layer_state = LayerState {
             rho: None,
             y_neuron_state: None,
+            clocked_slow_hidden: None,
+            summary_memory_hidden: None,
         };
         let output = lowrank_residual_step(
             branch_flat,
@@ -1375,7 +1839,8 @@ mod tests {
             .next
             .reshape([branch_batch, branch_views, branch_time, branch_dim]);
         let manual = model
-            .norm.forward(mhc_merge_with_coefficients(
+            .norm
+            .forward(mhc_merge_with_coefficients(
                 Some(mhc),
                 branch_out,
                 residuals_base,
@@ -1424,12 +1889,82 @@ mod tests {
             },
             &device,
         );
-        let tokens = Tensor::<Backend, 2, Int>::from_data(TensorData::new(vec![1, 2, 3], [1, 3]), &device);
+        let tokens =
+            Tensor::<Backend, 2, Int>::from_data(TensorData::new(vec![1, 2, 3], [1, 3]), &device);
         let output = model.forward(tokens);
         let [batch, time, vocab] = output.shape().dims::<3>();
 
         assert!(model.mhc_layers.is_none());
         assert_eq!([batch, time, vocab], [1, 3, 16]);
+    }
+
+    #[test]
+    fn bdh_mhc_multi_stream_language_contract_collapses_back_to_hidden() {
+        type Backend = NdArray<f32>;
+        let device = <Backend as BackendTrait>::Device::default();
+        let model = BDH::<Backend>::new(
+            BDHConfig {
+                n_layer: 2,
+                n_embd: 8,
+                n_head: 1,
+                mlp_internal_dim_multiplier: 1,
+                vocab_size: 16,
+                dropout: 0.0,
+                mhc: super::super::mhc::ManifoldHyperConnectionsConfig {
+                    enabled: true,
+                    num_streams: 2,
+                    num_views: 1,
+                    mhc_iters: 4,
+                    mhc_tau: 0.1,
+                    add_branch_out_to_residual: true,
+                    dropout: 0.0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            &device,
+        );
+        let tokens =
+            Tensor::<Backend, 2, Int>::from_data(TensorData::new(vec![1, 2, 3], [1, 3]), &device);
+        let output = model.forward(tokens);
+        let [batch, time, vocab] = output.shape().dims::<3>();
+
+        assert!(model.mhc_layers.is_some());
+        assert_eq!([batch, time, vocab], [1, 3, 16]);
+    }
+
+    #[test]
+    fn bdh_mhc_last_layers_only_allocates_top_layers() {
+        type Backend = NdArray<f32>;
+        let device = <Backend as BackendTrait>::Device::default();
+        let model = BDH::<Backend>::new(
+            BDHConfig {
+                n_layer: 4,
+                n_embd: 8,
+                n_head: 1,
+                mlp_internal_dim_multiplier: 1,
+                vocab_size: 16,
+                dropout: 0.0,
+                mhc: super::super::mhc::ManifoldHyperConnectionsConfig {
+                    enabled: true,
+                    num_streams: 2,
+                    num_views: 1,
+                    last_layers: Some(1),
+                    mhc_iters: 4,
+                    mhc_tau: 0.1,
+                    add_branch_out_to_residual: true,
+                    dropout: 0.0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            &device,
+        );
+        let layers = model.mhc_layers.as_ref().expect("mhc layers");
+        assert!(layers[0].is_none());
+        assert!(layers[1].is_none());
+        assert!(layers[2].is_none());
+        assert!(layers[3].is_some());
     }
 
     #[test]
@@ -1440,11 +1975,14 @@ mod tests {
             TensorData::new(vec![0.0, 2.0, 0.0, 4.0], [1, 2, 2]),
             &device,
         );
-        let suffix = Tensor::<Backend, 3>::from_data(TensorData::new(vec![0.0, 6.0], [1, 1, 2]), &device);
+        let suffix =
+            Tensor::<Backend, 3>::from_data(TensorData::new(vec![0.0, 6.0], [1, 1, 2]), &device);
 
-        let mut baseline = deterministic_y_neuron_recurrence_model(YNeuronRecurrenceConfig::default());
+        let mut baseline =
+            deterministic_y_neuron_recurrence_model(YNeuronRecurrenceConfig::default());
         let mut baseline_state = baseline.init_state();
-        let _ = baseline.forward_with_hidden_and_state_embedded(prefix.clone(), &mut baseline_state);
+        let _ =
+            baseline.forward_with_hidden_and_state_embedded(prefix.clone(), &mut baseline_state);
         assert!(baseline_state.layers[0].y_neuron_state.is_none());
         let (baseline_hidden, _) =
             baseline.forward_with_hidden_and_state_embedded(suffix.clone(), &mut baseline_state);
@@ -1546,11 +2084,14 @@ mod tests {
             TensorData::new(vec![0.0, 2.0, 0.0, 4.0], [1, 2, 2]),
             &device,
         );
-        let suffix = Tensor::<Backend, 3>::from_data(TensorData::new(vec![0.0, 6.0], [1, 1, 2]), &device);
+        let suffix =
+            Tensor::<Backend, 3>::from_data(TensorData::new(vec![0.0, 6.0], [1, 1, 2]), &device);
 
-        let mut baseline = deterministic_y_neuron_recurrence_model(YNeuronRecurrenceConfig::default());
+        let mut baseline =
+            deterministic_y_neuron_recurrence_model(YNeuronRecurrenceConfig::default());
         let mut baseline_state = baseline.init_state();
-        let _ = baseline.forward_with_hidden_and_state_embedded(prefix.clone(), &mut baseline_state);
+        let _ =
+            baseline.forward_with_hidden_and_state_embedded(prefix.clone(), &mut baseline_state);
         let (baseline_hidden, _) =
             baseline.forward_with_hidden_and_state_embedded(suffix.clone(), &mut baseline_state);
 
@@ -1642,6 +2183,204 @@ mod tests {
         assert!(
             top_vec.iter().any(|value| value.abs() > 1.0e-5),
             "expected non-zero carried y_neuron state on the recurrent top layer"
+        );
+    }
+
+    #[test]
+    fn summary_memory_reads_previous_chunk_instead_of_self_summary() {
+        type Backend = NdArray<f32>;
+        let device = <Backend as BackendTrait>::Device::default();
+        let model = BDH::<Backend>::new(
+            BDHConfig {
+                n_layer: 1,
+                n_embd: 4,
+                n_head: 1,
+                mlp_internal_dim_multiplier: 1,
+                vocab_size: 16,
+                dropout: 0.0,
+                summary_memory: SummaryMemoryConfig {
+                    enabled: true,
+                    last_layers: Some(1),
+                    chunk_tokens: 2,
+                    residual_scale: 0.5,
+                    state_decay: 1.0,
+                    state_update_scale: 1.0,
+                    surprise_gate_threshold: 0.0,
+                    surprise_gate_sharpness: 8.0,
+                    write_trigger_text: None,
+                    write_trigger_token_ids: None,
+                },
+                ..Default::default()
+            },
+            &device,
+        );
+
+        let mut layer_state = LayerState {
+            rho: None,
+            y_neuron_state: None,
+            clocked_slow_hidden: None,
+            summary_memory_hidden: None,
+        };
+        let first_chunk =
+            Tensor::<Backend, 4>::from_data(TensorData::new(vec![2.0, 4.0], [1, 1, 2, 1]), &device);
+        let first_out = model.forward_branch_summary_memory(first_chunk, &mut layer_state, 0, None);
+        let first_vec = first_out
+            .to_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .expect("first chunk vec");
+        assert_eq!(first_vec, vec![2.0, 4.0]);
+
+        let second_chunk =
+            Tensor::<Backend, 4>::from_data(TensorData::new(vec![10.0], [1, 1, 1, 1]), &device);
+        let second_out =
+            model.forward_branch_summary_memory(second_chunk, &mut layer_state, 2, None);
+        let second_vec = second_out
+            .to_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .expect("second chunk vec");
+        assert_eq!(second_vec, vec![11.5]);
+    }
+
+    #[test]
+    fn summary_memory_surprise_gate_preserves_prior_carry_when_chunk_is_unsurprising() {
+        type Backend = NdArray<f32>;
+        let device = <Backend as BackendTrait>::Device::default();
+        let model = BDH::<Backend>::new(
+            BDHConfig {
+                n_layer: 1,
+                n_embd: 4,
+                n_head: 1,
+                mlp_internal_dim_multiplier: 1,
+                vocab_size: 16,
+                dropout: 0.0,
+                summary_memory: SummaryMemoryConfig {
+                    enabled: true,
+                    last_layers: Some(1),
+                    chunk_tokens: 1,
+                    residual_scale: 0.5,
+                    state_decay: 1.0,
+                    state_update_scale: 1.0,
+                    surprise_gate_threshold: 0.5,
+                    surprise_gate_sharpness: 8.0,
+                    write_trigger_text: None,
+                    write_trigger_token_ids: None,
+                },
+                ..Default::default()
+            },
+            &device,
+        );
+
+        let mut layer_state = LayerState {
+            rho: None,
+            y_neuron_state: None,
+            clocked_slow_hidden: None,
+            summary_memory_hidden: None,
+        };
+
+        let first_chunk =
+            Tensor::<Backend, 4>::from_data(TensorData::new(vec![2.0], [1, 1, 1, 1]), &device);
+        let _ = model.forward_branch_summary_memory(first_chunk, &mut layer_state, 0, None);
+
+        let nearly_same_chunk =
+            Tensor::<Backend, 4>::from_data(TensorData::new(vec![2.01], [1, 1, 1, 1]), &device);
+        let _ = model.forward_branch_summary_memory(nearly_same_chunk, &mut layer_state, 1, None);
+
+        let probe_chunk =
+            Tensor::<Backend, 4>::from_data(TensorData::new(vec![10.0], [1, 1, 1, 1]), &device);
+        let probe_out = model.forward_branch_summary_memory(probe_chunk, &mut layer_state, 2, None);
+        let probe_vec = probe_out
+            .to_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .expect("probe vec");
+        assert!(
+            (probe_vec[0] - 11.0).abs() < 1.0e-3,
+            "expected prior carry to remain near 2.0, got {:?}",
+            probe_vec
+        );
+    }
+
+    #[test]
+    fn summary_memory_write_trigger_updates_only_on_event_chunks() {
+        type Backend = NdArray<f32>;
+        let device = <Backend as BackendTrait>::Device::default();
+        let model = BDH::<Backend>::new(
+            BDHConfig {
+                n_layer: 1,
+                n_embd: 4,
+                n_head: 1,
+                mlp_internal_dim_multiplier: 1,
+                vocab_size: 16,
+                dropout: 0.0,
+                summary_memory: SummaryMemoryConfig {
+                    enabled: true,
+                    last_layers: Some(1),
+                    chunk_tokens: 2,
+                    residual_scale: 0.5,
+                    state_decay: 1.0,
+                    state_update_scale: 1.0,
+                    surprise_gate_threshold: 0.0,
+                    surprise_gate_sharpness: 8.0,
+                    write_trigger_text: None,
+                    write_trigger_token_ids: Some(vec![7]),
+                },
+                ..Default::default()
+            },
+            &device,
+        );
+
+        let mut layer_state = LayerState {
+            rho: None,
+            y_neuron_state: None,
+            clocked_slow_hidden: None,
+            summary_memory_hidden: None,
+        };
+        let first_chunk =
+            Tensor::<Backend, 4>::from_data(TensorData::new(vec![2.0, 4.0], [1, 1, 2, 1]), &device);
+        let no_event_mask =
+            Tensor::<Backend, 2, Int>::from_data(TensorData::new(vec![0i64, 0], [1, 2]), &device);
+        let _ = model.forward_branch_summary_memory(
+            first_chunk,
+            &mut layer_state,
+            0,
+            Some(no_event_mask),
+        );
+
+        let second_chunk =
+            Tensor::<Backend, 4>::from_data(TensorData::new(vec![10.0], [1, 1, 1, 1]), &device);
+        let no_update_out =
+            model.forward_branch_summary_memory(second_chunk.clone(), &mut layer_state, 2, None);
+        let no_update_vec = no_update_out
+            .to_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .expect("no update vec");
+        assert!(
+            (no_update_vec[0] - 10.0).abs() < 1.0e-4,
+            "expected no summary carry before a trigger, got {:?}",
+            no_update_vec
+        );
+
+        let event_chunk =
+            Tensor::<Backend, 4>::from_data(TensorData::new(vec![6.0, 8.0], [1, 1, 2, 1]), &device);
+        let event_mask =
+            Tensor::<Backend, 2, Int>::from_data(TensorData::new(vec![0i64, 1], [1, 2]), &device);
+        let _ =
+            model.forward_branch_summary_memory(event_chunk, &mut layer_state, 2, Some(event_mask));
+
+        let probe_out =
+            model.forward_branch_summary_memory(second_chunk, &mut layer_state, 4, None);
+        let probe_vec = probe_out
+            .to_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .expect("probe vec");
+        assert!(
+            probe_vec[0] > 10.0,
+            "expected trigger-gated summary carry to affect the next chunk, got {:?}",
+            probe_vec
         );
     }
 }

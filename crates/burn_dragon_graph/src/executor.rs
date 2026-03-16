@@ -247,8 +247,10 @@ pub fn graph_reference_step<B: Backend>(
     });
 
     let decay = config.decay_for_mode(mode);
-    let decay_tensor =
-        Tensor::<B, 1>::from_data(TensorData::new(vec![decay], [1]), &inputs.node_query.device());
+    let decay_tensor = Tensor::<B, 1>::from_data(
+        TensorData::new(vec![decay], [1]),
+        &inputs.node_query.device(),
+    );
     let next_node_rho = target_major_identity_write(
         node_rho,
         inputs.node_query.clone(),
@@ -284,7 +286,8 @@ pub fn graph_reference_step<B: Backend>(
     };
     let next_global_rho = {
         let [batch, global_count, rank, value_dim] = global_rho.shape().dims::<4>();
-        let mut update = Tensor::<B, 4>::zeros([batch, global_count, rank, value_dim], &global_rho.device());
+        let mut update =
+            Tensor::<B, 4>::zeros([batch, global_count, rank, value_dim], &global_rho.device());
         if let Some(route) = routing.node_to_global() {
             let node_update =
                 sparse_write_aggregate(&inputs.node_query, &inputs.node_value, route, global_count);
@@ -299,8 +302,12 @@ pub fn graph_reference_step<B: Backend>(
             );
             update = update.add(cluster_update);
         }
-        target_major_decay_add(global_rho, update, decay_tensor.clone())
-            .reshape([batch, global_count, rank, value_dim])
+        target_major_decay_add(global_rho, update, decay_tensor.clone()).reshape([
+            batch,
+            global_count,
+            rank,
+            value_dim,
+        ])
     };
 
     let mut next_state = GraphTopologyState::from_parts(
@@ -657,9 +664,7 @@ fn sparse_write_aggregate<B: Backend>(
                 if source >= source_count {
                     continue;
                 }
-                let outer = query
-                    .clone()
-                    .slice_dim(1, source..source + 1);
+                let outer = query.clone().slice_dim(1, source..source + 1);
                 let outer = target_major_outer_product(
                     outer,
                     value.clone().slice_dim(1, source..source + 1),

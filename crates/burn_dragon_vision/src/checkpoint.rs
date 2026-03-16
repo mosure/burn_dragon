@@ -15,13 +15,13 @@ use burn_dragon_checkpoint::{
 };
 use burn_ndarray::NdArray;
 
+use crate::VisionDragon;
 use crate::config::{VisionTrainingConfig, VisionTrainingModeConfig, load_vision_training_config};
+use crate::train::vision::VisionVideoLejepaModel;
 use crate::train::{
     VisionDistillModel, VisionLejepaInit, VisionLejepaModel, VisionReconstructionInit,
     resolve_vision_rollout,
 };
-use crate::train::vision::VisionVideoLejepaModel;
-use crate::VisionDragon;
 
 const TRAINING_SNAPSHOT_FILE_NAME: &str = "vision_training_config.json";
 
@@ -75,8 +75,7 @@ pub fn export_vision_encoder_checkpoint_to_burnpack(
     let bundle = match &config.mode {
         VisionTrainingModeConfig::Distill(distill) => {
             let model = VisionDragon::<ExportBackend>::new(vision_config.clone(), &device);
-            let mut distill_model =
-                VisionDistillModel::new(model, distill.clone(), None, rollout);
+            let mut distill_model = VisionDistillModel::new(model, distill.clone(), None, rollout);
             let record = BinFileRecorder::<FullPrecisionSettings>::new()
                 .load::<<VisionDistillModel<ExportBackend> as Module<ExportBackend>>::Record>(
                     checkpoint_base.clone(),
@@ -246,7 +245,10 @@ pub(crate) fn resolve_checkpoint_run_dir(checkpoint: &Path) -> Option<PathBuf> {
     resolve_checkpoint_run_dir_shared(checkpoint)
 }
 
-pub(crate) fn resolve_checkpoint_base(path: &Path, epoch: Option<usize>) -> Result<(PathBuf, usize)> {
+pub(crate) fn resolve_checkpoint_base(
+    path: &Path,
+    epoch: Option<usize>,
+) -> Result<(PathBuf, usize)> {
     resolve_checkpoint_base_shared(path, epoch)
 }
 
@@ -281,24 +283,21 @@ fn infer_video_dataset_num_classes(config: &VisionTrainingConfig) -> Result<usiz
 mod tests {
     use super::{
         ExportBackend, export_vision_encoder_checkpoint_to_burnpack,
-        load_training_config_for_checkpoint,
-        training_snapshot_path, write_training_snapshot,
+        load_training_config_for_checkpoint, training_snapshot_path, write_training_snapshot,
     };
-    use crate::{
-        VisionBackboneKind, VisionDistillationLossConfig, VisionPatchEmbedMode,
-    };
+    use crate::VisionDragon;
     use crate::config::{
         VisionAugmentationConfig, VisionDatasetConfig, VisionDatasetSource, VisionDistillConfig,
         VisionLejepaConfig, VisionModelConfig, VisionTeacherConfig, VisionTeacherFeatureConfig,
         VisionTrainingConfig, VisionTrainingHyperparameters, VisionTrainingModeConfig,
         VisionVideoLejepaConfig,
     };
+    use crate::train::vision::VisionVideoLejepaModel;
     use crate::train::{
         VisionDistillModel, VisionLejepaInit, VisionLejepaModel, VisionReconstructionInit,
         resolve_vision_rollout,
     };
-    use crate::train::vision::VisionVideoLejepaModel;
-    use crate::VisionDragon;
+    use crate::{VisionBackboneKind, VisionDistillationLossConfig, VisionPatchEmbedMode};
     use burn::module::Module;
     use burn::record::{BinFileRecorder, FullPrecisionSettings, Recorder};
     use burn::tensor::backend::Backend as BackendTrait;
@@ -337,7 +336,8 @@ mod tests {
         write_training_snapshot(&config, &run_dir).expect("write vision snapshot");
 
         let vision_config = config.vision.build();
-        let rollout = resolve_vision_rollout(&config.training, vision_config.steps).expect("rollout");
+        let rollout =
+            resolve_vision_rollout(&config.training, vision_config.steps).expect("rollout");
         let distill = match &config.mode {
             VisionTrainingModeConfig::Distill(distill) => distill.clone(),
             _ => unreachable!("test config uses distill mode"),
@@ -507,9 +507,12 @@ mod tests {
                 cache_decoded: false,
                 cache_capacity: 1,
                 cache_preprocessed: false,
+                cache_teacher_features_in_memory: false,
             },
             training: VisionTrainingHyperparameters {
                 batch_size: 1,
+                gradient_accumulation_steps: 1,
+                schedule_mode: None,
                 epochs: Some(1),
                 max_iters: 1,
                 log_frequency: 1,
@@ -567,8 +570,15 @@ mod tests {
                 }),
                 loss: VisionDistillationLossConfig::default(),
                 rollout_supervision_frames: 1,
+                rollout_supervision_stride: 1,
+                rollout_supervision_groups: 1,
+                rollout_supervision_explicit_steps: Vec::new(),
+                rollout_supervision_explicit_groups: Vec::new(),
+                rollout_supervision_include_step1: true,
                 rollout_supervision_power: 1.0,
                 rollout_sampling_power: 0.0,
+                rollout_improvement_weight: 0.0,
+                rollout_improvement_margin: 0.0,
             }),
         }
     }

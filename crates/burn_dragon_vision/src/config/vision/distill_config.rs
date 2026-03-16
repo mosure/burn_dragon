@@ -32,10 +32,24 @@ pub struct VisionDistillConfig {
     pub loss: VisionDistillationLossConfig,
     #[serde(default = "default_distill_rollout_supervision_frames")]
     pub rollout_supervision_frames: usize,
+    #[serde(default = "default_distill_rollout_supervision_stride")]
+    pub rollout_supervision_stride: usize,
+    #[serde(default = "default_distill_rollout_supervision_groups")]
+    pub rollout_supervision_groups: usize,
+    #[serde(default)]
+    pub rollout_supervision_explicit_steps: Vec<usize>,
+    #[serde(default)]
+    pub rollout_supervision_explicit_groups: Vec<Vec<usize>>,
+    #[serde(default = "default_distill_rollout_supervision_include_step1")]
+    pub rollout_supervision_include_step1: bool,
     #[serde(default = "default_distill_rollout_supervision_power")]
     pub rollout_supervision_power: f32,
     #[serde(default = "default_distill_rollout_sampling_power")]
     pub rollout_sampling_power: f32,
+    #[serde(default = "default_distill_rollout_improvement_weight")]
+    pub rollout_improvement_weight: f32,
+    #[serde(default = "default_distill_rollout_improvement_margin")]
+    pub rollout_improvement_margin: f32,
 }
 
 impl Default for VisionDistillConfig {
@@ -44,8 +58,15 @@ impl Default for VisionDistillConfig {
             teacher: VisionTeacherConfig::Features(VisionTeacherFeatureConfig::default()),
             loss: VisionDistillationLossConfig::default(),
             rollout_supervision_frames: default_distill_rollout_supervision_frames(),
+            rollout_supervision_stride: default_distill_rollout_supervision_stride(),
+            rollout_supervision_groups: default_distill_rollout_supervision_groups(),
+            rollout_supervision_explicit_steps: Vec::new(),
+            rollout_supervision_explicit_groups: Vec::new(),
+            rollout_supervision_include_step1: default_distill_rollout_supervision_include_step1(),
             rollout_supervision_power: default_distill_rollout_supervision_power(),
             rollout_sampling_power: default_distill_rollout_sampling_power(),
+            rollout_improvement_weight: default_distill_rollout_improvement_weight(),
+            rollout_improvement_margin: default_distill_rollout_improvement_margin(),
         }
     }
 }
@@ -54,11 +75,31 @@ const fn default_distill_rollout_supervision_frames() -> usize {
     4
 }
 
+const fn default_distill_rollout_supervision_stride() -> usize {
+    1
+}
+
+const fn default_distill_rollout_supervision_groups() -> usize {
+    1
+}
+
+const fn default_distill_rollout_supervision_include_step1() -> bool {
+    true
+}
+
 const fn default_distill_rollout_supervision_power() -> f32 {
     1.0
 }
 
 const fn default_distill_rollout_sampling_power() -> f32 {
+    0.0
+}
+
+const fn default_distill_rollout_improvement_weight() -> f32 {
+    0.0
+}
+
+const fn default_distill_rollout_improvement_margin() -> f32 {
     0.0
 }
 

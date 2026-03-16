@@ -1,8 +1,8 @@
 use burn::tensor::{Tensor, TensorData};
+use burn_dragon::api::core::state::StructuredStepMode;
 use burn_dragon::api::graph::config::GraphTopologyConfig;
 use burn_dragon::api::graph::execution::{GraphCompiledExecutor, GraphDragon, GraphDragonConfig};
 use burn_dragon::api::graph::routing::{GraphCsrAdjacency, GraphTopologyRouting};
-use burn_dragon::api::core::state::StructuredStepMode;
 use burn_ndarray::NdArray;
 
 fn main() {

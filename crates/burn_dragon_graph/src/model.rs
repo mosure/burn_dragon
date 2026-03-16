@@ -17,8 +17,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::compiled_routing::CompiledGraphRouting;
 use crate::{
-    GraphCompiledExecutor, GraphExecutionError, GraphRhoStepConfig, GraphStepInputs, GraphStepOutput,
-    GraphTopologyRouting, GraphTopologyState, graph_reference_step,
+    GraphCompiledExecutor, GraphExecutionError, GraphRhoStepConfig, GraphStepInputs,
+    GraphStepOutput, GraphTopologyRouting, GraphTopologyState, graph_reference_step,
 };
 use compiled::{GraphCompiledRecurrentOutput, GraphCompiledState, GraphCompiledStepOutput};
 use support::{
@@ -467,14 +467,10 @@ impl<B: Backend> GraphDragon<B> {
             decay_tensor.clone(),
         );
 
-        let node_outer = target_major_outer_product(
-            inputs.node_query.clone(),
-            inputs.node_value.clone(),
-        );
-        let cluster_outer = target_major_outer_product(
-            inputs.cluster_query.clone(),
-            inputs.cluster_value.clone(),
-        );
+        let node_outer =
+            target_major_outer_product(inputs.node_query.clone(), inputs.node_value.clone());
+        let cluster_outer =
+            target_major_outer_product(inputs.cluster_query.clone(), inputs.cluster_value.clone());
         let mut cluster_rho = state.cluster_rho.clone().mul_scalar(decay) + cluster_outer.clone();
         let mut node_from_cluster = None;
         if let Some(route) = compiled.node_to_cluster() {
@@ -502,7 +498,8 @@ impl<B: Backend> GraphDragon<B> {
                 )
                 .ok()?;
                 node_from_cluster = Some(output.context);
-                cluster_rho = cluster_rho + (output.rho - state.cluster_rho.clone().mul_scalar(decay));
+                cluster_rho =
+                    cluster_rho + (output.rho - state.cluster_rho.clone().mul_scalar(decay));
             }
         }
 
@@ -667,7 +664,12 @@ impl<B: Backend> GraphDragon<B> {
     ) -> Tensor<B, 3> {
         let current = self.apply_step_mode(recurrent.state.node_state(), mode);
         let x_neuron = activation::relu(self.node_query.forward(current.clone()));
-        self.merge_node_state_dense(recurrent.state.node_state(), x_neuron, &recurrent.readouts, mode)
+        self.merge_node_state_dense(
+            recurrent.state.node_state(),
+            x_neuron,
+            &recurrent.readouts,
+            mode,
+        )
     }
 
     fn merge_node_state_dense(
@@ -716,7 +718,9 @@ impl<B: Backend> GraphDragon<B> {
             .readouts
             .cluster_from_global
             .clone()
-            .unwrap_or_else(|| Tensor::<B, 3>::zeros([batch, cluster_count, self.value_dim], &device));
+            .unwrap_or_else(|| {
+                Tensor::<B, 3>::zeros([batch, cluster_count, self.value_dim], &device)
+            });
         delta = delta
             + structured_dense_update_tokens(
                 x_neuron,
@@ -747,10 +751,9 @@ impl<B: Backend> GraphDragon<B> {
         } else {
             Tensor::<B, 3>::zeros([batch, cluster_count, self.embed_dim], &device)
         };
-        let recurrent_a_dense = readouts
-            .cluster_from_global
-            .clone()
-            .unwrap_or_else(|| Tensor::<B, 3>::zeros([batch, cluster_count, self.value_dim], &device));
+        let recurrent_a_dense = readouts.cluster_from_global.clone().unwrap_or_else(|| {
+            Tensor::<B, 3>::zeros([batch, cluster_count, self.value_dim], &device)
+        });
         let recurrent_delta = structured_dense_update_tokens(
             x_neuron,
             recurrent_a_dense,

@@ -59,6 +59,15 @@ use burn_cuda::Cuda;
 type WgpuNoFusion = CubeBackend<WgpuRuntime, f32, i32, u32>;
 
 #[cfg(feature = "train")]
+fn default_or_explicit_config_paths(default_base: &str, explicit: &[PathBuf]) -> Vec<PathBuf> {
+    if explicit.is_empty() {
+        vec![PathBuf::from(default_base)]
+    } else {
+        explicit.to_vec()
+    }
+}
+
+#[cfg(feature = "train")]
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Unified burn_dragon training CLI")]
 struct Cli {
@@ -239,8 +248,7 @@ where
 
 #[cfg(feature = "train")]
 fn run_language(args: LanguageArgs) -> Result<()> {
-    let mut config_paths = vec![PathBuf::from("config/language/base.toml")];
-    config_paths.extend(args.config);
+    let config_paths = default_or_explicit_config_paths("config/language/base.toml", &args.config);
     let config = load_language_training_config(&config_paths)?;
 
     if args.build_vocab_only {
@@ -324,6 +332,27 @@ fn run_language(args: LanguageArgs) -> Result<()> {
             }
         }
     })
+}
+
+#[cfg(all(test, feature = "train"))]
+mod tests {
+    use super::default_or_explicit_config_paths;
+    use std::path::PathBuf;
+
+    #[test]
+    fn default_or_explicit_config_paths_uses_default_only_when_no_explicit_configs() {
+        assert_eq!(
+            default_or_explicit_config_paths("config/language/base.toml", &[]),
+            vec![PathBuf::from("config/language/base.toml")]
+        );
+        assert_eq!(
+            default_or_explicit_config_paths(
+                "config/language/base.toml",
+                &[PathBuf::from("config/language/custom.toml")]
+            ),
+            vec![PathBuf::from("config/language/custom.toml")]
+        );
+    }
 }
 
 #[cfg(feature = "train")]

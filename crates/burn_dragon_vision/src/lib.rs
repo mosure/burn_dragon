@@ -9,10 +9,10 @@
 //!   `BankedRhoState`
 
 #[cfg(feature = "train")]
+pub mod checkpoint;
+#[cfg(feature = "train")]
 pub mod config;
 pub mod constants;
-#[cfg(feature = "train")]
-pub mod checkpoint;
 mod device;
 pub mod foveation;
 #[cfg(feature = "train")]
@@ -30,19 +30,41 @@ pub mod api {
             BankedRhoState, StructuredGridState, StructuredRoutingSpec, StructuredStepMode,
             StructuredTopologyState,
         };
-        pub use burn_dragon_core::{StructuredBankRole, StructuredRouteOperation,
-            StructuredRoutePattern, StructuredRouteSpec};
+        pub use burn_dragon_core::{
+            StructuredBankRole, StructuredRouteOperation, StructuredRoutePattern,
+            StructuredRouteSpec,
+        };
     }
 
     pub mod model {
         pub use crate::model::{
             PatchEmbed, PatchEmbedOutput, PatchGrid, SpatialPositionalEncodingKind,
-            StageAwareHostProfileSnapshot, VisionAttentionMode, VisionBackboneKind, VisionCellularConfig,
-            VisionCellularState, VisionDragon, VisionDragonConfig, VisionDragonMultiOutput,
-            VisionDragonOutput, VisionLatentActivation, VisionPatchEmbedMode,
-            VisionPyramidConfig, VisionRhoStreamConfig, VisionTrmGraphConfig,
-            VisionTrmGridMismatchPolicy, patchify, pool_patch_tokens,
+            StageAwareHostProfileSnapshot, VisionAttentionMode, VisionBackboneKind,
+            VisionCellularConfig, VisionCellularState, VisionDragon, VisionDragonConfig,
+            VisionDragonMultiOutput, VisionDragonOutput, VisionLatentActivation,
+            VisionPatchEmbedMode, VisionPyramidConfig, VisionRhoStreamConfig, VisionRolloutState,
+            VisionTrmGraphConfig, VisionTrmGridMismatchPolicy, patchify, pool_patch_tokens,
             stage_aware_host_profile_reset, stage_aware_host_profile_snapshot, unpatchify,
+        };
+    }
+
+    #[cfg(feature = "benchmark")]
+    pub mod bench {
+        pub use crate::model::{
+            VisionDenseAttentionBenchAdapter, VisionDenseBenchAdapter,
+            VisionRolloutScheduleBenchAdapter,
+        };
+        pub use crate::train::{
+            VISION_ARTIFACT_SCHEMA_VERSION, VisionArtifactHeader,
+            VisionDistillDeploySmokePrecision, VisionDistillDeploySmokeReport,
+            VisionDistillFeatureProbeAccuracyReport, VisionDistillFeatureProbeBackend,
+            VisionDistillFeatureProbeDevice, VisionDistillFeatureProbeReport,
+            VisionDistillFeatureProbeStepAccuracy,
+            VisionDistillServingBenchmarkBackend, VisionDistillServingBenchmarkDevice,
+            VisionDistillServingBenchmarkReport, VisionDistillServingStepMetrics,
+            push_vision_artifact_markdown_prelude,
+            run_vision_distill_deploy_smoke, run_vision_distill_feature_probe,
+            run_vision_distill_serving_benchmark,
         };
     }
 
@@ -70,16 +92,16 @@ pub mod api {
 
     #[cfg(feature = "train")]
     pub mod train {
-        pub use crate::loss::{VisionDistillationLossConfig, vision_distillation_loss};
+        pub use crate::loss::{
+            VisionDistillationLossConfig, vision_distillation_loss, vision_distillation_loss_terms,
+        };
         pub use crate::train::{
             CifarBatch, CifarDataLoader, CifarDataset, CifarSplit, CifarType, DinoFeatureStore,
             ImageNetAugmentations, ImageNetBatch, ImageNetDataLoader, ImageNetDataset,
-            ImageNetDatasetConfig, ImageNetSplit, MovingMnistSplit, MovingMnistVideoDataLoader,
-            MovingMnistRenderedClip, MovingMnistVideoDataset, MovingMnistVideoDatasetConfig,
-            VideoClipBatch,
-            VisionNormalize,
-            VisionVideoTrainProfileSnapshot, video_train_profile_reset,
-            video_train_profile_snapshot,
+            ImageNetDatasetConfig, ImageNetSplit, MovingMnistRenderedClip, MovingMnistSplit,
+            MovingMnistVideoDataLoader, MovingMnistVideoDataset, MovingMnistVideoDatasetConfig,
+            VideoClipBatch, VisionNormalize, VisionVideoTrainProfileSnapshot,
+            video_train_profile_reset, video_train_profile_snapshot,
         };
     }
 
@@ -102,21 +124,39 @@ pub use foveation::{
     render_foveated_patch_with_radius, sigma_from_unit,
 };
 pub use model::{
-    PatchEmbed, PatchEmbedOutput, PatchGrid, SpatialPositionalEncodingKind, StageAwareHostProfileSnapshot,
-    VisionAttentionMode, VisionBackboneKind, VisionCellularConfig, VisionCellularState, VisionDragon,
-    VisionDragonConfig, VisionDragonMultiOutput, VisionDragonOutput, VisionLatentActivation,
-    VisionPatchEmbedMode, VisionPyramidConfig, VisionRhoStreamConfig, VisionTrmGraphConfig,
-    VisionTrmGridMismatchPolicy, patchify, pool_patch_tokens, stage_aware_host_profile_reset,
-    stage_aware_host_profile_snapshot, unpatchify,
+    PatchEmbed, PatchEmbedOutput, PatchGrid, SpatialPositionalEncodingKind,
+    StageAwareHostProfileSnapshot, VisionAttentionMode, VisionBackboneKind, VisionCellularConfig,
+    VisionCellularState, VisionDragon, VisionDragonConfig, VisionDragonMultiOutput,
+    VisionDragonOutput, VisionLatentActivation, VisionPatchEmbedMode, VisionPyramidConfig,
+    VisionRhoStreamConfig, VisionTrmGraphConfig, VisionTrmGridMismatchPolicy, patchify,
+    pool_patch_tokens, stage_aware_host_profile_reset, stage_aware_host_profile_snapshot,
+    unpatchify,
+};
+#[cfg(feature = "benchmark")]
+pub use model::{
+    VisionDenseAttentionBenchAdapter, VisionDenseBenchAdapter, VisionRolloutScheduleBenchAdapter,
+};
+#[cfg(feature = "benchmark")]
+pub use train::{
+    VISION_ARTIFACT_SCHEMA_VERSION, VisionArtifactHeader,
+    VisionDistillDeploySmokePrecision, VisionDistillDeploySmokeReport,
+    VisionDistillFeatureProbeAccuracyReport, VisionDistillFeatureProbeBackend,
+    VisionDistillFeatureProbeDevice, VisionDistillFeatureProbeReport,
+    VisionDistillFeatureProbeStepAccuracy,
+    VisionDistillServingBenchmarkBackend, VisionDistillServingBenchmarkDevice,
+    VisionDistillServingBenchmarkReport, VisionDistillServingStepMetrics,
+    push_vision_artifact_markdown_prelude,
+    run_vision_distill_deploy_smoke, run_vision_distill_feature_probe,
+    run_vision_distill_serving_benchmark,
 };
 #[cfg(feature = "train")]
 pub use train::{
     CifarBatch, CifarDataLoader, CifarDataset, CifarSplit, CifarType, DinoFeatureStore,
     ImageNetAugmentations, ImageNetBatch, ImageNetDataLoader, ImageNetDataset,
-    ImageNetDatasetConfig, ImageNetSplit, MovingMnistSplit, MovingMnistVideoDataLoader,
-    MovingMnistRenderedClip, MovingMnistVideoDataset, MovingMnistVideoDatasetConfig,
-    VideoClipBatch, VisionNormalize, VisionVideoTrainProfileSnapshot,
-    video_train_profile_reset, video_train_profile_snapshot,
+    ImageNetDatasetConfig, ImageNetSplit, MovingMnistRenderedClip, MovingMnistSplit,
+    MovingMnistVideoDataLoader, MovingMnistVideoDataset, MovingMnistVideoDatasetConfig,
+    VideoClipBatch, VisionNormalize, VisionVideoTrainProfileSnapshot, video_train_profile_reset,
+    video_train_profile_snapshot,
 };
 
 #[cfg(feature = "train")]
@@ -128,6 +168,8 @@ pub use checkpoint::{
 #[cfg(feature = "train")]
 pub use config::*;
 #[cfg(feature = "train")]
-pub use loss::{VisionDistillationLossConfig, vision_distillation_loss};
+pub use loss::{
+    VisionDistillationLossConfig, vision_distillation_loss, vision_distillation_loss_terms,
+};
 
 pub use wgsl::{FOVEATION_BUFFER_SHADER, FOVEATION_SHADER, PYRAMID_SHADER, SCATTER_BUFFER_SHADER};

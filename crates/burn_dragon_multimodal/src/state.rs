@@ -2,7 +2,9 @@ use burn::tensor::Tensor;
 use burn::tensor::backend::{AutodiffBackend, Backend};
 use burn_dragon_core::api::state::{BankedRhoState, ModelState, StructuredTopologyState};
 use burn_dragon_core::model::LayerState;
-use burn_dragon_stream::{FusionCarryPolicy, StateCarryPolicy, StreamBoundary, StreamStepMetadata, TbpttWindow};
+use burn_dragon_stream::{
+    FusionCarryPolicy, StateCarryPolicy, StreamBoundary, StreamStepMetadata, TbpttWindow,
+};
 use burn_dragon_vision::api::model::VisionCellularState;
 
 #[derive(Clone)]
@@ -141,9 +143,7 @@ impl<B: Backend> MultimodalDragonState<B> {
             self.reset_fusion_state();
         }
 
-        if window.requires_detach()
-            && stream.step_index < window.detach_prefix_steps()
-        {
+        if window.requires_detach() && stream.step_index < window.detach_prefix_steps() {
             let detached = self.detach();
             *self = detached;
         }
@@ -158,6 +158,8 @@ pub fn detach_model_state<B: Backend>(state: &ModelState<B>) -> ModelState<B> {
             .map(|layer| LayerState {
                 rho: layer.rho.clone().map(Tensor::detach),
                 y_neuron_state: layer.y_neuron_state.clone().map(Tensor::detach),
+                clocked_slow_hidden: layer.clocked_slow_hidden.clone().map(Tensor::detach),
+                summary_memory_hidden: layer.summary_memory_hidden.clone().map(Tensor::detach),
             })
             .collect(),
         position: state.position,
@@ -172,6 +174,8 @@ pub fn model_state_inner<B: AutodiffBackend>(state: &ModelState<B>) -> ModelStat
             .map(|layer| LayerState {
                 rho: layer.rho.clone().map(Tensor::inner),
                 y_neuron_state: layer.y_neuron_state.clone().map(Tensor::inner),
+                clocked_slow_hidden: layer.clocked_slow_hidden.clone().map(Tensor::inner),
+                summary_memory_hidden: layer.summary_memory_hidden.clone().map(Tensor::inner),
             })
             .collect(),
         position: state.position,
@@ -188,6 +192,8 @@ pub fn model_state_from_inner<B: AutodiffBackend>(
             .map(|layer| LayerState {
                 rho: layer.rho.map(Tensor::from_inner),
                 y_neuron_state: layer.y_neuron_state.map(Tensor::from_inner),
+                clocked_slow_hidden: layer.clocked_slow_hidden.map(Tensor::from_inner),
+                summary_memory_hidden: layer.summary_memory_hidden.map(Tensor::from_inner),
             })
             .collect(),
         position: state.position,
@@ -198,8 +204,8 @@ pub fn model_state_from_inner<B: AutodiffBackend>(
 mod tests {
     use super::*;
     use burn::tensor::TensorData;
-    use burn_ndarray::NdArray;
     use burn_dragon_stream::{StreamSampleId, StreamStepMetadata};
+    use burn_ndarray::NdArray;
 
     #[test]
     fn stream_controls_reset_and_detach_state() {

@@ -4,38 +4,45 @@ use burn::tensor::backend::Backend;
 use burn::tensor::{Distribution as TensorDistribution, Int, Tensor, TensorData, activation};
 
 use burn_dragon_core::{
-    BankedRhoState, DragonNorm, FusedKernelConfig, ManifoldHyperConnections, StructuredBankRole,
-    StructuredRouteOperation, StructuredRoutePattern, StructuredRouteSpec, StructuredRoutingSpec,
-    StructuredStepMode, StructuredTopologyState, lowrank_residual_step, mhc_merge_with_coefficients,
-    mhc_split_with_coefficients, near_critical_residual_output_std, structured_dense_update_tokens,
-    target_major_decay_add,
+    BankedRhoState, DragonNorm, FusedAttentionExecutor, FusedKernelConfig,
+    ManifoldHyperConnections,
+    StructuredBankRole, StructuredRouteOperation, StructuredRoutePattern, StructuredRouteSpec,
+    StructuredRoutingSpec, StructuredStepMode, StructuredTopologyState, lowrank_residual_step,
+    mhc_merge_with_coefficients, mhc_split_with_coefficients, near_critical_residual_output_std,
+    structured_dense_update_tokens, target_major_decay_add,
 };
 use burn_dragon_wgpu::api::spatial::{
-    CompiledLocalGridRhoPlan, LocalGridNeighborhood, LocalGridShape2d,
-    LocalGridRhoPlanSpec,
-    CompiledStructuredPyramidRhoPlan,
-    StructuredPyramidBankMode, StructuredPyramidCoarseOnlyNoPatchStepInput,
-    StructuredPyramidCoarseOnlyStepOutput, StructuredPyramidRhoStepInput,
-    StructuredPyramidRhoStepOutput, StructuredPyramidShape,
-    StructuredPyramidSplitRhoStepInput,
-    reference_structured_pyramid_rho_step,
-    try_fused_structured_pyramid_coarse_only_no_patch_step_wgpu_with_plan,
-    supports_local_grid_rho_backend, try_fused_local_grid_rho_attention_wgpu_head_decay,
-    supports_structured_pyramid_rho_backend, try_fused_structured_pyramid_rho_step_wgpu_with_plan,
-    try_fused_structured_pyramid_split_step_wgpu_with_plan,
+    CompiledLocalGridRhoPlan, CompiledStructuredPyramidRhoPlan, LocalGridNeighborhood,
+    LocalGridRhoPlanSpec, LocalGridShape2d, StructuredPyramidBankMode,
+    StructuredPyramidCoarseOnlyNoPatchStepInput, StructuredPyramidCoarseOnlyStepOutput,
+    StructuredPyramidRhoStepInput, StructuredPyramidRhoStepOutput, StructuredPyramidShape,
+    StructuredPyramidSplitRhoStepInput, reference_structured_pyramid_rho_step,
+    supports_local_grid_rho_backend, supports_structured_pyramid_rho_backend,
+    try_fused_local_grid_rho_attention_wgpu_head_decay,
     try_fused_local_grid_rho_attention_wgpu_head_decay_with_plan,
+    try_fused_structured_pyramid_coarse_only_no_patch_step_wgpu_with_plan,
+    try_fused_structured_pyramid_rho_step_wgpu_with_plan,
+    try_fused_structured_pyramid_split_step_wgpu_with_plan,
 };
+use std::collections::BTreeMap;
 
 const ROW_NORM_EPS: f32 = 1e-6;
 
 mod cellular_state;
+#[cfg(feature = "benchmark")]
+mod benchmark;
 mod config;
 mod embedding;
 mod pyramid_ops;
 mod rho_stream;
+mod rollout_state;
 mod token_ops;
 
 pub use cellular_state::VisionCellularState;
+#[cfg(feature = "benchmark")]
+pub use benchmark::{
+    VisionDenseAttentionBenchAdapter, VisionDenseBenchAdapter, VisionRolloutScheduleBenchAdapter,
+};
 pub use config::*;
 pub use embedding::{
     PatchEmbed, PatchEmbedOutput, SpatialPositionalEncoding, VisionProjectionHead, patchify,
@@ -45,6 +52,7 @@ pub use pyramid_ops::{
     StageAwareHostProfileSnapshot, stage_aware_host_profile_reset,
     stage_aware_host_profile_snapshot,
 };
+pub use rollout_state::VisionRolloutState;
 
 fn centered_mode_offset_data(modes: usize, width: usize, scale: f32) -> Vec<f32> {
     let center = (modes.saturating_sub(1)) as f32 / 2.0;
@@ -142,7 +150,11 @@ impl<B: Backend> VisionDragon<B> {
         let patch_embed = PatchEmbed::new(&config, device);
         let dropout = DropoutConfig::new(config.dropout).init();
         let token_norm = if config.token_state_norm {
-            Some(DragonNorm::new(&config.normalization, config.embed_dim, device))
+            Some(DragonNorm::new(
+                &config.normalization,
+                config.embed_dim,
+                device,
+            ))
         } else {
             None
         };
@@ -659,6 +671,210 @@ impl<B: Backend> VisionDragon<B> {
         self.split_output(tokens)
     }
 
+    /// Evaluate multiple rollout checkpoints more efficiently than repeated full re-encodes.
+    ///
+    /// For the dense backbone this reuses detached prefix states over rollout depth, which acts
+    /// like TBPTT over step-time: each requested `(steps, backprop_steps)` pair reruns only the
+    /// tail segment that is still allowed to carry gradients.
+    ///
+    /// Backbones with richer persistent state contracts use the explicit `VisionRolloutState`
+    /// schedule path, caching detached prefix states and rerunning only the requested tail.
+    pub fn forward_images_steps_rollout_schedule(
+        &self,
+        images: Tensor<B, 4>,
+        schedule: &[(usize, usize)],
+    ) -> Vec<(usize, VisionDragonOutput<B>)> {
+        let patch = self.patch_embed.forward(images);
+        self.forward_tokens_steps_rollout_schedule_impl(patch.tokens, schedule, false)
+    }
+
+    /// Same as `forward_images_steps_rollout_schedule`, but does not clamp the requested rollout
+    /// depths to `self.steps`.
+    pub fn forward_images_steps_rollout_schedule_unbounded(
+        &self,
+        images: Tensor<B, 4>,
+        schedule: &[(usize, usize)],
+    ) -> Vec<(usize, VisionDragonOutput<B>)> {
+        let patch = self.patch_embed.forward(images);
+        self.forward_tokens_steps_rollout_schedule_impl(patch.tokens, schedule, true)
+    }
+
+    /// Evaluate multiple predictive rollout checkpoints from an explicit state with cached
+    /// detached prefixes between requested horizons.
+    pub fn predict_rollout_state_schedule(
+        &self,
+        state: VisionRolloutState<B>,
+        schedule: &[(usize, usize)],
+    ) -> Vec<(usize, VisionRolloutState<B>)> {
+        self.forward_rollout_state_schedule_impl(
+            state,
+            schedule,
+            StructuredStepMode::Predict,
+            false,
+        )
+    }
+
+    /// Same as `predict_rollout_state_schedule`, but does not clamp requested rollout depths to
+    /// `self.steps`.
+    pub fn predict_rollout_state_schedule_unbounded(
+        &self,
+        state: VisionRolloutState<B>,
+        schedule: &[(usize, usize)],
+    ) -> Vec<(usize, VisionRolloutState<B>)> {
+        self.forward_rollout_state_schedule_impl(state, schedule, StructuredStepMode::Predict, true)
+    }
+
+    /// Evaluate multiple refinement rollout checkpoints from an explicit state with cached
+    /// detached prefixes between requested horizons.
+    pub fn refine_rollout_state_schedule(
+        &self,
+        state: VisionRolloutState<B>,
+        schedule: &[(usize, usize)],
+    ) -> Vec<(usize, VisionRolloutState<B>)> {
+        self.forward_rollout_state_schedule_impl(state, schedule, StructuredStepMode::Refine, false)
+    }
+
+    /// Same as `refine_rollout_state_schedule`, but does not clamp requested rollout depths to
+    /// `self.steps`.
+    pub fn refine_rollout_state_schedule_unbounded(
+        &self,
+        state: VisionRolloutState<B>,
+        schedule: &[(usize, usize)],
+    ) -> Vec<(usize, VisionRolloutState<B>)> {
+        self.forward_rollout_state_schedule_impl(state, schedule, StructuredStepMode::Refine, true)
+    }
+
+    /// Initializes a topology-appropriate rollout state directly from observed images.
+    pub fn rollout_state_from_images(&self, images: Tensor<B, 4>) -> VisionRolloutState<B> {
+        let patch = self.patch_embed.forward(images);
+        self.rollout_state_from_tokens(patch.tokens)
+    }
+
+    /// Initializes a topology-appropriate rollout state from positioned patch tokens.
+    pub fn rollout_state_from_tokens(&self, tokens: Tensor<B, 3>) -> VisionRolloutState<B> {
+        match self.backbone_kind {
+            VisionBackboneKind::Dense => VisionRolloutState::Dense {
+                token_state: self.prepare_token_state(tokens, true),
+            },
+            VisionBackboneKind::Pyramid => {
+                VisionRolloutState::Pyramid(self.pyramid_state_from_patch_tokens(tokens))
+            }
+            VisionBackboneKind::Cellular => {
+                VisionRolloutState::Cellular(self.cellular_state_from_tokens(tokens))
+            }
+        }
+    }
+
+    /// Replaces the current observed image while preserving any persistent recurrent banks.
+    pub fn observe_rollout_state_unbounded(
+        &self,
+        state: VisionRolloutState<B>,
+        images: Tensor<B, 4>,
+        steps: usize,
+        backprop_steps: usize,
+    ) -> VisionRolloutState<B> {
+        let patch = self.patch_embed.forward(images);
+        self.observe_rollout_state_with_tokens_unbounded(state, patch.tokens, steps, backprop_steps)
+    }
+
+    /// Replaces the current observed token stream while preserving any persistent recurrent banks.
+    pub fn observe_rollout_state_with_tokens_unbounded(
+        &self,
+        state: VisionRolloutState<B>,
+        tokens: Tensor<B, 3>,
+        steps: usize,
+        backprop_steps: usize,
+    ) -> VisionRolloutState<B> {
+        let steps = steps.max(1);
+        let backprop_steps = backprop_steps.max(1).min(steps);
+        let detach_until = steps.saturating_sub(backprop_steps);
+        match state {
+            VisionRolloutState::Dense { .. } => VisionRolloutState::Dense {
+                token_state: self.rollout_dense_prepared_state(
+                    self.prepare_token_state(tokens, true),
+                    steps,
+                    detach_until,
+                ),
+            },
+            VisionRolloutState::Pyramid(state) => VisionRolloutState::Pyramid(
+                self.observe_pyramid_state(state, tokens, steps, backprop_steps),
+            ),
+            VisionRolloutState::Cellular(state) => VisionRolloutState::Cellular(
+                self.observe_cellular_state(state, tokens, steps, backprop_steps),
+            ),
+        }
+    }
+
+    /// Runs a refinement rollout from an explicit recurrent state without advancing temporal time.
+    pub fn refine_rollout_state_unbounded(
+        &self,
+        state: VisionRolloutState<B>,
+        steps: usize,
+        backprop_steps: usize,
+    ) -> VisionRolloutState<B> {
+        let steps = steps.max(1);
+        let backprop_steps = backprop_steps.max(1).min(steps);
+        let detach_until = steps.saturating_sub(backprop_steps);
+        match state {
+            VisionRolloutState::Dense { token_state } => VisionRolloutState::Dense {
+                token_state: self.rollout_dense_prepared_state(token_state, steps, detach_until),
+            },
+            VisionRolloutState::Pyramid(state) => {
+                VisionRolloutState::Pyramid(self.refine_pyramid_state(state, steps, backprop_steps))
+            }
+            VisionRolloutState::Cellular(state) => VisionRolloutState::Cellular(
+                self.refine_cellular_state(state, steps, backprop_steps),
+            ),
+        }
+    }
+
+    /// Runs a predictive rollout from an explicit recurrent state, advancing temporal state where
+    /// the active backbone supports it.
+    pub fn predict_rollout_state_unbounded(
+        &self,
+        state: VisionRolloutState<B>,
+        steps: usize,
+        backprop_steps: usize,
+    ) -> VisionRolloutState<B> {
+        let steps = steps.max(1);
+        let backprop_steps = backprop_steps.max(1).min(steps);
+        let detach_until = steps.saturating_sub(backprop_steps);
+        match state {
+            VisionRolloutState::Dense { token_state } => VisionRolloutState::Dense {
+                token_state: self.rollout_dense_prepared_state(token_state, steps, detach_until),
+            },
+            VisionRolloutState::Pyramid(state) => VisionRolloutState::Pyramid(
+                self.predict_pyramid_state(state, steps, backprop_steps),
+            ),
+            VisionRolloutState::Cellular(state) => VisionRolloutState::Cellular(
+                self.predict_cellular_state(state, steps, backprop_steps),
+            ),
+        }
+    }
+
+    /// Reads out the current explicit rollout state through the normal projection head.
+    pub fn forward_rollout_state(&self, state: &VisionRolloutState<B>) -> VisionDragonOutput<B> {
+        match state {
+            VisionRolloutState::Dense { token_state } => {
+                let projected = self.projection.forward(token_state.clone());
+                self.split_output(projected)
+            }
+            VisionRolloutState::Pyramid(state) => {
+                let patch_tokens = self.pyramid_patch_tokens(state);
+                let [batch, _time, dim] = patch_tokens.shape().dims::<3>();
+                let tokens = if self.use_cls_token {
+                    let cls = patch_tokens.clone().mean_dim(1).reshape([batch, 1, dim]);
+                    Tensor::cat(vec![cls, patch_tokens], 1)
+                } else {
+                    patch_tokens
+                };
+                let projected = self.projection.forward(tokens);
+                self.split_output(projected)
+            }
+            VisionRolloutState::Cellular(state) => self.forward_cellular_state(state),
+        }
+    }
+
     /// Initializes the cellular recurrent state from an observed token sequence.
     ///
     /// Persistence contract:
@@ -864,11 +1080,22 @@ impl<B: Backend> VisionDragon<B> {
                     &device,
                 ),
                 context_rho: Tensor::<B, 5>::zeros(
-                    [batch, coarse_rank, value_dim, h32_height.max(1), h32_width.max(1)],
+                    [
+                        batch,
+                        coarse_rank,
+                        value_dim,
+                        h32_height.max(1),
+                        h32_width.max(1),
+                    ],
                     &device,
                 ),
                 global_rho: Tensor::<B, 4>::zeros(
-                    [batch, self.trm_graph.hub_count.max(1), global_rank, value_dim],
+                    [
+                        batch,
+                        self.trm_graph.hub_count.max(1),
+                        global_rank,
+                        value_dim,
+                    ],
                     &device,
                 ),
             },
@@ -1085,7 +1312,8 @@ impl<B: Backend> VisionDragon<B> {
         bank_mode: &VisionTrmGraphBankModeConfig,
     ) -> StructuredPyramidRhoStepOutput<B> {
         let shape = self.pyramid_shape();
-        let [patch_batch, patch_value_dim, patch_height, patch_width] = patch_value.shape().dims::<4>();
+        let [patch_batch, patch_value_dim, patch_height, patch_width] =
+            patch_value.shape().dims::<4>();
         let [coarse_batch, coarse_value_dim, coarse_height, coarse_width] =
             coarse_value.shape().dims::<4>();
         let patch_zero = || {
@@ -1167,33 +1395,39 @@ impl<B: Backend> VisionDragon<B> {
             Self::pyramid_rho_to_target_major(patch_update),
             patch_decay,
         );
-        let next_patch_rho = Self::pyramid_rho_from_target_major(next_patch_rho, shape.patch.height, shape.patch.width);
+        let next_patch_rho = Self::pyramid_rho_from_target_major(
+            next_patch_rho,
+            shape.patch.height,
+            shape.patch.width,
+        );
 
         let coarse_rho_shape = coarse_rho.shape().dims::<5>();
         let coarse_rank = coarse_rho_shape[1];
         let coarse_rho_device = coarse_rho.device();
         let next_coarse_rho = target_major_decay_add(
             Self::pyramid_rho_to_target_major(coarse_rho),
-            Self::pyramid_rho_to_target_major(coarse_update.clone())
-                .add(
-                    patch_to_coarse_update
-                        .map(Self::pyramid_rho_to_target_major)
-                        .unwrap_or_else(|| {
-                            Tensor::<B, 4>::zeros(
-                                [
-                                    coarse_batch,
-                                    coarse_height * coarse_width,
-                                    coarse_rank,
-                                    coarse_value_dim,
-                                ],
-                                &coarse_rho_device,
-                            )
-                        }),
-                ),
+            Self::pyramid_rho_to_target_major(coarse_update.clone()).add(
+                patch_to_coarse_update
+                    .map(Self::pyramid_rho_to_target_major)
+                    .unwrap_or_else(|| {
+                        Tensor::<B, 4>::zeros(
+                            [
+                                coarse_batch,
+                                coarse_height * coarse_width,
+                                coarse_rank,
+                                coarse_value_dim,
+                            ],
+                            &coarse_rho_device,
+                        )
+                    }),
+            ),
             coarse_decay,
         );
-        let next_coarse_rho =
-            Self::pyramid_rho_from_target_major(next_coarse_rho, shape.coarse.height, shape.coarse.width);
+        let next_coarse_rho = Self::pyramid_rho_from_target_major(
+            next_coarse_rho,
+            shape.coarse.height,
+            shape.coarse.width,
+        );
 
         let next_hub_rho = self.pyramid_update_hub(
             global_rho,
@@ -1325,8 +1559,7 @@ impl<B: Backend> VisionDragon<B> {
             && self.trm_graph.uses_default_bank_schedule()
             && predict_coarse_substeps == 1;
         let fused_plan = match executor_mode {
-            PyramidRolloutExecutorMode::WgpuFused if uniform_fused_eligible =>
-            {
+            PyramidRolloutExecutorMode::WgpuFused if uniform_fused_eligible => {
                 Some(CompiledStructuredPyramidRhoPlan::new(
                     state.primary_state().shape().dims::<4>()[0],
                     patch_rank,
@@ -1438,11 +1671,13 @@ impl<B: Backend> VisionDragon<B> {
                 )
             };
             let hub_w8 = if patch_hub_gate_enabled {
-                Some(self.normalize_hub_weights(
-                    patch_proj
-                        .next()
-                        .expect("patch multi-projection should include hub-gate output"),
-                ))
+                Some(
+                    self.normalize_hub_weights(
+                        patch_proj
+                            .next()
+                            .expect("patch multi-projection should include hub-gate output"),
+                    ),
+                )
             } else if hub_count > 1 {
                 Some(self.pyramid_hub_weights_single(h8.clone(), hub_count, None))
             } else {
@@ -1471,9 +1706,9 @@ impl<B: Backend> VisionDragon<B> {
                 coarse_layers.push(hub_gate);
             }
             for _ in 1..predict_coarse_substeps {
-                let mut coarse_proj =
-                    self.project_spatial_many(current_coarse_state.clone(), &coarse_layers)
-                        .into_iter();
+                let mut coarse_proj = self
+                    .project_spatial_many(current_coarse_state.clone(), &coarse_layers)
+                    .into_iter();
                 let coarse_x = activation::relu(
                     coarse_proj
                         .next()
@@ -1488,11 +1723,13 @@ impl<B: Backend> VisionDragon<B> {
                     .next()
                     .expect("coarse multi-projection should include write-value output");
                 let hub_w32 = if coarse_hub_gate_enabled {
-                    Some(self.normalize_hub_weights(
-                        coarse_proj
-                            .next()
-                            .expect("coarse multi-projection should include hub-gate output"),
-                    ))
+                    Some(
+                        self.normalize_hub_weights(
+                            coarse_proj
+                                .next()
+                                .expect("coarse multi-projection should include hub-gate output"),
+                        ),
+                    )
                 } else if hub_count > 1 {
                     Some(self.pyramid_hub_weights_single(
                         current_coarse_state.clone(),
@@ -1503,47 +1740,50 @@ impl<B: Backend> VisionDragon<B> {
                     None
                 };
                 if let Some(plan) = split_fused_plan.as_ref() {
-                    let rho_step = try_fused_structured_pyramid_coarse_only_no_patch_step_wgpu_with_plan(
-                        pyramid_shape,
-                        StructuredPyramidCoarseOnlyNoPatchStepInput {
-                            coarse_local_query: coarse_x.clone(),
-                            coarse_query_for_global: coarse_global_query.clone(),
-                            coarse_value: v32.clone(),
-                            coarse_rho: current_coarse_rho.clone(),
-                            hub_rho: current_hub_rho.clone(),
-                            coarse_hub_weights: hub_w32.clone(),
-                            coarse_decay: ones_coarse_decay.clone(),
-                            global_decay: ones_global_decay.clone(),
-                            bank_mode: Self::pyramid_bank_mode_for_kernel(&coarse_only_bank_mode),
-                        },
-                        plan,
-                    )
-                    .unwrap_or_else(|| {
-                        let rho_step = self.pyramid_reference_step_split(
-                            patch_x.clone(),
-                            patch_coarse_query.clone(),
-                            patch_global_query.clone(),
-                            v8.clone(),
-                            coarse_x.clone(),
-                            coarse_global_query,
-                            v32,
-                            current_patch_rho.clone(),
-                            current_coarse_rho,
-                            current_hub_rho,
-                            hub_w8.clone(),
-                            hub_w32.clone(),
-                            ones_patch_decay.clone(),
-                            ones_coarse_decay.clone(),
-                            ones_global_decay.clone(),
-                            &coarse_only_bank_mode,
-                        );
-                        StructuredPyramidCoarseOnlyStepOutput {
-                            coarse_local_context: rho_step.coarse_local_context,
-                            coarse_from_hub_context: rho_step.coarse_from_hub_context,
-                            next_coarse_rho: rho_step.next_coarse_rho,
-                            next_hub_rho: rho_step.next_hub_rho,
-                        }
-                    });
+                    let rho_step =
+                        try_fused_structured_pyramid_coarse_only_no_patch_step_wgpu_with_plan(
+                            pyramid_shape,
+                            StructuredPyramidCoarseOnlyNoPatchStepInput {
+                                coarse_local_query: coarse_x.clone(),
+                                coarse_query_for_global: coarse_global_query.clone(),
+                                coarse_value: v32.clone(),
+                                coarse_rho: current_coarse_rho.clone(),
+                                hub_rho: current_hub_rho.clone(),
+                                coarse_hub_weights: hub_w32.clone(),
+                                coarse_decay: ones_coarse_decay.clone(),
+                                global_decay: ones_global_decay.clone(),
+                                bank_mode: Self::pyramid_bank_mode_for_kernel(
+                                    &coarse_only_bank_mode,
+                                ),
+                            },
+                            plan,
+                        )
+                        .unwrap_or_else(|| {
+                            let rho_step = self.pyramid_reference_step_split(
+                                patch_x.clone(),
+                                patch_coarse_query.clone(),
+                                patch_global_query.clone(),
+                                v8.clone(),
+                                coarse_x.clone(),
+                                coarse_global_query,
+                                v32,
+                                current_patch_rho.clone(),
+                                current_coarse_rho,
+                                current_hub_rho,
+                                hub_w8.clone(),
+                                hub_w32.clone(),
+                                ones_patch_decay.clone(),
+                                ones_coarse_decay.clone(),
+                                ones_global_decay.clone(),
+                                &coarse_only_bank_mode,
+                            );
+                            StructuredPyramidCoarseOnlyStepOutput {
+                                coarse_local_context: rho_step.coarse_local_context,
+                                coarse_from_hub_context: rho_step.coarse_from_hub_context,
+                                next_coarse_rho: rho_step.next_coarse_rho,
+                                next_hub_rho: rho_step.next_hub_rho,
+                            }
+                        });
                     current_coarse_state = self.pyramid_update_state(
                         current_coarse_state,
                         coarse_x.clone(),
@@ -1636,17 +1876,15 @@ impl<B: Backend> VisionDragon<B> {
                 .next()
                 .expect("coarse multi-projection should include write-value output");
             let hub_w32 = if coarse_hub_gate_enabled {
-                Some(self.normalize_hub_weights(
-                    coarse_proj
-                        .next()
-                        .expect("coarse multi-projection should include hub-gate output"),
-                ))
+                Some(
+                    self.normalize_hub_weights(
+                        coarse_proj
+                            .next()
+                            .expect("coarse multi-projection should include hub-gate output"),
+                    ),
+                )
             } else if hub_count > 1 {
-                Some(self.pyramid_hub_weights_single(
-                    current_coarse_state.clone(),
-                    hub_count,
-                    None,
-                ))
+                Some(self.pyramid_hub_weights_single(current_coarse_state.clone(), hub_count, None))
             } else {
                 None
             };
@@ -2090,6 +2328,375 @@ impl<B: Backend> VisionDragon<B> {
         }
     }
 
+    fn normalize_rollout_schedule(
+        &self,
+        schedule: &[(usize, usize)],
+        unbounded: bool,
+    ) -> Vec<(usize, usize)> {
+        let max_supported_steps = self.steps.max(1);
+        let mut normalized = schedule
+            .iter()
+            .map(|(step, backprop_steps)| {
+                let step = if unbounded {
+                    (*step).max(1)
+                } else {
+                    (*step).max(1).min(max_supported_steps)
+                };
+                let backprop_steps = if *backprop_steps == 0 {
+                    step
+                } else {
+                    (*backprop_steps).max(1).min(step)
+                };
+                (step, backprop_steps)
+            })
+            .collect::<Vec<_>>();
+        normalized.sort_unstable_by_key(|(step, _)| *step);
+        let mut deduped: Vec<(usize, usize)> = Vec::with_capacity(normalized.len());
+        for (step, backprop_steps) in normalized {
+            if let Some((last_step, last_backprop)) = deduped.last_mut()
+                && *last_step == step
+            {
+                *last_backprop = (*last_backprop).max(backprop_steps);
+            } else {
+                deduped.push((step, backprop_steps));
+            }
+        }
+        deduped
+    }
+
+    fn advance_rollout_state_unbounded(
+        &self,
+        state: VisionRolloutState<B>,
+        steps: usize,
+        backprop_steps: usize,
+        mode: StructuredStepMode,
+    ) -> VisionRolloutState<B> {
+        match mode {
+            StructuredStepMode::Refine => {
+                self.refine_rollout_state_unbounded(state, steps, backprop_steps)
+            }
+            StructuredStepMode::Predict => {
+                self.predict_rollout_state_unbounded(state, steps, backprop_steps)
+            }
+            StructuredStepMode::Observe => {
+                panic!("observe rollout scheduling requires explicit observation tokens")
+            }
+        }
+    }
+
+    fn forward_rollout_state_schedule_impl(
+        &self,
+        initial_state: VisionRolloutState<B>,
+        schedule: &[(usize, usize)],
+        mode: StructuredStepMode,
+        unbounded: bool,
+    ) -> Vec<(usize, VisionRolloutState<B>)> {
+        let normalized = self.normalize_rollout_schedule(schedule, unbounded);
+        if normalized.is_empty() {
+            return Vec::new();
+        }
+        if normalized.len() == 1 {
+            let (step, backprop_steps) = normalized[0];
+            return vec![(
+                step,
+                self.advance_rollout_state_unbounded(initial_state, step, backprop_steps, mode),
+            )];
+        }
+
+        let mut starts = normalized
+            .iter()
+            .map(|(step, backprop_steps)| step.saturating_sub(*backprop_steps))
+            .collect::<Vec<_>>();
+        starts.push(0);
+        starts.sort_unstable();
+        starts.dedup();
+
+        let mut cached = BTreeMap::new();
+        cached.insert(0usize, initial_state);
+        let mut previous_start = 0usize;
+        for &start in starts.iter().skip(1) {
+            let previous_state = cached
+                .get(&previous_start)
+                .expect("rollout prefix state")
+                .clone();
+            let delta = start.saturating_sub(previous_start);
+            let state = self
+                .advance_rollout_state_unbounded(previous_state, delta, delta, mode)
+                .detach();
+            cached.insert(start, state);
+            previous_start = start;
+        }
+
+        normalized
+            .into_iter()
+            .map(|(step, backprop_steps)| {
+                let start = step.saturating_sub(backprop_steps);
+                let start_state = cached.get(&start).expect("rollout start state").clone();
+                let final_state = self.advance_rollout_state_unbounded(
+                    start_state,
+                    backprop_steps,
+                    backprop_steps,
+                    mode,
+                );
+                (step, final_state)
+            })
+            .collect()
+    }
+
+    fn forward_tokens_steps_rollout_schedule_impl(
+        &self,
+        tokens: Tensor<B, 3>,
+        schedule: &[(usize, usize)],
+        unbounded: bool,
+    ) -> Vec<(usize, VisionDragonOutput<B>)> {
+        let normalized = self.normalize_rollout_schedule(schedule, unbounded);
+        if normalized.is_empty() {
+            return Vec::new();
+        }
+
+        if self.backbone_kind != VisionBackboneKind::Dense {
+            let states = self.predict_rollout_state_schedule_unbounded(
+                self.rollout_state_from_tokens(tokens),
+                &normalized,
+            );
+            return states
+                .into_iter()
+                .map(|(step, state)| (step, self.forward_rollout_state(&state)))
+                .collect();
+        }
+
+        if normalized.len() == 1 {
+            return normalized
+                .into_iter()
+                .map(|(step, backprop_steps)| {
+                    let output = if unbounded {
+                        self.forward_tokens_steps_rollout_unbounded(
+                            tokens.clone(),
+                            step,
+                            backprop_steps,
+                        )
+                    } else {
+                        self.forward_tokens_steps_rollout(tokens.clone(), step, backprop_steps)
+                    };
+                    (step, output)
+                })
+                .collect();
+        }
+
+        let initial_state = self.prepare_token_state(tokens, true);
+        let cached = self.cache_dense_rollout_prefix_states(initial_state, &normalized);
+        self.forward_dense_rollout_schedule_from_cached(&normalized, &cached)
+    }
+
+    fn cache_dense_rollout_prefix_states(
+        &self,
+        initial_state: Tensor<B, 3>,
+        schedule: &[(usize, usize)],
+    ) -> BTreeMap<usize, Tensor<B, 3>> {
+        let mut starts = schedule
+            .iter()
+            .map(|(step, backprop_steps)| step.saturating_sub(*backprop_steps))
+            .collect::<Vec<_>>();
+        starts.push(0);
+        starts.sort_unstable();
+        starts.dedup();
+
+        let mut cached = BTreeMap::new();
+        cached.insert(0usize, initial_state);
+        let mut previous_start = 0usize;
+        for &start in starts.iter().skip(1) {
+            let previous_state = cached
+                .get(&previous_start)
+                .expect("rollout prefix state")
+                .clone();
+            let delta = start.saturating_sub(previous_start);
+            let state = self.rollout_dense_prepared_state(previous_state, delta, delta);
+            cached.insert(start, state);
+            previous_start = start;
+        }
+        cached
+    }
+
+    fn forward_dense_rollout_schedule_from_cached(
+        &self,
+        schedule: &[(usize, usize)],
+        cached: &BTreeMap<usize, Tensor<B, 3>>,
+    ) -> Vec<(usize, VisionDragonOutput<B>)> {
+        if matches!(
+            self.kernel.attention_executor,
+            FusedAttentionExecutor::ScoresOnly
+        ) {
+            let min_backprop = schedule.iter().map(|(_, backprop_steps)| *backprop_steps).min();
+            let max_backprop = schedule.iter().map(|(_, backprop_steps)| *backprop_steps).max();
+            if let (Some(min_backprop), Some(max_backprop)) = (min_backprop, max_backprop) {
+                if max_backprop > min_backprop && max_backprop.saturating_sub(min_backprop) == 1 {
+                    return self.forward_dense_rollout_schedule_from_cached_unified(
+                        schedule,
+                        cached,
+                        max_backprop,
+                    );
+                }
+            }
+        }
+
+        let batch = cached
+            .get(&0)
+            .expect("initial dense rollout state")
+            .shape()
+            .dims::<3>()[0];
+        let mut grouped: BTreeMap<usize, Vec<(usize, usize, Tensor<B, 3>)>> = BTreeMap::new();
+        for (index, &(step, backprop_steps)) in schedule.iter().enumerate() {
+            let start = step.saturating_sub(backprop_steps);
+            let start_state = cached.get(&start).expect("rollout start state").clone();
+            grouped
+                .entry(backprop_steps)
+                .or_default()
+                .push((index, step, start_state));
+        }
+
+        let mut outputs: Vec<Option<(usize, VisionDragonOutput<B>)>> = vec![None; schedule.len()];
+        for (backprop_steps, requests) in grouped {
+            if requests.len() == 1 {
+                let (index, step, start_state) = requests
+                    .into_iter()
+                    .next()
+                    .expect("single dense rollout schedule request");
+                let final_state = self.rollout_dense_prepared_state(start_state, backprop_steps, 0);
+                let projected = self.projection.forward(final_state);
+                outputs[index] = Some((step, self.split_output(projected)));
+                continue;
+            }
+
+            let packed_start = Tensor::cat(
+                requests
+                    .iter()
+                    .map(|(_, _, start_state)| start_state.clone())
+                    .collect(),
+                0,
+            );
+            let packed_final = self.rollout_dense_prepared_state(packed_start, backprop_steps, 0);
+            let packed_projected = self.projection.forward(packed_final);
+
+            let mut batch_offset = 0usize;
+            for (index, step, _) in requests {
+                let next_offset = batch_offset + batch;
+                let projected = packed_projected
+                    .clone()
+                    .slice_dim(0, batch_offset..next_offset);
+                outputs[index] = Some((step, self.split_output(projected)));
+                batch_offset = next_offset;
+            }
+        }
+
+        outputs
+            .into_iter()
+            .map(|output| output.expect("dense rollout schedule output"))
+            .collect()
+    }
+
+    fn forward_dense_rollout_schedule_from_cached_unified(
+        &self,
+        schedule: &[(usize, usize)],
+        cached: &BTreeMap<usize, Tensor<B, 3>>,
+        exec_steps: usize,
+    ) -> Vec<(usize, VisionDragonOutput<B>)> {
+        let batch = cached
+            .get(&0)
+            .expect("initial dense rollout state")
+            .shape()
+            .dims::<3>()[0];
+        let mut requests = schedule
+            .iter()
+            .enumerate()
+            .map(|(index, &(step, backprop_steps))| {
+                let start = step.saturating_sub(backprop_steps);
+                let checkpoint = step.saturating_sub(start).max(1);
+                let start_state = cached.get(&start).expect("rollout start state").clone();
+                (checkpoint, index, step, start_state)
+            })
+            .collect::<Vec<_>>();
+        requests.sort_by_key(|(checkpoint, _, _, _)| *checkpoint);
+
+        let packed_start = Tensor::cat(
+            requests
+                .iter()
+                .map(|(_, _, _, start_state)| start_state.clone())
+                .collect(),
+            0,
+        );
+        let mut outputs: Vec<Option<(usize, VisionDragonOutput<B>)>> = vec![None; schedule.len()];
+        let [packed_batch, time, _] = packed_start.shape().dims::<3>();
+        let mut current = packed_start.reshape([packed_batch, 1, time, self.embed_dim]);
+
+        let encoder_raw = self.encoder.val();
+        let [heads, embd_enc, latent] = encoder_raw.shape().dims::<3>();
+        let encoder = encoder_raw.reshape([1, heads, embd_enc, latent]);
+
+        let encoder_v_raw = self.encoder_v.val();
+        let [heads_v, embd_v, latent_v] = encoder_v_raw.shape().dims::<3>();
+        let encoder_v = encoder_v_raw.reshape([1, heads_v, embd_v, latent_v]);
+
+        let decoder = self.decoder.val();
+        let fused =
+            self.kernel.enabled && matches!(self.latent_activation, VisionLatentActivation::Relu);
+        let apply_threshold = matches!(self.latent_activation, VisionLatentActivation::Relu);
+        let latent_pattern = &self.kernel.block_sparse.latent;
+        let sparse_mask = if fused && latent_pattern.is_sparse() {
+            Some(latent_pattern.mask::<B>(latent, &current.device()))
+        } else {
+            None
+        };
+
+        let mut request_offset = 0usize;
+        for step_idx in 0..exec_steps {
+            let output = lowrank_residual_step(
+                current,
+                encoder.clone(),
+                encoder_v.clone(),
+                decoder.clone(),
+                &self.dropout,
+                fused,
+                self.kernel.relu_threshold,
+                apply_threshold,
+                latent_pattern,
+                sparse_mask.clone(),
+                |query, value| self.full_attention(query, value),
+                |values| self.apply_latent_activation(values),
+                |values| self.apply_token_norm(values),
+            );
+            current = output.next;
+
+            let completed_step = step_idx + 1;
+            while request_offset < requests.len() && requests[request_offset].0 == completed_step {
+                let mut next_offset = request_offset + 1;
+                while next_offset < requests.len() && requests[next_offset].0 == completed_step {
+                    next_offset += 1;
+                }
+
+                let state = current
+                    .clone()
+                    .reshape([packed_batch, time, self.embed_dim])
+                    .slice_dim(0, request_offset * batch..next_offset * batch);
+                let projected = self.projection.forward(state);
+
+                let mut batch_offset = 0usize;
+                for (_, index, step, _) in &requests[request_offset..next_offset] {
+                    let next_batch = batch_offset + batch;
+                    let projected = projected.clone().slice_dim(0, batch_offset..next_batch);
+                    outputs[*index] = Some((*step, self.split_output(projected)));
+                    batch_offset = next_batch;
+                }
+
+                request_offset = next_offset;
+            }
+        }
+
+        outputs
+            .into_iter()
+            .map(|output| output.expect("dense rollout schedule output"))
+            .collect()
+    }
+
     fn encode_tokens_steps_inner_default(
         &self,
         tokens: Tensor<B, 3>,
@@ -2104,8 +2711,24 @@ impl<B: Backend> VisionDragon<B> {
         };
 
         let [batch, time, _] = tokens.shape().dims::<3>();
-        let mut current = tokens.reshape([batch, 1, time, self.embed_dim]);
-        current = self.apply_token_norm(current);
+        let current = tokens.reshape([batch, 1, time, self.embed_dim]);
+        let current = self.apply_token_norm(current);
+        let current = self.rollout_dense_prepared_state(
+            current.reshape([batch, time, self.embed_dim]),
+            steps,
+            detach_until,
+        );
+        current
+    }
+
+    fn rollout_dense_prepared_state(
+        &self,
+        current: Tensor<B, 3>,
+        steps: usize,
+        detach_until: usize,
+    ) -> Tensor<B, 3> {
+        let [batch, time, _] = current.shape().dims::<3>();
+        let mut current = current.reshape([batch, 1, time, self.embed_dim]);
 
         let encoder_raw = self.encoder.val();
         let [heads, embd_enc, latent] = encoder_raw.shape().dims::<3>();
@@ -2465,7 +3088,9 @@ impl<B: Backend> VisionDragon<B> {
             backprop_steps,
             StructuredStepMode::Predict,
         );
-        let patch_tokens = self.pyramid_patch_tokens(&state).reshape([batch, patch_count, dim]);
+        let patch_tokens = self
+            .pyramid_patch_tokens(&state)
+            .reshape([batch, patch_count, dim]);
         if has_cls {
             let cls = patch_tokens.clone().mean_dim(1).reshape([batch, 1, dim]);
             Tensor::cat(vec![cls, patch_tokens], 1)
@@ -2524,19 +3149,21 @@ impl<B: Backend> VisionDragon<B> {
             None
         };
 
-        let mhc_coefficients = self
-            .mhc_layers
-            .as_ref()
-            .map(|layers| layers.iter().map(|mhc| mhc.coefficients()).collect::<Vec<_>>());
+        let mhc_coefficients = self.mhc_layers.as_ref().map(|layers| {
+            layers
+                .iter()
+                .map(|mhc| mhc.coefficients())
+                .collect::<Vec<_>>()
+        });
 
         for step_idx in 0..steps {
             let mhc = self
                 .mhc_layers
                 .as_ref()
                 .map(|layers| &layers[step_idx.min(layers.len().saturating_sub(1))]);
-            let mhc_coefficients = mhc_coefficients
-                .as_ref()
-                .and_then(|coefficients| coefficients.get(step_idx.min(coefficients.len().saturating_sub(1))));
+            let mhc_coefficients = mhc_coefficients.as_ref().and_then(|coefficients| {
+                coefficients.get(step_idx.min(coefficients.len().saturating_sub(1)))
+            });
             let (branch_input, residuals_base, beta) =
                 mhc_split_with_coefficients(mhc, current, mhc_coefficients);
 
@@ -2594,3 +3221,5 @@ impl<B: Backend> VisionDragon<B> {
 
 #[cfg(test)]
 mod rho_stream_tests;
+#[cfg(test)]
+mod rollout_state_tests;

@@ -1,0 +1,1 @@
+extends = ["../experiments/imagenette_dinov2_vits14_dense_h8_deepbias0p5_ff6_280_promoted.toml"]

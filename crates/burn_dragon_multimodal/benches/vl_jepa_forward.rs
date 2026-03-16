@@ -1,9 +1,9 @@
 use burn::tensor::{Int, Tensor};
-use burn_ndarray::NdArray;
 use burn_dragon_multimodal::{
-    MultimodalStepMode, VlJepaDragon, VlJepaDragonConfig, VideoLanguageTripletBatch,
-    VisionLanguageTripletBatch,
+    MultimodalStepMode, VideoLanguageTripletBatch, VisionLanguageTripletBatch, VlJepaDragon,
+    VlJepaDragonConfig,
 };
+use burn_ndarray::NdArray;
 use criterion::{Criterion, criterion_group, criterion_main};
 
 type Backend = NdArray<f32>;

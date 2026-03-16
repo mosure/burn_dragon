@@ -283,9 +283,19 @@ fn wgpu_training_and_inference_core_switches_parse() {
     assert_eq!(config.training.gradient_accumulation_steps, 3);
     assert_eq!(config.training.target_effective_batch_size, Some(48));
     assert!(config.wgpu.training.startup_autotune.enabled);
-    assert_eq!(config.wgpu.training.startup_autotune.target_device_memory_mb, 4096);
+    assert_eq!(
+        config
+            .wgpu
+            .training
+            .startup_autotune
+            .target_device_memory_mb,
+        4096
+    );
     assert_eq!(config.wgpu.training.startup_autotune.min_batch_size, 4);
-    assert_eq!(config.wgpu.training.startup_autotune.max_batch_size, Some(64));
+    assert_eq!(
+        config.wgpu.training.startup_autotune.max_batch_size,
+        Some(64)
+    );
     assert_eq!(config.wgpu.training.startup_autotune.probe_steps, 2);
     assert!(!config.wgpu.training.startup_autotune.binary_search);
     assert_eq!(config.wgpu.inference.fused_core_recurrent, Some(false));
@@ -327,7 +337,9 @@ fn validate_rejects_invalid_wgpu_startup_autotune_config() {
         probe_steps = 0
     "#;
     let config: TrainingConfig = toml::from_str(text).expect("parse training config");
-    let error = config.validate().expect_err("invalid autotune config should fail");
+    let error = config
+        .validate()
+        .expect_err("invalid autotune config should fail");
     assert!(
         error
             .to_string()
@@ -359,6 +371,7 @@ fn mhc_override_parses_and_validates_for_language_bdh() {
         enabled = true
         num_streams = 1
         num_views = 4
+        last_layers = 1
         coefficient_policy = "static_sinkhorn"
         mhc_iters = 8
         mhc_tau = 0.1
@@ -366,11 +379,14 @@ fn mhc_override_parses_and_validates_for_language_bdh() {
         dropout = 0.0
     "#;
     let config: TrainingConfig = toml::from_str(text).expect("parse training config");
-    config.validate().expect("language mHC config should validate");
+    config
+        .validate()
+        .expect("language mHC config should validate");
     let mhc = config.model.mhc.expect("mHC override");
     assert!(mhc.enabled);
     assert_eq!(mhc.num_streams, 1);
     assert_eq!(mhc.num_views, 4);
+    assert_eq!(mhc.last_layers, Some(1));
     assert_eq!(
         mhc.coefficient_policy,
         ManifoldHyperConnectionCoefficientPolicy::StaticSinkhorn
@@ -407,7 +423,9 @@ fn y_neuron_recurrence_override_parses_and_validates_for_language_bdh() {
         state_rms_cap = 0.75
     "#;
     let config: TrainingConfig = toml::from_str(text).expect("parse training config");
-    config.validate().expect("language y_neuron recurrence should validate");
+    config
+        .validate()
+        .expect("language y_neuron recurrence should validate");
     let recurrence = config
         .model
         .y_neuron_recurrence
@@ -445,9 +463,14 @@ fn normalization_override_parses_and_validates_for_language_bdh() {
         kind = "rms_norm"
     "#;
     let config: TrainingConfig = toml::from_str(text).expect("parse training config");
-    config.validate().expect("language normalization config should validate");
+    config
+        .validate()
+        .expect("language normalization config should validate");
     let normalization = config.model.normalization.expect("normalization override");
-    assert_eq!(normalization.kind, burn_dragon_core::DragonNormKind::RmsNorm);
+    assert_eq!(
+        normalization.kind,
+        burn_dragon_core::DragonNormKind::RmsNorm
+    );
 }
 
 #[test]
@@ -480,7 +503,9 @@ fn y_sparse_recurrence_alias_parses_into_y_neuron_recurrence() {
         state_rms_cap = 0.5
     "#;
     let config: TrainingConfig = toml::from_str(text).expect("parse training config");
-    config.validate().expect("legacy y_sparse alias should validate");
+    config
+        .validate()
+        .expect("legacy y_sparse alias should validate");
     let recurrence = config
         .model
         .y_neuron_recurrence
@@ -522,7 +547,9 @@ fn validate_rejects_zero_last_layers_for_y_neuron_recurrence() {
         state_update_scale = 1.0
     "#;
     let config: TrainingConfig = toml::from_str(text).expect("parse training config");
-    let err = config.validate().expect_err("zero last_layers should be rejected");
+    let err = config
+        .validate()
+        .expect_err("zero last_layers should be rejected");
     assert!(
         err.to_string().contains("last_layers"),
         "expected last_layers validation error, got {err}"
@@ -530,7 +557,7 @@ fn validate_rejects_zero_last_layers_for_y_neuron_recurrence() {
 }
 
 #[test]
-fn validate_rejects_language_mhc_multi_streams_for_now() {
+fn language_mhc_multi_streams_validate_for_language_bdh() {
     let text = r#"
         [dataset]
         cache_dir = "data"
@@ -553,6 +580,43 @@ fn validate_rejects_language_mhc_multi_streams_for_now() {
         enabled = true
         num_streams = 2
         num_views = 2
+        last_layers = 1
+        mhc_iters = 8
+        mhc_tau = 0.1
+        add_branch_out_to_residual = true
+        dropout = 0.0
+    "#;
+    let config: TrainingConfig = toml::from_str(text).expect("parse training config");
+    config
+        .validate()
+        .expect("language multi-stream mHC should now validate");
+}
+
+#[test]
+fn validate_rejects_zero_last_layers_for_mhc() {
+    let text = r#"
+        [dataset]
+        cache_dir = "data"
+        type = "shakespeare"
+
+        [training]
+        block_size = 32
+        batch_size = 2
+        max_iters = 4
+        log_frequency = 1
+
+        [optimizer]
+        learning_rate = 0.001
+        weight_decay = 0.0
+
+        [generation]
+        prompt = "abc"
+
+        [model.mhc]
+        enabled = true
+        num_streams = 2
+        num_views = 1
+        last_layers = 0
         mhc_iters = 8
         mhc_tau = 0.1
         add_branch_out_to_residual = true
@@ -561,9 +625,9 @@ fn validate_rejects_language_mhc_multi_streams_for_now() {
     let config: TrainingConfig = toml::from_str(text).expect("parse training config");
     let err = config
         .validate()
-        .expect_err("language multi-stream mHC should fail validation for now");
+        .expect_err("zero mhc last_layers should be rejected");
     assert!(
-        err.to_string().contains("model.mhc.num_streams"),
+        err.to_string().contains("model.mhc.last_layers"),
         "unexpected error: {err:#}"
     );
 }

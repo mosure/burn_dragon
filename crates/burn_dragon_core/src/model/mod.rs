@@ -13,7 +13,10 @@ mod structured_state;
 mod structured_step;
 
 pub use bdh::BDH;
-pub use config::{BDHConfig, FusedKernelConfig, YNeuronRecurrenceConfig};
+pub use config::{
+    BDHConfig, ClockedSlowMemoryConfig, FusedAttentionExecutor, FusedKernelConfig,
+    SummaryMemoryConfig, YNeuronRecurrenceConfig,
+};
 pub use halt::HaltHead;
 pub use init::{
     near_critical_embedding_initializer, near_critical_embedding_std, near_critical_projection_std,
@@ -21,9 +24,9 @@ pub use init::{
 };
 pub use mhc::{
     ManifoldHyperConnectionCoefficientPolicy, ManifoldHyperConnectionCoefficients,
-    ManifoldHyperConnectionWidthOutput, ManifoldHyperConnections,
-    ManifoldHyperConnectionsConfig, mhc_merge, mhc_merge_with_coefficients, mhc_passthrough,
-    mhc_passthrough_with_coefficients, mhc_split, mhc_split_with_coefficients,
+    ManifoldHyperConnectionWidthOutput, ManifoldHyperConnections, ManifoldHyperConnectionsConfig,
+    mhc_merge, mhc_merge_with_coefficients, mhc_passthrough, mhc_passthrough_with_coefficients,
+    mhc_split, mhc_split_with_coefficients,
 };
 pub use norm::{DragonNorm, DragonNormConfig, DragonNormKind};
 pub use residual_stream::{LowRankResidualOutput, lowrank_residual_step};

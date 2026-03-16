@@ -44,14 +44,20 @@ pub fn target_major_outer_product<B: Backend>(
     let [batch, targets, rank] = query.shape().dims::<3>();
     let [value_batch, value_targets, value_dim] = value.shape().dims::<3>();
     assert_eq!(value_batch, batch, "value batch must match query batch");
-    assert_eq!(value_targets, targets, "value targets must match query targets");
+    assert_eq!(
+        value_targets, targets,
+        "value targets must match query targets"
+    );
     query
         .unsqueeze_dim::<4>(3)
         .mul(value.unsqueeze_dim::<4>(2))
         .reshape([batch, targets, rank, value_dim])
 }
 
-pub fn target_major_apply_decay<B: Backend>(rho: Tensor<B, 4>, decay: Tensor<B, 1>) -> Tensor<B, 4> {
+pub fn target_major_apply_decay<B: Backend>(
+    rho: Tensor<B, 4>,
+    decay: Tensor<B, 1>,
+) -> Tensor<B, 4> {
     let [batch, targets, rank, value_dim] = rho.shape().dims::<4>();
     let [decay_len] = decay.shape().dims::<1>();
     let decay = match decay_len {
@@ -93,7 +99,10 @@ pub fn structured_dense_update_tokens<B: Backend>(
     let [batch, targets, value_dim] = a_dense.shape().dims::<3>();
     let [x_batch, x_targets, rank] = x_neuron.shape().dims::<3>();
     assert_eq!(x_batch, batch, "x_neuron batch must match a_dense batch");
-    assert_eq!(x_targets, targets, "x_neuron targets must match a_dense targets");
+    assert_eq!(
+        x_targets, targets,
+        "x_neuron targets must match a_dense targets"
+    );
 
     let a_dense = if let Some(norm) = value_norm {
         norm.forward(a_dense)
@@ -167,14 +176,10 @@ mod tests {
     #[test]
     fn structured_dense_update_tokens_matches_gated_delta_contract() {
         let device = device();
-        let x_neuron = Tensor::<Backend, 3>::from_data(
-            TensorData::new(vec![2.0, 4.0], [1, 1, 2]),
-            &device,
-        );
-        let a_dense = Tensor::<Backend, 3>::from_data(
-            TensorData::new(vec![3.0, 5.0], [1, 1, 2]),
-            &device,
-        );
+        let x_neuron =
+            Tensor::<Backend, 3>::from_data(TensorData::new(vec![2.0, 4.0], [1, 1, 2]), &device);
+        let a_dense =
+            Tensor::<Backend, 3>::from_data(TensorData::new(vec![3.0, 5.0], [1, 1, 2]), &device);
         let y_gate_proj = Linear {
             weight: Param::from_tensor(Tensor::<Backend, 2>::from_data(
                 TensorData::new(vec![1.0, 0.0, 0.0, 1.0], [2, 2]),
@@ -205,10 +210,25 @@ mod tests {
 
     #[test]
     fn structured_predict_decay_matches_observe_refine_predict_contract() {
-        assert_eq!(structured_predict_decay(StructuredStepMode::Observe, 0.25), 1.0);
-        assert_eq!(structured_predict_decay(StructuredStepMode::Refine, 0.25), 1.0);
-        assert_eq!(structured_predict_decay(StructuredStepMode::Predict, 0.25), 0.25);
-        assert_eq!(structured_predict_decay(StructuredStepMode::Predict, -1.0), 0.0);
-        assert_eq!(structured_predict_decay(StructuredStepMode::Predict, 2.0), 1.0);
+        assert_eq!(
+            structured_predict_decay(StructuredStepMode::Observe, 0.25),
+            1.0
+        );
+        assert_eq!(
+            structured_predict_decay(StructuredStepMode::Refine, 0.25),
+            1.0
+        );
+        assert_eq!(
+            structured_predict_decay(StructuredStepMode::Predict, 0.25),
+            0.25
+        );
+        assert_eq!(
+            structured_predict_decay(StructuredStepMode::Predict, -1.0),
+            0.0
+        );
+        assert_eq!(
+            structured_predict_decay(StructuredStepMode::Predict, 2.0),
+            1.0
+        );
     }
 }

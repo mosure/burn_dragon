@@ -5,7 +5,7 @@ use burn::tensor::backend::Backend as BackendTrait;
 use burn::tensor::{Distribution, Tensor};
 use burn_autodiff::Autodiff;
 use burn_dragon::core::{
-    ManifoldHyperConnectionCoefficients, ManifoldHyperConnectionCoefficientPolicy,
+    ManifoldHyperConnectionCoefficientPolicy, ManifoldHyperConnectionCoefficients,
     ManifoldHyperConnections, ManifoldHyperConnectionsConfig,
 };
 use burn_wgpu::{CubeBackend, RuntimeOptions, WgpuRuntime, graphics};
@@ -97,6 +97,7 @@ fn build_config(case: BenchCase) -> ManifoldHyperConnectionsConfig {
         enabled: true,
         num_streams: case.num_streams,
         num_views: case.num_views,
+        last_layers: None,
         coefficient_policy: ManifoldHyperConnectionCoefficientPolicy::StaticSinkhorn,
         mhc_iters: 10,
         mhc_tau: 0.05,
@@ -138,8 +139,7 @@ fn reference_passthrough(
 ) -> Tensor<TrainBackend, 4> {
     let residuals_out =
         reference_mix_streams(residuals.clone(), coefficients.residual_weights.clone());
-    let branch_input =
-        reference_mix_streams(residuals, coefficients.branch_input_weights.clone());
+    let branch_input = reference_mix_streams(residuals, coefficients.branch_input_weights.clone());
     let Some(beta) = coefficients.branch_output_weights.clone() else {
         return residuals_out;
     };
@@ -219,5 +219,9 @@ fn run_case(case: BenchCase, device: &Device, args: &Args) -> (f64, f64, f32) {
         device,
     );
 
-    (baseline_ms, optimized_ms, (baseline_value - optimized_value).abs())
+    (
+        baseline_ms,
+        optimized_ms,
+        (baseline_value - optimized_value).abs(),
+    )
 }

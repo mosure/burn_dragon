@@ -1,12 +1,12 @@
 use crate::config::VisionAugmentationConfig;
 use crate::train::gdpo;
 use crate::train::prelude::*;
-use std::time::Instant;
 use burn::optim::{GradientsAccumulator, GradientsParams, Optimizer};
 use burn::tensor::Distribution as TensorDistribution;
 use burn::tensor::backend::{AutodiffBackend, Backend as BackendTrait};
 use burn::tensor::{Int, Tensor, TensorData};
 use burn_dragon_train::{GdpoConfig, GdpoHardGate};
+use std::time::Instant;
 
 pub struct VisionSaccadeBench<B: AutodiffBackend> {
     model: VisionSaccadeModel<B>,
@@ -59,6 +59,12 @@ pub struct VisionMaeTrainStepBench<B: AutodiffBackend> {
     lr: LearningRate,
     rollout_steps: usize,
     backprop_steps: usize,
+}
+
+pub struct VisionDistillTrainStepBench<B: AutodiffBackend> {
+    model: Option<VisionDistillModel<B>>,
+    optimizer: OptimizerAdaptor<AdamW, VisionDistillModel<B>, B>,
+    lr: LearningRate,
 }
 
 pub struct VisionLejepaTrainStepBench<B: AutodiffBackend> {
@@ -588,6 +594,46 @@ impl<B: AutodiffBackend> VisionMaeTrainStepBench<B> {
     }
 }
 
+impl<B: AutodiffBackend> VisionDistillTrainStepBench<B> {
+    pub fn new(
+        vision: VisionDragonConfig,
+        distill: VisionDistillConfig,
+        training: &VisionTrainingHyperparameters,
+        optimizer_cfg: &OptimizerConfig,
+        device: &B::Device,
+    ) -> Result<Self> {
+        let rollout = resolve_vision_rollout(training, vision.steps)?;
+        let model = VisionDragon::<B>::new(vision, device);
+        let distill = VisionDistillModel::new(model, distill, None, rollout);
+        let optimizer =
+            adamw_config_from_optimizer(optimizer_cfg).init::<B, VisionDistillModel<B>>();
+        let lr = optimizer_cfg.learning_rate;
+        Ok(Self {
+            model: Some(distill),
+            optimizer,
+            lr,
+        })
+    }
+
+    pub fn train_step(&mut self, batch: ImageNetBatch<B>) -> Tensor<B, 1> {
+        let mut model = self.model.take().expect("distill model");
+        let total = model.forward_train_total_loss(batch);
+        let grads = GradientsParams::from_grads(total.clone().backward(), &model);
+        let loss = total.detach();
+        model = self.optimizer.step(self.lr, model, grads);
+        self.model = Some(model);
+        loss
+    }
+
+    pub fn forward_loss(&self, batch: ImageNetBatch<B>) -> Tensor<B, 1> {
+        self.model
+            .as_ref()
+            .expect("distill model")
+            .forward_train_total_loss(batch)
+            .detach()
+    }
+}
+
 impl<B: AutodiffBackend> VisionLejepaTrainStepBench<B> {
     pub fn new(
         vision: VisionDragonConfig,
@@ -736,24 +782,26 @@ impl<B: AutodiffBackend> VisionVideoLejepaTrainStepBench<B> {
     pub fn forward_loss(&self, batch: VideoClipBatch<B>) -> Tensor<B, 1> {
         let model = self.model.as_ref().expect("video lejepa model");
         if model.uses_pyramid_backbone() {
-            model.forward_losses_train_pyramid(
-                batch,
-                self.rollout_steps,
-                self.backprop_steps,
-                false,
-                false,
-            )
+            model
+                .forward_losses_train_pyramid(
+                    batch,
+                    self.rollout_steps,
+                    self.backprop_steps,
+                    false,
+                    false,
+                )
                 .total
                 .detach()
         } else {
-            model.forward_losses(
-                batch,
-                self.rollout_steps,
-                self.backprop_steps,
-                false,
-                false,
-                false,
-            )
+            model
+                .forward_losses(
+                    batch,
+                    self.rollout_steps,
+                    self.backprop_steps,
+                    false,
+                    false,
+                    false,
+                )
                 .total
                 .detach()
         }

@@ -7,10 +7,15 @@ pub use burn_dragon_core::{
 pub mod vision;
 
 pub use vision::{
-    PatchEmbed, PatchEmbedOutput, PatchGrid, SpatialPositionalEncodingKind, VisionAttentionMode,
-    StageAwareHostProfileSnapshot, VisionBackboneKind, VisionCellularConfig, VisionCellularState, VisionDragon,
-    VisionDragonConfig, VisionDragonMultiOutput, VisionDragonOutput, VisionLatentActivation,
-    VisionPatchEmbedMode, VisionPyramidConfig, VisionRhoStreamConfig, VisionTrmGraphConfig,
-    VisionTrmGridMismatchPolicy, patchify, pool_patch_tokens, unpatchify,
-    stage_aware_host_profile_reset, stage_aware_host_profile_snapshot,
+    PatchEmbed, PatchEmbedOutput, PatchGrid, SpatialPositionalEncodingKind,
+    StageAwareHostProfileSnapshot, VisionAttentionMode, VisionBackboneKind, VisionCellularConfig,
+    VisionCellularState, VisionDragon, VisionDragonConfig, VisionDragonMultiOutput,
+    VisionDragonOutput, VisionLatentActivation, VisionPatchEmbedMode, VisionPyramidConfig,
+    VisionRhoStreamConfig, VisionRolloutState, VisionTrmGraphConfig, VisionTrmGridMismatchPolicy,
+    patchify, pool_patch_tokens, stage_aware_host_profile_reset, stage_aware_host_profile_snapshot,
+    unpatchify,
+};
+#[cfg(feature = "benchmark")]
+pub use vision::{
+    VisionDenseAttentionBenchAdapter, VisionDenseBenchAdapter, VisionRolloutScheduleBenchAdapter,
 };

@@ -118,6 +118,7 @@ impl SudokuCacheMhcConfig {
             enabled: self.enabled,
             num_streams: self.num_streams,
             num_views: self.num_views,
+            last_layers: None,
             coefficient_policy: self.coefficient_policy,
             mhc_iters: self.mhc_iters,
             mhc_tau: self.mhc_tau,

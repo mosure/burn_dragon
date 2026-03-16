@@ -14,9 +14,7 @@ impl TrainingConfig {
             return Err(anyhow!("training.batch_size must be > 0"));
         }
         if self.training.gradient_accumulation_steps == 0 {
-            return Err(anyhow!(
-                "training.gradient_accumulation_steps must be > 0"
-            ));
+            return Err(anyhow!("training.gradient_accumulation_steps must be > 0"));
         }
         if matches!(self.training.target_effective_batch_size, Some(0)) {
             return Err(anyhow!(
@@ -223,17 +221,101 @@ impl TrainingConfig {
                 ));
             }
         }
+        if let Some(clocked_slow_memory) = &self.model.clocked_slow_memory
+            && clocked_slow_memory.enabled
+        {
+            if matches!(clocked_slow_memory.last_layers, Some(0)) {
+                return Err(anyhow!(
+                    "model.clocked_slow_memory.last_layers must be > 0 when set"
+                ));
+            }
+            if clocked_slow_memory.chunk_tokens == 0 {
+                return Err(anyhow!(
+                    "model.clocked_slow_memory.chunk_tokens must be > 0 when enabled"
+                ));
+            }
+            if clocked_slow_memory.residual_scale <= 0.0 {
+                return Err(anyhow!(
+                    "model.clocked_slow_memory.residual_scale must be > 0 when enabled"
+                ));
+            }
+            if matches!(self.model.y_neuron_recurrence.as_ref(), Some(value) if value.enabled) {
+                return Err(anyhow!(
+                    "model.clocked_slow_memory is not yet supported together with model.y_neuron_recurrence"
+                ));
+            }
+        }
+        if let Some(summary_memory) = &self.model.summary_memory
+            && summary_memory.enabled
+        {
+            if matches!(summary_memory.last_layers, Some(0)) {
+                return Err(anyhow!(
+                    "model.summary_memory.last_layers must be > 0 when set"
+                ));
+            }
+            if summary_memory.chunk_tokens == 0 {
+                return Err(anyhow!(
+                    "model.summary_memory.chunk_tokens must be > 0 when enabled"
+                ));
+            }
+            if summary_memory.residual_scale <= 0.0 {
+                return Err(anyhow!(
+                    "model.summary_memory.residual_scale must be > 0 when enabled"
+                ));
+            }
+            if !(0.0..=1.0).contains(&summary_memory.state_decay) {
+                return Err(anyhow!(
+                    "model.summary_memory.state_decay must be in [0, 1] when enabled"
+                ));
+            }
+            if summary_memory.state_update_scale <= 0.0 {
+                return Err(anyhow!(
+                    "model.summary_memory.state_update_scale must be > 0 when enabled"
+                ));
+            }
+            if summary_memory.surprise_gate_threshold < 0.0 {
+                return Err(anyhow!(
+                    "model.summary_memory.surprise_gate_threshold must be >= 0 when enabled"
+                ));
+            }
+            if summary_memory.surprise_gate_sharpness <= 0.0 {
+                return Err(anyhow!(
+                    "model.summary_memory.surprise_gate_sharpness must be > 0 when enabled"
+                ));
+            }
+            if matches!(
+                summary_memory.write_trigger_text.as_ref(),
+                Some(value) if value.trim().is_empty()
+            ) {
+                return Err(anyhow!(
+                    "model.summary_memory.write_trigger_text must not be empty when set"
+                ));
+            }
+            if matches!(
+                summary_memory.write_trigger_token_ids.as_ref(),
+                Some(value) if value.is_empty()
+            ) {
+                return Err(anyhow!(
+                    "model.summary_memory.write_trigger_token_ids must not be empty when set"
+                ));
+            }
+            if matches!(self.model.y_neuron_recurrence.as_ref(), Some(value) if value.enabled) {
+                return Err(anyhow!(
+                    "model.summary_memory is not yet supported together with model.y_neuron_recurrence"
+                ));
+            }
+        }
         if let Some(mhc) = &self.model.mhc
             && mhc.enabled
         {
-            if mhc.num_streams != 1 {
-                return Err(anyhow!(
-                    "model.mhc.num_streams must currently be 1 for language BDH integration (got {})",
-                    mhc.num_streams
-                ));
+            if mhc.num_streams == 0 {
+                return Err(anyhow!("model.mhc.num_streams must be > 0 when enabled"));
             }
             if mhc.num_views == 0 {
                 return Err(anyhow!("model.mhc.num_views must be > 0 when enabled"));
+            }
+            if matches!(mhc.last_layers, Some(0)) {
+                return Err(anyhow!("model.mhc.last_layers must be > 0 when set"));
             }
             if mhc.mhc_tau <= 0.0 {
                 return Err(anyhow!("model.mhc.mhc_tau must be > 0 when enabled"));

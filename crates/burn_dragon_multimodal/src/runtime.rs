@@ -10,11 +10,11 @@ use burn::optim::{AdamWConfig, GradientsParams, Optimizer};
 use burn::record::{BinFileRecorder, FullPrecisionSettings, Recorder};
 use burn::tensor::backend::{AutodiffBackend, Backend as BackendTrait};
 use burn_dragon_checkpoint::write_json_snapshot;
+use burn_dragon_core::api::recurrent::BDH;
 use burn_dragon_language::api::checkpoint::{
     load_language_core_from_checkpoint, load_tokenizer_for_checkpoint,
 };
 use burn_dragon_language::api::inference::CharVocab;
-use burn_dragon_core::api::recurrent::BDH;
 use burn_dragon_train::api::config::WgpuRuntimeConfig;
 use burn_dragon_train::api::expert::train::pipeline::{create_run_dir, write_latest_run};
 use burn_dragon_train::api::runtime::cleanup_device_memory;
@@ -27,13 +27,12 @@ use crate::config::VlJepaDragonConfig;
 use crate::config_io::{load_merged_config, load_merged_value};
 use crate::ema::{init_momentum_teacher, sync_optional_teacher_from_student};
 use crate::train::{
-    ImagenetteVisionLanguageDataset,
-    JsonlVideoLanguageDataset, JsonlVisionLanguageDataset, MnistVideoLanguageDataset,
-    MnistVisionLanguageDataset, MovingMnistVideoLanguageDataset,
-    MovingMnistVideoLanguageDatasetConfig, VideoLanguageJsonlRecord, VisionLanguageJsonlRecord,
-    collate_video_language_segments, collate_vision_language_segments, multimodal_eval_step,
-    multimodal_train_step_with_frozen_cores, multimodal_video_eval_step,
-    multimodal_video_train_step_with_frozen_cores, TargetTextBankBatch,
+    ImagenetteVisionLanguageDataset, JsonlVideoLanguageDataset, JsonlVisionLanguageDataset,
+    MnistVideoLanguageDataset, MnistVisionLanguageDataset, MovingMnistVideoLanguageDataset,
+    MovingMnistVideoLanguageDatasetConfig, TargetTextBankBatch, VideoLanguageJsonlRecord,
+    VisionLanguageJsonlRecord, collate_video_language_segments, collate_vision_language_segments,
+    multimodal_eval_step, multimodal_train_step_with_frozen_cores, multimodal_video_eval_step,
+    multimodal_video_train_step_with_frozen_cores,
 };
 use burn_dragon_stream::StreamDataset;
 
@@ -416,9 +415,7 @@ pub fn load_multimodal_training_runtime_config(
     load_merged_config(config_paths)
 }
 
-pub fn load_multimodal_runtime_config(
-    config_paths: &[PathBuf],
-) -> Result<MultimodalRuntimeConfig> {
+pub fn load_multimodal_runtime_config(config_paths: &[PathBuf]) -> Result<MultimodalRuntimeConfig> {
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
     struct TaskProbe {
         #[serde(default)]
@@ -445,7 +442,10 @@ pub fn load_multimodal_video_training_runtime_config(
     load_merged_config(config_paths)
 }
 
-pub fn write_runtime_snapshot(run_dir: &Path, config: &MultimodalTrainingConfig) -> Result<PathBuf> {
+pub fn write_runtime_snapshot(
+    run_dir: &Path,
+    config: &MultimodalTrainingConfig,
+) -> Result<PathBuf> {
     write_runtime_snapshot_json(run_dir, config)
 }
 
@@ -489,14 +489,19 @@ fn resolve_pretrained_char_vocab(
     pretrained: &MultimodalPretrainedTextCoreConfig,
 ) -> Result<CharVocab> {
     let checkpoint = pretrained.checkpoint.clone();
-    let tokenizer =
-        load_tokenizer_for_checkpoint(&pretrained.config_paths, Some(&checkpoint), &pretrained.backend_name)?;
+    let tokenizer = load_tokenizer_for_checkpoint(
+        &pretrained.config_paths,
+        Some(&checkpoint),
+        &pretrained.backend_name,
+    )?;
     tokenizer
         .as_ref()
         .as_any()
         .downcast_ref::<CharVocab>()
         .cloned()
-        .ok_or_else(|| anyhow!("multimodal pretrained text core currently requires a char tokenizer"))
+        .ok_or_else(|| {
+            anyhow!("multimodal pretrained text core currently requires a char tokenizer")
+        })
 }
 
 fn resolve_image_pretrained_init<B: AutodiffBackend>(
@@ -515,11 +520,12 @@ fn resolve_image_pretrained_init<B: AutodiffBackend>(
 
     if let Some(pretrained) = config.pretrained.text_core.as_ref() {
         let checkpoint = pretrained.checkpoint.clone();
-        let language_config = burn_dragon_language::api::checkpoint::load_training_config_for_checkpoint(
-            &pretrained.config_paths,
-            Some(&checkpoint),
-            &pretrained.backend_name,
-        )?;
+        let language_config =
+            burn_dragon_language::api::checkpoint::load_training_config_for_checkpoint(
+                &pretrained.config_paths,
+                Some(&checkpoint),
+                &pretrained.backend_name,
+            )?;
         let source_config = burn_dragon_language::api::inference::build_model_config(
             &language_config.model,
             language_config.training.block_size,
@@ -609,11 +615,12 @@ fn resolve_video_pretrained_init<B: AutodiffBackend>(
 
     if let Some(pretrained) = config.pretrained.text_core.as_ref() {
         let checkpoint = pretrained.checkpoint.clone();
-        let language_config = burn_dragon_language::api::checkpoint::load_training_config_for_checkpoint(
-            &pretrained.config_paths,
-            Some(&checkpoint),
-            &pretrained.backend_name,
-        )?;
+        let language_config =
+            burn_dragon_language::api::checkpoint::load_training_config_for_checkpoint(
+                &pretrained.config_paths,
+                Some(&checkpoint),
+                &pretrained.backend_name,
+            )?;
         let source_config = burn_dragon_language::api::inference::build_model_config(
             &language_config.model,
             language_config.training.block_size,
@@ -745,10 +752,18 @@ where
 {
     fs::create_dir_all(run_dir)
         .with_context(|| format!("failed to create run directory {}", run_dir.display()))?;
-    fs::create_dir_all(artifact_dir(run_dir))
-        .with_context(|| format!("failed to create artifact directory {}", artifact_dir(run_dir).display()))?;
-    fs::create_dir_all(run_dir.join("checkpoint"))
-        .with_context(|| format!("failed to create checkpoint directory {}", run_dir.join("checkpoint").display()))?;
+    fs::create_dir_all(artifact_dir(run_dir)).with_context(|| {
+        format!(
+            "failed to create artifact directory {}",
+            artifact_dir(run_dir).display()
+        )
+    })?;
+    fs::create_dir_all(run_dir.join("checkpoint")).with_context(|| {
+        format!(
+            "failed to create checkpoint directory {}",
+            run_dir.join("checkpoint").display()
+        )
+    })?;
 
     write_runtime_snapshot(run_dir, config)?;
     let device = B::Device::default();
@@ -768,7 +783,8 @@ where
     vocab.save(&vocab_path)?;
     let prepared_target_bank =
         prepare_target_bank::<B>(bundle.target_bank_texts.as_deref(), &vocab, &device);
-    let mut model = crate::model::VlJepaDragon::<B>::new(resolved_init.model_config.clone(), &device);
+    let mut model =
+        crate::model::VlJepaDragon::<B>::new(resolved_init.model_config.clone(), &device);
     if let Some(vision_x_encoder) = resolved_init.vision_x_encoder {
         model.vision_x_encoder.replace_encoder(vision_x_encoder);
         model.vision_x_encoder.set_force_projection(true);
@@ -788,8 +804,10 @@ where
         resolved_init.freeze_target_y_encoder,
     );
     let frozen_cores = model.frozen_core_set();
-    let mut target_teacher =
-        init_momentum_teacher::<B, _>(&model.target_y_encoder, &resolved_init.model_config.target_teacher);
+    let mut target_teacher = init_momentum_teacher::<B, _>(
+        &model.target_y_encoder,
+        &resolved_init.model_config.target_teacher,
+    );
     let mut optimizer = AdamWConfig::new()
         .with_weight_decay(config.training.weight_decay)
         .init::<B, crate::model::VlJepaDragon<B>>();
@@ -804,22 +822,21 @@ where
         let mut top1_accuracy_sum = 0.0_f32;
         let mut steps = 0_usize;
         if bundle.supports_batched_contrastive {
-            let batch_indices = if prepared_target_bank.is_some()
-                && config.model.target_bank_loss_weight > 0.0
-            {
-                contiguous_batch_indices(
-                    bundle.train.len(),
-                    config.training.batch_size,
-                    config.training.max_steps_per_epoch,
-                )
-            } else {
-                unique_target_batches(
-                    &bundle.train,
-                    config.training.batch_size,
-                    config.training.max_steps_per_epoch,
-                    |segment| &segment.payload.target_y_tokens,
-                )
-            };
+            let batch_indices =
+                if prepared_target_bank.is_some() && config.model.target_bank_loss_weight > 0.0 {
+                    contiguous_batch_indices(
+                        bundle.train.len(),
+                        config.training.batch_size,
+                        config.training.max_steps_per_epoch,
+                    )
+                } else {
+                    unique_target_batches(
+                        &bundle.train,
+                        config.training.batch_size,
+                        config.training.max_steps_per_epoch,
+                        |segment| &segment.payload.target_y_tokens,
+                    )
+                };
             for batch_indices in batch_indices {
                 let segments = batch_indices
                     .into_iter()
@@ -828,7 +845,9 @@ where
                 let collated = collate_vision_language_segments::<B>(&segments, &device);
                 let target_bank = target_bank_batch_for_targets::<B, _>(
                     prepared_target_bank.as_ref(),
-                    segments.iter().map(|segment| segment.payload.target_y_tokens.as_slice()),
+                    segments
+                        .iter()
+                        .map(|segment| segment.payload.target_y_tokens.as_slice()),
                     &device,
                 );
                 let stream = collated
@@ -902,7 +921,10 @@ where
                 let diagonal_similarity = diagonal_similarity_mean(step.loss.similarities.clone());
                 let top1_accuracy = target_bank
                     .map(|target_bank| {
-                        labeled_top1_accuracy(step.loss.similarities.clone(), target_bank.target_indices)
+                        labeled_top1_accuracy(
+                            step.loss.similarities.clone(),
+                            target_bank.target_indices,
+                        )
                     })
                     .unwrap_or_else(|| bidirectional_top1_accuracy(step.loss.similarities.clone()));
                 let loss = step.loss;
@@ -949,7 +971,10 @@ where
             mean_total_loss: loss_sum / steps.max(1) as f32,
             mean_diagonal_similarity: diagonal_similarity_sum / steps.max(1) as f32,
             mean_top1_accuracy: top1_accuracy_sum / steps.max(1) as f32,
-            validation_steps: validation.as_ref().map(|metrics| metrics.steps).unwrap_or(0),
+            validation_steps: validation
+                .as_ref()
+                .map(|metrics| metrics.steps)
+                .unwrap_or(0),
             validation_mean_total_loss: validation.as_ref().map(|metrics| metrics.mean_total_loss),
             validation_mean_diagonal_similarity: validation
                 .as_ref()
@@ -967,7 +992,8 @@ where
             && epoch_index % config.training.artifact_every_epochs == 0
         {
             let artifact_path = artifact_dir(run_dir).join(format!("epoch-{epoch_index}.json"));
-            let payload = serde_json::to_string_pretty(&artifact).context("serialize epoch artifact")?;
+            let payload =
+                serde_json::to_string_pretty(&artifact).context("serialize epoch artifact")?;
             fs::write(&artifact_path, payload)
                 .with_context(|| format!("failed to write {}", artifact_path.display()))?;
             artifact_paths.push(artifact_path);
@@ -979,7 +1005,9 @@ where
             let checkpoint_base = run_dir.join("checkpoint").join(format!("model-{epoch}"));
             BinFileRecorder::<FullPrecisionSettings>::new()
                 .record(model.clone().into_record(), checkpoint_base.clone())
-                .with_context(|| format!("failed to write checkpoint {}", checkpoint_base.display()))?;
+                .with_context(|| {
+                    format!("failed to write checkpoint {}", checkpoint_base.display())
+                })?;
             checkpoint_paths.push(checkpoint_base.with_extension("bin"));
         }
     }
@@ -1009,10 +1037,18 @@ where
 {
     fs::create_dir_all(run_dir)
         .with_context(|| format!("failed to create run directory {}", run_dir.display()))?;
-    fs::create_dir_all(artifact_dir(run_dir))
-        .with_context(|| format!("failed to create artifact directory {}", artifact_dir(run_dir).display()))?;
-    fs::create_dir_all(run_dir.join("checkpoint"))
-        .with_context(|| format!("failed to create checkpoint directory {}", run_dir.join("checkpoint").display()))?;
+    fs::create_dir_all(artifact_dir(run_dir)).with_context(|| {
+        format!(
+            "failed to create artifact directory {}",
+            artifact_dir(run_dir).display()
+        )
+    })?;
+    fs::create_dir_all(run_dir.join("checkpoint")).with_context(|| {
+        format!(
+            "failed to create checkpoint directory {}",
+            run_dir.join("checkpoint").display()
+        )
+    })?;
 
     write_video_runtime_snapshot(run_dir, config)?;
     let device = B::Device::default();
@@ -1032,7 +1068,8 @@ where
     vocab.save(&vocab_path)?;
     let prepared_target_bank =
         prepare_target_bank::<B>(bundle.target_bank_texts.as_deref(), &vocab, &device);
-    let mut model = crate::model::VlJepaDragon::<B>::new(resolved_init.model_config.clone(), &device);
+    let mut model =
+        crate::model::VlJepaDragon::<B>::new(resolved_init.model_config.clone(), &device);
     if let Some(vision_x_encoder) = resolved_init.vision_x_encoder {
         model.vision_x_encoder.replace_encoder(vision_x_encoder);
         model.vision_x_encoder.set_force_projection(true);
@@ -1052,8 +1089,10 @@ where
         resolved_init.freeze_target_y_encoder,
     );
     let frozen_cores = model.frozen_core_set();
-    let mut target_teacher =
-        init_momentum_teacher::<B, _>(&model.target_y_encoder, &resolved_init.model_config.target_teacher);
+    let mut target_teacher = init_momentum_teacher::<B, _>(
+        &model.target_y_encoder,
+        &resolved_init.model_config.target_teacher,
+    );
     let mut optimizer = AdamWConfig::new()
         .with_weight_decay(config.training.weight_decay)
         .init::<B, crate::model::VlJepaDragon<B>>();
@@ -1068,22 +1107,21 @@ where
         let mut top1_accuracy_sum = 0.0_f32;
         let mut steps = 0_usize;
         if bundle.supports_batched_contrastive {
-            let batch_indices = if prepared_target_bank.is_some()
-                && config.model.target_bank_loss_weight > 0.0
-            {
-                contiguous_batch_indices(
-                    bundle.train.len(),
-                    config.training.batch_size,
-                    config.training.max_steps_per_epoch,
-                )
-            } else {
-                unique_target_batches(
-                    &bundle.train,
-                    config.training.batch_size,
-                    config.training.max_steps_per_epoch,
-                    |segment| &segment.payload.target_y_tokens,
-                )
-            };
+            let batch_indices =
+                if prepared_target_bank.is_some() && config.model.target_bank_loss_weight > 0.0 {
+                    contiguous_batch_indices(
+                        bundle.train.len(),
+                        config.training.batch_size,
+                        config.training.max_steps_per_epoch,
+                    )
+                } else {
+                    unique_target_batches(
+                        &bundle.train,
+                        config.training.batch_size,
+                        config.training.max_steps_per_epoch,
+                        |segment| &segment.payload.target_y_tokens,
+                    )
+                };
             for batch_indices in batch_indices {
                 let segments = batch_indices
                     .into_iter()
@@ -1092,7 +1130,9 @@ where
                 let collated = collate_video_language_segments::<B>(&segments, &device);
                 let target_bank = target_bank_batch_for_targets::<B, _>(
                     prepared_target_bank.as_ref(),
-                    segments.iter().map(|segment| segment.payload.target_y_tokens.as_slice()),
+                    segments
+                        .iter()
+                        .map(|segment| segment.payload.target_y_tokens.as_slice()),
                     &device,
                 );
                 let stream = collated
@@ -1166,7 +1206,10 @@ where
                 let diagonal_similarity = diagonal_similarity_mean(step.loss.similarities.clone());
                 let top1_accuracy = target_bank
                     .map(|target_bank| {
-                        labeled_top1_accuracy(step.loss.similarities.clone(), target_bank.target_indices)
+                        labeled_top1_accuracy(
+                            step.loss.similarities.clone(),
+                            target_bank.target_indices,
+                        )
                     })
                     .unwrap_or_else(|| bidirectional_top1_accuracy(step.loss.similarities.clone()));
                 let loss = step.loss;
@@ -1213,7 +1256,10 @@ where
             mean_total_loss: loss_sum / steps.max(1) as f32,
             mean_diagonal_similarity: diagonal_similarity_sum / steps.max(1) as f32,
             mean_top1_accuracy: top1_accuracy_sum / steps.max(1) as f32,
-            validation_steps: validation.as_ref().map(|metrics| metrics.steps).unwrap_or(0),
+            validation_steps: validation
+                .as_ref()
+                .map(|metrics| metrics.steps)
+                .unwrap_or(0),
             validation_mean_total_loss: validation.as_ref().map(|metrics| metrics.mean_total_loss),
             validation_mean_diagonal_similarity: validation
                 .as_ref()
@@ -1231,7 +1277,8 @@ where
             && epoch_index % config.training.artifact_every_epochs == 0
         {
             let artifact_path = artifact_dir(run_dir).join(format!("epoch-{epoch_index}.json"));
-            let payload = serde_json::to_string_pretty(&artifact).context("serialize epoch artifact")?;
+            let payload =
+                serde_json::to_string_pretty(&artifact).context("serialize epoch artifact")?;
             fs::write(&artifact_path, payload)
                 .with_context(|| format!("failed to write {}", artifact_path.display()))?;
             artifact_paths.push(artifact_path);
@@ -1243,7 +1290,9 @@ where
             let checkpoint_base = run_dir.join("checkpoint").join(format!("model-{epoch}"));
             BinFileRecorder::<FullPrecisionSettings>::new()
                 .record(model.clone().into_record(), checkpoint_base.clone())
-                .with_context(|| format!("failed to write checkpoint {}", checkpoint_base.display()))?;
+                .with_context(|| {
+                    format!("failed to write checkpoint {}", checkpoint_base.display())
+                })?;
             checkpoint_paths.push(checkpoint_base.with_extension("bin"));
         }
     }
@@ -1276,11 +1325,13 @@ fn load_image_text_dataset_bundle(
 ) -> Result<ImageTextDatasetBundle> {
     match config.data.source {
         MultimodalImageTextSource::Jsonl => {
-            let vocab = pretrained_vocab.cloned().unwrap_or(build_vocab_from_manifest(
-                &config.data.manifest,
-                config.training.max_steps_per_epoch,
-                config.data.include_unknown_char,
-            )?);
+            let vocab = pretrained_vocab
+                .cloned()
+                .unwrap_or(build_vocab_from_manifest(
+                    &config.data.manifest,
+                    config.training.max_steps_per_epoch,
+                    config.data.include_unknown_char,
+                )?);
             let train = dataset_to_vec(JsonlVisionLanguageDataset::from_jsonl(
                 &config.data.manifest,
                 config.data.image_size,
@@ -1300,7 +1351,7 @@ fn load_image_text_dataset_bundle(
                         config.data.normalize_mean,
                         config.data.normalize_std,
                     )
-                        .map(dataset_to_vec)
+                    .map(dataset_to_vec)
                 })
                 .transpose()?;
             Ok(ImageTextDatasetBundle {
@@ -1359,8 +1410,9 @@ fn load_image_text_dataset_bundle(
                     .into_iter()
                     .chain(label_texts.iter().map(String::as_str))
                     .collect::<Vec<_>>();
-                CharVocab::fit(texts.into_iter(), config.data.include_unknown_char)
-                    .context("failed to build character vocabulary from Imagenette label-text dataset")?
+                CharVocab::fit(texts.into_iter(), config.data.include_unknown_char).context(
+                    "failed to build character vocabulary from Imagenette label-text dataset",
+                )?
             });
             let train = dataset_to_vec(ImagenetteVisionLanguageDataset::from_imagenette(
                 &config.data.imagenette.root,
@@ -1372,16 +1424,18 @@ fn load_image_text_dataset_bundle(
                 config.data.normalize_mean,
                 config.data.normalize_std,
             )?);
-            let validation = Some(dataset_to_vec(ImagenetteVisionLanguageDataset::from_imagenette(
-                &config.data.imagenette.root,
-                &config.data.imagenette.validation_dir,
-                config.data.image_size,
-                config.data.imagenette.max_validation_records,
-                &config.data.imagenette.query_q_text,
-                &vocab,
-                config.data.normalize_mean,
-                config.data.normalize_std,
-            )?));
+            let validation = Some(dataset_to_vec(
+                ImagenetteVisionLanguageDataset::from_imagenette(
+                    &config.data.imagenette.root,
+                    &config.data.imagenette.validation_dir,
+                    config.data.image_size,
+                    config.data.imagenette.max_validation_records,
+                    &config.data.imagenette.query_q_text,
+                    &vocab,
+                    config.data.normalize_mean,
+                    config.data.normalize_std,
+                )?,
+            ));
             Ok(ImageTextDatasetBundle {
                 train,
                 validation,
@@ -1399,11 +1453,13 @@ fn load_video_text_dataset_bundle(
 ) -> Result<VideoTextDatasetBundle> {
     match config.data.source {
         MultimodalVideoTextSource::Jsonl => {
-            let vocab = pretrained_vocab.cloned().unwrap_or(build_video_vocab_from_manifest(
-                &config.data.manifest,
-                config.training.max_steps_per_epoch,
-                config.data.include_unknown_char,
-            )?);
+            let vocab = pretrained_vocab
+                .cloned()
+                .unwrap_or(build_video_vocab_from_manifest(
+                    &config.data.manifest,
+                    config.training.max_steps_per_epoch,
+                    config.data.include_unknown_char,
+                )?);
             let train = dataset_to_vec(JsonlVideoLanguageDataset::from_jsonl(
                 &config.data.manifest,
                 config.data.image_size,
@@ -1452,8 +1508,9 @@ fn load_video_text_dataset_bundle(
                         "nine",
                     ])
                     .collect::<Vec<_>>();
-                CharVocab::fit(texts.into_iter(), config.data.include_unknown_char)
-                    .context("failed to build character vocabulary from MNIST video label-text dataset")?
+                CharVocab::fit(texts.into_iter(), config.data.include_unknown_char).context(
+                    "failed to build character vocabulary from MNIST video label-text dataset",
+                )?
             });
             let train = dataset_to_vec(MnistVideoLanguageDataset::from_mnist(
                 true,
@@ -1492,8 +1549,9 @@ fn load_video_text_dataset_bundle(
                         "nine",
                     ])
                     .collect::<Vec<_>>();
-                CharVocab::fit(texts.into_iter(), config.data.include_unknown_char)
-                    .context("failed to build character vocabulary from moving-MNIST label-text dataset")?
+                CharVocab::fit(texts.into_iter(), config.data.include_unknown_char).context(
+                    "failed to build character vocabulary from moving-MNIST label-text dataset",
+                )?
             });
             let train = dataset_to_vec(MovingMnistVideoLanguageDataset::from_moving_mnist(
                 MovingMnistVideoLanguageDatasetConfig {
@@ -1514,25 +1572,27 @@ fn load_video_text_dataset_bundle(
                     normalize_std: config.data.normalize_std,
                 },
             )?);
-            let validation = Some(dataset_to_vec(MovingMnistVideoLanguageDataset::from_moving_mnist(
-                MovingMnistVideoLanguageDatasetConfig {
-                    train_split: false,
-                    frame_size: config.data.image_size,
-                    clip_frames: config.data.clip_frames,
-                    requested_horizons: &config.data.requested_horizons,
-                    max_records: config.data.moving_mnist.max_validation_records,
-                    digit_size: config.data.moving_mnist.digit_size,
-                    in_channels: config.data.moving_mnist.in_channels,
-                    frame_stride: config.data.moving_mnist.frame_stride,
-                    min_velocity: config.data.moving_mnist.min_velocity,
-                    max_velocity: config.data.moving_mnist.max_velocity,
-                    seed: config.data.moving_mnist.seed ^ 0xA5A5_A5A5_A5A5_A5A5,
-                    query_q_text: &config.data.moving_mnist.query_q_text,
-                    vocab: &vocab,
-                    normalize_mean: config.data.normalize_mean,
-                    normalize_std: config.data.normalize_std,
-                },
-            )?));
+            let validation = Some(dataset_to_vec(
+                MovingMnistVideoLanguageDataset::from_moving_mnist(
+                    MovingMnistVideoLanguageDatasetConfig {
+                        train_split: false,
+                        frame_size: config.data.image_size,
+                        clip_frames: config.data.clip_frames,
+                        requested_horizons: &config.data.requested_horizons,
+                        max_records: config.data.moving_mnist.max_validation_records,
+                        digit_size: config.data.moving_mnist.digit_size,
+                        in_channels: config.data.moving_mnist.in_channels,
+                        frame_stride: config.data.moving_mnist.frame_stride,
+                        min_velocity: config.data.moving_mnist.min_velocity,
+                        max_velocity: config.data.moving_mnist.max_velocity,
+                        seed: config.data.moving_mnist.seed ^ 0xA5A5_A5A5_A5A5_A5A5,
+                        query_q_text: &config.data.moving_mnist.query_q_text,
+                        vocab: &vocab,
+                        normalize_mean: config.data.normalize_mean,
+                        normalize_std: config.data.normalize_std,
+                    },
+                )?,
+            ));
             Ok(VideoTextDatasetBundle {
                 train,
                 validation,
@@ -1548,10 +1608,16 @@ fn dataset_to_vec<D>(dataset: D) -> Vec<D::Item>
 where
     D: StreamDataset,
 {
-    (0..dataset.len()).filter_map(|index| dataset.get(index)).collect()
+    (0..dataset.len())
+        .filter_map(|index| dataset.get(index))
+        .collect()
 }
 
-fn batch_ranges(total: usize, batch_size: usize, max_steps: Option<usize>) -> Vec<std::ops::Range<usize>> {
+fn batch_ranges(
+    total: usize,
+    batch_size: usize,
+    max_steps: Option<usize>,
+) -> Vec<std::ops::Range<usize>> {
     let batch_size = batch_size.max(1);
     let step_limit = max_steps.unwrap_or(usize::MAX);
     let mut ranges = Vec::new();
@@ -1625,7 +1691,12 @@ fn prepare_target_bank<B: BackendTrait>(
                 .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
-    let max_len = token_sequences.iter().map(Vec::len).max().unwrap_or(1).max(1);
+    let max_len = token_sequences
+        .iter()
+        .map(Vec::len)
+        .max()
+        .unwrap_or(1)
+        .max(1);
     let mut token_data = vec![0_i64; token_sequences.len() * max_len];
     let mut mask_data = vec![0_i64; token_sequences.len() * max_len];
     for (row, tokens) in token_sequences.iter().enumerate() {
@@ -1799,22 +1870,21 @@ fn run_image_text_validation_epoch<B: AutodiffBackend>(
     let mut top1_accuracy_sum = 0.0_f32;
     let mut steps = 0_usize;
     if batched {
-        let batch_indices = if prepared_target_bank.is_some()
-            && config.model.target_bank_loss_weight > 0.0
-        {
-            contiguous_batch_indices(
-                validation.len(),
-                config.training.batch_size,
-                config.training.max_validation_steps_per_epoch,
-            )
-        } else {
-            unique_target_batches(
-                validation,
-                config.training.batch_size,
-                config.training.max_validation_steps_per_epoch,
-                |segment| &segment.payload.target_y_tokens,
-            )
-        };
+        let batch_indices =
+            if prepared_target_bank.is_some() && config.model.target_bank_loss_weight > 0.0 {
+                contiguous_batch_indices(
+                    validation.len(),
+                    config.training.batch_size,
+                    config.training.max_validation_steps_per_epoch,
+                )
+            } else {
+                unique_target_batches(
+                    validation,
+                    config.training.batch_size,
+                    config.training.max_validation_steps_per_epoch,
+                    |segment| &segment.payload.target_y_tokens,
+                )
+            };
         for batch_indices in batch_indices {
             let segments = batch_indices
                 .into_iter()
@@ -1823,14 +1893,15 @@ fn run_image_text_validation_epoch<B: AutodiffBackend>(
             let collated = collate_vision_language_segments::<B>(&segments, device);
             let target_bank = target_bank_batch_for_targets::<B, _>(
                 prepared_target_bank,
-                segments.iter().map(|segment| segment.payload.target_y_tokens.as_slice()),
+                segments
+                    .iter()
+                    .map(|segment| segment.payload.target_y_tokens.as_slice()),
                 device,
             );
-            let stream = collated
-                .stream
-                .first()
-                .copied()
-                .ok_or_else(|| anyhow!("validation image-text batch missing stream metadata"))?;
+            let stream =
+                collated.stream.first().copied().ok_or_else(|| {
+                    anyhow!("validation image-text batch missing stream metadata")
+                })?;
             let step = multimodal_eval_step(
                 model,
                 target_teacher,
@@ -1852,20 +1923,22 @@ fn run_image_text_validation_epoch<B: AutodiffBackend>(
         }
     } else {
         let mut state = model.init_state();
-        for range in batch_ranges(validation.len(), 1, config.training.max_validation_steps_per_epoch) {
+        for range in batch_ranges(
+            validation.len(),
+            1,
+            config.training.max_validation_steps_per_epoch,
+        ) {
             let segment = validation[range.start].clone();
             let target_bank = target_bank_batch_for_targets::<B, _>(
                 prepared_target_bank,
                 [segment.payload.target_y_tokens.as_slice()],
                 device,
             );
-            let collated =
-                collate_vision_language_segments::<B>(&[segment], device);
-            let stream = collated
-                .stream
-                .first()
-                .copied()
-                .ok_or_else(|| anyhow!("validation image-text batch missing stream metadata"))?;
+            let collated = collate_vision_language_segments::<B>(&[segment], device);
+            let stream =
+                collated.stream.first().copied().ok_or_else(|| {
+                    anyhow!("validation image-text batch missing stream metadata")
+                })?;
             let step = multimodal_eval_step(
                 model,
                 target_teacher,
@@ -1930,22 +2003,21 @@ fn run_video_text_validation_epoch<B: AutodiffBackend>(
     let mut top1_accuracy_sum = 0.0_f32;
     let mut steps = 0_usize;
     if batched {
-        let batch_indices = if prepared_target_bank.is_some()
-            && config.model.target_bank_loss_weight > 0.0
-        {
-            contiguous_batch_indices(
-                validation.len(),
-                config.training.batch_size,
-                config.training.max_validation_steps_per_epoch,
-            )
-        } else {
-            unique_target_batches(
-                validation,
-                config.training.batch_size,
-                config.training.max_validation_steps_per_epoch,
-                |segment| &segment.payload.target_y_tokens,
-            )
-        };
+        let batch_indices =
+            if prepared_target_bank.is_some() && config.model.target_bank_loss_weight > 0.0 {
+                contiguous_batch_indices(
+                    validation.len(),
+                    config.training.batch_size,
+                    config.training.max_validation_steps_per_epoch,
+                )
+            } else {
+                unique_target_batches(
+                    validation,
+                    config.training.batch_size,
+                    config.training.max_validation_steps_per_epoch,
+                    |segment| &segment.payload.target_y_tokens,
+                )
+            };
         for batch_indices in batch_indices {
             let segments = batch_indices
                 .into_iter()
@@ -1954,14 +2026,15 @@ fn run_video_text_validation_epoch<B: AutodiffBackend>(
             let collated = collate_video_language_segments::<B>(&segments, device);
             let target_bank = target_bank_batch_for_targets::<B, _>(
                 prepared_target_bank,
-                segments.iter().map(|segment| segment.payload.target_y_tokens.as_slice()),
+                segments
+                    .iter()
+                    .map(|segment| segment.payload.target_y_tokens.as_slice()),
                 device,
             );
-            let stream = collated
-                .stream
-                .first()
-                .copied()
-                .ok_or_else(|| anyhow!("validation video-text batch missing stream metadata"))?;
+            let stream =
+                collated.stream.first().copied().ok_or_else(|| {
+                    anyhow!("validation video-text batch missing stream metadata")
+                })?;
             let step = multimodal_video_eval_step(
                 model,
                 target_teacher,
@@ -1983,20 +2056,22 @@ fn run_video_text_validation_epoch<B: AutodiffBackend>(
         }
     } else {
         let mut state = model.init_state();
-        for range in batch_ranges(validation.len(), 1, config.training.max_validation_steps_per_epoch) {
+        for range in batch_ranges(
+            validation.len(),
+            1,
+            config.training.max_validation_steps_per_epoch,
+        ) {
             let segment = validation[range.start].clone();
             let target_bank = target_bank_batch_for_targets::<B, _>(
                 prepared_target_bank,
                 [segment.payload.target_y_tokens.as_slice()],
                 device,
             );
-            let collated =
-                collate_video_language_segments::<B>(&[segment], device);
-            let stream = collated
-                .stream
-                .first()
-                .copied()
-                .ok_or_else(|| anyhow!("validation video-text batch missing stream metadata"))?;
+            let collated = collate_video_language_segments::<B>(&[segment], device);
+            let stream =
+                collated.stream.first().copied().ok_or_else(|| {
+                    anyhow!("validation video-text batch missing stream metadata")
+                })?;
             let step = multimodal_video_eval_step(
                 model,
                 target_teacher,
@@ -2055,15 +2130,18 @@ fn build_vocab_from_manifest(
         .lines()
         .enumerate()
     {
-        if let Some(limit) = max_steps_per_epoch && index >= limit {
+        if let Some(limit) = max_steps_per_epoch
+            && index >= limit
+        {
             break;
         }
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
-        let record: VisionLanguageJsonlRecord = serde_json::from_str(line)
-            .with_context(|| format!("failed to parse record {index} from {}", manifest.display()))?;
+        let record: VisionLanguageJsonlRecord = serde_json::from_str(line).with_context(|| {
+            format!("failed to parse record {index} from {}", manifest.display())
+        })?;
         texts.push(record.query_q_text);
         texts.push(record.target_y_text);
     }
@@ -2082,15 +2160,18 @@ fn build_video_vocab_from_manifest(
         .lines()
         .enumerate()
     {
-        if let Some(limit) = max_steps_per_epoch && index >= limit {
+        if let Some(limit) = max_steps_per_epoch
+            && index >= limit
+        {
             break;
         }
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
-        let record: VideoLanguageJsonlRecord = serde_json::from_str(line)
-            .with_context(|| format!("failed to parse record {index} from {}", manifest.display()))?;
+        let record: VideoLanguageJsonlRecord = serde_json::from_str(line).with_context(|| {
+            format!("failed to parse record {index} from {}", manifest.display())
+        })?;
         texts.push(record.query_q_text);
         texts.push(record.target_y_text);
     }
@@ -2108,15 +2189,18 @@ fn unique_target_texts_from_vision_manifest(
         .lines()
         .enumerate()
     {
-        if let Some(limit) = max_steps_per_epoch && index >= limit {
+        if let Some(limit) = max_steps_per_epoch
+            && index >= limit
+        {
             break;
         }
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
-        let record: VisionLanguageJsonlRecord = serde_json::from_str(line)
-            .with_context(|| format!("failed to parse record {index} from {}", manifest.display()))?;
+        let record: VisionLanguageJsonlRecord = serde_json::from_str(line).with_context(|| {
+            format!("failed to parse record {index} from {}", manifest.display())
+        })?;
         if !texts.iter().any(|text| text == &record.target_y_text) {
             texts.push(record.target_y_text);
         }
@@ -2134,15 +2218,18 @@ fn unique_target_texts_from_video_manifest(
         .lines()
         .enumerate()
     {
-        if let Some(limit) = max_steps_per_epoch && index >= limit {
+        if let Some(limit) = max_steps_per_epoch
+            && index >= limit
+        {
             break;
         }
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
-        let record: VideoLanguageJsonlRecord = serde_json::from_str(line)
-            .with_context(|| format!("failed to parse record {index} from {}", manifest.display()))?;
+        let record: VideoLanguageJsonlRecord = serde_json::from_str(line).with_context(|| {
+            format!("failed to parse record {index} from {}", manifest.display())
+        })?;
         if !texts.iter().any(|text| text == &record.target_y_text) {
             texts.push(record.target_y_text);
         }
@@ -2509,7 +2596,11 @@ mod tests {
         config.training.run_root = dir.path().join("runs");
 
         let report = train_backend::<Backend, _>(&config, "cpu", |_| {}).expect("train backend");
-        assert!(report.run_dir.starts_with(dir.path().join("runs").join("cpu")));
+        assert!(
+            report
+                .run_dir
+                .starts_with(dir.path().join("runs").join("cpu"))
+        );
         assert!(!report.run_name.is_empty());
         assert!(report.run_dir.join("checkpoint").is_dir());
     }
@@ -2631,9 +2722,8 @@ mod tests {
         config.training.max_steps_per_epoch = Some(2);
 
         let run_dir = dir.path().join("video-run");
-        let report =
-            run_video_text_training_backend::<Backend, _>(&config, &run_dir, |_| {})
-                .expect("run multimodal video training");
+        let report = run_video_text_training_backend::<Backend, _>(&config, &run_dir, |_| {})
+            .expect("run multimodal video training");
 
         assert_eq!(report.epochs.len(), 1);
         assert!(!report.checkpoint_paths.is_empty());
@@ -2675,9 +2765,8 @@ mod tests {
         config.training.max_validation_steps_per_epoch = Some(1);
 
         let run_dir = dir.path().join("mnist-video-run");
-        let report =
-            run_video_text_training_backend::<Backend, _>(&config, &run_dir, |_| {})
-                .expect("run MNIST video-text training");
+        let report = run_video_text_training_backend::<Backend, _>(&config, &run_dir, |_| {})
+            .expect("run MNIST video-text training");
 
         assert_eq!(report.epochs.len(), 1);
         assert!(!report.checkpoint_paths.is_empty());

@@ -2,12 +2,8 @@ mod coefficients;
 mod config;
 mod reference;
 
-pub use coefficients::{
-    ManifoldHyperConnectionCoefficients, ManifoldHyperConnectionWidthOutput,
-};
-pub use config::{
-    ManifoldHyperConnectionCoefficientPolicy, ManifoldHyperConnectionsConfig,
-};
+pub use coefficients::{ManifoldHyperConnectionCoefficients, ManifoldHyperConnectionWidthOutput};
+pub use config::{ManifoldHyperConnectionCoefficientPolicy, ManifoldHyperConnectionsConfig};
 pub use reference::ManifoldHyperConnections;
 
 use burn::tensor::Tensor;

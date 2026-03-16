@@ -55,15 +55,19 @@ where
     let training = &resolved_config.training;
     let optimizer_cfg = &config.optimizer;
 
-    let mut model_config = build_model_config(&resolved_config.model, training.block_size);
+    let tokenizer = dataset.tokenizer();
+    let mut model_config = build_model_config_with_tokenizer(
+        &resolved_config.model,
+        training.block_size,
+        tokenizer.as_ref(),
+    )?;
     apply_wgpu_fused_core_override(
         &mut model_config,
         backend_name,
         resolved_config.wgpu.training.fused_core_recurrent,
         resolved_config.wgpu.training.fused_core_rollout,
     );
-    let tokenizer = dataset.tokenizer();
-    model_config.vocab_size = tokenizer.len();
+    let summary_event_token_ids = model_config.summary_memory.write_trigger_token_ids.clone();
 
     let steps_per_epoch = dataset.steps_per_epoch(DatasetSplit::Train);
     let schedule = resolve_train_schedule(training, steps_per_epoch)?;
@@ -75,14 +79,16 @@ where
         "train schedule: steps_per_epoch={steps_per_epoch}, total_steps={total_steps}, epochs={total_epochs}, source={}",
         schedule.source.as_str()
     );
-    let train_loader: Arc<dyn DataLoader<B, SequenceBatch<B>>> =
-        Arc::new(RandomDataLoader::<B>::new(
+    let train_loader: Arc<dyn DataLoader<B, SequenceBatch<B>>> = Arc::new(
+        RandomDataLoader::<B>::new(
             Arc::clone(&dataset),
             DatasetSplit::Train,
             &device,
             steps_per_epoch,
             Some(total_steps),
-        ));
+        )
+        .with_summary_event_token_ids(summary_event_token_ids.clone()),
+    );
 
     let val_steps_per_epoch = dataset.steps_per_epoch(DatasetSplit::Val);
     let valid_steps =
@@ -90,13 +96,16 @@ where
 
     let valid_device = device.clone();
     let valid_loader: Arc<dyn DataLoader<ValidBackend<B>, SequenceBatch<ValidBackend<B>>>> =
-        Arc::new(RandomDataLoader::<ValidBackend<B>>::new(
-            Arc::clone(&dataset),
-            DatasetSplit::Val,
-            &valid_device,
-            valid_steps,
-            None,
-        ));
+        Arc::new(
+            RandomDataLoader::<ValidBackend<B>>::new(
+                Arc::clone(&dataset),
+                DatasetSplit::Val,
+                &valid_device,
+                valid_steps,
+                None,
+            )
+            .with_summary_event_token_ids(summary_event_token_ids),
+        );
 
     let mut model = Some(LanguageTrainModel::new(BDH::<B>::new(
         model_config.clone(),

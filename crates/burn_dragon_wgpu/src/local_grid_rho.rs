@@ -129,8 +129,16 @@ impl<B: BackendTrait> CompiledLocalGridRhoPlan<B> {
                     spec.grid.height as f32,
                     spec.grid.width as f32,
                     spec.neighborhood.radius as f32,
-                    if spec.neighborhood.diagonals { 1.0 } else { 0.0 },
-                    if spec.neighborhood.self_edges { 1.0 } else { 0.0 },
+                    if spec.neighborhood.diagonals {
+                        1.0
+                    } else {
+                        0.0
+                    },
+                    if spec.neighborhood.self_edges {
+                        1.0
+                    } else {
+                        0.0
+                    },
                 ],
                 [META_LEN],
             ),
@@ -242,17 +250,18 @@ where
         },
         &query.device(),
     );
-    let output =
-        try_fused_local_grid_rho_attention_wgpu_head_decay_with_plan(query, value, rho, decay, &plan);
+    let output = try_fused_local_grid_rho_attention_wgpu_head_decay_with_plan(
+        query, value, rho, decay, &plan,
+    );
     if output.is_some() {
         profile_record(&LOCAL_GRID_RHO_PROFILE, |state| {
             state.metadata_reuse_hits = state.metadata_reuse_hits.saturating_sub(1);
             state.metadata_reuse_bytes = state
                 .metadata_reuse_bytes
                 .saturating_sub((META_LEN * core::mem::size_of::<f32>()) as u64);
-            state.metadata_upload_bytes = state.metadata_upload_bytes.saturating_add(
-                ((META_LEN + heads.max(1)) * core::mem::size_of::<f32>()) as u64,
-            );
+            state.metadata_upload_bytes = state
+                .metadata_upload_bytes
+                .saturating_add(((META_LEN + heads.max(1)) * core::mem::size_of::<f32>()) as u64);
         });
     }
     output
@@ -310,13 +319,7 @@ where
         &meta_copy,
     )
     .or_else(|| {
-        try_fusion_path_wgpu::<B, u8>(
-            &query_copy,
-            &value_copy,
-            &rho_copy,
-            &decay_copy,
-            &meta_copy,
-        )
+        try_fusion_path_wgpu::<B, u8>(&query_copy, &value_copy, &rho_copy, &decay_copy, &meta_copy)
     })
     .or_else(|| try_direct_path::<B>(&query_copy, &value_copy, &rho_copy, &decay_copy, &meta_copy))
     .or_else(|| {

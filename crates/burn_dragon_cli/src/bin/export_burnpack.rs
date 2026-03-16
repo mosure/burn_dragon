@@ -5,9 +5,9 @@ use clap::{Parser, ValueEnum};
 
 use burn_dragon::api::checkpoint::bundle::BurnpackBundleExportOptions;
 use burn_dragon::api::checkpoint::burnpack::BurnpackFloatPrecision;
+use burn_dragon::api::checkpoint::policy::{BurnpackLoadPolicy, BurnpackPrecisionPreference};
 use burn_dragon::api::checkpoint::run::{CheckpointExportReport, resolve_checkpoint_base};
 use burn_dragon::api::graph::checkpoint::export_graph_checkpoint_to_burnpack;
-use burn_dragon::api::checkpoint::policy::{BurnpackLoadPolicy, BurnpackPrecisionPreference};
 use burn_dragon::api::language::checkpoint::export_language_checkpoint_to_burnpack;
 use burn_dragon::api::multimodal::checkpoint::export_multimodal_checkpoint_to_burnpack;
 use burn_dragon::api::sudoku::checkpoint::export_sudoku_checkpoint_to_burnpack;
@@ -38,7 +38,11 @@ impl From<PrecisionArg> for BurnpackFloatPrecision {
 }
 
 #[derive(Parser, Debug)]
-#[command(author, version, about = "Export Dragon checkpoints to deployable burnpack bundles")]
+#[command(
+    author,
+    version,
+    about = "Export Dragon checkpoints to deployable burnpack bundles"
+)]
 struct Args {
     /// Model family to export.
     #[arg(long, value_enum, default_value_t = ModelFamilyArg::Language)]
@@ -83,9 +87,10 @@ fn main() {
 fn run() -> Result<()> {
     let args = Args::parse();
     let (checkpoint_base, epoch) = resolve_checkpoint_base(&args.checkpoint, args.epoch)?;
-    let output_base = args.output.clone().unwrap_or_else(|| {
-        default_output_base(checkpoint_base.as_path(), epoch)
-    });
+    let output_base = args
+        .output
+        .clone()
+        .unwrap_or_else(|| default_output_base(checkpoint_base.as_path(), epoch));
 
     let load_policy = BurnpackLoadPolicy::default().with_precision(match args.precision {
         PrecisionArg::F16 => BurnpackPrecisionPreference::PreferF16,
@@ -173,7 +178,9 @@ fn print_common_export_report(label: &str, report: &CheckpointExportReport) {
     print_bundle_artifacts(&report.bundle);
 }
 
-fn print_bundle_artifacts(bundle: &burn_dragon::api::checkpoint::bundle::BurnpackBundleExportReport) {
+fn print_bundle_artifacts(
+    bundle: &burn_dragon::api::checkpoint::bundle::BurnpackBundleExportReport,
+) {
     if let Some(parts) = &bundle.parts {
         eprintln!(
             "Multipart burnpack: {} parts via {}",

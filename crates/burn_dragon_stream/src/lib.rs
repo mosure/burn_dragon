@@ -64,7 +64,9 @@ pub mod api {
     }
 
     pub mod expert {
-        pub use crate::{alignment, boundary, collate, cursor, dataset, ids, policy, segment, window};
+        pub use crate::{
+            alignment, boundary, collate, cursor, dataset, ids, policy, segment, window,
+        };
     }
 }
 

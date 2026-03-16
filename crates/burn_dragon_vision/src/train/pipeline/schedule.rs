@@ -103,6 +103,7 @@ where
         Arc::clone(&env.valid_loader),
     )
     .num_epochs(env.epochs)
+    .grads_accumulation(env.training.gradient_accumulation_steps.max(1))
     .with_training_strategy(LearningStrategy::SingleDevice(env.device.clone()));
     if enable_checkpoints {
         builder = builder.with_file_checkpointer(BinFileRecorder::<FullPrecisionSettings>::new());
@@ -1069,8 +1070,12 @@ pub fn resolve_vision_train_schedule(
     training: &VisionTrainingHyperparameters,
     steps_per_epoch: usize,
 ) -> Result<TrainSchedule> {
+    let epochs = match training.schedule_mode {
+        Some(crate::VisionTrainScheduleMode::MaxIters) => None,
+        Some(crate::VisionTrainScheduleMode::Epochs) | None => training.epochs,
+    };
     burn_dragon_train::train::pipeline::resolve_train_schedule(
-        training.epochs,
+        epochs,
         training.max_iters,
         steps_per_epoch,
         "vision training",

@@ -51,14 +51,19 @@ where
         .target_effective_batch_size
         .filter(|value| *value > 0);
 
-    let mut model_config = build_model_config(&config.model, config.training.block_size);
+    let tokenizer = dataset.tokenizer();
+    let mut model_config = build_model_config_with_tokenizer(
+        &config.model,
+        config.training.block_size,
+        tokenizer.as_ref(),
+    )?;
     apply_wgpu_fused_core_override(
         &mut model_config,
         backend_name,
         config.wgpu.training.fused_core_recurrent,
         config.wgpu.training.fused_core_rollout,
     );
-    model_config.vocab_size = dataset.tokenizer().len();
+    let summary_event_token_ids = model_config.summary_memory.write_trigger_token_ids.clone();
 
     let mut probes = Vec::new();
     let target_bytes = (autotune.target_device_memory_mb as u64).saturating_mul(1024 * 1024);
@@ -73,6 +78,7 @@ where
             candidate,
             autotune.probe_steps.max(1),
             target_bytes,
+            summary_event_token_ids.as_deref(),
             device,
         );
         let fit_target = probe.fit_target;
@@ -99,6 +105,7 @@ where
                 candidate,
                 autotune.probe_steps.max(1),
                 target_bytes,
+                summary_event_token_ids.as_deref(),
                 device,
             );
             let fit_target = probe.fit_target;
@@ -139,12 +146,11 @@ where
         probes.len(),
     );
 
-    let resolved_gradient_accumulation_steps =
-        resolve_gradient_accumulation_steps(
-            resolved_batch_size,
-            config.training.gradient_accumulation_steps,
-            target_effective_batch_size,
-        );
+    let resolved_gradient_accumulation_steps = resolve_gradient_accumulation_steps(
+        resolved_batch_size,
+        config.training.gradient_accumulation_steps,
+        target_effective_batch_size,
+    );
     let resolved_effective_batch_size =
         resolved_batch_size.saturating_mul(resolved_gradient_accumulation_steps);
 
@@ -169,6 +175,7 @@ fn probe_batch_size<B>(
     batch_size: usize,
     probe_steps: usize,
     target_bytes: u64,
+    summary_event_token_ids: Option<&[u32]>,
     device: &B::Device,
 ) -> StartupAutotuneProbe
 where
@@ -187,6 +194,7 @@ where
                 DatasetSplit::Train,
                 batch_size,
                 block_size,
+                summary_event_token_ids,
                 device,
             );
             let output = burn_train::TrainStep::step(&model, batch);

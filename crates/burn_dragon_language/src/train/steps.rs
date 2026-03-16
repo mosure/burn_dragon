@@ -19,7 +19,15 @@ impl<B: AutodiffBackend> TrainStep for LanguageTrainModel<B> {
     fn step(&self, batch: SequenceBatch<B>) -> TrainOutput<LanguageModelTrainItem<B>> {
         let prof_enabled = crate::train::profile::enabled();
         let forward_start = prof_enabled.then(Instant::now);
-        let logits = if fast_train_enabled() {
+        let logits = if let Some(summary_event_mask) = batch.summary_event_mask {
+            if fast_train_enabled() {
+                self.model
+                    .forward_fast_with_summary_event_mask(batch.inputs, summary_event_mask)
+            } else {
+                self.model
+                    .forward_with_summary_event_mask(batch.inputs, summary_event_mask)
+            }
+        } else if fast_train_enabled() {
             self.model.forward_fast(batch.inputs)
         } else {
             self.model.forward(batch.inputs)
@@ -48,7 +56,15 @@ impl<B: BackendTrait> ValidStep for LanguageTrainModel<B> {
     type Output = LanguageModelOutput<B>;
 
     fn step(&self, batch: SequenceBatch<B>) -> LanguageModelOutput<B> {
-        let logits = if fast_train_enabled() {
+        let logits = if let Some(summary_event_mask) = batch.summary_event_mask {
+            if fast_train_enabled() {
+                self.model
+                    .forward_fast_with_summary_event_mask(batch.inputs, summary_event_mask)
+            } else {
+                self.model
+                    .forward_with_summary_event_mask(batch.inputs, summary_event_mask)
+            }
+        } else if fast_train_enabled() {
             self.model.forward_fast(batch.inputs)
         } else {
             self.model.forward(batch.inputs)

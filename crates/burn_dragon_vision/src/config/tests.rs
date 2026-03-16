@@ -32,6 +32,16 @@ fn vision_configs_parse_serialize_validate() {
         "vision/croco/tiny.toml",
         "vision/lejepa/tiny.toml",
         "vision/saccade/tiny.toml",
+        "vision/distill/baselines/smoke.toml",
+        "vision/distill/baselines/tiny.toml",
+        "vision/distill/baselines/small.toml",
+        "vision/distill/baselines/base.toml",
+        "vision/distill/baselines/balanced_224.toml",
+        "vision/distill/baselines/richer_280.toml",
+        "vision/video_lejepa/baselines/smoke.toml",
+        "vision/video_lejepa/baselines/tiny.toml",
+        "vision/video_lejepa/baselines/small.toml",
+        "vision/video_lejepa/baselines/base.toml",
         "vision/video_lejepa/moving_mnist_trm_artifact_validate.toml",
     ];
 
@@ -75,9 +85,12 @@ fn video_lejepa_configs_parse_serialize_validate() {
     );
 
     for path in files {
-        let config: VisionTrainingConfig =
-            load_vision_training_config(std::slice::from_ref(&path)).unwrap_or_else(|err| {
-                panic!("failed to load video_lejepa config {}: {err}", path.display());
+        let config: VisionTrainingConfig = load_vision_training_config(std::slice::from_ref(&path))
+            .unwrap_or_else(|err| {
+                panic!(
+                    "failed to load video_lejepa config {}: {err}",
+                    path.display()
+                );
             });
         config
             .validate()
@@ -182,4 +195,88 @@ fn vision_loader_supports_relative_extends() {
     assert_eq!(config.training.batch_size, 7);
     assert_eq!(config.training.max_iters, 8);
     assert!(matches!(config.mode, VisionTrainingModeConfig::Distill(_)));
+}
+
+#[test]
+fn all_vision_config_extends_targets_exist() {
+    fn collect_toml_files(root: &Path) -> Vec<PathBuf> {
+        let mut stack = vec![root.to_path_buf()];
+        let mut files = Vec::new();
+        let local_root = root.join("local");
+        while let Some(dir) = stack.pop() {
+            if dir == local_root {
+                continue;
+            }
+            let entries = fs::read_dir(&dir)
+                .unwrap_or_else(|err| panic!("failed to read {}: {err}", dir.display()));
+            for entry in entries {
+                let path = entry
+                    .unwrap_or_else(|err| panic!("failed to read dir entry in {}: {err}", dir.display()))
+                    .path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().and_then(|ext| ext.to_str()) == Some("toml") {
+                    files.push(path);
+                }
+            }
+        }
+        files.sort();
+        files
+    }
+
+    fn extract_extends(path: &Path) -> Vec<PathBuf> {
+        let text = fs::read_to_string(path)
+            .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
+        let value: toml::Value = toml::from_str(&text)
+            .unwrap_or_else(|err| panic!("failed to parse {}: {err}", path.display()));
+        let Some(extends) = value.get("extends") else {
+            return Vec::new();
+        };
+        match extends {
+            toml::Value::String(value) => vec![PathBuf::from(value)],
+            toml::Value::Array(values) => values
+                .iter()
+                .map(|value| match value {
+                    toml::Value::String(value) => PathBuf::from(value),
+                    other => panic!(
+                        "extends in {} must contain only strings, got {other:?}",
+                        path.display()
+                    ),
+                })
+                .collect(),
+            other => panic!(
+                "extends in {} must be string or array of strings, got {other:?}",
+                path.display()
+            ),
+        }
+    }
+
+    let root = config_root().join("vision");
+    let files = collect_toml_files(&root);
+    assert!(
+        !files.is_empty(),
+        "expected at least one config file under {}",
+        root.display()
+    );
+
+    let mut missing = Vec::new();
+    for path in files {
+        let parent = path.parent().expect("config parent");
+        for extend in extract_extends(&path) {
+            let resolved = parent.join(&extend);
+            if !resolved.exists() {
+                missing.push(format!(
+                    "{} -> {}",
+                    path.display(),
+                    resolved.display()
+                ));
+            }
+        }
+    }
+
+    assert!(
+        missing.is_empty(),
+        "missing extends targets:\n{}",
+        missing.join("\n")
+    );
 }

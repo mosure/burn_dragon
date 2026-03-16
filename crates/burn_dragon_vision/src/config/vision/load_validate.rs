@@ -204,6 +204,35 @@ pub(super) fn validate_vision_mode(
                             "mode.rollout_supervision_frames must be > 0 for distill mode"
                         ));
                     }
+                    if distill.rollout_supervision_groups == 0 {
+                        return Err(anyhow!(
+                            "mode.rollout_supervision_groups must be > 0 for distill mode"
+                        ));
+                    }
+                    if distill
+                        .rollout_supervision_explicit_steps
+                        .iter()
+                        .any(|step| *step == 0)
+                    {
+                        return Err(anyhow!(
+                            "mode.rollout_supervision_explicit_steps entries must be > 0 for distill mode"
+                        ));
+                    }
+                    if distill
+                        .rollout_supervision_explicit_groups
+                        .iter()
+                        .flatten()
+                        .any(|step| *step == 0)
+                    {
+                        return Err(anyhow!(
+                            "mode.rollout_supervision_explicit_groups entries must be > 0 for distill mode"
+                        ));
+                    }
+                    if distill.rollout_supervision_stride == 0 {
+                        return Err(anyhow!(
+                            "mode.rollout_supervision_stride must be > 0 for distill mode"
+                        ));
+                    }
                     if distill.rollout_supervision_power < 0.0 {
                         return Err(anyhow!(
                             "mode.rollout_supervision_power must be >= 0 for distill mode"
@@ -212,6 +241,16 @@ pub(super) fn validate_vision_mode(
                     if distill.rollout_sampling_power < 0.0 {
                         return Err(anyhow!(
                             "mode.rollout_sampling_power must be >= 0 for distill mode"
+                        ));
+                    }
+                    if distill.rollout_improvement_weight < 0.0 {
+                        return Err(anyhow!(
+                            "mode.rollout_improvement_weight must be >= 0 for distill mode"
+                        ));
+                    }
+                    if distill.rollout_improvement_margin < 0.0 {
+                        return Err(anyhow!(
+                            "mode.rollout_improvement_margin must be >= 0 for distill mode"
                         ));
                     }
                     let deterministic_train_features = augment.flip_prob <= 0.0
@@ -247,6 +286,35 @@ pub(super) fn validate_vision_mode(
                             "mode.rollout_supervision_frames must be > 0 for distill mode"
                         ));
                     }
+                    if distill.rollout_supervision_groups == 0 {
+                        return Err(anyhow!(
+                            "mode.rollout_supervision_groups must be > 0 for distill mode"
+                        ));
+                    }
+                    if distill
+                        .rollout_supervision_explicit_steps
+                        .iter()
+                        .any(|step| *step == 0)
+                    {
+                        return Err(anyhow!(
+                            "mode.rollout_supervision_explicit_steps entries must be > 0 for distill mode"
+                        ));
+                    }
+                    if distill
+                        .rollout_supervision_explicit_groups
+                        .iter()
+                        .flatten()
+                        .any(|step| *step == 0)
+                    {
+                        return Err(anyhow!(
+                            "mode.rollout_supervision_explicit_groups entries must be > 0 for distill mode"
+                        ));
+                    }
+                    if distill.rollout_supervision_stride == 0 {
+                        return Err(anyhow!(
+                            "mode.rollout_supervision_stride must be > 0 for distill mode"
+                        ));
+                    }
                     if distill.rollout_supervision_power < 0.0 {
                         return Err(anyhow!(
                             "mode.rollout_supervision_power must be >= 0 for distill mode"
@@ -255,6 +323,16 @@ pub(super) fn validate_vision_mode(
                     if distill.rollout_sampling_power < 0.0 {
                         return Err(anyhow!(
                             "mode.rollout_sampling_power must be >= 0 for distill mode"
+                        ));
+                    }
+                    if distill.rollout_improvement_weight < 0.0 {
+                        return Err(anyhow!(
+                            "mode.rollout_improvement_weight must be >= 0 for distill mode"
+                        ));
+                    }
+                    if distill.rollout_improvement_margin < 0.0 {
+                        return Err(anyhow!(
+                            "mode.rollout_improvement_margin must be >= 0 for distill mode"
                         ));
                     }
                 }
@@ -765,15 +843,22 @@ fn load_value(path: &Path) -> Result<Value> {
 }
 
 fn load_value_recursive(path: &Path, stack: &mut Vec<PathBuf>) -> Result<Value> {
-    let canonical = fs::canonicalize(path)
-        .with_context(|| format!("failed to canonicalize configuration file {}", path.display()))?;
+    let canonical = fs::canonicalize(path).with_context(|| {
+        format!(
+            "failed to canonicalize configuration file {}",
+            path.display()
+        )
+    })?;
     if let Some(idx) = stack.iter().position(|seen| seen == &canonical) {
         let mut cycle = stack[idx..]
             .iter()
             .map(|path| path.display().to_string())
             .collect::<Vec<_>>();
         cycle.push(canonical.display().to_string());
-        return Err(anyhow!("config extends cycle detected: {}", cycle.join(" -> ")));
+        return Err(anyhow!(
+            "config extends cycle detected: {}",
+            cycle.join(" -> ")
+        ));
     }
 
     stack.push(canonical.clone());
@@ -782,10 +867,10 @@ fn load_value_recursive(path: &Path, stack: &mut Vec<PathBuf>) -> Result<Value> 
             format!("failed to read configuration file {}", canonical.display())
         })?;
         let ext = canonical
-        .extension()
-        .and_then(|value| value.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
         let mut value = if ext == "yml" || ext == "yaml" {
             let value: serde_yaml::Value = serde_yaml::from_str(&content)
                 .with_context(|| format!("failed to parse {} as YAML", canonical.display()))?;

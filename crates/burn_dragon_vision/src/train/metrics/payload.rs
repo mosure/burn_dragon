@@ -1,9 +1,9 @@
 use burn::tensor::backend::{AutodiffBackend, Backend as BackendTrait};
 use burn::tensor::{Int, Tensor};
-use burn_train::metric::{Adaptor, ItemLazy, LossInput};
 use burn_dragon_train::train::metrics::{
     LossValue, MetricsBackend, OptionalScalarValue, ScalarValue,
 };
+use burn_train::metric::{Adaptor, ItemLazy, LossInput};
 
 pub const VISION_ROLLOUT_HORIZON_CAPS: [usize; 6] = [1, 2, 4, 8, 12, 24];
 pub const VISION_ROLLOUT_HORIZON_COUNT: usize = VISION_ROLLOUT_HORIZON_CAPS.len();

@@ -17,7 +17,10 @@ fn gather_diagonal_log_probs<B: Backend>(log_probs: Tensor<B, 2>) -> Tensor<B, 1
     log_probs.gather(1, labels).neg().mean()
 }
 
-fn gather_label_log_probs<B: Backend>(log_probs: Tensor<B, 2>, labels: Tensor<B, 1, Int>) -> Tensor<B, 1> {
+fn gather_label_log_probs<B: Backend>(
+    log_probs: Tensor<B, 2>,
+    labels: Tensor<B, 1, Int>,
+) -> Tensor<B, 1> {
     let [batch] = labels.shape().dims::<1>();
     log_probs.gather(1, labels.reshape([batch, 1])).neg().mean()
 }
@@ -37,10 +40,8 @@ pub fn vl_jepa_bidirectional_info_nce_loss<B: Backend>(
     let predicted = l2_normalize(predicted_target_embedding);
     let target = l2_normalize(target_embedding_y);
     let similarities = predicted.matmul(target.clone().swap_dims(0, 1)) / temperature.max(1e-6);
-    let predictor_to_target = gather_diagonal_log_probs(activation::log_softmax(
-        similarities.clone(),
-        1,
-    ));
+    let predictor_to_target =
+        gather_diagonal_log_probs(activation::log_softmax(similarities.clone(), 1));
     let target_to_predictor = gather_diagonal_log_probs(activation::log_softmax(
         similarities.clone().swap_dims(0, 1),
         1,
@@ -63,12 +64,12 @@ pub fn vl_jepa_teacher_student_info_nce_loss<B: Backend>(
     let predicted = l2_normalize(predicted_target_embedding);
     let student_target = l2_normalize(student_target_embedding_y);
     let teacher_target = l2_normalize(teacher_target_embedding_y);
-    let similarities =
-        predicted.clone().matmul(teacher_target.clone().swap_dims(0, 1)) / temperature.max(1e-6);
-    let predictor_to_target = gather_diagonal_log_probs(activation::log_softmax(
-        similarities.clone(),
-        1,
-    ));
+    let similarities = predicted
+        .clone()
+        .matmul(teacher_target.clone().swap_dims(0, 1))
+        / temperature.max(1e-6);
+    let predictor_to_target =
+        gather_diagonal_log_probs(activation::log_softmax(similarities.clone(), 1));
     let target_to_predictor = gather_diagonal_log_probs(activation::log_softmax(
         student_target.matmul(predicted.detach().swap_dims(0, 1)) / temperature.max(1e-6),
         1,
@@ -91,8 +92,10 @@ pub fn vl_jepa_target_bank_loss<B: Backend>(
     let predicted = l2_normalize(predicted_target_embedding);
     let target_bank = l2_normalize(target_bank_embeddings);
     let similarities = predicted.matmul(target_bank.swap_dims(0, 1)) / temperature.max(1e-6);
-    let predictor_to_target =
-        gather_label_log_probs(activation::log_softmax(similarities.clone(), 1), target_indices);
+    let predictor_to_target = gather_label_log_probs(
+        activation::log_softmax(similarities.clone(), 1),
+        target_indices,
+    );
     let target_to_predictor = predictor_to_target.clone();
     let total = predictor_to_target.clone();
     VlJepaLossBreakdown {

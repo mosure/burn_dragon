@@ -99,12 +99,13 @@ pub(super) fn build_distill_datasets_and_teacher<B: BackendTrait>(
                 cache_preprocessed: config.dataset.cache_preprocessed,
             })?;
             let train_records = train_dataset.len();
-            let train_teacher = Arc::new(DinoFeatureStore::new(
+            let train_teacher = Arc::new(DinoFeatureStore::new_with_options(
                 &teacher.train_cls_path,
                 &teacher.train_patch_path,
                 teacher.feature_dim,
                 teacher_tokens,
                 Some(train_records),
+                config.dataset.cache_teacher_features_in_memory,
             )?);
             train_dataset = train_dataset.with_teacher(Arc::clone(&train_teacher));
             let train_dataset = Arc::new(train_dataset);
@@ -126,12 +127,13 @@ pub(super) fn build_distill_datasets_and_teacher<B: BackendTrait>(
                 cache_preprocessed: config.dataset.cache_preprocessed,
             })?;
             let val_records = val_dataset.len();
-            let val_teacher = Arc::new(DinoFeatureStore::new(
+            let val_teacher = Arc::new(DinoFeatureStore::new_with_options(
                 &teacher.val_cls_path,
                 &teacher.val_patch_path,
                 teacher.feature_dim,
                 teacher_tokens,
                 Some(val_records),
+                config.dataset.cache_teacher_features_in_memory,
             )?);
             val_dataset = val_dataset.with_teacher(Arc::clone(&val_teacher));
             Ok((train_dataset, Arc::new(val_dataset), None))

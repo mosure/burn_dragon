@@ -1,6 +1,6 @@
+use std::fmt::Display;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::fmt::Display;
 
 use anyhow::{Context, Result, anyhow};
 use serde::Serialize;
@@ -221,7 +221,10 @@ mod tests {
 
         let (base, epoch) = resolve_checkpoint_base(&checkpoint_dir, None).expect("resolve base");
         assert_eq!(epoch, 3);
-        assert_eq!(checkpoint_bin_path(&base), checkpoint_dir.join("model-3.bin"));
+        assert_eq!(
+            checkpoint_bin_path(&base),
+            checkpoint_dir.join("model-3.bin")
+        );
         assert_eq!(
             resolve_checkpoint_run_dir(&checkpoint_dir).expect("run dir"),
             run_dir
@@ -242,6 +245,9 @@ mod tests {
         let manifest = checkpoint_dir.join("model-2.bin.parts.json");
         let (base, epoch) = resolve_checkpoint_base(&manifest, None).expect("resolve manifest");
         assert_eq!(epoch, 2);
-        assert_eq!(checkpoint_bin_path(&base), checkpoint_dir.join("model-2.bin"));
+        assert_eq!(
+            checkpoint_bin_path(&base),
+            checkpoint_dir.join("model-2.bin")
+        );
     }
 }

@@ -1,6 +1,6 @@
 use burn::tensor::{Int, Tensor};
-use burn_ndarray::NdArray;
 use burn_dragon::api::multimodal;
+use burn_ndarray::NdArray;
 
 type Backend = NdArray<f32>;
 
@@ -33,5 +33,8 @@ fn main() {
         model.init_state(),
         multimodal::data::MultimodalStepMode::Observe,
     );
-    assert_eq!(output.fusion.predicted_target_embedding.shape().dims::<2>(), [1, 16]);
+    assert_eq!(
+        output.fusion.predicted_target_embedding.shape().dims::<2>(),
+        [1, 16]
+    );
 }

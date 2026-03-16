@@ -39,11 +39,11 @@ pub mod api {
     }
 }
 
+#[cfg(feature = "viz")]
+pub use bevy_dragon as viz;
 pub use burn_dragon_checkpoint as checkpoint;
 pub use burn_dragon_core as core;
 pub use burn_dragon_graph as graph;
-#[cfg(feature = "viz")]
-pub use bevy_dragon as viz;
 pub use burn_dragon_language as language;
 pub use burn_dragon_multimodal as multimodal;
 pub use burn_dragon_stream as stream;
@@ -51,6 +51,6 @@ pub use burn_dragon_sudoku as sudoku;
 #[cfg(feature = "train")]
 pub use burn_dragon_train as train;
 pub use burn_dragon_vision as vision;
-pub use burn_dragon_wgpu as wgpu;
 #[cfg(feature = "web")]
 pub use burn_dragon_web as web;
+pub use burn_dragon_wgpu as wgpu;

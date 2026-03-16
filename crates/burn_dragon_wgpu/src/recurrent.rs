@@ -147,9 +147,9 @@ where
             state.metadata_reuse_bytes = state
                 .metadata_reuse_bytes
                 .saturating_sub((META_LEN * core::mem::size_of::<f32>()) as u64);
-            state.metadata_upload_bytes = state.metadata_upload_bytes.saturating_add(
-                ((META_LEN + heads.max(1)) * core::mem::size_of::<f32>()) as u64,
-            );
+            state.metadata_upload_bytes = state
+                .metadata_upload_bytes
+                .saturating_add(((META_LEN + heads.max(1)) * core::mem::size_of::<f32>()) as u64);
         });
     }
     output
@@ -697,9 +697,13 @@ mod tests {
         let mut rho = Tensor::<Backend, 4>::zeros([2, 4, 8, 12], &device);
 
         for _ in 0..2 {
-            let output =
-                try_fused_recurrent_attention_wgpu::<Backend>(&query, &value, Some(&rho), Some(&decay))
-                    .expect("fused recurrent");
+            let output = try_fused_recurrent_attention_wgpu::<Backend>(
+                &query,
+                &value,
+                Some(&rho),
+                Some(&decay),
+            )
+            .expect("fused recurrent");
             rho = output.rho;
         }
         let _ = Backend::sync(&device);
@@ -708,9 +712,13 @@ mod tests {
 
         let mut snapshots = Vec::with_capacity(24);
         for step in 0..32 {
-            let output =
-                try_fused_recurrent_attention_wgpu::<Backend>(&query, &value, Some(&rho), Some(&decay))
-                    .expect("fused recurrent");
+            let output = try_fused_recurrent_attention_wgpu::<Backend>(
+                &query,
+                &value,
+                Some(&rho),
+                Some(&decay),
+            )
+            .expect("fused recurrent");
             rho = output.rho;
             let _ = Backend::sync(&device);
             Backend::memory_cleanup(&device);

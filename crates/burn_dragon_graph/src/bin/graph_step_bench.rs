@@ -4,10 +4,10 @@ use std::time::Instant;
 
 use burn::tensor::backend::Backend as BackendTrait;
 use burn::tensor::{Distribution, Tensor};
+use burn_dragon_graph::api::expert::CompiledGraphRouting;
 use burn_dragon_graph::{
     GraphCsrAdjacency, GraphDragon, GraphDragonConfig, GraphTopologyRouting, StructuredStepMode,
 };
-use burn_dragon_graph::api::expert::CompiledGraphRouting;
 use burn_dragon_wgpu::api::graph::{
     sparse_graph_rho_profile_reset, sparse_graph_rho_profile_snapshot,
 };

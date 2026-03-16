@@ -1,7 +1,7 @@
 use burn::prelude::*;
 
-use crate::compiled_routing::CompiledGraphRouting;
 use crate::GraphTopologyRouting;
+use crate::compiled_routing::CompiledGraphRouting;
 
 /// Domain-level compiled execution wrapper for graph recurrent rollout.
 ///

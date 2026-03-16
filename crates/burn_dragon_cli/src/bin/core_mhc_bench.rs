@@ -3,7 +3,7 @@ use std::time::Instant;
 use burn::tensor::backend::Backend as BackendTrait;
 use burn::tensor::{Distribution, Tensor};
 use burn_dragon::core::{
-    ManifoldHyperConnectionCoefficients, ManifoldHyperConnectionCoefficientPolicy,
+    ManifoldHyperConnectionCoefficientPolicy, ManifoldHyperConnectionCoefficients,
     ManifoldHyperConnections, ManifoldHyperConnectionsConfig, mhc_passthrough_with_coefficients,
 };
 use burn_wgpu::{CubeBackend, RuntimeOptions, WgpuRuntime, graphics};
@@ -102,10 +102,7 @@ fn main() {
     for case in CASES.iter().copied() {
         let result = run_case(case, &device, &args);
         println!("## {}", case.name);
-        println!(
-            "- coefficient: {:.3} ms",
-            result.coefficient_ms,
-        );
+        println!("- coefficient: {:.3} ms", result.coefficient_ms,);
         println!(
             "- width: baseline {:.3} ms, optimized {:.3} ms, speedup {:.2}x, max_abs_diff {:.3e}",
             result.width_baseline_ms,
@@ -115,9 +112,7 @@ fn main() {
         );
         println!(
             "- depth: baseline {:.3} ms, optimized {:.3} ms, speedup {:.2}x",
-            result.depth_baseline_ms,
-            result.depth_optimized_ms,
-            result.depth_speedup_x,
+            result.depth_baseline_ms, result.depth_optimized_ms, result.depth_speedup_x,
         );
         println!(
             "- passthrough: baseline {:.3} ms, optimized {:.3} ms, speedup {:.2}x, max_abs_diff {:.3e}",
@@ -157,6 +152,7 @@ fn build_config(case: BenchCase) -> ManifoldHyperConnectionsConfig {
         enabled: true,
         num_streams: case.num_streams,
         num_views: case.num_views,
+        last_layers: None,
         coefficient_policy: ManifoldHyperConnectionCoefficientPolicy::StaticSinkhorn,
         mhc_iters: 10,
         mhc_tau: 0.05,
@@ -198,8 +194,7 @@ fn reference_width(
 ) -> (Tensor<Backend, 4>, Tensor<Backend, 4>) {
     let residuals_out =
         reference_mix_streams(residuals.clone(), coefficients.residual_weights.clone());
-    let branch_input =
-        reference_mix_streams(residuals, coefficients.branch_input_weights.clone());
+    let branch_input = reference_mix_streams(residuals, coefficients.branch_input_weights.clone());
     (branch_input, residuals_out)
 }
 

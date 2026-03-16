@@ -78,15 +78,20 @@ where
         Some(root) => root.clone(),
         None => default_cache_root()?,
     };
-    fs::create_dir_all(&cache_root)
-        .map_err(|err| format!("failed to create burn_dragon cache {}: {err}", cache_root.display()))?;
+    fs::create_dir_all(&cache_root).map_err(|err| {
+        format!(
+            "failed to create burn_dragon cache {}: {err}",
+            cache_root.display()
+        )
+    })?;
 
     let local_base = resolve_local_base(local_base, &cache_root);
     let local_candidates = candidate_burnpack_paths(local_base.as_path(), config.load_policy);
     let remote_candidates = candidate_burnpack_urls(remote_base_url, config.load_policy);
     let mut last_error = None;
 
-    for (local_candidate, remote_candidate) in local_candidates.iter().zip(remote_candidates.iter()) {
+    for (local_candidate, remote_candidate) in local_candidates.iter().zip(remote_candidates.iter())
+    {
         let manifest_path = burnpack_parts_manifest_path(local_candidate);
         if manifest_is_complete(&manifest_path).unwrap_or(false) {
             progress(format!(
@@ -133,13 +138,18 @@ where
                                 ));
                                 continue;
                             }
-                            let part_url = resolve_manifest_entry_url(manifest_url.as_str(), part.path.as_str());
+                            let part_url = resolve_manifest_entry_url(
+                                manifest_url.as_str(),
+                                part.path.as_str(),
+                            );
                             progress(format!(
                                 "downloading burnpack part {}/{}",
                                 index + 1,
                                 manifest.parts.len()
                             ));
-                            if ensure_file_cached(local_part_path.as_path(), part_url.as_str()).is_err() {
+                            if ensure_file_cached(local_part_path.as_path(), part_url.as_str())
+                                .is_err()
+                            {
                                 manifest_ok = false;
                                 break;
                             }
@@ -225,11 +235,18 @@ fn resolve_manifest_entry_url(manifest_url: &str, entry_path: &str) -> String {
     if entry_path.starts_with("http://") || entry_path.starts_with("https://") {
         return entry_path.to_string();
     }
-    let base = manifest_url.rsplit_once('/').map(|(left, _)| left).unwrap_or("");
+    let base = manifest_url
+        .rsplit_once('/')
+        .map(|(left, _)| left)
+        .unwrap_or("");
     if base.is_empty() {
         entry_path.trim_start_matches('/').to_string()
     } else {
-        format!("{}/{}", base.trim_end_matches('/'), entry_path.trim_start_matches('/'))
+        format!(
+            "{}/{}",
+            base.trim_end_matches('/'),
+            entry_path.trim_start_matches('/')
+        )
     }
 }
 
@@ -238,8 +255,12 @@ fn ensure_file_cached(path: &Path, url: &str) -> Result<(), String> {
         return Ok(());
     }
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|err| format!("failed to create cache directory {}: {err}", parent.display()))?;
+        fs::create_dir_all(parent).map_err(|err| {
+            format!(
+                "failed to create cache directory {}: {err}",
+                parent.display()
+            )
+        })?;
     }
     let bytes = download_required_bytes(url)?;
     write_bytes_atomically(path, bytes.as_slice())
@@ -292,12 +313,24 @@ fn write_bytes_atomically(path: &Path, bytes: &[u8]) -> Result<(), String> {
         path.extension().and_then(|ext| ext.to_str()).unwrap_or("")
     ));
     {
-        let mut file = fs::File::create(&temp_path)
-            .map_err(|err| format!("failed to create temporary file {}: {err}", temp_path.display()))?;
-        file.write_all(bytes)
-            .map_err(|err| format!("failed to write temporary file {}: {err}", temp_path.display()))?;
-        file.flush()
-            .map_err(|err| format!("failed to flush temporary file {}: {err}", temp_path.display()))?;
+        let mut file = fs::File::create(&temp_path).map_err(|err| {
+            format!(
+                "failed to create temporary file {}: {err}",
+                temp_path.display()
+            )
+        })?;
+        file.write_all(bytes).map_err(|err| {
+            format!(
+                "failed to write temporary file {}: {err}",
+                temp_path.display()
+            )
+        })?;
+        file.flush().map_err(|err| {
+            format!(
+                "failed to flush temporary file {}: {err}",
+                temp_path.display()
+            )
+        })?;
     }
     fs::rename(&temp_path, path).map_err(|err| {
         format!(

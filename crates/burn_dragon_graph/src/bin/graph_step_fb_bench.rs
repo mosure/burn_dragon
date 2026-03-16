@@ -4,11 +4,11 @@ use std::time::Instant;
 use burn::tensor::backend::Backend as BackendTrait;
 use burn::tensor::{Distribution, Tensor};
 use burn_autodiff::Autodiff;
+use burn_dragon_graph::api::expert::CompiledGraphRouting;
 use burn_dragon_graph::{
     GraphCsrAdjacency, GraphDragon, GraphDragonConfig, GraphTopologyRouting, GraphTopologyState,
     StructuredStepMode,
 };
-use burn_dragon_graph::api::expert::CompiledGraphRouting;
 use burn_dragon_wgpu::api::graph::{
     sparse_graph_rho_profile_reset, sparse_graph_rho_profile_snapshot,
 };
@@ -115,12 +115,15 @@ fn main() {
         .iter()
         .copied()
         .filter(|case| {
-            args.case_filter.as_ref().is_none_or(|filters| {
-                filters.iter().any(|filter| filter == case.name)
-            })
+            args.case_filter
+                .as_ref()
+                .is_none_or(|filters| filters.iter().any(|filter| filter == case.name))
         })
         .collect::<Vec<_>>();
-    assert!(!selected_cases.is_empty(), "graph_step_fb_bench selected no cases");
+    assert!(
+        !selected_cases.is_empty(),
+        "graph_step_fb_bench selected no cases"
+    );
 
     let mut results = Vec::with_capacity(selected_cases.len() * 2);
     for (case_idx, case) in selected_cases.into_iter().enumerate() {
@@ -248,20 +251,48 @@ fn run_case(
         .state_from_observations(&routing, node_observation, cluster_observation)
         .expect("state init");
 
-    let (loss_abs_diff, node_error, cluster_error, node_rho_error, cluster_rho_error, global_rho_error) =
-        parity_snapshot(&model, state.clone(), &routing, &compiled, steps);
+    let (
+        loss_abs_diff,
+        node_error,
+        cluster_error,
+        node_rho_error,
+        cluster_rho_error,
+        global_rho_error,
+    ) = parity_snapshot(&model, state.clone(), &routing, &compiled, steps);
 
     for _ in 0..args.warmup {
         let _ = run_forward_backward(&model, state.clone(), &routing, None, steps, device);
-        let _ = run_forward_backward(&model, state.clone(), &routing, Some(&compiled), steps, device);
+        let _ = run_forward_backward(
+            &model,
+            state.clone(),
+            &routing,
+            Some(&compiled),
+            steps,
+            device,
+        );
     }
 
-    let baseline = summarize_measurements((0..args.repetitions).map(|_| {
-        run_forward_backward(&model, state.clone(), &routing, None, steps, device)
-    }).collect::<Vec<_>>(), steps);
-    let fused = summarize_measurements((0..args.repetitions).map(|_| {
-        run_forward_backward(&model, state.clone(), &routing, Some(&compiled), steps, device)
-    }).collect::<Vec<_>>(), steps);
+    let baseline = summarize_measurements(
+        (0..args.repetitions)
+            .map(|_| run_forward_backward(&model, state.clone(), &routing, None, steps, device))
+            .collect::<Vec<_>>(),
+        steps,
+    );
+    let fused = summarize_measurements(
+        (0..args.repetitions)
+            .map(|_| {
+                run_forward_backward(
+                    &model,
+                    state.clone(),
+                    &routing,
+                    Some(&compiled),
+                    steps,
+                    device,
+                )
+            })
+            .collect::<Vec<_>>(),
+        steps,
+    );
 
     CaseResult {
         case,
@@ -331,8 +362,18 @@ fn state_loss(state: GraphTopologyState<TrainBackend>) -> Tensor<TrainBackend, 1
 fn summarize_measurements(samples: Vec<StepMeasurement>, steps: usize) -> Measurement {
     let count = samples.len().max(1) as f64;
     let elapsed_ms = samples.iter().map(|sample| sample.elapsed_ms).sum::<f64>() / count;
-    let kernel_calls = (samples.iter().map(|sample| sample.kernel_calls as f64).sum::<f64>() / count).round() as u64;
-    let launches = (samples.iter().map(|sample| sample.launches as f64).sum::<f64>() / count).round() as u64;
+    let kernel_calls = (samples
+        .iter()
+        .map(|sample| sample.kernel_calls as f64)
+        .sum::<f64>()
+        / count)
+        .round() as u64;
+    let launches = (samples
+        .iter()
+        .map(|sample| sample.launches as f64)
+        .sum::<f64>()
+        / count)
+        .round() as u64;
     let dispatch_ms = samples.iter().map(|sample| sample.dispatch_ms).sum::<f64>() / count;
     Measurement {
         elapsed_ms,
@@ -364,7 +405,9 @@ fn parity_snapshot(
     let fused = model
         .rollout_compiled(state, compiled, steps, StructuredStepMode::Predict)
         .expect("compiled rollout");
-    let loss_abs_diff = (scalar_to_f32(state_loss(reference.clone())) - scalar_to_f32(state_loss(fused.clone()))).abs();
+    let loss_abs_diff = (scalar_to_f32(state_loss(reference.clone()))
+        - scalar_to_f32(state_loss(fused.clone())))
+    .abs();
 
     (
         loss_abs_diff,
@@ -443,7 +486,11 @@ fn synthetic_routing(case: BenchCase) -> GraphTopologyRouting {
 
 fn format_markdown(adapter: &str, args: Args, results: &[CaseResult]) -> String {
     let mut out = String::new();
-    writeln!(&mut out, "# burn_dragon_graph sparse graph forward+backward benchmark").unwrap();
+    writeln!(
+        &mut out,
+        "# burn_dragon_graph sparse graph forward+backward benchmark"
+    )
+    .unwrap();
     writeln!(&mut out).unwrap();
     writeln!(&mut out, "- Adapter: {adapter}").unwrap();
     writeln!(&mut out, "- Warmup: {}", args.warmup).unwrap();

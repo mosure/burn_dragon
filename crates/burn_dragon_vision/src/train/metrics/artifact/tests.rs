@@ -32,7 +32,11 @@ fn test_metadata_epoch(iteration: usize, epoch: usize) -> MetricMetadata {
 }
 
 fn create_stub_ffmpeg(bin_dir: &std::path::Path) -> std::io::Result<PathBuf> {
-    let path = bin_dir.join(if cfg!(windows) { "ffmpeg.bat" } else { "ffmpeg" });
+    let path = bin_dir.join(if cfg!(windows) {
+        "ffmpeg.bat"
+    } else {
+        "ffmpeg"
+    });
     let script = if cfg!(windows) {
         "@echo off\r\nset OUT=%~1\r\nshift\r\n:loop\r\nif \"%~1\"==\"\" goto done\r\nset OUT=%~1\r\nshift\r\ngoto loop\r\n:done\r\ntype nul > \"%OUT%\"\r\n"
     } else {

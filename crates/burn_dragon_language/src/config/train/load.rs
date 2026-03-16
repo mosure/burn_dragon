@@ -28,11 +28,86 @@ pub fn load_training_config(paths: &[PathBuf]) -> Result<TrainingConfig> {
 }
 
 fn load_value(path: &Path) -> Result<Value> {
-    let content = fs::read_to_string(path)
-        .with_context(|| format!("failed to read configuration file {}", path.display()))?;
-    let table: toml::value::Table = toml::from_str(&content)
-        .with_context(|| format!("failed to parse {} as TOML", path.display()))?;
-    Ok(Value::Table(table))
+    let mut stack = Vec::new();
+    load_value_recursive(path, &mut stack)
+}
+
+fn load_value_recursive(path: &Path, stack: &mut Vec<PathBuf>) -> Result<Value> {
+    let canonical = fs::canonicalize(path).with_context(|| {
+        format!(
+            "failed to canonicalize configuration file {}",
+            path.display()
+        )
+    })?;
+    if let Some(idx) = stack.iter().position(|seen| seen == &canonical) {
+        let mut cycle = stack[idx..]
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>();
+        cycle.push(canonical.display().to_string());
+        return Err(anyhow!(
+            "config extends cycle detected: {}",
+            cycle.join(" -> ")
+        ));
+    }
+
+    stack.push(canonical.clone());
+    let result = (|| {
+        let content = fs::read_to_string(&canonical).with_context(|| {
+            format!("failed to read configuration file {}", canonical.display())
+        })?;
+        let table: toml::value::Table = toml::from_str(&content)
+            .with_context(|| format!("failed to parse {} as TOML", canonical.display()))?;
+        let mut value = Value::Table(table);
+        let extends = take_extends(&mut value)
+            .with_context(|| format!("failed to parse extends in {}", canonical.display()))?;
+        if let Some(extends) = extends {
+            let base_dir = canonical.parent().unwrap_or_else(|| Path::new("."));
+            let mut merged = Value::Table(toml::value::Table::new());
+            for extend in extends {
+                let extend_path = base_dir.join(extend);
+                let base = load_value_recursive(&extend_path, stack)?;
+                merge_values(&mut merged, base);
+            }
+            merge_values(&mut merged, value);
+            Ok(merged)
+        } else {
+            Ok(value)
+        }
+    })();
+    stack.pop();
+    result
+}
+
+fn take_extends(value: &mut Value) -> Result<Option<Vec<PathBuf>>> {
+    let Value::Table(table) = value else {
+        return Ok(None);
+    };
+    let Some(extends) = table.remove("extends") else {
+        return Ok(None);
+    };
+    match extends {
+        Value::String(path) => Ok(Some(vec![PathBuf::from(path)])),
+        Value::Array(values) => {
+            let mut out = Vec::with_capacity(values.len());
+            for value in values {
+                match value {
+                    Value::String(path) => out.push(PathBuf::from(path)),
+                    other => {
+                        return Err(anyhow!(
+                            "extends entries must be strings, got {}",
+                            other.type_str()
+                        ));
+                    }
+                }
+            }
+            Ok(Some(out))
+        }
+        other => Err(anyhow!(
+            "extends must be a string or array of strings, got {}",
+            other.type_str()
+        )),
+    }
 }
 
 fn merge_values(base: &mut Value, overlay: Value) {

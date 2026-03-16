@@ -148,6 +148,9 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 
+[patch.crates-io]
+cubecl-cuda = { path = "vendor/cubecl-cuda-0.10.0-pre.2" }
+
 
 [lib]
 path = "src/lib.rs"

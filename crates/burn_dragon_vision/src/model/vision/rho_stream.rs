@@ -268,9 +268,7 @@ impl<B: Backend> VisionDragon<B> {
         decay: Tensor<B, 1>,
         mode: StructuredStepMode,
     ) -> Tensor<B, 4> {
-        self.rho_stream_attention_fused_with_decay_plan(
-            query, value, rho_state, decay, mode, None,
-        )
+        self.rho_stream_attention_fused_with_decay_plan(query, value, rho_state, decay, mode, None)
     }
 
     pub(super) fn rho_stream_attention_fused_with_decay_plan(

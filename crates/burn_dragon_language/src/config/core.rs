@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use burn_dragon_core::{
-    DragonNormConfig, ManifoldHyperConnectionsConfig, RotaryEmbedding, YNeuronRecurrenceConfig,
+    ClockedSlowMemoryConfig, DragonNormConfig, ManifoldHyperConnectionsConfig, RotaryEmbedding,
+    SummaryMemoryConfig, YNeuronRecurrenceConfig,
 };
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -43,6 +44,8 @@ pub struct ModelOverrides {
     pub rotary_embedding: Option<RotaryEmbedding>,
     #[serde(alias = "y_sparse_recurrence")]
     pub y_neuron_recurrence: Option<YNeuronRecurrenceConfig>,
+    pub clocked_slow_memory: Option<ClockedSlowMemoryConfig>,
+    pub summary_memory: Option<SummaryMemoryConfig>,
     pub mhc: Option<ManifoldHyperConnectionsConfig>,
 }
 

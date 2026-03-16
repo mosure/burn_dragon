@@ -214,10 +214,7 @@ pub(super) fn pool_dense_with_weights<B: Backend>(
     if target_count == 0 {
         return Tensor::<B, 3>::zeros([batch, 0, dim], &source.device());
     }
-    source
-        .swap_dims(1, 2)
-        .matmul(weights)
-        .swap_dims(1, 2)
+    source.swap_dims(1, 2).matmul(weights).swap_dims(1, 2)
 }
 
 #[cfg(test)]
@@ -325,7 +322,9 @@ mod tests {
 
         let rho = Tensor::<Backend, 4>::from_data(
             TensorData::new(
-                (0..2 * 2 * 2 * 3).map(|index| index as f32).collect::<Vec<_>>(),
+                (0..2 * 2 * 2 * 3)
+                    .map(|index| index as f32)
+                    .collect::<Vec<_>>(),
                 [2, 2, 2, 3],
             ),
             &device,
@@ -369,17 +368,15 @@ mod tests {
             ),
             &device,
         );
-        let aggregated = aggregate_target_major_with_weights(gathered.clone(), write_weights.clone());
+        let aggregated =
+            aggregate_target_major_with_weights(gathered.clone(), write_weights.clone());
         let manual_aggregated = write_weights
             .clone()
             .repeat_dim(0, 2)
             .matmul(gathered.reshape([2, 3, 6]))
             .reshape([2, 2, 2, 3]);
         assert_eq!(
-            aggregated
-                .into_data()
-                .to_vec::<f32>()
-                .expect("aggregated"),
+            aggregated.into_data().to_vec::<f32>().expect("aggregated"),
             manual_aggregated
                 .into_data()
                 .to_vec::<f32>()
@@ -392,7 +389,9 @@ mod tests {
         let device = <Backend as BackendTrait>::Device::default();
         let rho = Tensor::<Backend, 4>::from_data(
             TensorData::new(
-                (0..2 * 3 * 2 * 2).map(|index| index as f32).collect::<Vec<_>>(),
+                (0..2 * 3 * 2 * 2)
+                    .map(|index| index as f32)
+                    .collect::<Vec<_>>(),
                 [2, 3, 2, 2],
             ),
             &device,
@@ -461,11 +460,8 @@ mod tests {
             &device,
         );
 
-        let updated = select_assign_target_major_assignments(
-            base.clone(),
-            outer.clone(),
-            assignment_targets,
-        );
+        let updated =
+            select_assign_target_major_assignments(base.clone(), outer.clone(), assignment_targets);
         let weighted = base + aggregate_target_major_with_weights(outer, write_weights);
 
         assert_eq!(
@@ -473,5 +469,4 @@ mod tests {
             weighted.into_data().to_vec::<f32>().expect("weighted"),
         );
     }
-
 }

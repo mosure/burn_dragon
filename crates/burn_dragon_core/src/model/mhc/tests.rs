@@ -8,8 +8,8 @@ use burn_wgpu::{CubeBackend, RuntimeOptions, WgpuRuntime, graphics};
 
 use super::{
     ManifoldHyperConnectionCoefficientPolicy, ManifoldHyperConnections,
-    ManifoldHyperConnectionsConfig, mhc_merge, mhc_passthrough,
-    mhc_passthrough_with_coefficients, mhc_split,
+    ManifoldHyperConnectionsConfig, mhc_merge, mhc_passthrough, mhc_passthrough_with_coefficients,
+    mhc_split,
 };
 
 type TestBackend = NdArray<f32>;
@@ -130,7 +130,10 @@ fn mhc_width_connection_shapes_match_streams_and_views() {
     let mhc = ManifoldHyperConnections::<TestBackend>::new(&config, 1, &device);
     let residuals = Tensor::<TestBackend, 4>::zeros([4, config.num_streams, 6, 8], &device);
     let output = mhc.width_connection(residuals);
-    assert_eq!(output.branch_input.shape().dims::<4>(), [4, config.num_views, 6, 8]);
+    assert_eq!(
+        output.branch_input.shape().dims::<4>(),
+        [4, config.num_views, 6, 8]
+    );
     assert_eq!(
         output.residuals_out.shape().dims::<4>(),
         [4, config.num_streams, 6, 8]
@@ -157,7 +160,10 @@ fn mhc_width_and_depth_with_explicit_coefficients_match_compatibility_path() {
     };
     let mhc = ManifoldHyperConnections::<TestBackend>::new(&config, 1, &device);
     let residuals = Tensor::<TestBackend, 4>::from_data(
-        TensorData::new((0..64).map(|idx| idx as f32 / 32.0).collect::<Vec<_>>(), [2, 2, 4, 4]),
+        TensorData::new(
+            (0..64).map(|idx| idx as f32 / 32.0).collect::<Vec<_>>(),
+            [2, 2, 4, 4],
+        ),
         &device,
     );
 
@@ -304,15 +310,11 @@ fn mhc_passthrough_with_explicit_coefficients_matches_one_shot_path() {
     };
     let mhc = ManifoldHyperConnections::<TestBackend>::new(&config, 0, &device);
     let coefficients = mhc.coefficients();
-    let residuals = Tensor::<TestBackend, 4>::random(
-        [2, 4, 8, 12],
-        Distribution::Normal(0.0, 1.0),
-        &device,
-    );
+    let residuals =
+        Tensor::<TestBackend, 4>::random([2, 4, 8, 12], Distribution::Normal(0.0, 1.0), &device);
 
     let one_shot = mhc_passthrough(Some(&mhc), residuals.clone());
-    let reused =
-        mhc_passthrough_with_coefficients(Some(&mhc), residuals, Some(&coefficients));
+    let reused = mhc_passthrough_with_coefficients(Some(&mhc), residuals, Some(&coefficients));
     assert_eq!(
         one_shot
             .to_data()
@@ -361,7 +363,12 @@ fn mhc_wgpu_passthrough_memory_stays_bounded_across_repeated_calls() {
         }
     }
 
-    assert_memory_growth_bounded("mhc_passthrough", &snapshots, 256 * 1024 * 1024, 64 * 1024 * 1024);
+    assert_memory_growth_bounded(
+        "mhc_passthrough",
+        &snapshots,
+        256 * 1024 * 1024,
+        64 * 1024 * 1024,
+    );
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -378,7 +385,9 @@ fn mhc_wgpu_width_and_depth_are_autodiff_stable_after_one_step() {
         ..Default::default()
     };
     let reference = ManifoldHyperConnections::<WgpuAutodiffBackend>::new(&config, 0, &device);
-    let cloned = reference.clone().load_record(reference.clone().into_record());
+    let cloned = reference
+        .clone()
+        .load_record(reference.clone().into_record());
     let residuals = Tensor::<WgpuAutodiffBackend, 4>::random(
         [2, 4, 16, 24],
         Distribution::Normal(0.0, 1.0),

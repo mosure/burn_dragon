@@ -1,0 +1,1 @@
+extends = ["../experiments/moving_mnist_trm_cli_smoke.toml"]

@@ -7,10 +7,10 @@ use anyhow::Result;
 use burn::optim::{AdamWConfig, GradientsParams, Optimizer};
 use burn::tensor::backend::Backend;
 use burn_autodiff::Autodiff;
-use burn_dragon::api::{multimodal, stream, train};
 use burn_dragon::api::multimodal::model::{
     TargetTextEncoderAdapter, TextFusionAdapter, VisionFusionAdapter,
 };
+use burn_dragon::api::{multimodal, stream, train};
 use burn_ndarray::{NdArray, NdArrayDevice};
 use burn_wgpu::{Wgpu, WgpuDevice};
 use clap::Parser;
@@ -19,7 +19,11 @@ type ForwardBackend = Wgpu<f32>;
 type TrainBackend = Autodiff<NdArray<f32>>;
 
 #[derive(Parser, Debug)]
-#[command(author, version, about = "Benchmark multimodal VL-JEPA staging and train-step timings")]
+#[command(
+    author,
+    version,
+    about = "Benchmark multimodal VL-JEPA staging and train-step timings"
+)]
 struct Args {
     #[arg(long, default_value_t = 20)]
     iterations: usize,
@@ -54,18 +58,34 @@ fn main() -> Result<()> {
     let video_segments = video_cpu_segments(64);
 
     let train_device = NdArrayDevice::default();
-    let image_train =
-        benchmark_image_train_step(&image_config, &image_segments, &train_device, args.iterations);
-    let video_train =
-        benchmark_video_train_step(&video_config, &video_segments, &train_device, args.iterations);
+    let image_train = benchmark_image_train_step(
+        &image_config,
+        &image_segments,
+        &train_device,
+        args.iterations,
+    );
+    let video_train = benchmark_video_train_step(
+        &video_config,
+        &video_segments,
+        &train_device,
+        args.iterations,
+    );
 
     let forward_device = init_bench_device();
     let image_loader = benchmark_image_loader(&image_segments, &forward_device, args.iterations);
     let video_loader = benchmark_video_loader(&video_segments, &forward_device, args.iterations);
-    let image_forward =
-        benchmark_image_forward(&image_config, &image_segments, &forward_device, args.iterations);
-    let video_forward =
-        benchmark_video_forward(&video_config, &video_segments, &forward_device, args.iterations);
+    let image_forward = benchmark_image_forward(
+        &image_config,
+        &image_segments,
+        &forward_device,
+        args.iterations,
+    );
+    let video_forward = benchmark_video_forward(
+        &video_config,
+        &video_segments,
+        &forward_device,
+        args.iterations,
+    );
     ForwardBackend::memory_cleanup(&forward_device);
 
     println!("multimodal_vl_jepa_bench");
@@ -198,8 +218,10 @@ fn benchmark_image_loader(
 
     for index in 0..iterations {
         let segment = segments[index % segments.len()].clone();
-        let collated =
-            multimodal::train::collate_vision_language_segments::<ForwardBackend>(&[segment], device);
+        let collated = multimodal::train::collate_vision_language_segments::<ForwardBackend>(
+            &[segment],
+            device,
+        );
         let mut state = model.init_state();
         let reset_start = Instant::now();
         state.apply_stream_controls(
@@ -231,8 +253,10 @@ fn benchmark_video_loader(
 
     for index in 0..iterations {
         let segment = segments[index % segments.len()].clone();
-        let collated =
-            multimodal::train::collate_video_language_segments::<ForwardBackend>(&[segment], device);
+        let collated = multimodal::train::collate_video_language_segments::<ForwardBackend>(
+            &[segment],
+            device,
+        );
         let mut state = model.init_state();
         let reset_start = Instant::now();
         state.apply_stream_controls(
@@ -264,8 +288,10 @@ fn benchmark_image_forward(
     for index in 0..iterations {
         let assembly_start = Instant::now();
         let segment = segments[index % segments.len()].clone();
-        let collated =
-            multimodal::train::collate_vision_language_segments::<ForwardBackend>(&[segment], device);
+        let collated = multimodal::train::collate_vision_language_segments::<ForwardBackend>(
+            &[segment],
+            device,
+        );
         stats.segment_assembly_ms += assembly_start.elapsed().as_secs_f64() * 1000.0;
 
         let mut state = model.init_state();
@@ -330,8 +356,10 @@ fn benchmark_video_forward(
     for index in 0..iterations {
         let assembly_start = Instant::now();
         let segment = segments[index % segments.len()].clone();
-        let collated =
-            multimodal::train::collate_video_language_segments::<ForwardBackend>(&[segment], device);
+        let collated = multimodal::train::collate_video_language_segments::<ForwardBackend>(
+            &[segment],
+            device,
+        );
         stats.segment_assembly_ms += assembly_start.elapsed().as_secs_f64() * 1000.0;
 
         let mut state = model.init_state();
@@ -348,7 +376,9 @@ fn benchmark_video_forward(
         let total_start = Instant::now();
 
         let vision_start = Instant::now();
-        let vision = model.vision_x_encoder.observe_video_x(batch.video_x.clone(), state.vision.take());
+        let vision = model
+            .vision_x_encoder
+            .observe_video_x(batch.video_x.clone(), state.vision.take());
         stats.vision_encode_ms += vision_start.elapsed().as_secs_f64() * 1000.0;
         state.vision = vision.state.clone();
 
@@ -488,5 +518,8 @@ fn print_timing(label: &str, stats: TimingStats) {
 }
 
 fn print_train(label: &str, stats: TimingStats) {
-    println!("{label}: total_train_step_ms={:.4}", stats.total_train_step_ms);
+    println!(
+        "{label}: total_train_step_ms={:.4}",
+        stats.total_train_step_ms
+    );
 }

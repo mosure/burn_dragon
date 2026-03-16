@@ -10,11 +10,21 @@ use crate::model::mhc::ManifoldHyperConnectionsConfig;
 use crate::model::norm::DragonNormConfig;
 use crate::positional::RotaryEmbedding;
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FusedAttentionExecutor {
+    ScoresOnly,
+    #[default]
+    AttentionContext,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct FusedKernelConfig {
     pub enabled: bool,
     pub wgpu_recurrent_kernel: bool,
     pub wgpu_rollout_fused: bool,
+    #[serde(default)]
+    pub attention_executor: FusedAttentionExecutor,
     pub block_sparse: BlockSparseConfig,
     pub rope_theta: f32,
     pub relu_threshold: f32,
@@ -28,6 +38,7 @@ impl Default for FusedKernelConfig {
             enabled: false,
             wgpu_recurrent_kernel: true,
             wgpu_rollout_fused: false,
+            attention_executor: FusedAttentionExecutor::default(),
             block_sparse: BlockSparseConfig::dense(64, 64),
             rope_theta: 65_536.0,
             relu_threshold: 0.0,
@@ -64,6 +75,10 @@ impl FusedKernelConfig {
 
     pub fn set_wgpu_rollout_fused(&mut self, enabled: bool) {
         self.wgpu_rollout_fused = enabled;
+    }
+
+    pub fn set_attention_executor(&mut self, executor: FusedAttentionExecutor) {
+        self.attention_executor = executor;
     }
 }
 
@@ -110,10 +125,11 @@ impl<B: AutodiffBackend> AutodiffModule<B> for FusedKernelConfig {
 impl ModuleDisplayDefault for FusedKernelConfig {
     fn content(&self, content: Content) -> Option<Content> {
         let summary = format!(
-            "enabled={}, wgpu_recurrent_kernel={}, wgpu_rollout_fused={}, rotary_embedding={}, relu_threshold={}, rope_theta={}, latent_block={}, time_block={}, custom_alibi={}",
+            "enabled={}, wgpu_recurrent_kernel={}, wgpu_rollout_fused={}, attention_executor={:?}, rotary_embedding={}, relu_threshold={}, rope_theta={}, latent_block={}, time_block={}, custom_alibi={}",
             self.enabled,
             self.wgpu_recurrent_kernel,
             self.wgpu_rollout_fused,
+            self.attention_executor,
             self.rotary_embedding,
             self.relu_threshold,
             self.rope_theta,
@@ -162,6 +178,236 @@ impl Default for YNeuronRecurrenceConfig {
         }
     }
 }
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct ClockedSlowMemoryConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub last_layers: Option<usize>,
+    #[serde(default = "default_clocked_slow_chunk_tokens")]
+    pub chunk_tokens: usize,
+    #[serde(default = "default_clocked_slow_residual_scale")]
+    pub residual_scale: f32,
+}
+
+impl Default for ClockedSlowMemoryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            last_layers: None,
+            chunk_tokens: default_clocked_slow_chunk_tokens(),
+            residual_scale: default_clocked_slow_residual_scale(),
+        }
+    }
+}
+
+fn default_clocked_slow_chunk_tokens() -> usize {
+    4
+}
+
+fn default_clocked_slow_residual_scale() -> f32 {
+    1.0
+}
+
+impl<B: Backend> Module<B> for ClockedSlowMemoryConfig {
+    type Record = ();
+
+    fn collect_devices(&self, devices: Devices<B>) -> Devices<B> {
+        devices
+    }
+
+    fn fork(self, _device: &B::Device) -> Self {
+        self
+    }
+
+    fn to_device(self, _device: &B::Device) -> Self {
+        self
+    }
+
+    fn visit<Visitor: ModuleVisitor<B>>(&self, _visitor: &mut Visitor) {}
+
+    fn map<Mapper: ModuleMapper<B>>(self, _mapper: &mut Mapper) -> Self {
+        self
+    }
+
+    fn load_record(self, _record: Self::Record) -> Self {
+        self
+    }
+
+    fn into_record(self) -> Self::Record {}
+}
+
+impl<B: AutodiffBackend> AutodiffModule<B> for ClockedSlowMemoryConfig {
+    type InnerModule = ClockedSlowMemoryConfig;
+
+    fn valid(&self) -> Self::InnerModule {
+        self.clone()
+    }
+
+    fn from_inner(module: Self::InnerModule) -> Self {
+        module
+    }
+}
+
+impl ModuleDisplayDefault for ClockedSlowMemoryConfig {
+    fn content(&self, content: Content) -> Option<Content> {
+        let summary = format!(
+            "enabled={}, last_layers={}, chunk_tokens={}, residual_scale={}",
+            self.enabled,
+            self.last_layers
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "all".to_string()),
+            self.chunk_tokens,
+            self.residual_scale,
+        );
+
+        content
+            .set_top_level_type("ClockedSlowMemoryConfig")
+            .add_formatted(&summary)
+            .optional()
+    }
+}
+
+impl ModuleDisplay for ClockedSlowMemoryConfig {}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct SummaryMemoryConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub last_layers: Option<usize>,
+    #[serde(default = "default_summary_memory_chunk_tokens")]
+    pub chunk_tokens: usize,
+    #[serde(default = "default_summary_memory_residual_scale")]
+    pub residual_scale: f32,
+    #[serde(default = "default_summary_memory_state_decay")]
+    pub state_decay: f32,
+    #[serde(default = "default_summary_memory_state_update_scale")]
+    pub state_update_scale: f32,
+    #[serde(default = "default_summary_memory_surprise_gate_threshold")]
+    pub surprise_gate_threshold: f32,
+    #[serde(default = "default_summary_memory_surprise_gate_sharpness")]
+    pub surprise_gate_sharpness: f32,
+    #[serde(default)]
+    pub write_trigger_text: Option<String>,
+    #[serde(default)]
+    pub write_trigger_token_ids: Option<Vec<u32>>,
+}
+
+impl Default for SummaryMemoryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            last_layers: None,
+            chunk_tokens: default_summary_memory_chunk_tokens(),
+            residual_scale: default_summary_memory_residual_scale(),
+            state_decay: default_summary_memory_state_decay(),
+            state_update_scale: default_summary_memory_state_update_scale(),
+            surprise_gate_threshold: default_summary_memory_surprise_gate_threshold(),
+            surprise_gate_sharpness: default_summary_memory_surprise_gate_sharpness(),
+            write_trigger_text: None,
+            write_trigger_token_ids: None,
+        }
+    }
+}
+
+fn default_summary_memory_chunk_tokens() -> usize {
+    32
+}
+
+fn default_summary_memory_residual_scale() -> f32 {
+    0.25
+}
+
+fn default_summary_memory_state_decay() -> f32 {
+    0.75
+}
+
+fn default_summary_memory_state_update_scale() -> f32 {
+    0.5
+}
+
+fn default_summary_memory_surprise_gate_threshold() -> f32 {
+    0.0
+}
+
+fn default_summary_memory_surprise_gate_sharpness() -> f32 {
+    8.0
+}
+
+impl<B: Backend> Module<B> for SummaryMemoryConfig {
+    type Record = ();
+
+    fn collect_devices(&self, devices: Devices<B>) -> Devices<B> {
+        devices
+    }
+
+    fn fork(self, _device: &B::Device) -> Self {
+        self
+    }
+
+    fn to_device(self, _device: &B::Device) -> Self {
+        self
+    }
+
+    fn visit<Visitor: ModuleVisitor<B>>(&self, _visitor: &mut Visitor) {}
+
+    fn map<Mapper: ModuleMapper<B>>(self, _mapper: &mut Mapper) -> Self {
+        self
+    }
+
+    fn load_record(self, _record: Self::Record) -> Self {
+        self
+    }
+
+    fn into_record(self) -> Self::Record {}
+}
+
+impl<B: AutodiffBackend> AutodiffModule<B> for SummaryMemoryConfig {
+    type InnerModule = SummaryMemoryConfig;
+
+    fn valid(&self) -> Self::InnerModule {
+        self.clone()
+    }
+
+    fn from_inner(module: Self::InnerModule) -> Self {
+        module
+    }
+}
+
+impl ModuleDisplayDefault for SummaryMemoryConfig {
+    fn content(&self, content: Content) -> Option<Content> {
+        let summary = format!(
+            "enabled={}, last_layers={}, chunk_tokens={}, residual_scale={}, state_decay={}, state_update_scale={}, surprise_gate_threshold={}, surprise_gate_sharpness={}, write_trigger_text_chars={}, write_trigger_tokens={}",
+            self.enabled,
+            self.last_layers
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "all".to_string()),
+            self.chunk_tokens,
+            self.residual_scale,
+            self.state_decay,
+            self.state_update_scale,
+            self.surprise_gate_threshold,
+            self.surprise_gate_sharpness,
+            self.write_trigger_text
+                .as_ref()
+                .map(|value| value.chars().count())
+                .unwrap_or(0),
+            self.write_trigger_token_ids
+                .as_ref()
+                .map(|value| value.len())
+                .unwrap_or(0),
+        );
+
+        content
+            .set_top_level_type("SummaryMemoryConfig")
+            .add_formatted(&summary)
+            .optional()
+    }
+}
+
+impl ModuleDisplay for SummaryMemoryConfig {}
 
 fn default_y_neuron_carry_in_scale() -> f32 {
     0.125
@@ -265,6 +511,8 @@ pub struct BDHConfig {
     pub normalization: DragonNormConfig,
     pub mhc: ManifoldHyperConnectionsConfig,
     pub y_neuron_recurrence: YNeuronRecurrenceConfig,
+    pub clocked_slow_memory: ClockedSlowMemoryConfig,
+    pub summary_memory: SummaryMemoryConfig,
 }
 
 impl Default for BDHConfig {
@@ -282,6 +530,8 @@ impl Default for BDHConfig {
             normalization: DragonNormConfig::default(),
             mhc: ManifoldHyperConnectionsConfig::default(),
             y_neuron_recurrence: YNeuronRecurrenceConfig::default(),
+            clocked_slow_memory: ClockedSlowMemoryConfig::default(),
+            summary_memory: SummaryMemoryConfig::default(),
         }
     }
 }

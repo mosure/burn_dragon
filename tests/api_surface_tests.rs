@@ -1,6 +1,6 @@
 use burn::tensor::{Int, Tensor, TensorData};
-use burn_ndarray::NdArray;
 use burn_dragon::api::{core, graph, language, multimodal, stream, vision};
+use burn_ndarray::NdArray;
 
 type InferBackend = NdArray<f32>;
 
@@ -119,15 +119,18 @@ fn root_api_train_surface_exposes_runtime_config() {
 #[cfg(feature = "train")]
 #[test]
 fn root_api_multimodal_checkpoint_surface_exposes_exporter() {
-    let _export_fn = burn_dragon::api::multimodal::checkpoint::export_multimodal_checkpoint_to_burnpack;
-    let _default_dir = burn_dragon::api::multimodal::checkpoint::default_checkpoint_dir("runs/example");
+    let _export_fn =
+        burn_dragon::api::multimodal::checkpoint::export_multimodal_checkpoint_to_burnpack;
+    let _default_dir =
+        burn_dragon::api::multimodal::checkpoint::default_checkpoint_dir("runs/example");
 }
 
 #[cfg(feature = "train")]
 #[test]
 fn root_api_multimodal_runtime_surface_exposes_training_entrypoints() {
     let _cfg = burn_dragon::api::multimodal::runtime::MultimodalTrainingConfig::default();
-    let _video_cfg = burn_dragon::api::multimodal::runtime::MultimodalVideoTrainingConfig::default();
+    let _video_cfg =
+        burn_dragon::api::multimodal::runtime::MultimodalVideoTrainingConfig::default();
     let _load = burn_dragon::api::multimodal::runtime::load_multimodal_training_runtime_config;
     let _load_video =
         burn_dragon::api::multimodal::runtime::load_multimodal_video_training_runtime_config;
@@ -170,5 +173,8 @@ fn root_api_stream_and_multimodal_surface_runs() {
         model.init_state(),
         multimodal::data::MultimodalStepMode::Observe,
     );
-    assert_eq!(output.fusion.predicted_target_embedding.shape().dims::<2>(), [1, 16]);
+    assert_eq!(
+        output.fusion.predicted_target_embedding.shape().dims::<2>(),
+        [1, 16]
+    );
 }

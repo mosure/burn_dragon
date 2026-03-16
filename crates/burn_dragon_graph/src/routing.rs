@@ -197,11 +197,7 @@ impl GraphCsrAdjacency {
         target_count: usize,
         assignments: &[usize],
     ) -> Result<Self, GraphRoutingError> {
-        let edges = assignments
-            .iter()
-            .copied()
-            .enumerate()
-            .collect::<Vec<_>>();
+        let edges = assignments.iter().copied().enumerate().collect::<Vec<_>>();
         Self::try_from_edges(assignments.len(), target_count, &edges)
     }
 

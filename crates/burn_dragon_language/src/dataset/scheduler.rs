@@ -8,6 +8,7 @@ use burn::tensor::backend::Backend;
 use burn::tensor::{Int, Tensor, TensorData};
 use rand::prelude::*;
 
+use crate::summary_events::summary_event_mask_tensor;
 use crate::tokenizer::SharedTokenizer;
 
 use super::DatasetSplit;
@@ -76,7 +77,14 @@ pub fn sample_batch<B: Backend, T: TokenSequenceDataset + ?Sized>(
     split: DatasetSplit,
     device: &B::Device,
 ) -> SequenceBatch<B> {
-    sample_batch_with_shape::<B, T>(dataset, split, dataset.batch_size(), dataset.block_size(), device)
+    sample_batch_with_shape::<B, T>(
+        dataset,
+        split,
+        dataset.batch_size(),
+        dataset.block_size(),
+        None,
+        device,
+    )
 }
 
 /// Sample a random batch with an explicit batch/block shape from any dataset implementing
@@ -86,6 +94,7 @@ pub fn sample_batch_with_shape<B: Backend, T: TokenSequenceDataset + ?Sized>(
     split: DatasetSplit,
     batch_size: usize,
     block_size: usize,
+    summary_event_token_ids: Option<&[u32]>,
     device: &B::Device,
 ) -> SequenceBatch<B> {
     let prof_enabled = crate::train::profile::enabled();
@@ -117,14 +126,17 @@ pub fn sample_batch_with_shape<B: Backend, T: TokenSequenceDataset + ?Sized>(
         .unwrap_or_default();
 
     let tensor_copy_start = prof_enabled.then(Instant::now);
-    let inputs_tensor = Tensor::<B, 2, Int>::from_data(
-        TensorData::new(inputs, [batch_size, block_size]),
+    let summary_event_mask = summary_event_mask_tensor::<B>(
+        &inputs,
+        batch_size,
+        block_size,
+        summary_event_token_ids,
         device,
     );
-    let targets_tensor = Tensor::<B, 2, Int>::from_data(
-        TensorData::new(targets, [batch_size, block_size]),
-        device,
-    );
+    let inputs_tensor =
+        Tensor::<B, 2, Int>::from_data(TensorData::new(inputs, [batch_size, block_size]), device);
+    let targets_tensor =
+        Tensor::<B, 2, Int>::from_data(TensorData::new(targets, [batch_size, block_size]), device);
     let tensor_copy_ns = tensor_copy_start
         .map(|start| start.elapsed().as_nanos())
         .unwrap_or_default();
@@ -135,7 +147,7 @@ pub fn sample_batch_with_shape<B: Backend, T: TokenSequenceDataset + ?Sized>(
         crate::train::profile::record_dataloader(cpu_ns, tensor_copy_ns, copy_bytes, 0);
     }
 
-    SequenceBatch::new(inputs_tensor, targets_tensor)
+    SequenceBatch::new(inputs_tensor, targets_tensor, summary_event_mask)
 }
 
 /// Batched token inputs and targets for language modeling.
@@ -143,11 +155,20 @@ pub fn sample_batch_with_shape<B: Backend, T: TokenSequenceDataset + ?Sized>(
 pub struct SequenceBatch<B: Backend> {
     pub inputs: Tensor<B, 2, Int>,
     pub targets: Tensor<B, 2, Int>,
+    pub summary_event_mask: Option<Tensor<B, 2, Int>>,
 }
 
 impl<B: Backend> SequenceBatch<B> {
-    pub fn new(inputs: Tensor<B, 2, Int>, targets: Tensor<B, 2, Int>) -> Self {
-        Self { inputs, targets }
+    pub fn new(
+        inputs: Tensor<B, 2, Int>,
+        targets: Tensor<B, 2, Int>,
+        summary_event_mask: Option<Tensor<B, 2, Int>>,
+    ) -> Self {
+        Self {
+            inputs,
+            targets,
+            summary_event_mask,
+        }
     }
 }
 
@@ -159,6 +180,7 @@ pub struct RandomDataLoader<B: Backend> {
     steps_per_epoch: usize,
     total_steps: Option<usize>,
     consumed_steps: Option<Arc<AtomicUsize>>,
+    summary_event_token_ids: Option<Vec<u32>>,
 }
 
 impl<B: Backend> Clone for RandomDataLoader<B> {
@@ -170,6 +192,7 @@ impl<B: Backend> Clone for RandomDataLoader<B> {
             steps_per_epoch: self.steps_per_epoch,
             total_steps: self.total_steps,
             consumed_steps: self.consumed_steps.as_ref().map(Arc::clone),
+            summary_event_token_ids: self.summary_event_token_ids.clone(),
         }
     }
 }
@@ -197,7 +220,16 @@ impl<B: Backend> RandomDataLoader<B> {
             steps_per_epoch,
             total_steps,
             consumed_steps,
+            summary_event_token_ids: None,
         }
+    }
+
+    pub fn with_summary_event_token_ids(
+        mut self,
+        summary_event_token_ids: Option<Vec<u32>>,
+    ) -> Self {
+        self.summary_event_token_ids = summary_event_token_ids;
+        self
     }
 }
 
@@ -227,6 +259,7 @@ where
             step: 0,
             total_steps: self.total_steps,
             consumed_steps: self.consumed_steps.clone(),
+            summary_event_token_ids: self.summary_event_token_ids.clone(),
         })
     }
 
@@ -242,6 +275,7 @@ where
             steps_per_epoch: self.steps_per_epoch,
             total_steps: self.total_steps,
             consumed_steps: self.consumed_steps.as_ref().map(Arc::clone),
+            summary_event_token_ids: self.summary_event_token_ids.clone(),
         })
     }
 
@@ -257,6 +291,7 @@ where
             steps_per_epoch: steps,
             total_steps: self.total_steps,
             consumed_steps: self.consumed_steps.as_ref().map(Arc::clone),
+            summary_event_token_ids: self.summary_event_token_ids.clone(),
         })
     }
 }
@@ -269,6 +304,7 @@ struct RandomIterator<B: Backend> {
     step: usize,
     total_steps: Option<usize>,
     consumed_steps: Option<Arc<AtomicUsize>>,
+    summary_event_token_ids: Option<Vec<u32>>,
 }
 
 impl<B: Backend> Iterator for RandomIterator<B> {
@@ -291,9 +327,12 @@ impl<B: Backend> Iterator for RandomIterator<B> {
             }
         }
 
-        Some(sample_batch::<B, _>(
+        Some(sample_batch_with_shape::<B, _>(
             &*self.dataset,
             self.split,
+            self.dataset.batch_size(),
+            self.dataset.block_size(),
+            self.summary_event_token_ids.as_deref(),
             &self.device,
         ))
     }

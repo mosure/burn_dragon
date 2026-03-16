@@ -3,6 +3,8 @@ use burn_dragon_core::BDHConfig;
 use burn_dragon_train::wgpu as shared_wgpu;
 
 use crate::ModelOverrides;
+use crate::summary_events::resolve_summary_memory_write_triggers;
+use crate::tokenizer::Tokenizer;
 
 /// Build a model configuration by applying training overrides.
 pub fn build_model_config(overrides: &ModelOverrides, training_block_size: usize) -> BDHConfig {
@@ -45,11 +47,28 @@ pub fn build_model_config(overrides: &ModelOverrides, training_block_size: usize
     if let Some(y_neuron_recurrence) = &overrides.y_neuron_recurrence {
         model_config.y_neuron_recurrence = y_neuron_recurrence.clone();
     }
+    if let Some(clocked_slow_memory) = &overrides.clocked_slow_memory {
+        model_config.clocked_slow_memory = clocked_slow_memory.clone();
+    }
+    if let Some(summary_memory) = &overrides.summary_memory {
+        model_config.summary_memory = summary_memory.clone();
+    }
     if let Some(mhc) = &overrides.mhc {
         model_config.mhc = mhc.clone();
     }
 
     model_config
+}
+
+pub fn build_model_config_with_tokenizer(
+    overrides: &ModelOverrides,
+    training_block_size: usize,
+    tokenizer: &dyn Tokenizer,
+) -> anyhow::Result<BDHConfig> {
+    let mut model_config = build_model_config(overrides, training_block_size);
+    resolve_summary_memory_write_triggers(&mut model_config, tokenizer)?;
+    model_config.vocab_size = tokenizer.len();
+    Ok(model_config)
 }
 
 pub fn is_wgpu_backend_name(backend_name: &str) -> bool {

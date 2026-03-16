@@ -2,8 +2,8 @@ use burn::module::{
     AutodiffModule, Content, Devices, Module, ModuleDisplay, ModuleDisplayDefault, ModuleMapper,
     ModuleVisitor, Param,
 };
-use burn::tensor::backend::{AutodiffBackend, Backend};
 use burn::tensor::Tensor;
+use burn::tensor::backend::{AutodiffBackend, Backend};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, Default)]
@@ -280,8 +280,16 @@ mod tests {
         let x = Tensor::<Backend, 2>::from_data(TensorData::new(vec![1.0, 3.0], [1, 2]), &device);
         let y = norm.forward(x);
         let data = y.into_data().to_vec::<f32>().expect("f32 data");
-        assert!((data[0] + 1.0).abs() < 1e-4, "expected approx -1, got {}", data[0]);
-        assert!((data[1] - 1.0).abs() < 1e-4, "expected approx 1, got {}", data[1]);
+        assert!(
+            (data[0] + 1.0).abs() < 1e-4,
+            "expected approx -1, got {}",
+            data[0]
+        );
+        assert!(
+            (data[1] - 1.0).abs() < 1e-4,
+            "expected approx 1, got {}",
+            data[1]
+        );
     }
 
     #[test]
@@ -298,8 +306,16 @@ mod tests {
         let x = Tensor::<Backend, 2>::from_data(TensorData::new(vec![3.0, 3.0], [1, 2]), &device);
         let y = norm.forward(x);
         let data = y.into_data().to_vec::<f32>().expect("f32 data");
-        assert!((data[0] - 1.0).abs() < 1e-4, "expected approx 1, got {}", data[0]);
-        assert!((data[1] - 1.0).abs() < 1e-4, "expected approx 1, got {}", data[1]);
+        assert!(
+            (data[0] - 1.0).abs() < 1e-4,
+            "expected approx 1, got {}",
+            data[0]
+        );
+        assert!(
+            (data[1] - 1.0).abs() < 1e-4,
+            "expected approx 1, got {}",
+            data[1]
+        );
     }
 
     #[test]
@@ -313,11 +329,20 @@ mod tests {
             2,
             &device,
         );
-        let x = Tensor::<Backend, 2>::from_data(TensorData::new(vec![-10.0, 10.0], [1, 2]), &device);
+        let x =
+            Tensor::<Backend, 2>::from_data(TensorData::new(vec![-10.0, 10.0], [1, 2]), &device);
         let y = norm.forward(x);
         let data = y.into_data().to_vec::<f32>().expect("f32 data");
-        assert!(data[0] > -1.01 && data[0] < -0.9, "expected bounded negative output, got {}", data[0]);
-        assert!(data[1] < 1.01 && data[1] > 0.9, "expected bounded positive output, got {}", data[1]);
+        assert!(
+            data[0] > -1.01 && data[0] < -0.9,
+            "expected bounded negative output, got {}",
+            data[0]
+        );
+        assert!(
+            data[1] < 1.01 && data[1] > 0.9,
+            "expected bounded positive output, got {}",
+            data[1]
+        );
     }
 
     #[test]
@@ -331,11 +356,20 @@ mod tests {
             2,
             &device,
         );
-        let x = Tensor::<Backend, 2>::from_data(TensorData::new(vec![-10.0, 10.0], [1, 2]), &device);
+        let x =
+            Tensor::<Backend, 2>::from_data(TensorData::new(vec![-10.0, 10.0], [1, 2]), &device);
         let y = norm.forward(x);
         let data = y.into_data().to_vec::<f32>().expect("f32 data");
-        assert!(data[0] > -1.01 && data[0] < -0.9, "expected bounded negative output, got {}", data[0]);
-        assert!(data[1] < 1.01 && data[1] > 0.9, "expected bounded positive output, got {}", data[1]);
+        assert!(
+            data[0] > -1.01 && data[0] < -0.9,
+            "expected bounded negative output, got {}",
+            data[0]
+        );
+        assert!(
+            data[1] < 1.01 && data[1] > 0.9,
+            "expected bounded positive output, got {}",
+            data[1]
+        );
     }
 
     #[test]

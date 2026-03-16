@@ -32,10 +32,10 @@ pub use model::{
 pub use training::{
     SudokuEasyRewardMode, SudokuHaltConfig, SudokuHardRewardMode, SudokuInfoRewardConfig,
     SudokuLossMask, SudokuPolicyConfig, SudokuPolicyHead, SudokuReconConfig, SudokuReconLoss,
-    SudokuRevisitConfig, SudokuRewardBaselineConfig, SudokuRewardConfig,
-    SudokuRewardShapingConfig, SudokuRewardShapingMetric, SudokuRolloutConfig,
-    SudokuRolloutSchedule, SudokuTrainingHyperparameters, SudokuTraversal, SudokuTrmMode,
-    SudokuValidationConfig, SudokuWriteGateMode,
+    SudokuRevisitConfig, SudokuRewardBaselineConfig, SudokuRewardConfig, SudokuRewardShapingConfig,
+    SudokuRewardShapingMetric, SudokuRolloutConfig, SudokuRolloutSchedule,
+    SudokuTrainingHyperparameters, SudokuTraversal, SudokuTrmMode, SudokuValidationConfig,
+    SudokuWriteGateMode,
 };
 
 pub(crate) use defaults::*;

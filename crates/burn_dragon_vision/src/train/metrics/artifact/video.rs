@@ -243,21 +243,24 @@ impl<B: BackendTrait> VisionArtifactMetric<B> {
                 } else {
                     None
                 };
-                let posterior_patch_steps_vec = if let Some(maps) = &item.posterior_patch_norms_steps
-                {
-                    match maps.to_data().convert::<f32>().into_vec::<f32>() {
-                        Ok(vec) => Some(vec),
-                        Err(_) => {
-                            return serialized_entry(
-                                "posterior_patch_steps_copy_failed".to_string(),
-                                "0".to_string(),
-                            );
+                let posterior_patch_steps_vec =
+                    if let Some(maps) = &item.posterior_patch_norms_steps {
+                        match maps.to_data().convert::<f32>().into_vec::<f32>() {
+                            Ok(vec) => Some(vec),
+                            Err(_) => {
+                                return serialized_entry(
+                                    "posterior_patch_steps_copy_failed".to_string(),
+                                    "0".to_string(),
+                                );
+                            }
                         }
-                    }
-                } else {
-                    None
-                };
-                let pca_steps_dims = item.pca_rgb_steps.as_ref().map(|maps| maps.shape().dims::<5>());
+                    } else {
+                        None
+                    };
+                let pca_steps_dims = item
+                    .pca_rgb_steps
+                    .as_ref()
+                    .map(|maps| maps.shape().dims::<5>());
                 let posterior_pca_steps_dims = item
                     .posterior_pca_rgb_steps
                     .as_ref()
@@ -323,48 +326,49 @@ impl<B: BackendTrait> VisionArtifactMetric<B> {
                     None
                 };
 
-                let patch_meta = if let (Some([norm_batch, patch_frames, grid_h, grid_w]), Some(vec)) =
-                    (patch_steps_dims, patch_steps_vec.as_ref())
-                {
-                    let expected = norm_batch
-                        .saturating_mul(patch_frames)
-                        .saturating_mul(grid_h)
-                        .saturating_mul(grid_w);
-                    if norm_batch == batch
-                        && patch_frames == frame_count
-                        && grid_h > 0
-                        && grid_w > 0
-                        && vec.len() >= expected
+                let patch_meta =
+                    if let (Some([norm_batch, patch_frames, grid_h, grid_w]), Some(vec)) =
+                        (patch_steps_dims, patch_steps_vec.as_ref())
                     {
-                        Some((grid_h, grid_w))
+                        let expected = norm_batch
+                            .saturating_mul(patch_frames)
+                            .saturating_mul(grid_h)
+                            .saturating_mul(grid_w);
+                        if norm_batch == batch
+                            && patch_frames == frame_count
+                            && grid_h > 0
+                            && grid_w > 0
+                            && vec.len() >= expected
+                        {
+                            Some((grid_h, grid_w))
+                        } else {
+                            None
+                        }
                     } else {
                         None
-                    }
-                } else {
-                    None
-                };
-                let posterior_patch_meta = if let (
-                    Some([norm_batch, patch_frames, grid_h, grid_w]),
-                    Some(vec),
-                ) = (posterior_patch_steps_dims, posterior_patch_steps_vec.as_ref())
-                {
-                    let expected = norm_batch
-                        .saturating_mul(patch_frames)
-                        .saturating_mul(grid_h)
-                        .saturating_mul(grid_w);
-                    if norm_batch == batch
-                        && patch_frames == frame_count
-                        && grid_h > 0
-                        && grid_w > 0
-                        && vec.len() >= expected
-                    {
-                        Some((grid_h, grid_w))
+                    };
+                let posterior_patch_meta =
+                    if let (Some([norm_batch, patch_frames, grid_h, grid_w]), Some(vec)) = (
+                        posterior_patch_steps_dims,
+                        posterior_patch_steps_vec.as_ref(),
+                    ) {
+                        let expected = norm_batch
+                            .saturating_mul(patch_frames)
+                            .saturating_mul(grid_h)
+                            .saturating_mul(grid_w);
+                        if norm_batch == batch
+                            && patch_frames == frame_count
+                            && grid_h > 0
+                            && grid_w > 0
+                            && vec.len() >= expected
+                        {
+                            Some((grid_h, grid_w))
+                        } else {
+                            None
+                        }
                     } else {
                         None
-                    }
-                } else {
-                    None
-                };
+                    };
                 let pca_meta = if let (
                     Some([pca_batch, pca_frames, pca_channels, grid_h, grid_w]),
                     Some(vec),
@@ -392,7 +396,8 @@ impl<B: BackendTrait> VisionArtifactMetric<B> {
                 let posterior_pca_meta = if let (
                     Some([pca_batch, pca_frames, pca_channels, grid_h, grid_w]),
                     Some(vec),
-                ) = (posterior_pca_steps_dims, posterior_pca_steps_vec.as_ref())
+                ) =
+                    (posterior_pca_steps_dims, posterior_pca_steps_vec.as_ref())
                 {
                     let expected = pca_batch
                         .saturating_mul(pca_frames)
@@ -413,26 +418,27 @@ impl<B: BackendTrait> VisionArtifactMetric<B> {
                 } else {
                     None
                 };
-                let debug_patch_meta = if let (Some([norm_batch, patch_frames, grid_h, grid_w]), Some(vec)) =
-                    (debug_patch_steps_dims, debug_patch_steps_vec.as_ref())
-                {
-                    let expected = norm_batch
-                        .saturating_mul(patch_frames)
-                        .saturating_mul(grid_h)
-                        .saturating_mul(grid_w);
-                    if norm_batch == batch
-                        && patch_frames == frame_count
-                        && grid_h > 0
-                        && grid_w > 0
-                        && vec.len() >= expected
+                let debug_patch_meta =
+                    if let (Some([norm_batch, patch_frames, grid_h, grid_w]), Some(vec)) =
+                        (debug_patch_steps_dims, debug_patch_steps_vec.as_ref())
                     {
-                        Some((grid_h, grid_w))
+                        let expected = norm_batch
+                            .saturating_mul(patch_frames)
+                            .saturating_mul(grid_h)
+                            .saturating_mul(grid_w);
+                        if norm_batch == batch
+                            && patch_frames == frame_count
+                            && grid_h > 0
+                            && grid_w > 0
+                            && vec.len() >= expected
+                        {
+                            Some((grid_h, grid_w))
+                        } else {
+                            None
+                        }
                     } else {
                         None
-                    }
-                } else {
-                    None
-                };
+                    };
                 let debug_pca_meta = if let (
                     Some([pca_batch, pca_frames, pca_channels, grid_h, grid_w]),
                     Some(vec),
@@ -509,32 +515,35 @@ impl<B: BackendTrait> VisionArtifactMetric<B> {
                         }
                         self.write_legend_with_notes(legend, &notes);
                     }
-                    let frames_vec = match frames_tensor.to_data().convert::<f32>().into_vec::<f32>() {
-                        Ok(vec) => vec,
-                        Err(_) => {
-                            return serialized_entry("frame_copy_failed".to_string(), "0".to_string());
-                        }
-                    };
-                    let probe_preds = if let (Some(logits), Some(labels)) =
-                        (&item.probe_logits, &item.labels)
-                    {
-                        let preds = logits
-                            .clone()
-                            .argmax(1)
-                            .to_data()
-                            .convert::<i64>()
-                            .into_vec::<i64>()
-                            .ok();
-                        let labels = labels
-                            .clone()
-                            .to_data()
-                            .convert::<i64>()
-                            .into_vec::<i64>()
-                            .ok();
-                        preds.zip(labels)
-                    } else {
-                        None
-                    };
+                    let frames_vec =
+                        match frames_tensor.to_data().convert::<f32>().into_vec::<f32>() {
+                            Ok(vec) => vec,
+                            Err(_) => {
+                                return serialized_entry(
+                                    "frame_copy_failed".to_string(),
+                                    "0".to_string(),
+                                );
+                            }
+                        };
+                    let probe_preds =
+                        if let (Some(logits), Some(labels)) = (&item.probe_logits, &item.labels) {
+                            let preds = logits
+                                .clone()
+                                .argmax(1)
+                                .to_data()
+                                .convert::<i64>()
+                                .into_vec::<i64>()
+                                .ok();
+                            let labels = labels
+                                .clone()
+                                .to_data()
+                                .convert::<i64>()
+                                .into_vec::<i64>()
+                                .ok();
+                            preds.zip(labels)
+                        } else {
+                            None
+                        };
 
                     let mut saved = 0usize;
                     let mut last_mode = self.output_mode;
@@ -671,7 +680,8 @@ impl<B: BackendTrait> VisionArtifactMetric<B> {
             } else {
                 None
             };
-            if let (Some([_, pca_channels, pca_h, pca_w]), Some(vec)) = (pca_dims, pca_vec.as_ref()) {
+            if let (Some([_, pca_channels, pca_h, pca_w]), Some(vec)) = (pca_dims, pca_vec.as_ref())
+            {
                 if pca_channels < 3 || pca_h != grid_h || pca_w != grid_w {
                     pca_vec = None;
                 } else {
@@ -714,12 +724,18 @@ impl<B: BackendTrait> VisionArtifactMetric<B> {
             } else {
                 None
             };
-            let pca_steps_dims = item.pca_rgb_steps.as_ref().map(|maps| maps.shape().dims::<5>());
+            let pca_steps_dims = item
+                .pca_rgb_steps
+                .as_ref()
+                .map(|maps| maps.shape().dims::<5>());
             let pca_steps_vec = if let Some(maps) = &item.pca_rgb_steps {
                 match maps.to_data().convert::<f32>().into_vec::<f32>() {
                     Ok(vec) => Some(vec),
                     Err(_) => {
-                        return serialized_entry("pca_steps_copy_failed".to_string(), "0".to_string());
+                        return serialized_entry(
+                            "pca_steps_copy_failed".to_string(),
+                            "0".to_string(),
+                        );
                     }
                 }
             } else {
@@ -776,25 +792,25 @@ impl<B: BackendTrait> VisionArtifactMetric<B> {
                 (None, None) => 0,
             };
 
-            let probe_preds = if let (Some(logits), Some(labels)) = (&item.probe_logits, &item.labels)
-            {
-                let preds = logits
-                    .clone()
-                    .argmax(1)
-                    .to_data()
-                    .convert::<i64>()
-                    .into_vec::<i64>()
-                    .ok();
-                let labels = labels
-                    .clone()
-                    .to_data()
-                    .convert::<i64>()
-                    .into_vec::<i64>()
-                    .ok();
-                preds.zip(labels)
-            } else {
-                None
-            };
+            let probe_preds =
+                if let (Some(logits), Some(labels)) = (&item.probe_logits, &item.labels) {
+                    let preds = logits
+                        .clone()
+                        .argmax(1)
+                        .to_data()
+                        .convert::<i64>()
+                        .into_vec::<i64>()
+                        .ok();
+                    let labels = labels
+                        .clone()
+                        .to_data()
+                        .convert::<i64>()
+                        .into_vec::<i64>()
+                        .ok();
+                    preds.zip(labels)
+                } else {
+                    None
+                };
 
             let mut saved = 0usize;
             let mut last_mode = self.output_mode;
@@ -829,7 +845,8 @@ impl<B: BackendTrait> VisionArtifactMetric<B> {
                             let src_frame_stride = pca_channels * channel_stride;
                             let mut out = vec![0.0f32; batch * 3 * channel_stride];
                             for batch_step in 0..batch {
-                                let src_base = (batch_step * frame_count + frame_idx) * src_frame_stride;
+                                let src_base =
+                                    (batch_step * frame_count + frame_idx) * src_frame_stride;
                                 let dst_base = batch_step * 3 * channel_stride;
                                 for channel in 0..3 {
                                     let src = src_base + channel * channel_stride;

@@ -8,8 +8,8 @@
 burn inference and training of the [dragon model](https://arxiv.org/abs/2509.26507)
 
 
-![Alt text](./docs/vocab.png)
-![Alt text](./docs/bdh.png)
+![Alt text](./docs/assets/vocab.png)
+![Alt text](./docs/assets/bdh.png)
 
 
 ## current state
@@ -33,12 +33,12 @@ not the recommended entrypoint.
 
 Framework status/tracking:
 
-- [framework support matrix](./docs/dragon_framework_support_matrix.md)
-- [Dragon Hatchling alignment spec](./docs/dragon_hatchling_alignment_spec.md)
-- [Dragon Hatchling progress tracker](./docs/dragon_hatchling_progress_tracker.md)
-- [Dragon mHC roadmap](./docs/dragon_mhc_core_roadmap.md)
-- [Dragon multimodal VL-JEPA roadmap](./docs/dragon_multimodal_vl_jepa_roadmap.md)
-- [Dragon multimodal progress tracker](./docs/dragon_multimodal_progress_tracker.md)
+- [framework support matrix](./docs/core/dragon_framework_support_matrix.md)
+- [Dragon Hatchling alignment spec](./docs/hatchling/dragon_hatchling_alignment_spec.md)
+- [Dragon Hatchling progress tracker](./docs/hatchling/dragon_hatchling_progress_tracker.md)
+- [Dragon mHC roadmap](./docs/core/dragon_mhc_core_roadmap.md)
+- [Dragon multimodal VL-JEPA roadmap](./docs/multimodal/dragon_multimodal_vl_jepa_roadmap.md)
+- [Dragon multimodal progress tracker](./docs/multimodal/dragon_multimodal_progress_tracker.md)
 
 ## features
 
@@ -249,4 +249,4 @@ for inclusion in the work by you, as defined in the Apache-2.0 license, shall be
 additional terms or conditions.
 
 
-![Alt text](./docs/community.png)
+![Alt text](./docs/assets/community.png)

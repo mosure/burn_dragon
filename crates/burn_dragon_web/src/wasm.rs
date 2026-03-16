@@ -17,8 +17,8 @@ use wasm_bindgen::prelude::*;
 #[cfg(feature = "viz")]
 use wasm_bindgen_futures::JsFuture;
 
-use burn_dragon_core::{BDH, ModelState};
 use burn_dragon_checkpoint::{BurnpackPartsManifest, apply_burnpack_part_bytes};
+use burn_dragon_core::{BDH, ModelState};
 use burn_dragon_language::generation::{
     ContextStrategy, prefill_state, resolve_context_strategy, sample_next_token_async,
 };
@@ -202,19 +202,16 @@ fn load_record_bytes_into_model(
     model_bytes: &[u8],
     device: &WebDevice,
 ) -> Result<BDH<WebBackend>> {
-    let record: <BDH<WebBackend> as Module<WebBackend>>::Record = match BinBytesRecorder::<
-        FullPrecisionSettings,
-        &[u8],
-    >::default()
-    .load(model_bytes, device)
-    {
-        Ok(record) => record,
-        Err(full_err) => BinBytesRecorder::<HalfPrecisionSettings, &[u8]>::default()
-            .load(model_bytes, device)
-            .map_err(|half_err| {
-                anyhow!("failed to load model weights as f32 ({full_err}) or f16 ({half_err})")
-            })?,
-    };
+    let record: <BDH<WebBackend> as Module<WebBackend>>::Record =
+        match BinBytesRecorder::<FullPrecisionSettings, &[u8]>::default().load(model_bytes, device)
+        {
+            Ok(record) => record,
+            Err(full_err) => BinBytesRecorder::<HalfPrecisionSettings, &[u8]>::default()
+                .load(model_bytes, device)
+                .map_err(|half_err| {
+                    anyhow!("failed to load model weights as f32 ({full_err}) or f16 ({half_err})")
+                })?,
+        };
     Ok(model.load_record(record))
 }
 
@@ -266,10 +263,8 @@ async fn load_burnpack_url_into_model(
 ) -> Result<()> {
     let manifest_url = format!("{base_burnpack_url}.parts.json");
     if let Some(manifest_bytes) = fetch_optional_url_bytes(manifest_url.as_str()).await? {
-        let manifest: BurnpackPartsManifest =
-            serde_json::from_slice(manifest_bytes.as_slice()).map_err(|err| {
-                anyhow!("failed to parse parts manifest {manifest_url}: {err}")
-            })?;
+        let manifest: BurnpackPartsManifest = serde_json::from_slice(manifest_bytes.as_slice())
+            .map_err(|err| anyhow!("failed to parse parts manifest {manifest_url}: {err}"))?;
         if manifest.parts.is_empty() {
             return Err(anyhow!("parts manifest is empty: {manifest_url}"));
         }
@@ -318,7 +313,8 @@ pub async fn load_model(
         start_viz: Option<bool>,
     ) -> Result<WasmInference> {
         let mut init = initialize_inference(vocab_json, config_json, start_viz).await?;
-        init.model = load_record_bytes_into_model(init.model, model_bytes.as_slice(), &init.device)?;
+        init.model =
+            load_record_bytes_into_model(init.model, model_bytes.as_slice(), &init.device)?;
         Ok(finalize_inference(init))
     }
 

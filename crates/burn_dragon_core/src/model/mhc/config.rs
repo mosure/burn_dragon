@@ -65,6 +65,7 @@ pub struct ManifoldHyperConnectionsConfig {
     pub enabled: bool,
     pub num_streams: usize,
     pub num_views: usize,
+    pub last_layers: Option<usize>,
     #[serde(default)]
     pub coefficient_policy: ManifoldHyperConnectionCoefficientPolicy,
     pub mhc_iters: usize,
@@ -79,6 +80,7 @@ impl Default for ManifoldHyperConnectionsConfig {
             enabled: false,
             num_streams: 1,
             num_views: 1,
+            last_layers: None,
             coefficient_policy: ManifoldHyperConnectionCoefficientPolicy::StaticSinkhorn,
             mhc_iters: 10,
             mhc_tau: 0.05,

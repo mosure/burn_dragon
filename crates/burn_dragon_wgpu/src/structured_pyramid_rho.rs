@@ -224,7 +224,9 @@ impl<B: Backend> CompiledStructuredPyramidRhoPlan<B> {
             patch_to_coarse_pool: (shape.coarse_stride > 1
                 && shape.patch.height == shape.coarse.height * shape.coarse_stride
                 && shape.patch.width == shape.coarse.width * shape.coarse_stride)
-                .then(|| patch_to_coarse_pool_route(batch, shape.patch, shape.coarse_stride, device)),
+                .then(|| {
+                    patch_to_coarse_pool_route(batch, shape.patch, shape.coarse_stride, device)
+                }),
             shape,
             neighborhood,
             rank,
@@ -236,9 +238,14 @@ impl<B: Backend> CompiledStructuredPyramidRhoPlan<B> {
         let [batch, rank, patch_h, patch_w] = input.patch_query.shape().dims::<4>();
         let [patch_value_batch, value_dim, patch_value_h, patch_value_w] =
             input.patch_value.shape().dims::<4>();
-        let [coarse_batch, coarse_rank, coarse_h, coarse_w] = input.coarse_query.shape().dims::<4>();
-        let [coarse_value_batch, coarse_value_dim, coarse_value_h, coarse_value_w] =
-            input.coarse_value.shape().dims::<4>();
+        let [coarse_batch, coarse_rank, coarse_h, coarse_w] =
+            input.coarse_query.shape().dims::<4>();
+        let [
+            coarse_value_batch,
+            coarse_value_dim,
+            coarse_value_h,
+            coarse_value_w,
+        ] = input.coarse_value.shape().dims::<4>();
         let patch_kernel_ok = if self.shape.patch.token_count() > 1 {
             self.patch_plan.is_some()
         } else {
@@ -281,7 +288,12 @@ impl<B: Backend> CompiledStructuredPyramidRhoPlan<B> {
                     self.shape.coarse.width,
                 ]
             && input.hub_rho.shape().dims::<4>()
-                == [batch, self.shape.hub_count.max(1), self.rank, self.value_dim]
+                == [
+                    batch,
+                    self.shape.hub_count.max(1),
+                    self.rank,
+                    self.value_dim,
+                ]
             && input.neighborhood == self.neighborhood
             && patch_kernel_ok
             && coarse_kernel_ok
@@ -325,11 +337,25 @@ impl<B: Backend> CompiledStructuredPyramidSplitPlan<B> {
                 && spec.shape.coarse_stride <= 2
                 && spec.shape.patch.height == spec.shape.coarse.height * spec.shape.coarse_stride
                 && spec.shape.patch.width == spec.shape.coarse.width * spec.shape.coarse_stride)
-                .then(|| patch_from_coarse_route(spec.batch, spec.shape.patch, spec.shape.coarse, spec.device)),
+                .then(|| {
+                    patch_from_coarse_route(
+                        spec.batch,
+                        spec.shape.patch,
+                        spec.shape.coarse,
+                        spec.device,
+                    )
+                }),
             patch_to_coarse_pool: (spec.shape.coarse_stride > 1
                 && spec.shape.patch.height == spec.shape.coarse.height * spec.shape.coarse_stride
                 && spec.shape.patch.width == spec.shape.coarse.width * spec.shape.coarse_stride)
-                .then(|| patch_to_coarse_pool_route(spec.batch, spec.shape.patch, spec.shape.coarse_stride, spec.device)),
+                .then(|| {
+                    patch_to_coarse_pool_route(
+                        spec.batch,
+                        spec.shape.patch,
+                        spec.shape.coarse_stride,
+                        spec.device,
+                    )
+                }),
             shape: spec.shape,
             patch_neighborhood: spec.patch_neighborhood,
             coarse_neighborhood: spec.coarse_neighborhood,
@@ -344,16 +370,32 @@ impl<B: Backend> CompiledStructuredPyramidSplitPlan<B> {
         let [batch, patch_rank, patch_h, patch_w] = input.patch_local_query.shape().dims::<4>();
         let [patch_value_batch, value_dim, patch_value_h, patch_value_w] =
             input.patch_value.shape().dims::<4>();
-        let [patch_coarse_batch, patch_coarse_rank, patch_coarse_h, patch_coarse_w] =
-            input.patch_query_for_coarse.shape().dims::<4>();
-        let [patch_global_batch, patch_global_rank, patch_global_h, patch_global_w] =
-            input.patch_query_for_global.shape().dims::<4>();
+        let [
+            patch_coarse_batch,
+            patch_coarse_rank,
+            patch_coarse_h,
+            patch_coarse_w,
+        ] = input.patch_query_for_coarse.shape().dims::<4>();
+        let [
+            patch_global_batch,
+            patch_global_rank,
+            patch_global_h,
+            patch_global_w,
+        ] = input.patch_query_for_global.shape().dims::<4>();
         let [coarse_batch, coarse_rank, coarse_h, coarse_w] =
             input.coarse_local_query.shape().dims::<4>();
-        let [coarse_global_batch, coarse_global_rank, coarse_global_h, coarse_global_w] =
-            input.coarse_query_for_global.shape().dims::<4>();
-        let [coarse_value_batch, coarse_value_dim, coarse_value_h, coarse_value_w] =
-            input.coarse_value.shape().dims::<4>();
+        let [
+            coarse_global_batch,
+            coarse_global_rank,
+            coarse_global_h,
+            coarse_global_w,
+        ] = input.coarse_query_for_global.shape().dims::<4>();
+        let [
+            coarse_value_batch,
+            coarse_value_dim,
+            coarse_value_h,
+            coarse_value_w,
+        ] = input.coarse_value.shape().dims::<4>();
         let patch_kernel_ok = if self.shape.patch.token_count() > 1 {
             self.patch_plan.is_some()
         } else {
@@ -409,7 +451,12 @@ impl<B: Backend> CompiledStructuredPyramidSplitPlan<B> {
                     self.shape.coarse.width,
                 ]
             && input.hub_rho.shape().dims::<4>()
-                == [batch, self.shape.hub_count.max(1), self.global_rank, self.value_dim]
+                == [
+                    batch,
+                    self.shape.hub_count.max(1),
+                    self.global_rank,
+                    self.value_dim,
+                ]
             && patch_kernel_ok
             && coarse_kernel_ok
     }
@@ -419,10 +466,18 @@ impl<B: Backend> CompiledStructuredPyramidSplitPlan<B> {
             input.patch_rho.shape().dims::<5>();
         let [coarse_batch, coarse_rank, coarse_h, coarse_w] =
             input.coarse_local_query.shape().dims::<4>();
-        let [coarse_global_batch, coarse_global_rank, coarse_global_h, coarse_global_w] =
-            input.coarse_query_for_global.shape().dims::<4>();
-        let [coarse_value_batch, coarse_value_dim, coarse_value_h, coarse_value_w] =
-            input.coarse_value.shape().dims::<4>();
+        let [
+            coarse_global_batch,
+            coarse_global_rank,
+            coarse_global_h,
+            coarse_global_w,
+        ] = input.coarse_query_for_global.shape().dims::<4>();
+        let [
+            coarse_value_batch,
+            coarse_value_dim,
+            coarse_value_h,
+            coarse_value_w,
+        ] = input.coarse_value.shape().dims::<4>();
         let coarse_kernel_ok = if self.shape.coarse.token_count() > 1 {
             self.coarse_plan.is_some()
         } else {
@@ -453,7 +508,12 @@ impl<B: Backend> CompiledStructuredPyramidSplitPlan<B> {
                     self.shape.coarse.width,
                 ]
             && input.hub_rho.shape().dims::<4>()
-                == [patch_batch, self.shape.hub_count.max(1), self.global_rank, self.value_dim]
+                == [
+                    patch_batch,
+                    self.shape.hub_count.max(1),
+                    self.global_rank,
+                    self.value_dim,
+                ]
             && coarse_kernel_ok
     }
 
@@ -463,10 +523,18 @@ impl<B: Backend> CompiledStructuredPyramidSplitPlan<B> {
     ) -> bool {
         let [coarse_batch, coarse_rank, coarse_h, coarse_w] =
             input.coarse_local_query.shape().dims::<4>();
-        let [coarse_global_batch, coarse_global_rank, coarse_global_h, coarse_global_w] =
-            input.coarse_query_for_global.shape().dims::<4>();
-        let [coarse_value_batch, coarse_value_dim, coarse_value_h, coarse_value_w] =
-            input.coarse_value.shape().dims::<4>();
+        let [
+            coarse_global_batch,
+            coarse_global_rank,
+            coarse_global_h,
+            coarse_global_w,
+        ] = input.coarse_query_for_global.shape().dims::<4>();
+        let [
+            coarse_value_batch,
+            coarse_value_dim,
+            coarse_value_h,
+            coarse_value_w,
+        ] = input.coarse_value.shape().dims::<4>();
         let coarse_kernel_ok = if self.shape.coarse.token_count() > 1 {
             self.coarse_plan.is_some()
         } else {
@@ -492,7 +560,12 @@ impl<B: Backend> CompiledStructuredPyramidSplitPlan<B> {
                     self.shape.coarse.width,
                 ]
             && input.hub_rho.shape().dims::<4>()
-                == [coarse_batch, self.shape.hub_count.max(1), self.global_rank, self.value_dim]
+                == [
+                    coarse_batch,
+                    self.shape.hub_count.max(1),
+                    self.global_rank,
+                    self.value_dim,
+                ]
             && coarse_kernel_ok
     }
 }
@@ -555,7 +628,11 @@ pub fn reference_structured_pyramid_rho_step<B: Backend>(
         None,
     )
     .unwrap_or_else(|| {
-        pool_target_major_outer(patch_update.clone(), shape.patch, shape.coarse_stride.max(1))
+        pool_target_major_outer(
+            patch_update.clone(),
+            shape.patch,
+            shape.coarse_stride.max(1),
+        )
     });
 
     let next_patch_rho = rho_from_target_major(
@@ -631,8 +708,7 @@ where
     let output = try_fused_structured_pyramid_rho_step_wgpu_with_plan(shape, input, &plan);
     if output.is_some() {
         profile_record(&STRUCTURED_PYRAMID_PROFILE, |state| {
-            let reused_bytes =
-                (2 * 11 * core::mem::size_of::<f32>()) as u64;
+            let reused_bytes = (2 * 11 * core::mem::size_of::<f32>()) as u64;
             state.metadata_reuse_hits = state.metadata_reuse_hits.saturating_sub(2);
             state.metadata_reuse_bytes = state.metadata_reuse_bytes.saturating_sub(reused_bytes);
             state.metadata_upload_bytes = state.metadata_upload_bytes.saturating_add(reused_bytes);
@@ -713,7 +789,8 @@ where
         )?
     };
 
-    let patch_update = spatial_outer_target_major(input.patch_query.clone(), input.patch_value.clone());
+    let patch_update =
+        spatial_outer_target_major(input.patch_query.clone(), input.patch_value.clone());
     let coarse_update =
         spatial_outer_target_major(input.coarse_query.clone(), input.coarse_value.clone());
     let pooled_patch_update = pool_target_major_outer_fast(
@@ -724,11 +801,17 @@ where
         plan.patch_to_coarse_pool.clone(),
     )
     .unwrap_or_else(|| {
-        pool_target_major_outer(patch_update.clone(), shape.patch, shape.coarse_stride.max(1))
+        pool_target_major_outer(
+            patch_update.clone(),
+            shape.patch,
+            shape.coarse_stride.max(1),
+        )
     });
 
-    let next_coarse_rho =
-        rho_from_target_major(coarse_local.1.clone().add(pooled_patch_update), shape.coarse);
+    let next_coarse_rho = rho_from_target_major(
+        coarse_local.1.clone().add(pooled_patch_update),
+        shape.coarse,
+    );
     let next_hub_rho = update_hub_from_deltas(
         input.hub_rho.clone(),
         patch_update.sum_dims_squeeze::<3, usize>(&[1]),
@@ -748,27 +831,27 @@ where
     );
 
     let output = StructuredPyramidRhoStepOutput {
-            patch_local_context: patch_local.0,
-            coarse_local_context: coarse_local.0,
-            patch_from_coarse_context: cross_scale_read_fast(
+        patch_local_context: patch_local.0,
+        coarse_local_context: coarse_local.0,
+        patch_from_coarse_context: cross_scale_read_fast(
+            input.coarse_rho.clone(),
+            input.patch_query.clone(),
+            shape.coarse,
+            shape.patch,
+            shape.coarse_stride.max(1),
+            plan.patch_from_coarse_route.clone(),
+        )
+        .unwrap_or_else(|| {
+            cross_scale_read(
                 input.coarse_rho.clone(),
                 input.patch_query.clone(),
                 shape.coarse,
                 shape.patch,
                 shape.coarse_stride.max(1),
-                plan.patch_from_coarse_route.clone(),
             )
-            .unwrap_or_else(|| {
-                cross_scale_read(
-                    input.coarse_rho.clone(),
-                    input.patch_query.clone(),
-                    shape.coarse,
-                    shape.patch,
-                    shape.coarse_stride.max(1),
-                )
-            }),
-            patch_from_hub_context,
-            coarse_from_hub_context,
+        }),
+        patch_from_hub_context,
+        coarse_from_hub_context,
         next_patch_rho: patch_local.1,
         next_coarse_rho,
         next_hub_rho,
@@ -967,11 +1050,7 @@ where
             plan.patch_to_coarse_pool.clone(),
         )
         .unwrap_or_else(|| {
-            pool_target_major_outer(
-                patch_update,
-                shape.patch,
-                shape.coarse_stride.max(1),
-            )
+            pool_target_major_outer(patch_update, shape.patch, shape.coarse_stride.max(1))
         })
     } else {
         zeros_like_target_major_rho(
@@ -1069,7 +1148,8 @@ where
     }
 
     let [batch, _, value_dim, height, width] = input.patch_rho.shape().dims::<5>();
-    let patch_zero = || Tensor::<B, 4>::zeros([batch, value_dim, height, width], &input.patch_rho.device());
+    let patch_zero =
+        || Tensor::<B, 4>::zeros([batch, value_dim, height, width], &input.patch_rho.device());
     let patch_rho = input.patch_rho.clone();
     let output = try_fused_structured_pyramid_coarse_only_no_patch_step_wgpu_with_plan(
         shape,
@@ -1276,7 +1356,11 @@ fn rho_from_target_major<B: Backend>(input: Tensor<B, 4>, shape: LocalGridShape2
         .swap_dims(1, 3)
 }
 
-fn contract<B: Backend>(rho: Tensor<B, 5>, query: Tensor<B, 4>, shape: LocalGridShape2d) -> Tensor<B, 4> {
+fn contract<B: Backend>(
+    rho: Tensor<B, 5>,
+    query: Tensor<B, 4>,
+    shape: LocalGridShape2d,
+) -> Tensor<B, 4> {
     let read = target_major_identity_read(tokens_to_target_major(query), rho_to_target_major(rho));
     tokens_from_target_major(read, shape)
 }
@@ -1309,13 +1393,18 @@ fn local_grid_context_to_spatial<B: Backend>(
     tokens_from_target_major(target_major, shape)
 }
 
-fn local_grid_rho_to_spatial<B: Backend>(input: Tensor<B, 5>, shape: LocalGridShape2d) -> Tensor<B, 5> {
+fn local_grid_rho_to_spatial<B: Backend>(
+    input: Tensor<B, 5>,
+    shape: LocalGridShape2d,
+) -> Tensor<B, 5> {
     rho_from_target_major(local_grid_rho_to_target_major(input), shape)
 }
 
 fn local_grid_rho_to_target_major<B: Backend>(input: Tensor<B, 5>) -> Tensor<B, 4> {
     let [batch, rank, tokens, _, value_dim] = input.shape().dims::<5>();
-    input.reshape([batch, rank, tokens, value_dim]).swap_dims(1, 2)
+    input
+        .reshape([batch, rank, tokens, value_dim])
+        .swap_dims(1, 2)
 }
 
 fn fused_local_step<B: Backend>(
@@ -1386,13 +1475,19 @@ fn reference_local_step<B: Backend>(
     (context, next_rho)
 }
 
-fn spatial_outer_target_major<B: Backend>(query: Tensor<B, 4>, value: Tensor<B, 4>) -> Tensor<B, 4> {
+fn spatial_outer_target_major<B: Backend>(
+    query: Tensor<B, 4>,
+    value: Tensor<B, 4>,
+) -> Tensor<B, 4> {
     target_major_outer_product(tokens_to_target_major(query), tokens_to_target_major(value))
 }
 
 fn spatial_outer_spatial<B: Backend>(query: Tensor<B, 4>, value: Tensor<B, 4>) -> Tensor<B, 5> {
     let [_, _, height, width] = query.shape().dims::<4>();
-    rho_from_target_major(spatial_outer_target_major(query, value), LocalGridShape2d::new(height, width))
+    rho_from_target_major(
+        spatial_outer_target_major(query, value),
+        LocalGridShape2d::new(height, width),
+    )
 }
 
 fn shift_spatial<B: Backend>(input: Tensor<B, 4>, dy: isize, dx: isize) -> Tensor<B, 4> {
@@ -1505,7 +1600,13 @@ fn cross_scale_read_fast<B: Backend>(
     ) {
         return Some(context);
     }
-    cross_scale_read_tiled(coarse_rho, patch_query, coarse_shape, patch_shape, coarse_stride)
+    cross_scale_read_tiled(
+        coarse_rho,
+        patch_query,
+        coarse_shape,
+        patch_shape,
+        coarse_stride,
+    )
 }
 
 fn cross_scale_read_with_route<B: Backend>(
@@ -1536,8 +1637,11 @@ fn cross_scale_read_with_route<B: Backend>(
         return None;
     }
 
-    let routed_rho = rho_to_target_major(coarse_rho).reshape([batch, coarse_tokens, rank * value_dim]);
-    let routed_rho = route.matmul(routed_rho).reshape([batch, patch_tokens, rank, value_dim]);
+    let routed_rho =
+        rho_to_target_major(coarse_rho).reshape([batch, coarse_tokens, rank * value_dim]);
+    let routed_rho = route
+        .matmul(routed_rho)
+        .reshape([batch, patch_tokens, rank, value_dim]);
     let patch_query = tokens_to_target_major(patch_query);
     let context = routed_rho
         .mul(patch_query.unsqueeze_dim::<4>(3))
@@ -1587,7 +1691,8 @@ fn patch_to_coarse_pool_route<B: Backend>(
         for py in 0..patch_shape.height {
             for px in 0..patch_shape.width {
                 let patch_idx = py * patch_shape.width + px;
-                let coarse_idx = (py / coarse_stride.max(1)) * pooled_width + (px / coarse_stride.max(1));
+                let coarse_idx =
+                    (py / coarse_stride.max(1)) * pooled_width + (px / coarse_stride.max(1));
                 data[batch_offset + coarse_idx * patch_tokens + patch_idx] = 1.0;
             }
         }
@@ -1622,9 +1727,7 @@ fn cross_scale_read_tiled<B: Backend>(
         return None;
     }
 
-    let coarse_rho = coarse_rho
-        .unsqueeze_dim::<6>(3)
-        .unsqueeze_dim::<7>(5);
+    let coarse_rho = coarse_rho.unsqueeze_dim::<6>(3).unsqueeze_dim::<7>(5);
     let patch_query = patch_query
         .reshape([
             batch,
@@ -1651,7 +1754,9 @@ fn hub_read<B: Backend>(
     let query = tokens_to_target_major(query).unsqueeze_dim::<4>(1);
     let hub_context = query.matmul(hub_rho);
     let reduced = if let Some(weights) = weights {
-        let weights = tokens_to_target_major(weights).swap_dims(1, 2).unsqueeze_dim::<4>(3);
+        let weights = tokens_to_target_major(weights)
+            .swap_dims(1, 2)
+            .unsqueeze_dim::<4>(3);
         hub_context.mul(weights).sum_dims_squeeze::<3, usize>(&[1])
     } else if hubs > 1 {
         hub_context
@@ -1709,10 +1814,13 @@ fn hub_reduce_slice<B: Backend>(
 ) -> Tensor<B, 4> {
     let slice = context.slice_dim(2, start..start + len);
     let reduced = if let Some(weights) = weights {
-        let weights = tokens_to_target_major(weights).swap_dims(1, 2).unsqueeze_dim::<4>(3);
+        let weights = tokens_to_target_major(weights)
+            .swap_dims(1, 2)
+            .unsqueeze_dim::<4>(3);
         slice.mul(weights).sum_dims_squeeze::<3, usize>(&[1])
     } else if hubs > 1 {
-        slice.sum_dims_squeeze::<3, usize>(&[1])
+        slice
+            .sum_dims_squeeze::<3, usize>(&[1])
             .div_scalar(hubs as f32)
     } else {
         slice.sum_dims_squeeze::<3, usize>(&[1])
@@ -1733,7 +1841,12 @@ fn pool_target_major_outer<B: Backend>(
     let pooled_height = patch_shape.height / stride;
     let pooled_width = patch_shape.width / stride;
     update
-        .reshape([batch, patch_shape.height, patch_shape.width, rank * value_dim])
+        .reshape([
+            batch,
+            patch_shape.height,
+            patch_shape.width,
+            rank * value_dim,
+        ])
         .reshape([
             batch,
             pooled_height,
@@ -1769,7 +1882,11 @@ fn pool_target_major_outer_fast<B: Backend>(
         return None;
     }
     let update = update.reshape([batch, patch_tokens, rank * value_dim]);
-    Some(route.matmul(update).reshape([batch, coarse_tokens, rank, value_dim]))
+    Some(
+        route
+            .matmul(update)
+            .reshape([batch, coarse_tokens, rank, value_dim]),
+    )
 }
 
 fn update_hub_from_deltas<B: Backend>(
@@ -1816,7 +1933,11 @@ fn update_hub_from_spatial_updates<B: Backend>(
                 let [batch, _, rank, value_dim] = hub_rho.shape().dims::<4>();
                 Tensor::<B, 3>::zeros([batch, rank, value_dim], &hub_rho.device())
             });
-        return target_major_decay_add(hub_rho, sum_patch.add(sum_coarse).unsqueeze_dim::<4>(1), decay);
+        return target_major_decay_add(
+            hub_rho,
+            sum_patch.add(sum_coarse).unsqueeze_dim::<4>(1),
+            decay,
+        );
     }
 
     let delta = weighted_global_sum_pair(
@@ -1865,10 +1986,20 @@ fn weighted_global_sum_pair<B: Backend>(
         (Some(patch), None) => Some(weighted_global_sum(patch, patch_weights, hub_count)),
         (None, Some(coarse)) => Some(weighted_global_sum(coarse, coarse_weights, hub_count)),
         (Some(patch), Some(coarse)) => {
-            let [batch, patch_rank, patch_value_dim, patch_height, patch_width] =
-                patch.shape().dims::<5>();
-            let [coarse_batch, coarse_rank, coarse_value_dim, coarse_height, coarse_width] =
-                coarse.shape().dims::<5>();
+            let [
+                batch,
+                patch_rank,
+                patch_value_dim,
+                patch_height,
+                patch_width,
+            ] = patch.shape().dims::<5>();
+            let [
+                coarse_batch,
+                coarse_rank,
+                coarse_value_dim,
+                coarse_height,
+                coarse_width,
+            ] = coarse.shape().dims::<5>();
             if coarse_batch != batch
                 || patch_rank != rank
                 || coarse_rank != rank
@@ -1876,18 +2007,18 @@ fn weighted_global_sum_pair<B: Backend>(
                 || coarse_value_dim != value_dim
             {
                 return Some(
-                    weighted_global_sum(patch, patch_weights, hub_count)
-                        .add(weighted_global_sum(coarse, coarse_weights, hub_count)),
+                    weighted_global_sum(patch, patch_weights, hub_count).add(weighted_global_sum(
+                        coarse,
+                        coarse_weights,
+                        hub_count,
+                    )),
                 );
             }
             let patch_tokens = patch_height * patch_width;
             let coarse_tokens = coarse_height * coarse_width;
             let patch_weights = patch_weights.unwrap_or_else(|| {
-                Tensor::<B, 4>::ones(
-                    [batch, hub_count.max(1), patch_height, patch_width],
-                    device,
-                )
-                .div_scalar(hub_count.max(1) as f32)
+                Tensor::<B, 4>::ones([batch, hub_count.max(1), patch_height, patch_width], device)
+                    .div_scalar(hub_count.max(1) as f32)
             });
             let coarse_weights = coarse_weights.unwrap_or_else(|| {
                 Tensor::<B, 4>::ones(
@@ -1899,12 +2030,15 @@ fn weighted_global_sum_pair<B: Backend>(
             let patch_update = patch.reshape([batch, rank, value_dim, patch_tokens]);
             let coarse_update = coarse.reshape([batch, rank, value_dim, coarse_tokens]);
             let patch_weights = patch_weights.reshape([batch, hub_count.max(1), patch_tokens]);
-            let coarse_weights =
-                coarse_weights.reshape([batch, hub_count.max(1), coarse_tokens]);
-            let update =
-                Tensor::cat(vec![patch_update, coarse_update], 3).unsqueeze_dim::<5>(1);
-            let weights = Tensor::cat(vec![patch_weights, coarse_weights], 2)
-                .reshape([batch, hub_count.max(1), 1, 1, patch_tokens + coarse_tokens]);
+            let coarse_weights = coarse_weights.reshape([batch, hub_count.max(1), coarse_tokens]);
+            let update = Tensor::cat(vec![patch_update, coarse_update], 3).unsqueeze_dim::<5>(1);
+            let weights = Tensor::cat(vec![patch_weights, coarse_weights], 2).reshape([
+                batch,
+                hub_count.max(1),
+                1,
+                1,
+                patch_tokens + coarse_tokens,
+            ]);
             Some(update.mul(weights).sum_dims_squeeze::<4, usize>(&[4]))
         }
     }
@@ -1921,7 +2055,10 @@ fn target_major_identity_read<B: Backend>(query: Tensor<B, 3>, rho: Tensor<B, 4>
         .reshape([batch, targets, value_dim])
 }
 
-fn target_major_outer_product<B: Backend>(query: Tensor<B, 3>, value: Tensor<B, 3>) -> Tensor<B, 4> {
+fn target_major_outer_product<B: Backend>(
+    query: Tensor<B, 3>,
+    value: Tensor<B, 3>,
+) -> Tensor<B, 4> {
     let [batch, targets, rank] = query.shape().dims::<3>();
     let [value_batch, value_targets, value_dim] = value.shape().dims::<3>();
     assert_eq!(value_batch, batch);
@@ -1950,8 +2087,8 @@ fn target_major_decay_add<B: Backend>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use burn::tensor::backend::Backend as BackendTrait;
     use burn::tensor::TensorData;
+    use burn::tensor::backend::Backend as BackendTrait;
     use burn_cubecl::cubecl::Runtime;
     use burn_ndarray::NdArray;
     use burn_wgpu::{CubeBackend, RuntimeOptions, WgpuRuntime, graphics};
@@ -1983,7 +2120,10 @@ mod tests {
         let output = reference_structured_pyramid_rho_step(shape, input);
         assert_eq!(output.patch_local_context.shape().dims(), [1, 4, 2, 2]);
         assert_eq!(output.coarse_local_context.shape().dims(), [1, 4, 1, 1]);
-        assert_eq!(output.patch_from_coarse_context.shape().dims(), [1, 4, 2, 2]);
+        assert_eq!(
+            output.patch_from_coarse_context.shape().dims(),
+            [1, 4, 2, 2]
+        );
         assert_eq!(output.patch_from_hub_context.shape().dims(), [1, 4, 2, 2]);
         assert_eq!(output.coarse_from_hub_context.shape().dims(), [1, 4, 1, 1]);
         assert_eq!(output.next_patch_rho.shape().dims(), [1, 2, 4, 2, 2]);
@@ -2099,14 +2239,9 @@ mod tests {
         let patch_shape = LocalGridShape2d::new(2, 2);
         let coarse_shape = LocalGridShape2d::new(1, 1);
         let route = patch_to_coarse_pool_route::<Backend>(1, patch_shape, 2, &device);
-        let fast = pool_target_major_outer_fast(
-            update.clone(),
-            patch_shape,
-            coarse_shape,
-            2,
-            Some(route),
-        )
-        .expect("pooled route");
+        let fast =
+            pool_target_major_outer_fast(update.clone(), patch_shape, coarse_shape, 2, Some(route))
+                .expect("pooled route");
         let reference = pool_target_major_outer(update, patch_shape, 2);
         assert!(max_abs_diff_any(fast, reference) <= 1.0e-6);
     }
@@ -2181,10 +2316,8 @@ mod tests {
             ),
             &device,
         );
-        let coarse_query = Tensor::<Backend, 4>::from_data(
-            TensorData::new(vec![0.5, 1.5], [1, 2, 1, 1]),
-            &device,
-        );
+        let coarse_query =
+            Tensor::<Backend, 4>::from_data(TensorData::new(vec![0.5, 1.5], [1, 2, 1, 1]), &device);
         let patch_weights = Tensor::<Backend, 4>::from_data(
             TensorData::new(
                 vec![
@@ -2195,10 +2328,8 @@ mod tests {
             ),
             &device,
         );
-        let coarse_weights = Tensor::<Backend, 4>::from_data(
-            TensorData::new(vec![0.4, 0.6], [1, 2, 1, 1]),
-            &device,
-        );
+        let coarse_weights =
+            Tensor::<Backend, 4>::from_data(TensorData::new(vec![0.4, 0.6], [1, 2, 1, 1]), &device);
 
         let (patch_pair, coarse_pair) = hub_read_pair(
             hub_rho.clone(),
@@ -2221,14 +2352,10 @@ mod tests {
         type Backend = NdArray<f32>;
         let device = <Backend as BackendTrait>::Device::default();
         let hub_rho = Tensor::<Backend, 4>::zeros([1, 2, 2, 1], &device);
-        let patch_delta = Tensor::<Backend, 3>::from_data(
-            TensorData::new(vec![2.0, 4.0], [1, 2, 1]),
-            &device,
-        );
-        let coarse_delta = Tensor::<Backend, 3>::from_data(
-            TensorData::new(vec![1.0, 3.0], [1, 2, 1]),
-            &device,
-        );
+        let patch_delta =
+            Tensor::<Backend, 3>::from_data(TensorData::new(vec![2.0, 4.0], [1, 2, 1]), &device);
+        let coarse_delta =
+            Tensor::<Backend, 3>::from_data(TensorData::new(vec![1.0, 3.0], [1, 2, 1]), &device);
         let decay = Tensor::<Backend, 1>::ones([2], &device);
 
         let output = update_hub_from_deltas(hub_rho, patch_delta, coarse_delta, 2, decay);
@@ -2447,26 +2574,30 @@ mod tests {
         };
 
         let reference = reference_structured_pyramid_rho_step(shape, input.clone());
-        let plan = CompiledStructuredPyramidRhoPlan::new(2, 4, 6, shape, input.neighborhood, &device);
-        let fused =
-            try_fused_structured_pyramid_rho_step_wgpu_with_plan(shape, input, &plan).expect(
-                "structured pyramid fused output",
-            );
+        let plan =
+            CompiledStructuredPyramidRhoPlan::new(2, 4, 6, shape, input.neighborhood, &device);
+        let fused = try_fused_structured_pyramid_rho_step_wgpu_with_plan(shape, input, &plan)
+            .expect("structured pyramid fused output");
 
         assert!(max_abs_diff(fused.patch_local_context, reference.patch_local_context) <= 1.0e-5);
+        assert!(max_abs_diff(fused.coarse_local_context, reference.coarse_local_context) <= 1.0e-5);
         assert!(
-            max_abs_diff(fused.coarse_local_context, reference.coarse_local_context) <= 1.0e-5
+            max_abs_diff(
+                fused.patch_from_coarse_context,
+                reference.patch_from_coarse_context
+            ) <= 1.0e-5
         );
         assert!(
-            max_abs_diff(fused.patch_from_coarse_context, reference.patch_from_coarse_context)
-                <= 1.0e-5
+            max_abs_diff(
+                fused.patch_from_hub_context,
+                reference.patch_from_hub_context
+            ) <= 1.0e-5
         );
         assert!(
-            max_abs_diff(fused.patch_from_hub_context, reference.patch_from_hub_context) <= 1.0e-5
-        );
-        assert!(
-            max_abs_diff(fused.coarse_from_hub_context, reference.coarse_from_hub_context)
-                <= 1.0e-5
+            max_abs_diff(
+                fused.coarse_from_hub_context,
+                reference.coarse_from_hub_context
+            ) <= 1.0e-5
         );
         assert!(max_abs_diff(fused.next_patch_rho, reference.next_patch_rho) <= 1.0e-5);
         assert!(max_abs_diff(fused.next_coarse_rho, reference.next_coarse_rho) <= 1.0e-5);
@@ -2492,22 +2623,16 @@ mod tests {
             &device,
         )
         .abs();
-        let patch_hub_weights = patch_hub_weights.clone()
-            / patch_hub_weights
-                .clone()
-                .sum_dim(1)
-                .add_scalar(1.0e-6);
+        let patch_hub_weights =
+            patch_hub_weights.clone() / patch_hub_weights.clone().sum_dim(1).add_scalar(1.0e-6);
         let coarse_hub_weights = Tensor::<WgpuBackend, 4>::random(
             [2, 2, 1, 1],
             burn::tensor::Distribution::Normal(0.0, 1.0),
             &device,
         )
         .abs();
-        let coarse_hub_weights = coarse_hub_weights.clone()
-            / coarse_hub_weights
-                .clone()
-                .sum_dim(1)
-                .add_scalar(1.0e-6);
+        let coarse_hub_weights =
+            coarse_hub_weights.clone() / coarse_hub_weights.clone().sum_dim(1).add_scalar(1.0e-6);
         let input = StructuredPyramidRhoStepInput {
             patch_query: Tensor::<WgpuBackend, 4>::random(
                 [2, 2, 2, 2],
@@ -2551,26 +2676,30 @@ mod tests {
         };
 
         let reference = reference_structured_pyramid_rho_step(shape, input.clone());
-        let plan = CompiledStructuredPyramidRhoPlan::new(2, 2, 4, shape, input.neighborhood, &device);
-        let fused =
-            try_fused_structured_pyramid_rho_step_wgpu_with_plan(shape, input, &plan).expect(
-                "structured pyramid fused output",
-            );
+        let plan =
+            CompiledStructuredPyramidRhoPlan::new(2, 2, 4, shape, input.neighborhood, &device);
+        let fused = try_fused_structured_pyramid_rho_step_wgpu_with_plan(shape, input, &plan)
+            .expect("structured pyramid fused output");
 
         assert!(max_abs_diff(fused.patch_local_context, reference.patch_local_context) <= 1.0e-5);
+        assert!(max_abs_diff(fused.coarse_local_context, reference.coarse_local_context) <= 1.0e-5);
         assert!(
-            max_abs_diff(fused.coarse_local_context, reference.coarse_local_context) <= 1.0e-5
+            max_abs_diff(
+                fused.patch_from_coarse_context,
+                reference.patch_from_coarse_context
+            ) <= 1.0e-5
         );
         assert!(
-            max_abs_diff(fused.patch_from_coarse_context, reference.patch_from_coarse_context)
-                <= 1.0e-5
+            max_abs_diff(
+                fused.patch_from_hub_context,
+                reference.patch_from_hub_context
+            ) <= 1.0e-5
         );
         assert!(
-            max_abs_diff(fused.patch_from_hub_context, reference.patch_from_hub_context) <= 1.0e-5
-        );
-        assert!(
-            max_abs_diff(fused.coarse_from_hub_context, reference.coarse_from_hub_context)
-                <= 1.0e-5
+            max_abs_diff(
+                fused.coarse_from_hub_context,
+                reference.coarse_from_hub_context
+            ) <= 1.0e-5
         );
         assert!(max_abs_diff(fused.next_patch_rho, reference.next_patch_rho) <= 1.0e-5);
         assert!(max_abs_diff(fused.next_coarse_rho, reference.next_coarse_rho) <= 1.0e-5);
@@ -2633,15 +2762,16 @@ mod tests {
         };
 
         let reference = reference_structured_pyramid_rho_step(shape, input.clone());
-        let plan = CompiledStructuredPyramidRhoPlan::new(1, 3, 5, shape, input.neighborhood, &device);
-        let fused =
-            try_fused_structured_pyramid_rho_step_wgpu_with_plan(shape, input, &plan).expect(
-                "structured pyramid fused output",
-            );
+        let plan =
+            CompiledStructuredPyramidRhoPlan::new(1, 3, 5, shape, input.neighborhood, &device);
+        let fused = try_fused_structured_pyramid_rho_step_wgpu_with_plan(shape, input, &plan)
+            .expect("structured pyramid fused output");
 
         assert!(
-            max_abs_diff(fused.patch_from_coarse_context, reference.patch_from_coarse_context)
-                <= 1.0e-5
+            max_abs_diff(
+                fused.patch_from_coarse_context,
+                reference.patch_from_coarse_context
+            ) <= 1.0e-5
         );
         assert!(max_abs_diff(fused.next_patch_rho, reference.next_patch_rho) <= 1.0e-5);
         assert!(max_abs_diff(fused.next_coarse_rho, reference.next_coarse_rho) <= 1.0e-5);

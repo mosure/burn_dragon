@@ -185,7 +185,6 @@ fn assignment_route_targets<B: Backend>(
     ))
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -260,5 +259,4 @@ mod tests {
             [3]
         );
     }
-
 }

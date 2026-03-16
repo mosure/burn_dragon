@@ -19,6 +19,9 @@ impl VisionTrainingConfig {
         if self.training.batch_size == 0 {
             return Err(anyhow!("training.batch_size must be > 0"));
         }
+        if self.training.gradient_accumulation_steps == 0 {
+            return Err(anyhow!("training.gradient_accumulation_steps must be > 0"));
+        }
         if self.training.max_iters == 0 {
             return Err(anyhow!("training.max_iters must be > 0"));
         }
@@ -35,6 +38,15 @@ impl VisionTrainingConfig {
             && epochs == 0
         {
             return Err(anyhow!("training.epochs must be > 0"));
+        }
+        if matches!(
+            self.training.schedule_mode,
+            Some(VisionTrainScheduleMode::Epochs)
+        ) && self.training.epochs.is_none()
+        {
+            return Err(anyhow!(
+                "training.schedule_mode=epochs requires training.epochs to be set"
+            ));
         }
         self.optimizer.validate()?;
 

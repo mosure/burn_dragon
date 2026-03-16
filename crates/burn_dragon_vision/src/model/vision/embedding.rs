@@ -15,6 +15,7 @@ pub struct PatchEmbedOutput<B: Backend> {
 
 const PATCH_EMBED_EXPANSION: usize = 4;
 const PATCH_EMBED_BLOCKS_PER_STAGE: usize = 1;
+const PATCH_EMBED_CONVNEXT_STEM_BLOCKS: usize = 2;
 
 #[derive(Module, Debug)]
 struct PatchConvNeXtBlock<B: Backend> {
@@ -113,7 +114,7 @@ impl<B: Backend> PatchEmbed<B> {
             .saturating_mul(patch_size)
             .saturating_mul(config.in_channels.max(1));
         let (stages, proj, linear) = match config.patch_embed_mode {
-            VisionPatchEmbedMode::Conv | VisionPatchEmbedMode::ConvNext => {
+            VisionPatchEmbedMode::Conv => {
                 let mut strides = patch_downsample_strides(patch_size);
                 if strides.is_empty() {
                     strides.push(1);
@@ -121,6 +122,39 @@ impl<B: Backend> PatchEmbed<B> {
                 let hidden_dim = (config.embed_dim / 2).max(16).min(config.embed_dim.max(1));
                 let mut stages = Vec::with_capacity(strides.len());
                 let mut in_channels = config.in_channels.max(1);
+                for stride in strides {
+                    stages.push(PatchEmbedStage::new(
+                        in_channels,
+                        hidden_dim,
+                        stride,
+                        PATCH_EMBED_BLOCKS_PER_STAGE,
+                        PATCH_EMBED_EXPANSION,
+                        device,
+                    ));
+                    in_channels = hidden_dim;
+                }
+                let proj = Conv2dConfig::new([in_channels.max(1), config.embed_dim.max(1)], [1, 1])
+                    .init(device);
+                (stages, Some(proj), None)
+            }
+            VisionPatchEmbedMode::ConvNext => {
+                let mut strides = patch_downsample_strides(patch_size);
+                if strides.is_empty() {
+                    strides.push(1);
+                }
+                let hidden_dim = (config.embed_dim / 2).max(16).min(config.embed_dim.max(1));
+                let mut stages = Vec::with_capacity(strides.len().saturating_add(1));
+                let mut in_channels = config.in_channels.max(1);
+                // Real ConvNeXt-style local stem: local residual mixing before patchify/downsample.
+                stages.push(PatchEmbedStage::new(
+                    in_channels,
+                    hidden_dim,
+                    1,
+                    PATCH_EMBED_CONVNEXT_STEM_BLOCKS,
+                    PATCH_EMBED_EXPANSION,
+                    device,
+                ));
+                in_channels = hidden_dim;
                 for stride in strides {
                     stages.push(PatchEmbedStage::new(
                         in_channels,
@@ -254,6 +288,64 @@ impl<B: Backend> PatchEmbed<B> {
 
     pub fn patch_size(&self) -> usize {
         self.patch_size
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::vision::{
+        FusedKernelConfig, VisionAttentionMode, VisionBackboneKind, VisionDragonConfig,
+        VisionLatentActivation,
+    };
+    use burn::backend::NdArray;
+    use burn_dragon_core::ManifoldHyperConnectionsConfig;
+
+    fn test_config(mode: VisionPatchEmbedMode) -> VisionDragonConfig {
+        VisionDragonConfig {
+            image_size: 196,
+            patch_size: 14,
+            patch_embed_mode: mode,
+            backbone: VisionBackboneKind::Dense,
+            in_channels: 3,
+            embed_dim: 128,
+            steps: 4,
+            n_head: 4,
+            mlp_internal_dim_multiplier: 4,
+            dropout: 0.0,
+            projection_dim: 384,
+            projection_hidden_dim: 384,
+            use_cls_token: true,
+            cls_sync_alpha: 0.1,
+            num_eyes: 1,
+            cross_eye_steps: 0,
+            token_state_norm: true,
+            normalization: DragonNormConfig::default(),
+            latent_activation: VisionLatentActivation::default(),
+            pos_encoding: SpatialPositionalEncodingKind::Learned2d,
+            pos_max_height: 14,
+            pos_max_width: 14,
+            attention_mode: VisionAttentionMode::RowL1,
+            use_alibi: true,
+            fused_kernels: FusedKernelConfig::default(),
+            mhc: ManifoldHyperConnectionsConfig::default(),
+            trm_graph: Default::default(),
+            rho_stream: Default::default(),
+        }
+    }
+
+    #[test]
+    fn convnext_patch_embed_builds_distinct_local_stem() {
+        type BackendImpl = NdArray<f32>;
+        let device = <BackendImpl as Backend>::Device::default();
+        let conv =
+            PatchEmbed::<BackendImpl>::new(&test_config(VisionPatchEmbedMode::Conv), &device);
+        let convnext =
+            PatchEmbed::<BackendImpl>::new(&test_config(VisionPatchEmbedMode::ConvNext), &device);
+
+        assert!(convnext.stages.len() > conv.stages.len());
+        assert_eq!(convnext.stages.first().expect("stem").blocks.len(), 2);
+        assert_eq!(conv.stages.first().expect("conv stage").blocks.len(), 1);
     }
 }
 

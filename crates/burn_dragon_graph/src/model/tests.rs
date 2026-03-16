@@ -3,10 +3,10 @@ use crate::compiled_routing::CompiledGraphRouting;
 use crate::{GraphCompiledExecutor, GraphCsrAdjacency, GraphTopologyRouting};
 #[cfg(not(target_arch = "wasm32"))]
 use burn::optim::{AdamWConfig, GradientsParams, LearningRate, Optimizer};
-use burn::tensor::TensorData;
-use burn::tensor::backend::Backend as BackendTrait;
 #[cfg(not(target_arch = "wasm32"))]
 use burn::tensor::Distribution;
+use burn::tensor::TensorData;
+use burn::tensor::backend::Backend as BackendTrait;
 #[cfg(not(target_arch = "wasm32"))]
 use burn_autodiff::Autodiff;
 use burn_cubecl::cubecl::Runtime;
@@ -432,10 +432,7 @@ fn graph_compiled_executor_matches_direct_compiled_step_on_ndarray_backend() {
         .expect("executor step");
 
     assert!(max_abs_diff(direct.state.node_state(), wrapped.state.node_state()) <= 1e-5);
-    assert!(max_abs_diff(
-        direct.state.cluster_state(),
-        wrapped.state.cluster_state()
-    ) <= 1e-5);
+    assert!(max_abs_diff(direct.state.cluster_state(), wrapped.state.cluster_state()) <= 1e-5);
     assert!(max_abs_diff(direct.state.node_rho(), wrapped.state.node_rho()) <= 1e-5);
 }
 
@@ -732,9 +729,21 @@ fn graph_dragon_rollout_compiled_memory_stays_bounded_on_wgpu_backend() {
         .expect("valid node adjacency"),
     )
     .expect("valid routing")
-    .with_cluster_assignments(8, &[0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 6, 6, 6, 6, 7, 7, 7, 7])
+    .with_cluster_assignments(
+        8,
+        &[
+            0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 6, 6, 6, 6, 7,
+            7, 7, 7,
+        ],
+    )
     .expect("valid cluster assignments")
-    .with_node_global_assignments(2, &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1])
+    .with_node_global_assignments(
+        2,
+        &[
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+            1, 1, 1,
+        ],
+    )
     .expect("valid node/global assignments")
     .with_cluster_global_assignments(2, &[0, 0, 1, 1, 0, 0, 1, 1])
     .expect("valid cluster/global assignments");
@@ -804,8 +813,21 @@ fn graph_dragon_rollout_compiled_autodiff_matches_reference_after_one_step() {
     )
     .load_record(reference.clone().into_record());
     let routing = GraphTopologyRouting::new(
-        GraphCsrAdjacency::try_from_edges(8, 8, &[(0, 1), (1, 0), (1, 2), (2, 2), (3, 5), (4, 4), (5, 6), (6, 7)])
-            .expect("valid node adjacency"),
+        GraphCsrAdjacency::try_from_edges(
+            8,
+            8,
+            &[
+                (0, 1),
+                (1, 0),
+                (1, 2),
+                (2, 2),
+                (3, 5),
+                (4, 4),
+                (5, 6),
+                (6, 7),
+            ],
+        )
+        .expect("valid node adjacency"),
     )
     .expect("valid routing")
     .with_cluster_assignments(3, &[0, 0, 1, 1, 1, 2, 2, 2])
@@ -874,7 +896,8 @@ fn graph_dragon_rollout_compiled_autodiff_matches_reference_after_one_step() {
         .expect("reference rollout");
     let fused_state = fused
         .rollout_compiled(
-            fused.state_from_observations(&routing, node_obs, cluster_obs)
+            fused
+                .state_from_observations(&routing, node_obs, cluster_obs)
                 .expect("fused state"),
             &compiled,
             3,

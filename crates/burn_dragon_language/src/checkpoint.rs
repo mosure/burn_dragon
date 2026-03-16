@@ -8,8 +8,8 @@ use burn::module::Module;
 use burn::record::{BinFileRecorder, FullPrecisionSettings, Recorder};
 use burn::tensor::backend::Backend as BackendTrait;
 use burn_dragon_checkpoint::{
-    BurnpackBundleExportOptions, BurnpackBundleExportReport,
-    export_model_to_burnpack_bundle, format_checkpoint_load_error, load_json_snapshot,
+    BurnpackBundleExportOptions, BurnpackBundleExportReport, export_model_to_burnpack_bundle,
+    format_checkpoint_load_error, load_json_snapshot,
     resolve_checkpoint_base as resolve_checkpoint_base_shared,
     resolve_checkpoint_run_dir as resolve_checkpoint_run_dir_shared, run_snapshot_path,
     write_json_snapshot,
@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::load_training_config;
 use crate::tokenizer::{SharedTokenizer, Tokenizer};
-use crate::{BDH, ModelOverrides, TrainingConfig, build_model_config};
+use crate::{BDH, ModelOverrides, TrainingConfig, build_model_config_with_tokenizer};
 
 const RUN_CONFIG_FILE_NAME: &str = "config.json";
 const TRAINING_SNAPSHOT_FILE_NAME: &str = "training_config.json";
@@ -151,14 +151,20 @@ pub fn export_language_checkpoint_to_burnpack(
             .context("failed to initialize tokenizer")?
     };
 
-    let mut model_config = build_model_config(&config.model, config.training.block_size);
-    model_config.vocab_size = tokenizer.len();
+    let model_config = build_model_config_with_tokenizer(
+        &config.model,
+        config.training.block_size,
+        tokenizer.as_ref(),
+    )?;
 
     let device = <ExportBackend as BackendTrait>::Device::default();
     ExportBackend::seed(&device, 1337);
     let mut model = BDH::<ExportBackend>::new(model_config, &device);
     let record = BinFileRecorder::<FullPrecisionSettings>::new()
-        .load::<<BDH<ExportBackend> as Module<ExportBackend>>::Record>(checkpoint_base.clone(), &device)
+        .load::<<BDH<ExportBackend> as Module<ExportBackend>>::Record>(
+            checkpoint_base.clone(),
+            &device,
+        )
         .map_err(|err| anyhow!(format_checkpoint_load_error(&checkpoint_base, err)))?;
     model = model.load_record(record);
 
@@ -209,9 +215,13 @@ pub fn load_language_core_from_checkpoint<B: BackendTrait>(
     let checkpoint_path = checkpoint.to_path_buf();
     let config =
         load_training_config_for_checkpoint(config_paths, Some(&checkpoint_path), backend_name)?;
-    let tokenizer = load_tokenizer_for_checkpoint(config_paths, Some(&checkpoint_path), backend_name)?;
-    let mut model_config = build_model_config(&config.model, config.training.block_size);
-    model_config.vocab_size = tokenizer.len();
+    let tokenizer =
+        load_tokenizer_for_checkpoint(config_paths, Some(&checkpoint_path), backend_name)?;
+    let model_config = build_model_config_with_tokenizer(
+        &config.model,
+        config.training.block_size,
+        tokenizer.as_ref(),
+    )?;
     let mut model = BDH::<B>::new(model_config, device);
     let record = BinFileRecorder::<FullPrecisionSettings>::new()
         .load::<<BDH<B> as Module<B>>::Record>(checkpoint_base.clone(), device)
@@ -268,6 +278,12 @@ pub fn merge_model_overrides(base: &mut ModelOverrides, incoming: &ModelOverride
     if let Some(value) = &incoming.y_neuron_recurrence {
         base.y_neuron_recurrence = Some(value.clone());
     }
+    if let Some(value) = &incoming.clocked_slow_memory {
+        base.clocked_slow_memory = Some(value.clone());
+    }
+    if let Some(value) = &incoming.summary_memory {
+        base.summary_memory = Some(value.clone());
+    }
     if let Some(value) = &incoming.mhc {
         base.mhc = Some(value.clone());
     }
@@ -315,7 +331,10 @@ pub fn tokenizer_snapshot_path(run_dir: &Path) -> PathBuf {
     run_dir.join(TOKENIZER_SNAPSHOT_FILE_NAME)
 }
 
-pub(crate) fn resolve_checkpoint_base(path: &Path, epoch: Option<usize>) -> Result<(PathBuf, usize)> {
+pub(crate) fn resolve_checkpoint_base(
+    path: &Path,
+    epoch: Option<usize>,
+) -> Result<(PathBuf, usize)> {
     resolve_checkpoint_base_shared(path, epoch)
 }
 
@@ -347,15 +366,15 @@ fn resolve_latest_run_dir_from(run_root: &Path) -> Option<PathBuf> {
 mod tests {
     use super::{
         BurnpackBundleExportOptions, ExportBackend, export_language_checkpoint_to_burnpack,
-        load_training_config_for_checkpoint, resolve_checkpoint_base,
-        tokenizer_snapshot_path, training_snapshot_path, write_training_snapshot,
+        load_training_config_for_checkpoint, resolve_checkpoint_base, tokenizer_snapshot_path,
+        training_snapshot_path, write_training_snapshot,
     };
+    use crate::BDH;
     use crate::config::{
         ContextStrategyConfig, DatasetConfig, DatasetSourceConfig, GenerationConfig,
         ModelOverrides, TrainingConfig, TrainingHyperparameters,
     };
     use crate::tokenizer::TokenizerConfig;
-    use crate::BDH;
     use burn::module::Module;
     use burn::record::{BinFileRecorder, FullPrecisionSettings, Recorder};
     use burn::tensor::backend::Backend as BackendTrait;
@@ -380,12 +399,9 @@ mod tests {
 
         write_training_snapshot(&config, &run_dir, tokenizer.as_ref()).expect("write snapshot");
 
-        let loaded = load_training_config_for_checkpoint(
-            &[],
-            Some(&run_dir.join("checkpoint")),
-            "wgpu",
-        )
-        .expect("load checkpoint config");
+        let loaded =
+            load_training_config_for_checkpoint(&[], Some(&run_dir.join("checkpoint")), "wgpu")
+                .expect("load checkpoint config");
 
         assert!(training_snapshot_path(&run_dir).is_file());
         assert!(tokenizer_snapshot_path(&run_dir).is_file());
@@ -413,8 +429,12 @@ mod tests {
 
         let device = <ExportBackend as BackendTrait>::Device::default();
         ExportBackend::seed(&device, 1337);
-        let mut model_config = crate::build_model_config(&config.model, config.training.block_size);
-        model_config.vocab_size = tokenizer.len();
+        let model_config = crate::build_model_config_with_tokenizer(
+            &config.model,
+            config.training.block_size,
+            tokenizer.as_ref(),
+        )
+        .expect("build model config with tokenizer");
         let model = BDH::<ExportBackend>::new(model_config, &device);
         BinFileRecorder::<FullPrecisionSettings>::new()
             .record(model.into_record(), checkpoint_dir.join("model-0"))

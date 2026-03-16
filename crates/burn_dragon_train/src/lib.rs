@@ -13,12 +13,14 @@ pub mod api {
 
     pub mod config {
         pub use crate::config::{
-            GdpoConfig, GdpoHardGate, VisionTeacherVariant, WgpuBackend,
-            WgpuGenerationExecutor, WgpuInferenceConfig, WgpuMemoryConfig,
-            WgpuRuntimeConfig, WgpuStartupAutotuneConfig, WgpuTrainingConfig,
+            GdpoConfig, GdpoHardGate, VisionTeacherVariant, WgpuBackend, WgpuGenerationExecutor,
+            WgpuInferenceConfig, WgpuMemoryConfig, WgpuRuntimeConfig, WgpuStartupAutotuneConfig,
+            WgpuTrainingConfig,
         };
         #[cfg(feature = "train")]
-        pub use crate::config::{LearningRateScheduleConfig, OptimizerConfig, VisionArtifactOutputMode};
+        pub use crate::config::{
+            LearningRateScheduleConfig, OptimizerConfig, VisionArtifactOutputMode,
+        };
     }
 
     pub mod runtime {

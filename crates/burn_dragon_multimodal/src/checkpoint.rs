@@ -15,8 +15,8 @@ use burn_dragon_checkpoint::{
 };
 use burn_ndarray::NdArray;
 
-use crate::config_io::load_merged_config;
 use crate::config::VlJepaDragonConfig;
+use crate::config_io::load_merged_config;
 use crate::model::VlJepaDragon;
 
 const MULTIMODAL_CONFIG_SNAPSHOT_FILE_NAME: &str = "multimodal_vl_jepa_config.json";
@@ -30,7 +30,10 @@ pub fn default_checkpoint_dir(run_dir: impl AsRef<Path>) -> PathBuf {
     run_dir.as_ref().join("checkpoint")
 }
 
-pub fn write_training_snapshot(run_dir: impl AsRef<Path>, config: &VlJepaDragonConfig) -> Result<PathBuf> {
+pub fn write_training_snapshot(
+    run_dir: impl AsRef<Path>,
+    config: &VlJepaDragonConfig,
+) -> Result<PathBuf> {
     let run_dir = run_dir.as_ref();
     write_json_snapshot(run_dir, MULTIMODAL_CONFIG_SNAPSHOT_FILE_NAME, config)?;
     Ok(training_snapshot_path(run_dir))
@@ -101,7 +104,10 @@ pub(crate) fn resolve_checkpoint_run_dir(checkpoint: &Path) -> Option<PathBuf> {
     resolve_checkpoint_run_dir_shared(checkpoint)
 }
 
-pub(crate) fn resolve_checkpoint_base(path: &Path, epoch: Option<usize>) -> Result<(PathBuf, usize)> {
+pub(crate) fn resolve_checkpoint_base(
+    path: &Path,
+    epoch: Option<usize>,
+) -> Result<(PathBuf, usize)> {
     resolve_checkpoint_base_shared(path, epoch)
 }
 
@@ -112,8 +118,8 @@ fn load_multimodal_training_config(config_paths: &[PathBuf]) -> Result<VlJepaDra
 #[cfg(test)]
 mod tests {
     use super::{
-        ExportBackend, export_multimodal_checkpoint_to_burnpack, load_training_config_for_checkpoint,
-        training_snapshot_path, write_training_snapshot,
+        ExportBackend, export_multimodal_checkpoint_to_burnpack,
+        load_training_config_for_checkpoint, training_snapshot_path, write_training_snapshot,
     };
     use crate::config::VlJepaDragonConfig;
     use crate::model::VlJepaDragon;
@@ -156,8 +162,8 @@ mod tests {
         let config = test_config();
 
         write_training_snapshot(&run_dir, &config).expect("write multimodal snapshot");
-        let loaded =
-            load_training_config_for_checkpoint(&[], &run_dir.join("checkpoint")).expect("load snapshot");
+        let loaded = load_training_config_for_checkpoint(&[], &run_dir.join("checkpoint"))
+            .expect("load snapshot");
 
         assert!(training_snapshot_path(&run_dir).is_file());
         assert_eq!(loaded, config);
@@ -226,11 +232,8 @@ slot_count = 4
         )
         .expect("write override");
 
-        let loaded = load_training_config_for_checkpoint(
-            &[base_path, override_path],
-            dir.path(),
-        )
-        .expect("load merged overlays");
+        let loaded = load_training_config_for_checkpoint(&[base_path, override_path], dir.path())
+            .expect("load merged overlays");
 
         assert_eq!(loaded.temperature, 0.11);
         assert_eq!(loaded.fusion_slots.slot_count, 4);

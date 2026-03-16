@@ -1,4 +1,4 @@
-use anyhow::Context;
+use crate::adapters::{TargetTextDragonEncoderAdapter, TargetTextEncoderAdapter};
 use crate::config::VlJepaDragonConfig;
 use crate::data::{MultimodalStepMode, VideoLanguageTripletBatch, VisionLanguageTripletBatch};
 use crate::loss::{
@@ -6,12 +6,12 @@ use crate::loss::{
     vl_jepa_teacher_student_info_nce_loss,
 };
 use crate::model::{FrozenMultimodalCoreSet, VlJepaDragon, VlJepaForwardOutput};
-use crate::adapters::{TargetTextDragonEncoderAdapter, TargetTextEncoderAdapter};
 use crate::state::MultimodalDragonState;
-use burn_dataset::Dataset;
-use burn_dataset::vision::{MnistDataset, MnistItem};
+use anyhow::Context;
 use burn::tensor::backend::{AutodiffBackend, Backend};
 use burn::tensor::{Bool, Int, Tensor};
+use burn_dataset::Dataset;
+use burn_dataset::vision::{MnistDataset, MnistItem};
 use burn_dragon_language::api::inference::CharVocab;
 use burn_dragon_stream::{
     CollatedStreamBatch, InMemoryStreamDataset, StreamBoundary, StreamDataset, StreamSampleId,
@@ -170,7 +170,13 @@ impl JsonlVisionLanguageDataset {
                 .resize_exact(image_size as u32, image_size as u32, FilterType::Triangle)
                 .to_rgb8();
             let mut image_chw = rgb_image_to_chw(&image);
-            normalize_chw(&mut image_chw, image_size, image_size, normalize_mean, normalize_std);
+            normalize_chw(
+                &mut image_chw,
+                image_size,
+                image_size,
+                normalize_mean,
+                normalize_std,
+            );
             samples.push(StreamSegment {
                 payload: VisionLanguageCpuSample {
                     image_chw,
@@ -228,7 +234,13 @@ impl MnistVisionLanguageDataset {
                 continue;
             };
             let mut image_chw = resize_mnist_rgb(&item, image_size);
-            normalize_chw(&mut image_chw, image_size.max(1), image_size.max(1), normalize_mean, normalize_std);
+            normalize_chw(
+                &mut image_chw,
+                image_size.max(1),
+                image_size.max(1),
+                normalize_mean,
+                normalize_std,
+            );
             let label_word = digit_word(item.label);
             samples.push(StreamSegment {
                 payload: VisionLanguageCpuSample {
@@ -282,13 +294,17 @@ impl ImagenetteVisionLanguageDataset {
                 .filter(|path| {
                     path.extension()
                         .and_then(|ext| ext.to_str())
-                        .map(|ext| matches!(ext.to_ascii_lowercase().as_str(), "jpeg" | "jpg" | "png"))
+                        .map(|ext| {
+                            matches!(ext.to_ascii_lowercase().as_str(), "jpeg" | "jpg" | "png")
+                        })
                         .unwrap_or(false)
                 })
                 .collect::<Vec<_>>();
             entries.sort();
             for path in entries {
-                if let Some(limit) = max_records && samples.len() >= limit {
+                if let Some(limit) = max_records
+                    && samples.len() >= limit
+                {
                     return Ok(Self {
                         samples: InMemoryStreamDataset::new(samples),
                     });
@@ -298,7 +314,13 @@ impl ImagenetteVisionLanguageDataset {
                     .resize_exact(image_size as u32, image_size as u32, FilterType::Triangle)
                     .to_rgb8();
                 let mut image_chw = rgb_image_to_chw(&image);
-                normalize_chw(&mut image_chw, image_size.max(1), image_size.max(1), normalize_mean, normalize_std);
+                normalize_chw(
+                    &mut image_chw,
+                    image_size.max(1),
+                    image_size.max(1),
+                    normalize_mean,
+                    normalize_std,
+                );
                 let sample_index = samples.len() as u64;
                 samples.push(StreamSegment {
                     payload: VisionLanguageCpuSample {
@@ -388,7 +410,13 @@ impl MnistVideoLanguageDataset {
                 continue;
             };
             let mut image_chw = resize_mnist_rgb(&item, image_size);
-            normalize_chw(&mut image_chw, image_size.max(1), image_size.max(1), normalize_mean, normalize_std);
+            normalize_chw(
+                &mut image_chw,
+                image_size.max(1),
+                image_size.max(1),
+                normalize_mean,
+                normalize_std,
+            );
             let label_word = digit_word(item.label);
             let mut video_tchw = Vec::with_capacity(frame_count * image_chw.len());
             for _ in 0..frame_count {
@@ -447,7 +475,13 @@ impl JsonlVideoLanguageDataset {
                 .resize_exact(image_size as u32, image_size as u32, FilterType::Triangle)
                 .to_rgb8();
             let mut image_chw = rgb_image_to_chw(&image);
-            normalize_chw(&mut image_chw, image_size, image_size, normalize_mean, normalize_std);
+            normalize_chw(
+                &mut image_chw,
+                image_size,
+                image_size,
+                normalize_mean,
+                normalize_std,
+            );
             frames.push(StreamSegment {
                 payload: VideoLanguageFrameCpuSample {
                     image_chw,
@@ -481,12 +515,17 @@ impl JsonlVideoLanguageDataset {
         let requested_horizons = if requested_horizons.is_empty() {
             vec![1]
         } else {
-            requested_horizons.iter().copied().map(|h| h.max(1)).collect()
+            requested_horizons
+                .iter()
+                .copied()
+                .map(|h| h.max(1))
+                .collect()
         };
         let metadata: Vec<_> = frames.iter().map(|segment| segment.stream).collect();
         let mut samples = Vec::new();
         for observation_index in 0..frames.len() {
-            let requested_horizon = requested_horizons[observation_index % requested_horizons.len()];
+            let requested_horizon =
+                requested_horizons[observation_index % requested_horizons.len()];
             let Some(selection) = resolve_stream_window_alignment(
                 target_alignment_policy,
                 &metadata,
@@ -957,8 +996,7 @@ fn combine_with_target_bank_loss<B: Backend>(
                         .detach()
                 })
                 .unwrap_or_else(|| {
-                    model
-                        .encode_target_bank(target_bank.tokens.clone(), target_bank.mask.clone())
+                    model.encode_target_bank(target_bank.tokens.clone(), target_bank.mask.clone())
                 });
             let bank_loss = vl_jepa_target_bank_loss(
                 predicted_target_embedding,
@@ -967,9 +1005,9 @@ fn combine_with_target_bank_loss<B: Backend>(
                 config.temperature,
             );
             let total_weight = (pairwise_weight + bank_weight).max(1e-6);
-            base_loss.total =
-                (base_loss.total * pairwise_weight + bank_loss.total.clone() * bank_weight)
-                    / total_weight;
+            base_loss.total = (base_loss.total * pairwise_weight
+                + bank_loss.total.clone() * bank_weight)
+                / total_weight;
             base_loss.predictor_to_target = (base_loss.predictor_to_target * pairwise_weight
                 + bank_loss.predictor_to_target.clone() * bank_weight)
                 / total_weight;
@@ -1028,10 +1066,10 @@ pub(crate) fn multimodal_train_step_with_frozen_cores<B: AutodiffBackend>(
         model,
         target_teacher,
         loss_for_prediction(
-        forward.fusion.predicted_target_embedding.clone(),
-        student_target_embedding_y.clone(),
-        teacher_target_embedding_y.clone(),
-        config.temperature,
+            forward.fusion.predicted_target_embedding.clone(),
+            student_target_embedding_y.clone(),
+            teacher_target_embedding_y.clone(),
+            config.temperature,
         ),
         forward.fusion.predicted_target_embedding.clone(),
         target_bank,
@@ -1062,8 +1100,10 @@ pub(crate) fn multimodal_train_step_with_frozen_cores<B: AutodiffBackend>(
         );
         let weight = refine_step_weight(refine_index + 1, config.refine_loss_power);
         loss_total = loss_total + refined_loss.total.clone() * weight;
-        predictor_to_target = predictor_to_target + refined_loss.predictor_to_target.clone() * weight;
-        target_to_predictor = target_to_predictor + refined_loss.target_to_predictor.clone() * weight;
+        predictor_to_target =
+            predictor_to_target + refined_loss.predictor_to_target.clone() * weight;
+        target_to_predictor =
+            target_to_predictor + refined_loss.target_to_predictor.clone() * weight;
         weight_sum += weight;
         forward.fusion = fusion;
         forward.state = next_state;
@@ -1128,10 +1168,10 @@ pub(crate) fn multimodal_video_train_step_with_frozen_cores<B: AutodiffBackend>(
         model,
         target_teacher,
         loss_for_prediction(
-        forward.fusion.predicted_target_embedding.clone(),
-        student_target_embedding_y.clone(),
-        teacher_target_embedding_y.clone(),
-        config.temperature,
+            forward.fusion.predicted_target_embedding.clone(),
+            student_target_embedding_y.clone(),
+            teacher_target_embedding_y.clone(),
+            config.temperature,
         ),
         forward.fusion.predicted_target_embedding.clone(),
         target_bank,
@@ -1162,8 +1202,10 @@ pub(crate) fn multimodal_video_train_step_with_frozen_cores<B: AutodiffBackend>(
         );
         let weight = refine_step_weight(refine_index + 1, config.refine_loss_power);
         loss_total = loss_total + refined_loss.total.clone() * weight;
-        predictor_to_target = predictor_to_target + refined_loss.predictor_to_target.clone() * weight;
-        target_to_predictor = target_to_predictor + refined_loss.target_to_predictor.clone() * weight;
+        predictor_to_target =
+            predictor_to_target + refined_loss.predictor_to_target.clone() * weight;
+        target_to_predictor =
+            target_to_predictor + refined_loss.target_to_predictor.clone() * weight;
         weight_sum += weight;
         forward.fusion = fusion;
         forward.state = next_state;
@@ -1329,11 +1371,11 @@ pub fn multimodal_video_eval_step<B: Backend>(
 mod tests {
     use super::*;
     use crate::config::VlJepaDragonConfig;
-    use burn_ndarray::{NdArray, NdArrayDevice};
-    use burn_autodiff::Autodiff;
-    use burn::tensor::Bool;
     use burn::optim::{AdamWConfig, GradientsParams, Optimizer};
+    use burn::tensor::Bool;
+    use burn_autodiff::Autodiff;
     use burn_dragon_train::api::runtime::device_memory_usage_safe;
+    use burn_ndarray::{NdArray, NdArrayDevice};
     use image::RgbImage;
     use tempfile::tempdir;
 
@@ -1357,8 +1399,8 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     fn wgpu_memory_snapshot(device: &WgpuDevice) -> MemorySnapshot {
-        let usage = device_memory_usage_safe::<Autodiff<Wgpu<f32>>>(device)
-            .expect("wgpu memory usage");
+        let usage =
+            device_memory_usage_safe::<Autodiff<Wgpu<f32>>>(device).expect("wgpu memory usage");
         MemorySnapshot {
             reserved: usage.reserved_bytes,
             in_use: usage.in_use_bytes,
@@ -1372,11 +1414,30 @@ mod tests {
         max_reserved_growth: u64,
         max_in_use_growth: u64,
     ) {
-        assert!(!snapshots.is_empty(), "{label}: no memory snapshots collected");
-        let min_reserved = snapshots.iter().map(|snapshot| snapshot.reserved).min().unwrap_or(0);
-        let max_reserved = snapshots.iter().map(|snapshot| snapshot.reserved).max().unwrap_or(0);
-        let min_in_use = snapshots.iter().map(|snapshot| snapshot.in_use).min().unwrap_or(0);
-        let max_in_use = snapshots.iter().map(|snapshot| snapshot.in_use).max().unwrap_or(0);
+        assert!(
+            !snapshots.is_empty(),
+            "{label}: no memory snapshots collected"
+        );
+        let min_reserved = snapshots
+            .iter()
+            .map(|snapshot| snapshot.reserved)
+            .min()
+            .unwrap_or(0);
+        let max_reserved = snapshots
+            .iter()
+            .map(|snapshot| snapshot.reserved)
+            .max()
+            .unwrap_or(0);
+        let min_in_use = snapshots
+            .iter()
+            .map(|snapshot| snapshot.in_use)
+            .min()
+            .unwrap_or(0);
+        let max_in_use = snapshots
+            .iter()
+            .map(|snapshot| snapshot.in_use)
+            .max()
+            .unwrap_or(0);
         let growth_reserved = max_reserved.saturating_sub(min_reserved);
         let growth_in_use = max_in_use.saturating_sub(min_in_use);
         assert!(
@@ -1412,7 +1473,10 @@ mod tests {
                 absolute_time: 7,
             },
         };
-        let batch = collate_vision_language_segments::<Backend>(std::slice::from_ref(&segment), &Default::default());
+        let batch = collate_vision_language_segments::<Backend>(
+            std::slice::from_ref(&segment),
+            &Default::default(),
+        );
         assert_eq!(batch.payload.vision_x.shape().dims(), [1, 3, 4, 4]);
         assert_eq!(batch.stream[0].sample_id.segment_id, 6);
     }
@@ -1443,22 +1507,17 @@ mod tests {
             format!("{}\n", serde_json::to_string(&record).expect("record json")),
         )
         .expect("manifest write");
-        let dataset =
-            JsonlVisionLanguageDataset::from_jsonl(
-                &manifest_path,
-                4,
-                &CharVocab::fit(["question", "answer"].into_iter(), true).expect("fit vocab"),
-                [0.0, 0.0, 0.0],
-                [1.0, 1.0, 1.0],
-            )
-            .expect("dataset");
+        let dataset = JsonlVisionLanguageDataset::from_jsonl(
+            &manifest_path,
+            4,
+            &CharVocab::fit(["question", "answer"].into_iter(), true).expect("fit vocab"),
+            [0.0, 0.0, 0.0],
+            [1.0, 1.0, 1.0],
+        )
+        .expect("dataset");
         assert_eq!(dataset.len(), 1);
         assert_eq!(
-            dataset
-                .get(0)
-                .expect("item")
-                .stream
-                .boundary,
+            dataset.get(0).expect("item").stream.boundary,
             StreamBoundary::ResetEpisode
         );
     }
@@ -1560,11 +1619,13 @@ mod tests {
             TargetAlignmentPolicy::VariableFuture,
             &[1, 2],
             &CharVocab::fit(
-                ["look", "new", "frame0", "frame1", "frame2", "frame3", "frame4", "frame5"]
-                    .into_iter(),
+                [
+                    "look", "new", "frame0", "frame1", "frame2", "frame3", "frame4", "frame5",
+                ]
+                .into_iter(),
                 true,
             )
-                .expect("fit vocab"),
+            .expect("fit vocab"),
             [0.0, 0.0, 0.0],
             [1.0, 1.0, 1.0],
         )
@@ -1643,10 +1704,20 @@ mod tests {
             step_index: 0,
             absolute_time: 0,
         };
-        let output =
-            multimodal_train_step(&model, None, None, batch, &stream, model.init_state(), &config);
+        let output = multimodal_train_step(
+            &model,
+            None,
+            None,
+            batch,
+            &stream,
+            model.init_state(),
+            &config,
+        );
         assert_eq!(output.loss.total.shape().dims(), [1]);
-        assert_eq!(output.forward.targets.target_embedding_y.shape().dims(), [2, 32]);
+        assert_eq!(
+            output.forward.targets.target_embedding_y.shape().dims(),
+            [2, 32]
+        );
     }
 
     #[test]
@@ -1694,7 +1765,10 @@ mod tests {
             &config,
         );
         assert_eq!(output.loss.total.shape().dims(), [1]);
-        assert_eq!(output.forward.targets.target_embedding_y.shape().dims(), [2, 32]);
+        assert_eq!(
+            output.forward.targets.target_embedding_y.shape().dims(),
+            [2, 32]
+        );
     }
 
     #[test]
@@ -1740,16 +1814,29 @@ mod tests {
             VisionLanguageTripletBatch {
                 vision_x: Tensor::<Autodiff<NdArray<f32>>, 4>::zeros([1, 3, 8, 8], &device),
                 query_q_tokens: Tensor::<Autodiff<NdArray<f32>>, 2, Int>::zeros([1, 4], &device),
-                query_q_mask: Some(Tensor::<Autodiff<NdArray<f32>>, 2, Bool>::ones([1, 4], &device)),
+                query_q_mask: Some(Tensor::<Autodiff<NdArray<f32>>, 2, Bool>::ones(
+                    [1, 4],
+                    &device,
+                )),
                 target_y_tokens: Tensor::<Autodiff<NdArray<f32>>, 2, Int>::zeros([1, 4], &device),
-                target_y_mask: Some(Tensor::<Autodiff<NdArray<f32>>, 2, Bool>::ones([1, 4], &device)),
+                target_y_mask: Some(Tensor::<Autodiff<NdArray<f32>>, 2, Bool>::ones(
+                    [1, 4],
+                    &device,
+                )),
             },
             &stream,
             VlJepaDragon::<Autodiff<NdArray<f32>>>::new(config.clone(), &device).init_state(),
             &config,
         );
-        let eval =
-            multimodal_eval_step(&model, None, None, batch, &stream, model.init_state(), &config);
+        let eval = multimodal_eval_step(
+            &model,
+            None,
+            None,
+            batch,
+            &stream,
+            model.init_state(),
+            &config,
+        );
         assert!(eval.forward.state.fusion.position > train.forward.state.fusion.position);
     }
 
@@ -1850,7 +1937,10 @@ mod tests {
             .zip(fresh_values.iter())
             .map(|(left, right)| (left - right).abs())
             .fold(0.0_f32, f32::max);
-        assert!(max_abs_diff < 2e-2, "reset output drifted by {max_abs_diff}");
+        assert!(
+            max_abs_diff < 2e-2,
+            "reset output drifted by {max_abs_diff}"
+        );
     }
 
     #[test]

@@ -95,7 +95,8 @@ pub struct VisionDragonFusionAdapter<B: Backend> {
 impl<B: Backend> VisionDragonFusionAdapter<B> {
     pub fn new(config: &VlJepaDragonConfig, device: &B::Device) -> Self {
         let encoder = VisionDragon::new(config.vision.clone(), device);
-        let token_projector = LinearConfig::new(config.vision.embed_dim, config.fusion_dim).init(device);
+        let token_projector =
+            LinearConfig::new(config.vision.embed_dim, config.fusion_dim).init(device);
         let summary_projector =
             LinearConfig::new(config.vision.embed_dim, config.fusion_dim).init(device);
         let summary_norm = LayerNormConfig::new(config.fusion_dim).init(device);
@@ -151,16 +152,14 @@ impl<B: Backend> VisionDragonFusionAdapter<B> {
         let fusion_tokens = if use_passthrough_projection {
             patch_tokens
         } else {
-            self
-                .token_projector
+            self.token_projector
                 .forward(patch_tokens.reshape([batch * token_count, dim]))
                 .reshape([batch, token_count, self.fusion_dim])
         };
         let summary_token = if use_passthrough_projection {
             summary_token
         } else {
-            self
-                .summary_norm
+            self.summary_norm
                 .forward(self.summary_projector.forward(summary_token))
         };
         VisionFusionOutput {
@@ -186,12 +185,16 @@ impl<B: Backend> VisionDragonFusionAdapter<B> {
                         self.rollout_steps,
                         self.backprop_steps,
                     ),
-                    MultimodalStepMode::Refine => self
-                        .encoder
-                        .refine_pyramid_state(state, self.rollout_steps, self.backprop_steps),
-                    MultimodalStepMode::Predict => self
-                        .encoder
-                        .predict_pyramid_state(state, self.rollout_steps, self.backprop_steps),
+                    MultimodalStepMode::Refine => self.encoder.refine_pyramid_state(
+                        state,
+                        self.rollout_steps,
+                        self.backprop_steps,
+                    ),
+                    MultimodalStepMode::Predict => self.encoder.predict_pyramid_state(
+                        state,
+                        self.rollout_steps,
+                        self.backprop_steps,
+                    ),
                 };
                 self.project_output(
                     self.encoder.pyramid_patch_tokens(&next_state),
@@ -235,7 +238,9 @@ impl<B: Backend> VisionDragonFusionAdapter<B> {
         let mut last_tokens = None;
         let mut last_summary = None;
         for frame in 0..frames {
-            let image = video.clone().slice([0..batch, frame..frame + 1, 0..channels, 0..height, 0..width])
+            let image = video
+                .clone()
+                .slice([0..batch, frame..frame + 1, 0..channels, 0..height, 0..width])
                 .reshape([batch, channels, height, width]);
             let observed = self.observe_images(image, carried, MultimodalStepMode::Observe);
             carried = observed.state;
@@ -513,7 +518,9 @@ impl<B: Backend> TextDragonFusionAdapter<B> {
         state: Option<ModelState<B>>,
     ) -> TextFusionOutput<B, ModelState<B>> {
         let mut carried = state.unwrap_or_else(|| self.encoder.init_state());
-        let (hidden, _logits) = self.encoder.forward_with_hidden_and_state(tokens, &mut carried);
+        let (hidden, _logits) = self
+            .encoder
+            .forward_with_hidden_and_state(tokens, &mut carried);
         let hidden = if self.freeze_encoder_core {
             hidden.detach()
         } else {
@@ -529,8 +536,7 @@ impl<B: Backend> TextDragonFusionAdapter<B> {
         let fusion_tokens = if use_passthrough_projection {
             hidden.clone()
         } else {
-            self
-                .token_projector
+            self.token_projector
                 .forward(hidden.clone().reshape([batch * time, dim]))
                 .reshape([batch, time, self.fusion_dim])
         };
@@ -538,7 +544,8 @@ impl<B: Backend> TextDragonFusionAdapter<B> {
         let summary = if use_passthrough_projection {
             summary
         } else {
-            self.summary_norm.forward(self.summary_projector.forward(summary))
+            self.summary_norm
+                .forward(self.summary_projector.forward(summary))
         };
         TextFusionOutput {
             fusion_tokens,
@@ -585,7 +592,8 @@ impl<B: AutodiffBackend> TextDragonFusionAdapter<B> {
         let summary = if use_passthrough_projection {
             summary
         } else {
-            self.summary_norm.forward(self.summary_projector.forward(summary))
+            self.summary_norm
+                .forward(self.summary_projector.forward(summary))
         };
         TextFusionOutput {
             fusion_tokens,
@@ -664,8 +672,8 @@ impl<B: Backend> TargetTextDragonEncoderAdapter<B> {
             let ratio = index as f32 / half.max(1) as f32;
             freq_values.push((1.0_f32 / 32.0).powf(ratio).max(1e-3));
         }
-        let freqs = Tensor::<B, 1>::from_floats(freq_values.as_slice(), &device)
-            .reshape([1, 1, half]);
+        let freqs =
+            Tensor::<B, 1>::from_floats(freq_values.as_slice(), &device).reshape([1, 1, half]);
         let phases = token_values * freqs;
         let mut features = Tensor::cat(vec![phases.clone().sin(), phases.cos()], 2);
         let feature_dim = features.shape().dims::<3>()[2];
@@ -702,7 +710,9 @@ impl<B: Backend> TargetTextEncoderAdapter<B> for TargetTextDragonEncoderAdapter<
             self.fixed_fourier_mean(input.0, input.1)
         } else {
             let mut state = self.encoder.init_state();
-            let (hidden, _logits) = self.encoder.forward_with_hidden_and_state(input.0, &mut state);
+            let (hidden, _logits) = self
+                .encoder
+                .forward_with_hidden_and_state(input.0, &mut state);
             let hidden = if self.freeze_encoder_core {
                 hidden.detach()
             } else {
@@ -753,22 +763,23 @@ impl<B: AutodiffBackend> TargetTextDragonEncoderAdapter<B> {
 mod tests {
     use super::*;
     use crate::config::VlJepaDragonConfig;
-    use burn_ndarray::NdArray;
+    use crate::state::VisionMultimodalState;
     use burn_dragon_vision::api::model::VisionBackboneKind;
+    use burn_ndarray::NdArray;
 
     #[test]
     fn text_adapter_threads_state_and_projects_to_fusion_dim() {
         type Backend = NdArray<f32>;
         let device = Default::default();
         let config = VlJepaDragonConfig::default();
-        let adapter = TextDragonFusionAdapter::<Backend>::new(
-            &config.query_text,
-            config.fusion_dim,
-            &device,
-        );
+        let adapter =
+            TextDragonFusionAdapter::<Backend>::new(&config.query_text, config.fusion_dim, &device);
         let tokens = Tensor::<Backend, 2, Int>::zeros([2, 4], &device);
         let output = adapter.observe_q((tokens, None), None);
-        assert_eq!(output.fusion_tokens.shape().dims(), [2, 4, config.fusion_dim]);
+        assert_eq!(
+            output.fusion_tokens.shape().dims(),
+            [2, 4, config.fusion_dim]
+        );
         assert_eq!(output.summary_token.shape().dims(), [2, config.fusion_dim]);
         assert!(output.state.is_some());
     }
@@ -790,8 +801,99 @@ mod tests {
         let images = Tensor::<Backend, 4>::zeros([2, 3, 32, 32], &device);
         let output = adapter.observe_x(images, None, MultimodalStepMode::Observe);
         assert_eq!(output.fusion_tokens.shape().dims::<3>()[0], 2);
-        assert_eq!(output.fusion_tokens.shape().dims::<3>()[2], config.fusion_dim);
+        assert_eq!(
+            output.fusion_tokens.shape().dims::<3>()[2],
+            config.fusion_dim
+        );
         assert_eq!(output.summary_token.shape().dims(), [2, config.fusion_dim]);
+    }
+
+    #[test]
+    fn dense_vision_adapter_keeps_no_persistent_vision_state() {
+        type Backend = NdArray<f32>;
+        let device = Default::default();
+        let mut config = VlJepaDragonConfig::default();
+        config.vision.backbone = VisionBackboneKind::Dense;
+        config.vision.embed_dim = 32;
+        config.vision.projection_dim = 32;
+        config.vision.patch_size = 4;
+        config.vision.in_channels = 3;
+        config.vision.image_size = 32;
+        config.vision.pos_max_height = 8;
+        config.vision.pos_max_width = 8;
+        config.fusion_dim = 32;
+        let adapter = VisionDragonFusionAdapter::<Backend>::new(&config, &device);
+        let images = Tensor::<Backend, 4>::zeros([2, 3, 32, 32], &device);
+        let output = adapter.observe_x(images, None, MultimodalStepMode::Observe);
+        assert!(output.state.is_none());
+    }
+
+    #[test]
+    fn pyramid_vision_adapter_threads_state_and_can_refine() {
+        type Backend = NdArray<f32>;
+        let device = Default::default();
+        let mut config = VlJepaDragonConfig::default();
+        config.vision.backbone = VisionBackboneKind::Pyramid;
+        config.vision.embed_dim = 32;
+        config.vision.projection_dim = 32;
+        config.vision.patch_size = 4;
+        config.vision.in_channels = 3;
+        config.vision.image_size = 32;
+        config.vision.pos_max_height = 8;
+        config.vision.pos_max_width = 8;
+        config.fusion_dim = 32;
+        let adapter = VisionDragonFusionAdapter::<Backend>::new(&config, &device);
+        let images = Tensor::<Backend, 4>::zeros([2, 3, 32, 32], &device);
+        let output = adapter.observe_x(images, None, MultimodalStepMode::Observe);
+        let state = output.state.expect("pyramid backbone should return state");
+        assert!(matches!(state, VisionMultimodalState::Pyramid(_)));
+        let refined = adapter.refine_state(state);
+        assert!(refined.is_some());
+    }
+
+    #[test]
+    fn dense_vision_adapter_video_observe_has_no_persistent_state() {
+        type Backend = NdArray<f32>;
+        let device = Default::default();
+        let mut config = VlJepaDragonConfig::default();
+        config.vision.backbone = VisionBackboneKind::Dense;
+        config.vision.embed_dim = 32;
+        config.vision.projection_dim = 32;
+        config.vision.patch_size = 4;
+        config.vision.in_channels = 3;
+        config.vision.image_size = 32;
+        config.vision.pos_max_height = 8;
+        config.vision.pos_max_width = 8;
+        config.fusion_dim = 32;
+        let adapter = VisionDragonFusionAdapter::<Backend>::new(&config, &device);
+        let video = Tensor::<Backend, 5>::zeros([2, 3, 3, 32, 32], &device);
+        let output = adapter.observe_video_x(video, None);
+        assert!(output.state.is_none());
+    }
+
+    #[test]
+    fn pyramid_vision_adapter_video_observe_carries_state_across_frames() {
+        type Backend = NdArray<f32>;
+        let device = Default::default();
+        let mut config = VlJepaDragonConfig::default();
+        config.vision.backbone = VisionBackboneKind::Pyramid;
+        config.vision.embed_dim = 32;
+        config.vision.projection_dim = 32;
+        config.vision.patch_size = 4;
+        config.vision.in_channels = 3;
+        config.vision.image_size = 32;
+        config.vision.pos_max_height = 8;
+        config.vision.pos_max_width = 8;
+        config.fusion_dim = 32;
+        let adapter = VisionDragonFusionAdapter::<Backend>::new(&config, &device);
+        let video = Tensor::<Backend, 5>::zeros([2, 3, 3, 32, 32], &device);
+        let output = adapter.observe_video_x(video, None);
+        let state = output
+            .state
+            .expect("pyramid video observe should carry vision state");
+        assert!(matches!(state, VisionMultimodalState::Pyramid(_)));
+        let refined = adapter.refine_state(state);
+        assert!(refined.is_some());
     }
 
     #[test]

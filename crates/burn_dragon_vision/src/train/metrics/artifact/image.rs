@@ -1,7 +1,7 @@
 use std::io::Write;
 
-use burn_dragon_train::train::constants::LEJEPA_EPS;
 use ::image::RgbImage;
+use burn_dragon_train::train::constants::LEJEPA_EPS;
 
 use super::*;
 
@@ -340,7 +340,8 @@ impl<B: BackendTrait> VisionArtifactMetric<B> {
                 continue;
             };
             let frame = self.maybe_upscale_frame(frame, artifact_scale);
-            if let Some(image) = RgbImage::from_vec(frame.width as u32, frame.height as u32, frame.rgb)
+            if let Some(image) =
+                RgbImage::from_vec(frame.width as u32, frame.height as u32, frame.rgb)
             {
                 let filename = if self.overwrite {
                     format!("sample_{:02}.png", batch_idx)

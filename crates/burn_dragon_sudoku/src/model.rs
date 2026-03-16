@@ -133,6 +133,8 @@ impl SudokuModelConfig {
             normalization: burn_dragon_core::DragonNormConfig::default(),
             mhc: ManifoldHyperConnectionsConfig::default(),
             y_neuron_recurrence: Default::default(),
+            clocked_slow_memory: Default::default(),
+            summary_memory: Default::default(),
         }
     }
 

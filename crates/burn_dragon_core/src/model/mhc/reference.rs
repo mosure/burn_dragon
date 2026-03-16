@@ -150,8 +150,8 @@ impl<B: Backend> ManifoldHyperConnections<B> {
         }
 
         if streams == 1 {
-            let expanded = residuals.swap_dims(1, 2).swap_dims(2, 3)
-                * weights.reshape([1, 1, 1, out_streams]);
+            let expanded =
+                residuals.swap_dims(1, 2).swap_dims(2, 3) * weights.reshape([1, 1, 1, out_streams]);
             return expanded.swap_dims(2, 3).swap_dims(1, 2);
         }
 
@@ -171,8 +171,7 @@ impl<B: Backend> ManifoldHyperConnections<B> {
         debug_assert_eq!(residuals.shape().dims::<4>()[1], self.num_streams);
         let residuals_out =
             self.mix_streams(residuals.clone(), coefficients.residual_weights.clone());
-        let branch_input =
-            self.mix_streams(residuals, coefficients.branch_input_weights.clone());
+        let branch_input = self.mix_streams(residuals, coefficients.branch_input_weights.clone());
 
         ManifoldHyperConnectionWidthOutput {
             branch_input,
@@ -181,7 +180,10 @@ impl<B: Backend> ManifoldHyperConnections<B> {
         }
     }
 
-    pub fn width_connection(&self, residuals: Tensor<B, 4>) -> ManifoldHyperConnectionWidthOutput<B> {
+    pub fn width_connection(
+        &self,
+        residuals: Tensor<B, 4>,
+    ) -> ManifoldHyperConnectionWidthOutput<B> {
         let coefficients = self.coefficients();
         self.width_connection_with_coefficients(residuals, &coefficients)
     }

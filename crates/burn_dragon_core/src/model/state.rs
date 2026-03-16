@@ -5,6 +5,8 @@ use burn::tensor::backend::Backend;
 pub struct LayerState<B: Backend> {
     pub rho: Option<Tensor<B, 4>>,
     pub y_neuron_state: Option<Tensor<B, 3>>,
+    pub clocked_slow_hidden: Option<Tensor<B, 4>>,
+    pub summary_memory_hidden: Option<Tensor<B, 4>>,
     #[cfg(feature = "viz")]
     pub viz: Option<LayerVizState<B>>,
 }
@@ -31,6 +33,8 @@ impl<B: Backend> ModelState<B> {
                 .map(|_| LayerState {
                     rho: None,
                     y_neuron_state: None,
+                    clocked_slow_hidden: None,
+                    summary_memory_hidden: None,
                     #[cfg(feature = "viz")]
                     viz: None,
                 })
@@ -43,6 +47,8 @@ impl<B: Backend> ModelState<B> {
         for layer in &mut self.layers {
             layer.rho = None;
             layer.y_neuron_state = None;
+            layer.clocked_slow_hidden = None;
+            layer.summary_memory_hidden = None;
         }
         self.position = 0;
     }

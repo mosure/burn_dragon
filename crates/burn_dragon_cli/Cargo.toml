@@ -21,6 +21,8 @@ anyhow = "1"
 clap = { version = "4.5", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+image = "0.25"
+rand = "0.8"
 burn = { version = "0.21.0-pre.2", default-features = false, features = ["ndarray", "std", "wgpu", "fusion"] }
 burn-autodiff = "0.21.0-pre.2"
 burn-wgpu = { version = "0.21.0-pre.2", default-features = false, features = ["fusion", "std"] }
@@ -33,6 +35,7 @@ burn_dragon_wgpu = { path = "../burn_dragon_wgpu", version = "0.4.0", default-fe
 burn_dragon_sudoku = { path = "../burn_dragon_sudoku", version = "0.4.0", default-features = false, optional = true }
 pollster = "0.3"
 wgpu = "26"
+bytemuck = { version = "1", features = ["derive"] }
 
 [[bin]]
 name = "core_mhc_bench"
@@ -47,4 +50,64 @@ required-features = ["benchmark"]
 [[bin]]
 name = "multimodal_vl_jepa_bench"
 path = "src/bin/multimodal_vl_jepa_bench.rs"
+required-features = ["benchmark"]
+
+[[bin]]
+name = "vision_distill_resolution_bench"
+path = "src/bin/vision_distill_resolution_bench.rs"
+required-features = ["benchmark"]
+
+[[bin]]
+name = "vision_distill_rollout_probe"
+path = "src/bin/vision_distill_rollout_probe.rs"
+required-features = ["benchmark"]
+
+[[bin]]
+name = "vision_distill_rollout_schedule_bench"
+path = "src/bin/vision_distill_rollout_schedule_bench.rs"
+required-features = ["benchmark"]
+
+[[bin]]
+name = "vision_distill_serving_bench"
+path = "src/bin/vision_distill_serving_bench.rs"
+required-features = ["benchmark"]
+
+[[bin]]
+name = "vision_distill_deploy_smoke"
+path = "src/bin/vision_distill_deploy_smoke.rs"
+required-features = ["benchmark"]
+
+[[bin]]
+name = "vision_distill_feature_probe"
+path = "src/bin/vision_distill_feature_probe.rs"
+required-features = ["benchmark"]
+
+[[bin]]
+name = "vision_dense_attention_bench"
+path = "src/bin/vision_dense_attention_bench.rs"
+required-features = ["benchmark"]
+
+[[bin]]
+name = "vision_dense_step_bench"
+path = "src/bin/vision_dense_step_bench.rs"
+required-features = ["benchmark"]
+
+[[bin]]
+name = "training_density_bench"
+path = "src/bin/training_density_bench.rs"
+required-features = ["benchmark", "train"]
+
+[[bin]]
+name = "language_rollout_probe"
+path = "src/bin/language_rollout_probe.rs"
+required-features = ["benchmark"]
+
+[[bin]]
+name = "language_chunk_retention_probe"
+path = "src/bin/language_chunk_retention_probe.rs"
+required-features = ["benchmark"]
+
+[[bin]]
+name = "language_tool_boundary_probe"
+path = "src/bin/language_tool_boundary_probe.rs"
 required-features = ["benchmark"]

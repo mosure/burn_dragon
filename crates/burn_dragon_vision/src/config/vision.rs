@@ -13,7 +13,10 @@ use crate::{
     VisionLatentActivation, VisionPatchEmbedMode, VisionRhoStreamConfig, VisionTrmGraphConfig,
     VisionTrmGridMismatchPolicy,
 };
-use burn_dragon_core::{DragonNormConfig, FusedKernelConfig, ManifoldHyperConnectionCoefficientPolicy};
+use burn_dragon_core::{
+    DragonNormConfig, FusedAttentionExecutor, FusedKernelConfig,
+    ManifoldHyperConnectionCoefficientPolicy,
+};
 use burn_dragon_train::{
     GdpoConfig, GdpoHardGate, OptimizerConfig, VisionArtifactOutputMode, WgpuRuntimeConfig,
 };
@@ -1392,6 +1395,10 @@ fn default_batch_repeats() -> usize {
     1
 }
 
+fn default_gradient_accumulation_steps() -> usize {
+    1
+}
+
 fn default_enable_checkpoints() -> bool {
     true
 }
@@ -1431,6 +1438,10 @@ fn default_cache_capacity() -> usize {
 }
 
 fn default_cache_preprocessed() -> bool {
+    false
+}
+
+fn default_cache_teacher_features_in_memory() -> bool {
     false
 }
 
@@ -1521,6 +1532,8 @@ pub struct VisionDatasetConfig {
     pub cache_capacity: usize,
     #[serde(default = "default_cache_preprocessed")]
     pub cache_preprocessed: bool,
+    #[serde(default = "default_cache_teacher_features_in_memory")]
+    pub cache_teacher_features_in_memory: bool,
 }
 
 impl Default for VisionDatasetConfig {
@@ -1539,14 +1552,26 @@ impl Default for VisionDatasetConfig {
             cache_decoded: default_cache_decoded(),
             cache_capacity: default_cache_capacity(),
             cache_preprocessed: default_cache_preprocessed(),
+            cache_teacher_features_in_memory: default_cache_teacher_features_in_memory(),
         }
     }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum VisionTrainScheduleMode {
+    Epochs,
+    MaxIters,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
 pub struct VisionTrainingHyperparameters {
     pub batch_size: usize,
+    #[serde(default = "default_gradient_accumulation_steps")]
+    pub gradient_accumulation_steps: usize,
+    #[serde(default)]
+    pub schedule_mode: Option<VisionTrainScheduleMode>,
     #[serde(default)]
     pub epochs: Option<usize>,
     pub max_iters: usize,
@@ -1585,6 +1610,8 @@ impl Default for VisionTrainingHyperparameters {
     fn default() -> Self {
         Self {
             batch_size: 64,
+            gradient_accumulation_steps: default_gradient_accumulation_steps(),
+            schedule_mode: None,
             epochs: None,
             max_iters: 1000,
             log_frequency: 50,
@@ -1673,6 +1700,7 @@ impl VisionManifoldHyperConnectionsConfig {
             } else {
                 self.num_views
             },
+            last_layers: None,
             coefficient_policy: self.coefficient_policy,
             mhc_iters: self.mhc_iters,
             mhc_tau: self.mhc_tau,
@@ -1717,6 +1745,8 @@ pub struct VisionModelConfig {
     /// Enable ALiBi bias on the recurrent time axis.
     pub use_alibi: bool,
     pub fused_kernels: bool,
+    #[serde(default)]
+    pub fused_attention_executor: FusedAttentionExecutor,
     pub relu_threshold: f32,
     pub mhc: VisionManifoldHyperConnectionsConfig,
     pub trm_graph: VisionTrmGraphConfig,
@@ -1754,6 +1784,7 @@ impl Default for VisionModelConfig {
             allow_softmax_attention: false,
             use_alibi: true,
             fused_kernels: false,
+            fused_attention_executor: FusedAttentionExecutor::default(),
             relu_threshold: 0.0,
             mhc: VisionManifoldHyperConnectionsConfig::default(),
             trm_graph: VisionTrmGraphConfig::default(),
@@ -1809,6 +1840,7 @@ impl VisionModelConfig {
         let num_eyes = self.num_eyes.max(1);
         let kernels = FusedKernelConfig {
             enabled: self.fused_kernels,
+            attention_executor: self.fused_attention_executor,
             relu_threshold: self.relu_threshold,
             ..Default::default()
         };

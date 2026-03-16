@@ -130,7 +130,9 @@ impl<B: BackendTrait> VisionVideoLejepaModel<B> {
             patch_state = patch_state + cond;
         }
         let patch_state = self.apply_step_mode_spatial(patch_state, mode);
-        let state = self.frame_model.pyramid_state_with_patch_state(state, patch_state);
+        let state = self
+            .frame_model
+            .pyramid_state_with_patch_state(state, patch_state);
         self.frame_model
             .forward_pyramid_state_rollout_mode_unbounded(state, steps, backprop_steps, mode)
     }

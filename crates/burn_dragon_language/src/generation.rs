@@ -12,6 +12,7 @@ use burn_dragon_core::{BDH, ModelState};
 
 use crate::GenerationConfig;
 use crate::config::ContextStrategyConfig;
+use crate::summary_events::summary_event_mask_tensor;
 use crate::tokenizer::Tokenizer;
 
 type TokenChunkCallback<'a> = Option<&'a mut dyn FnMut(&[i64])>;
@@ -239,7 +240,18 @@ pub fn prefill_state<B: Backend>(
 
     let mut state = model.init_state();
     let prefill_start = prof_enabled.then(Instant::now);
-    let logits = model.forward_with_state(prompt_tensor, &mut state);
+    let logits = match summary_event_mask_tensor::<B>(
+        prompt_tokens,
+        1,
+        prompt_len,
+        model.summary_memory_write_trigger_token_ids(),
+        device,
+    ) {
+        Some(mask) => {
+            model.forward_with_state_and_summary_event_mask(prompt_tensor, mask, &mut state)
+        }
+        None => model.forward_with_state(prompt_tensor, &mut state),
+    };
     if let Some(start) = prefill_start {
         let elapsed = start.elapsed().as_nanos();
         generation_profile_record(|profile| {

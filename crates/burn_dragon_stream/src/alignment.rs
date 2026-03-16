@@ -92,15 +92,23 @@ fn stream_alignment_is_valid(
     observation_index: usize,
     target_index: usize,
 ) -> bool {
-    if observation_index >= stream.len() || target_index >= stream.len() || observation_index > target_index {
+    if observation_index >= stream.len()
+        || target_index >= stream.len()
+        || observation_index > target_index
+    {
         return false;
     }
     let observation = stream[observation_index];
     let source_id = observation.sample_id.source_id;
     let episode_id = observation.sample_id.episode_id;
     let mut previous_time = observation.absolute_time;
-    for metadata in stream.iter().take(target_index + 1).skip(observation_index + 1) {
-        if metadata.sample_id.source_id != source_id || metadata.sample_id.episode_id != episode_id {
+    for metadata in stream
+        .iter()
+        .take(target_index + 1)
+        .skip(observation_index + 1)
+    {
+        if metadata.sample_id.source_id != source_id || metadata.sample_id.episode_id != episode_id
+        {
             return false;
         }
         if metadata.absolute_time < previous_time {
@@ -114,7 +122,11 @@ fn stream_alignment_is_valid(
     true
 }
 
-fn stream_window_is_valid(stream: &[StreamStepMetadata], start_index: usize, end_index: usize) -> bool {
+fn stream_window_is_valid(
+    stream: &[StreamStepMetadata],
+    start_index: usize,
+    end_index: usize,
+) -> bool {
     if start_index >= stream.len() || end_index >= stream.len() || start_index > end_index {
         return false;
     }
@@ -128,7 +140,8 @@ fn stream_window_is_valid(stream: &[StreamStepMetadata], start_index: usize, end
         .skip(start_index)
         .enumerate()
     {
-        if metadata.sample_id.source_id != source_id || metadata.sample_id.episode_id != episode_id {
+        if metadata.sample_id.source_id != source_id || metadata.sample_id.episode_id != episode_id
+        {
             return false;
         }
         if relative_index > 0 && metadata.absolute_time < previous_time {
@@ -176,11 +189,12 @@ mod tests {
 
     #[test]
     fn target_alignment_fixed_future_requires_available_horizon() {
-        let selection =
-            resolve_target_alignment(TargetAlignmentPolicy::FixedFuture, 2, 8, Some(3))
-                .expect("selection");
+        let selection = resolve_target_alignment(TargetAlignmentPolicy::FixedFuture, 2, 8, Some(3))
+            .expect("selection");
         assert_eq!(selection.target_index, 5);
-        assert!(resolve_target_alignment(TargetAlignmentPolicy::FixedFuture, 7, 8, Some(3)).is_none());
+        assert!(
+            resolve_target_alignment(TargetAlignmentPolicy::FixedFuture, 7, 8, Some(3)).is_none()
+        );
     }
 
     #[test]
@@ -199,8 +213,13 @@ mod tests {
             metadata(0, 0, 2, StreamBoundary::ResetEpisode, 2),
         ];
         assert!(
-            resolve_stream_target_alignment(TargetAlignmentPolicy::FixedFuture, &stream, 1, Some(1))
-                .is_none()
+            resolve_stream_target_alignment(
+                TargetAlignmentPolicy::FixedFuture,
+                &stream,
+                1,
+                Some(1)
+            )
+            .is_none()
         );
     }
 
@@ -232,14 +251,8 @@ mod tests {
             metadata(0, 0, 2, StreamBoundary::ResetEpisode, 2),
         ];
         assert!(
-            resolve_stream_window_alignment(
-                TargetAlignmentPolicy::SameStep,
-                &stream,
-                2,
-                2,
-                None,
-            )
-            .is_none()
+            resolve_stream_window_alignment(TargetAlignmentPolicy::SameStep, &stream, 2, 2, None,)
+                .is_none()
         );
     }
 }

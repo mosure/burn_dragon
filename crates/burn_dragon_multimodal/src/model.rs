@@ -88,7 +88,11 @@ impl<B: Backend> VlJepaDragon<B> {
         };
         Self {
             vision_x_encoder: VisionDragonFusionAdapter::new(&config, device),
-            query_q_encoder: TextDragonFusionAdapter::new(&config.query_text, config.fusion_dim, device),
+            query_q_encoder: TextDragonFusionAdapter::new(
+                &config.query_text,
+                config.fusion_dim,
+                device,
+            ),
             target_y_encoder: TargetTextDragonEncoderAdapter::with_kind(
                 &config.target_text,
                 config.target_dim,
@@ -153,22 +157,33 @@ impl<B: Backend> VlJepaDragon<B> {
             return (vision, query, slots);
         };
         let modality = embeddings.val();
-        let vision = vision + modality.clone().slice([0..1, 0..self.fusion_dim]).unsqueeze_dim::<3>(0);
-        let query = query + modality.clone().slice([1..2, 0..self.fusion_dim]).unsqueeze_dim::<3>(0);
-        let slots = slots + modality.clone().slice([2..3, 0..self.fusion_dim]).unsqueeze_dim::<3>(0);
+        let vision = vision
+            + modality
+                .clone()
+                .slice([0..1, 0..self.fusion_dim])
+                .unsqueeze_dim::<3>(0);
+        let query = query
+            + modality
+                .clone()
+                .slice([1..2, 0..self.fusion_dim])
+                .unsqueeze_dim::<3>(0);
+        let slots = slots
+            + modality
+                .clone()
+                .slice([2..3, 0..self.fusion_dim])
+                .unsqueeze_dim::<3>(0);
         (vision, query, slots)
     }
 
-    fn resolve_fusion_slots(
-        &self,
-        state: &MultimodalDragonState<B>,
-        batch: usize,
-    ) -> Tensor<B, 3> {
+    fn resolve_fusion_slots(&self, state: &MultimodalDragonState<B>, batch: usize) -> Tensor<B, 3> {
         let Some(slots) = state.cached_slot_tokens.as_ref() else {
             return self.expand_fusion_slots(batch);
         };
         let [slot_batch, slot_count, slot_dim] = slots.shape().dims::<3>();
-        if slot_batch == batch && slot_count == self.fusion_slot_count && slot_dim == self.fusion_dim {
+        if slot_batch == batch
+            && slot_count == self.fusion_slot_count
+            && slot_dim == self.fusion_dim
+        {
             slots.clone()
         } else {
             self.expand_fusion_slots(batch)
@@ -218,19 +233,23 @@ impl<B: Backend> VlJepaDragon<B> {
         let [batch, total_tokens, dim] = hidden.shape().dims::<3>();
         let query_start = packed.vision_token_count;
         let slot_start = query_start + packed.query_token_count;
-        state.cached_vision_tokens = Some(
-            packed
-                .tokens
-                .clone()
-                .slice([0..batch, 0..query_start, 0..dim]),
-        );
-        state.cached_query_tokens = Some(
-            packed
-                .tokens
-                .clone()
-                .slice([0..batch, query_start..slot_start, 0..dim]),
-        );
-        let slot_hidden = hidden.clone().slice([0..batch, slot_start..total_tokens, 0..dim]);
+        state.cached_vision_tokens =
+            Some(
+                packed
+                    .tokens
+                    .clone()
+                    .slice([0..batch, 0..query_start, 0..dim]),
+            );
+        state.cached_query_tokens =
+            Some(
+                packed
+                    .tokens
+                    .clone()
+                    .slice([0..batch, query_start..slot_start, 0..dim]),
+            );
+        let slot_hidden = hidden
+            .clone()
+            .slice([0..batch, slot_start..total_tokens, 0..dim]);
         state.cached_slot_tokens = Some(slot_hidden.clone());
         let slot_summary = slot_hidden.mean_dim(1).reshape([batch, dim]);
         let context_summary = hidden.clone().mean_dim(1).reshape([batch, dim]);
@@ -265,8 +284,7 @@ impl<B: Backend> VlJepaDragon<B> {
         target_tokens: Tensor<B, 2, burn::tensor::Int>,
         target_mask: Option<Tensor<B, 2, burn::tensor::Bool>>,
     ) -> Tensor<B, 2> {
-        self
-            .target_y_encoder
+        self.target_y_encoder
             .encode_y((target_tokens, target_mask))
             .target_embedding
     }
@@ -326,9 +344,11 @@ impl<B: Backend> VlJepaDragon<B> {
                     0..width,
                 ])
                 .reshape([batch_size, channels, height, width]);
-            let vision = self
-                .vision_x_encoder
-                .observe_x(frame, state.vision.take(), MultimodalStepMode::Observe);
+            let vision = self.vision_x_encoder.observe_x(
+                frame,
+                state.vision.take(),
+                MultimodalStepMode::Observe,
+            );
             state.vision = vision.state.clone();
             let packed = self.pack_fusion_inputs(&vision, &query, &state);
             let (fusion, next_state) = self.fusion_predict(packed.clone(), state);
@@ -378,8 +398,11 @@ impl<B: Backend> VlJepaDragon<B> {
             vision_token_count,
             query_token_count,
             fusion_slot_count: slot_token_count,
-            tokens: Tensor::cat(vec![vision_tokens, query_tokens, slot_tokens], 1)
-                .reshape([batch, total_token_count, self.fusion_dim]),
+            tokens: Tensor::cat(vec![vision_tokens, query_tokens, slot_tokens], 1).reshape([
+                batch,
+                total_token_count,
+                self.fusion_dim,
+            ]),
         };
         Some(self.fusion_predict(packed, state))
     }
@@ -427,8 +450,12 @@ impl<B: AutodiffBackend> VlJepaDragon<B> {
             let valid_encoder = frozen_cores
                 .and_then(|cores| cores.vision_x_encoder.as_ref())
                 .expect("frozen vision core set missing persistent encoder");
-            self.vision_x_encoder
-                .observe_x_frozen_core(valid_encoder, batch.vision_x, state.vision.take(), mode)
+            self.vision_x_encoder.observe_x_frozen_core(
+                valid_encoder,
+                batch.vision_x,
+                state.vision.take(),
+                mode,
+            )
         } else {
             self.vision_x_encoder
                 .observe_x(batch.vision_x, state.vision.take(), mode)
@@ -533,8 +560,11 @@ impl<B: AutodiffBackend> VlJepaDragon<B> {
                     MultimodalStepMode::Observe,
                 )
             } else {
-                self.vision_x_encoder
-                    .observe_x(frame, state.vision.take(), MultimodalStepMode::Observe)
+                self.vision_x_encoder.observe_x(
+                    frame,
+                    state.vision.take(),
+                    MultimodalStepMode::Observe,
+                )
             };
             state.vision = vision.state.clone();
             let packed = self.pack_fusion_inputs(&vision, &query, &state);
@@ -608,8 +638,11 @@ impl<B: AutodiffBackend> VlJepaDragon<B> {
             vision_token_count,
             query_token_count,
             fusion_slot_count: slot_token_count,
-            tokens: Tensor::cat(vec![vision_tokens, query_tokens, slot_tokens], 1)
-                .reshape([batch, total_token_count, self.fusion_dim]),
+            tokens: Tensor::cat(vec![vision_tokens, query_tokens, slot_tokens], 1).reshape([
+                batch,
+                total_token_count,
+                self.fusion_dim,
+            ]),
         };
         Some(self.fusion_predict(packed, state))
     }
@@ -618,12 +651,12 @@ impl<B: AutodiffBackend> VlJepaDragon<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::FusionSlotConfig;
+    use crate::config::VlJepaDragonConfig;
     use burn::tensor::Int;
     use burn_dragon_core::api::config::BDHConfig;
     use burn_dragon_core::api::state::ModelState;
     use burn_dragon_vision::api::model::VisionDragonConfig;
-    use crate::config::VlJepaDragonConfig;
-    use crate::config::FusionSlotConfig;
     use burn_ndarray::NdArray;
 
     #[test]
@@ -649,7 +682,10 @@ mod tests {
             target_y_mask: None,
         };
         let output = model.forward_x_q_y(batch, model.init_state(), MultimodalStepMode::Observe);
-        assert_eq!(output.fusion.predicted_target_embedding.shape().dims(), [2, 32]);
+        assert_eq!(
+            output.fusion.predicted_target_embedding.shape().dims(),
+            [2, 32]
+        );
         assert_eq!(output.targets.target_embedding_y.shape().dims(), [2, 32]);
         assert!(output.state.query_text.is_some());
         assert!(output.state.fusion.position > 0);
@@ -690,7 +726,11 @@ mod tests {
         let fusion_position = output.state.fusion.position;
         let (_, refined_state) = model.refine(output.state).expect("refine output");
         assert_eq!(
-            refined_state.query_text.as_ref().expect("query state").position,
+            refined_state
+                .query_text
+                .as_ref()
+                .expect("query state")
+                .position,
             query_position
         );
         assert!(refined_state.fusion.position > fusion_position);
@@ -721,11 +761,8 @@ mod tests {
             target_y_tokens: Tensor::<Backend, 2, Int>::zeros([1, 4], &device),
             target_y_mask: None,
         };
-        let single = model.forward_x_q_y(
-            image_batch,
-            model.init_state(),
-            MultimodalStepMode::Observe,
-        );
+        let single =
+            model.forward_x_q_y(image_batch, model.init_state(), MultimodalStepMode::Observe);
         let video_batch = VideoLanguageTripletBatch {
             video_x: Tensor::<Backend, 5>::zeros([1, 2, 3, 8, 8], &device),
             query_q_tokens: Tensor::<Backend, 2, Int>::zeros([1, 4], &device),
@@ -803,7 +840,8 @@ mod tests {
             target_y_tokens: Tensor::<Backend, 2, Int>::zeros([1, 4], &device),
             target_y_mask: None,
         };
-        let image = model.forward_x_q_y(image_batch, model.init_state(), MultimodalStepMode::Observe);
+        let image =
+            model.forward_x_q_y(image_batch, model.init_state(), MultimodalStepMode::Observe);
         let video = model.forward_video_x_q_y(video_batch, model.init_state());
         let image_values = image
             .fusion

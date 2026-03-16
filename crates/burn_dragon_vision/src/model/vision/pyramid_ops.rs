@@ -244,18 +244,17 @@ impl<B: Backend> VisionDragon<B> {
                 );
                 let left_tokens = left_height * left_width;
                 let right_tokens = right_height * right_width;
-                let left = left
-                    .swap_dims(1, 3)
-                    .swap_dims(1, 2)
-                    .reshape([left_batch, left_tokens, left_dim]);
-                let right = right
-                    .swap_dims(1, 3)
-                    .swap_dims(1, 2)
-                    .reshape([right_batch, right_tokens, right_dim]);
-                let tokens = Tensor::cat(
-                    vec![left, right],
-                    1,
-                );
+                let left = left.swap_dims(1, 3).swap_dims(1, 2).reshape([
+                    left_batch,
+                    left_tokens,
+                    left_dim,
+                ]);
+                let right = right.swap_dims(1, 3).swap_dims(1, 2).reshape([
+                    right_batch,
+                    right_tokens,
+                    right_dim,
+                ]);
+                let tokens = Tensor::cat(vec![left, right], 1);
                 let tokens = norm.forward(tokens);
                 let left = tokens
                     .clone()
@@ -323,19 +322,18 @@ impl<B: Backend> VisionDragon<B> {
             .iter()
             .map(|layer| layer.weight.val().shape().dims::<2>()[1])
             .collect();
-        let fused_weight = Tensor::cat(
-            layers.iter().map(|layer| layer.weight.val()).collect(),
-            1,
-        );
+        let fused_weight = Tensor::cat(layers.iter().map(|layer| layer.weight.val()).collect(), 1);
         let fused_bias = if layers.iter().any(|layer| layer.bias.is_some()) {
             Some(Tensor::cat(
                 layers
                     .iter()
                     .zip(out_dims.iter())
                     .map(|(layer, &out_dim)| {
-                        layer.bias.as_ref().map(|bias| bias.val()).unwrap_or_else(|| {
-                            Tensor::<B, 1>::zeros([out_dim], &flat.device())
-                        })
+                        layer
+                            .bias
+                            .as_ref()
+                            .map(|bias| bias.val())
+                            .unwrap_or_else(|| Tensor::<B, 1>::zeros([out_dim], &flat.device()))
                     })
                     .collect(),
                 0,
@@ -358,7 +356,6 @@ impl<B: Backend> VisionDragon<B> {
         }
         outputs
     }
-
 
     pub(super) fn project_spatial_pair(
         &self,
@@ -392,18 +389,16 @@ impl<B: Backend> VisionDragon<B> {
         );
         let left_tokens = left_height * left_width;
         let right_tokens = right_height * right_width;
-        let left = left
-            .swap_dims(1, 3)
-            .swap_dims(1, 2)
-            .reshape([left_batch, left_tokens, left_dim]);
-        let right = right
-            .swap_dims(1, 3)
-            .swap_dims(1, 2)
-            .reshape([right_batch, right_tokens, right_dim]);
-        let tokens = Tensor::cat(
-            vec![left, right],
-            1,
-        );
+        let left =
+            left.swap_dims(1, 3)
+                .swap_dims(1, 2)
+                .reshape([left_batch, left_tokens, left_dim]);
+        let right =
+            right
+                .swap_dims(1, 3)
+                .swap_dims(1, 2)
+                .reshape([right_batch, right_tokens, right_dim]);
+        let tokens = Tensor::cat(vec![left, right], 1);
         let flat = tokens.reshape([left_batch * (left_tokens + right_tokens), left_dim]);
         let flat = layer.forward(flat);
         let out_dim = flat.shape().dims::<2>()[1];
@@ -535,9 +530,8 @@ impl<B: Backend> VisionDragon<B> {
         let memory = Self::pyramid_rho_to_target_major(memory);
         let query = Self::pyramid_tokens_target_major(query);
         let read = target_major_identity_read(query, memory);
-        Self::pyramid_tokens_from_target_major(read, height, width).reshape([
-            batch, value_dim, height, width,
-        ])
+        Self::pyramid_tokens_from_target_major(read, height, width)
+            .reshape([batch, value_dim, height, width])
     }
 
     pub(super) fn pyramid_local_read(
@@ -636,7 +630,9 @@ impl<B: Backend> VisionDragon<B> {
 
     pub(super) fn pyramid_local_grid_rho_to_target_major(input: Tensor<B, 5>) -> Tensor<B, 4> {
         let [batch, rank, tokens, _, value_dim] = input.shape().dims::<5>();
-        input.reshape([batch, rank, tokens, value_dim]).swap_dims(1, 2)
+        input
+            .reshape([batch, rank, tokens, value_dim])
+            .swap_dims(1, 2)
     }
 
     pub(super) fn pyramid_local_grid_rho_to_spatial(
@@ -696,7 +692,8 @@ impl<B: Backend> VisionDragon<B> {
         let fused_value = if write_enabled {
             value.clone()
         } else {
-            let [value_batch, value_channels, value_height, value_width] = value.shape().dims::<4>();
+            let [value_batch, value_channels, value_height, value_width] =
+                value.shape().dims::<4>();
             Tensor::<B, 4>::zeros(
                 [
                     value_batch.max(1),
@@ -827,17 +824,20 @@ impl<B: Backend> VisionDragon<B> {
         assert_eq!(msg_batch, batch, "pyramid msg batch must match state batch");
         assert_eq!(x_height, height, "pyramid x height must match state height");
         assert_eq!(x_width, width, "pyramid x width must match state width");
-        assert_eq!(msg_height, height, "pyramid msg height must match state height");
+        assert_eq!(
+            msg_height, height,
+            "pyramid msg height must match state height"
+        );
         assert_eq!(msg_width, width, "pyramid msg width must match state width");
 
         let x_tokens = x
             .swap_dims(1, 3)
             .swap_dims(1, 2)
             .reshape([batch, height * width, rank]);
-        let msg_tokens = msg
-            .swap_dims(1, 3)
-            .swap_dims(1, 2)
-            .reshape([batch, height * width, value_dim]);
+        let msg_tokens =
+            msg.swap_dims(1, 3)
+                .swap_dims(1, 2)
+                .reshape([batch, height * width, value_dim]);
         let delta = structured_dense_update_tokens(
             x_tokens,
             msg_tokens,
@@ -872,19 +872,36 @@ impl<B: Backend> VisionDragon<B> {
         let [patch_x_batch, rank, patch_x_height, patch_x_width] = patch_x.shape().dims::<4>();
         let [coarse_x_batch, coarse_rank, coarse_x_height, coarse_x_width] =
             coarse_x.shape().dims::<4>();
-        let [patch_msg_batch, value_dim, patch_msg_height, patch_msg_width] =
-            patch_msg.shape().dims::<4>();
-        let [coarse_msg_batch, coarse_value_dim, coarse_msg_height, coarse_msg_width] =
-            coarse_msg.shape().dims::<4>();
+        let [
+            patch_msg_batch,
+            value_dim,
+            patch_msg_height,
+            patch_msg_width,
+        ] = patch_msg.shape().dims::<4>();
+        let [
+            coarse_msg_batch,
+            coarse_value_dim,
+            coarse_msg_height,
+            coarse_msg_width,
+        ] = coarse_msg.shape().dims::<4>();
         assert_eq!(coarse_batch, batch, "coarse batch must match patch batch");
         assert_eq!(
             coarse_dense_dim, dense_dim,
             "coarse dense dim must match patch dense dim"
         );
         assert_eq!(patch_x_batch, batch, "patch x batch must match state batch");
-        assert_eq!(coarse_x_batch, batch, "coarse x batch must match state batch");
-        assert_eq!(patch_msg_batch, batch, "patch msg batch must match state batch");
-        assert_eq!(coarse_msg_batch, batch, "coarse msg batch must match state batch");
+        assert_eq!(
+            coarse_x_batch, batch,
+            "coarse x batch must match state batch"
+        );
+        assert_eq!(
+            patch_msg_batch, batch,
+            "patch msg batch must match state batch"
+        );
+        assert_eq!(
+            coarse_msg_batch, batch,
+            "coarse msg batch must match state batch"
+        );
         assert_eq!(coarse_rank, rank, "coarse rank must match patch rank");
         assert_eq!(
             coarse_value_dim, value_dim,
@@ -944,10 +961,11 @@ impl<B: Backend> VisionDragon<B> {
                     .swap_dims(1, 3)
                     .swap_dims(1, 2)
                     .reshape([batch, patch_tokens, value_dim]),
-                coarse_msg
-                    .swap_dims(1, 3)
-                    .swap_dims(1, 2)
-                    .reshape([batch, coarse_tokens, value_dim]),
+                coarse_msg.swap_dims(1, 3).swap_dims(1, 2).reshape([
+                    batch,
+                    coarse_tokens,
+                    value_dim,
+                ]),
             ],
             1,
         );
@@ -973,10 +991,7 @@ impl<B: Backend> VisionDragon<B> {
             .swap_dims(1, 3)
             .swap_dims(2, 3);
 
-        self.apply_embed_norm_spatial_pair(
-            patch_state + patch_delta,
-            coarse_state + coarse_delta,
-        )
+        self.apply_embed_norm_spatial_pair(patch_state + patch_delta, coarse_state + coarse_delta)
     }
 
     pub(super) fn pyramid_hub_weights(
@@ -1080,13 +1095,18 @@ impl<B: Backend> VisionDragon<B> {
                 )
                 .reshape([batch, 1, rank, total_tokens]);
                 let reduced = hub_mat.matmul(query);
-                let patch_reduced = reduced
-                    .clone()
-                    .slice_dim(3, 0..patch_tokens)
-                    .reshape([batch, hubs, value_dim, patch_tokens]);
-                let coarse_reduced = reduced
-                    .slice_dim(3, patch_tokens..total_tokens)
-                    .reshape([batch, hubs, value_dim, coarse_tokens]);
+                let patch_reduced = reduced.clone().slice_dim(3, 0..patch_tokens).reshape([
+                    batch,
+                    hubs,
+                    value_dim,
+                    patch_tokens,
+                ]);
+                let coarse_reduced = reduced.slice_dim(3, patch_tokens..total_tokens).reshape([
+                    batch,
+                    hubs,
+                    value_dim,
+                    coarse_tokens,
+                ]);
                 (
                     Some(self.pyramid_reduce_hub_values(
                         patch_reduced,
@@ -1104,7 +1124,6 @@ impl<B: Backend> VisionDragon<B> {
             }
         }
     }
-
 
     fn pyramid_reduce_hub_values(
         &self,
@@ -1221,7 +1240,8 @@ impl<B: Backend> VisionDragon<B> {
         stage_aware_profile_record(|state| {
             state.step_calls += 1;
         });
-        let [patch_batch, patch_value_dim, patch_height, patch_width] = patch_value.shape().dims::<4>();
+        let [patch_batch, patch_value_dim, patch_height, patch_width] =
+            patch_value.shape().dims::<4>();
         let [coarse_batch, coarse_value_dim, coarse_height, coarse_width] =
             coarse_value.shape().dims::<4>();
         let patch_zero = || {
@@ -1472,5 +1492,4 @@ impl<B: Backend> VisionDragon<B> {
             next_hub_rho,
         }
     }
-
 }

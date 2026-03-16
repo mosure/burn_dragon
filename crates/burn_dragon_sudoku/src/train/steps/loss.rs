@@ -1682,10 +1682,8 @@ pub(super) fn rollout_losses_train<B: AutodiffBackend>(
                 let hard = advantage
                     .clone()
                     .reshape([step_count * scene_batch, gdpo_group.max(1)]);
-                let easy = Tensor::<B, 2>::zeros(
-                    [step_count * scene_batch, gdpo_group.max(1)],
-                    &device,
-                );
+                let easy =
+                    Tensor::<B, 2>::zeros([step_count * scene_batch, gdpo_group.max(1)], &device);
                 advantage = gdpo_advantage_autodiff::<B>(hard, easy, &training.gdpo)
                     .reshape([step_count * batch, 1]);
             }

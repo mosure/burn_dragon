@@ -634,7 +634,7 @@ fn make_text_batch<B: BackendTrait>(
     }
     let inputs = Tensor::<B, 2, Int>::from_data(TensorData::new(inputs, [batch, block]), device);
     let targets = Tensor::<B, 2, Int>::from_data(TensorData::new(targets, [batch, block]), device);
-    SequenceBatch::new(inputs, targets)
+    SequenceBatch::new(inputs, targets, None)
 }
 
 fn run_foveation_equivalence<B: BackendTrait>(device: &B::Device, backend_label: &str) {

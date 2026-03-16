@@ -4,14 +4,14 @@ use std::sync::Mutex;
 #[cfg(feature = "integration_test")]
 use std::sync::OnceLock;
 
-use burn::tensor::backend::{AutodiffBackend, Backend as BackendTrait};
-use burn::tensor::Tensor;
-use burn_ndarray::NdArray;
-use burn_train::metric::{Adaptor, ItemLazy, LossInput};
 use crate::train::runtime::{
     DeviceMemoryUsage, bytes_to_mb, cleanup_device_memory, cleanup_device_memory_allowed,
     device_memory_usage_safe,
 };
+use burn::tensor::Tensor;
+use burn::tensor::backend::{AutodiffBackend, Backend as BackendTrait};
+use burn_ndarray::NdArray;
+use burn_train::metric::{Adaptor, ItemLazy, LossInput};
 pub type MetricsBackend = NdArray<f32>;
 
 fn serialized_entry(

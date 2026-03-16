@@ -8,9 +8,9 @@
 //! - graph execution adapters project dense state into neuron-space write activations and merge
 //!   dense recurrent readouts back into the activation stream
 
-mod compiled_routing;
-mod compiled_executor;
 mod checkpoint;
+mod compiled_executor;
+mod compiled_routing;
 mod config;
 mod executor;
 mod model;
@@ -61,16 +61,16 @@ pub mod api {
     }
 }
 
-pub use compiled_executor::GraphCompiledExecutor;
+pub use burn_dragon_core::{
+    BankedRhoState, StructuredBankRole, StructuredRouteOperation, StructuredRoutePattern,
+    StructuredRouteSpec, StructuredRoutingSpec, StructuredStepMode, StructuredTopologyState,
+};
 pub use checkpoint::{
     GraphBurnpackExportReport, export_graph_checkpoint_to_burnpack,
     load_graph_config_for_checkpoint, load_graph_config_snapshot_from_run_dir,
     write_graph_config_snapshot,
 };
-pub use burn_dragon_core::{
-    BankedRhoState, StructuredBankRole, StructuredRouteOperation, StructuredRoutePattern,
-    StructuredRouteSpec, StructuredRoutingSpec, StructuredStepMode, StructuredTopologyState,
-};
+pub use compiled_executor::GraphCompiledExecutor;
 pub use config::GraphTopologyConfig;
 pub use executor::{
     GraphExecutionError, GraphRhoStepConfig, GraphStepInputs, GraphStepOutput, GraphStepReadouts,

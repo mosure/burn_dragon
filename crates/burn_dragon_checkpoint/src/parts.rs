@@ -83,7 +83,10 @@ const fn align_offset(offset: u64, alignment: u64) -> u64 {
 
 #[inline]
 fn aligned_data_section_start(metadata_size: usize) -> usize {
-    align_offset((BURNPACK_HEADER_SIZE + metadata_size) as u64, TENSOR_ALIGNMENT) as usize
+    align_offset(
+        (BURNPACK_HEADER_SIZE + metadata_size) as u64,
+        TENSOR_ALIGNMENT,
+    ) as usize
 }
 
 pub fn burnpack_parts_manifest_path(burnpack_path: &Path) -> PathBuf {
@@ -224,7 +227,12 @@ pub fn write_burnpack_parts(
             group,
         )?;
         let bytes = fs::metadata(&part_path)
-            .map_err(|err| format!("failed to stat burnpack part {}: {err}", part_path.display()))?
+            .map_err(|err| {
+                format!(
+                    "failed to stat burnpack part {}: {err}",
+                    part_path.display()
+                )
+            })?
             .len();
         let sha256 = sha256_file(&part_path)?;
         part_entries.push(BurnpackPartEntry {
@@ -271,7 +279,9 @@ where
     let mut store = BurnpackStore::from_bytes(Some(Bytes::from_bytes_vec(burnpack_bytes)))
         .allow_partial(true)
         .validate(true);
-    model.load_from(&mut store).map_err(|err| format!("{err:?}"))
+    model
+        .load_from(&mut store)
+        .map_err(|err| format!("{err:?}"))
 }
 
 pub fn apply_burnpack_parts_bytes_with_progress<M, B, F>(
@@ -363,7 +373,9 @@ where
     Init: FnMut() -> M,
     F: FnMut(String),
 {
-    let any_candidate_exists = burnpack_candidates.iter().any(|candidate| candidate.exists());
+    let any_candidate_exists = burnpack_candidates
+        .iter()
+        .any(|candidate| candidate.exists());
 
     for candidate in burnpack_candidates {
         if any_candidate_exists && !candidate.exists() {
@@ -702,8 +714,12 @@ pub(crate) fn write_burnpack_file(
     payloads: Vec<Vec<u8>>,
 ) -> Result<(), String> {
     if let Some(parent) = output_path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|err| format!("failed to create output directory {}: {err}", parent.display()))?;
+        fs::create_dir_all(parent).map_err(|err| {
+            format!(
+                "failed to create output directory {}: {err}",
+                parent.display()
+            )
+        })?;
     }
 
     let mut metadata_bytes = Vec::new();
@@ -721,16 +737,24 @@ pub(crate) fn write_burnpack_file(
         )
     })?;
 
-    let mut out = fs::File::create(output_path)
-        .map_err(|err| format!("failed to create output burnpack {}: {err}", output_path.display()))?;
+    let mut out = fs::File::create(output_path).map_err(|err| {
+        format!(
+            "failed to create output burnpack {}: {err}",
+            output_path.display()
+        )
+    })?;
     let data_section_start = aligned_data_section_start(metadata_bytes.len());
     let mut written = 0usize;
     let mut header = [0u8; BURNPACK_HEADER_SIZE];
     header[0..4].copy_from_slice(&BURNPACK_MAGIC_NUMBER.to_le_bytes());
     header[4..6].copy_from_slice(&version.to_le_bytes());
     header[6..10].copy_from_slice(&metadata_size.to_le_bytes());
-    out.write_all(&header)
-        .map_err(|err| format!("failed to write burnpack header {}: {err}", output_path.display()))?;
+    out.write_all(&header).map_err(|err| {
+        format!(
+            "failed to write burnpack header {}: {err}",
+            output_path.display()
+        )
+    })?;
     written += BURNPACK_HEADER_SIZE;
     out.write_all(metadata_bytes.as_slice()).map_err(|err| {
         format!(
@@ -762,7 +786,10 @@ pub(crate) fn write_burnpack_file(
     }
 
     for ((name, descriptor), bytes) in descriptors.into_iter().zip(payloads) {
-        let expected_len = descriptor.data_offsets.1.saturating_sub(descriptor.data_offsets.0);
+        let expected_len = descriptor
+            .data_offsets
+            .1
+            .saturating_sub(descriptor.data_offsets.0);
         if expected_len != bytes.len() as u64 {
             return Err(format!(
                 "tensor `{name}` payload length mismatch for {}: expected {expected_len}, got {}",
@@ -797,8 +824,12 @@ pub(crate) fn write_burnpack_file(
         })?;
         written = written.saturating_add(bytes.len());
     }
-    out.flush()
-        .map_err(|err| format!("failed to flush output burnpack {}: {err}", output_path.display()))
+    out.flush().map_err(|err| {
+        format!(
+            "failed to flush output burnpack {}: {err}",
+            output_path.display()
+        )
+    })
 }
 
 fn split_tensor_records(
@@ -896,8 +927,12 @@ fn write_burnpack_part(
         fs::create_dir_all(parent)
             .map_err(|err| format!("failed to create {}: {err}", parent.display()))?;
     }
-    let mut out = fs::File::create(destination)
-        .map_err(|err| format!("failed to create burnpack part {}: {err}", destination.display()))?;
+    let mut out = fs::File::create(destination).map_err(|err| {
+        format!(
+            "failed to create burnpack part {}: {err}",
+            destination.display()
+        )
+    })?;
     let data_section_start = aligned_data_section_start(metadata_bytes.len());
     let mut written = 0usize;
 
@@ -905,8 +940,12 @@ fn write_burnpack_part(
     header[0..4].copy_from_slice(&BURNPACK_MAGIC_NUMBER.to_le_bytes());
     header[4..6].copy_from_slice(&version.to_le_bytes());
     header[6..10].copy_from_slice(&metadata_size.to_le_bytes());
-    out.write_all(&header)
-        .map_err(|err| format!("failed to write burnpack header {}: {err}", destination.display()))?;
+    out.write_all(&header).map_err(|err| {
+        format!(
+            "failed to write burnpack header {}: {err}",
+            destination.display()
+        )
+    })?;
     written += BURNPACK_HEADER_SIZE;
     out.write_all(metadata_bytes.as_slice()).map_err(|err| {
         format!(
@@ -957,18 +996,32 @@ fn write_burnpack_part(
         let len_usize = usize::try_from(len)
             .map_err(|_| format!("tensor byte length overflow in {}", destination.display()))?;
         buffer.resize(len_usize, 0);
-        source
-            .seek(SeekFrom::Start(seek_offset))
-            .map_err(|err| format!("failed to seek source burnpack {}: {err}", destination.display()))?;
-        source
-            .read_exact(buffer.as_mut_slice())
-            .map_err(|err| format!("failed to read source tensor bytes {}: {err}", destination.display()))?;
-        out.write_all(buffer.as_slice())
-            .map_err(|err| format!("failed to write tensor bytes {}: {err}", destination.display()))?;
+        source.seek(SeekFrom::Start(seek_offset)).map_err(|err| {
+            format!(
+                "failed to seek source burnpack {}: {err}",
+                destination.display()
+            )
+        })?;
+        source.read_exact(buffer.as_mut_slice()).map_err(|err| {
+            format!(
+                "failed to read source tensor bytes {}: {err}",
+                destination.display()
+            )
+        })?;
+        out.write_all(buffer.as_slice()).map_err(|err| {
+            format!(
+                "failed to write tensor bytes {}: {err}",
+                destination.display()
+            )
+        })?;
         written = written.saturating_add(buffer.len());
     }
-    out.flush()
-        .map_err(|err| format!("failed to flush burnpack part {}: {err}", destination.display()))
+    out.flush().map_err(|err| {
+        format!(
+            "failed to flush burnpack part {}: {err}",
+            destination.display()
+        )
+    })
 }
 
 pub(crate) fn part_matches_cache(path: &Path, part: &BurnpackPartEntry) -> Result<bool, String> {
@@ -976,7 +1029,12 @@ pub(crate) fn part_matches_cache(path: &Path, part: &BurnpackPartEntry) -> Resul
         return Ok(false);
     }
     let bytes = fs::metadata(path)
-        .map_err(|err| format!("failed to stat cached burnpack part {}: {err}", path.display()))?
+        .map_err(|err| {
+            format!(
+                "failed to stat cached burnpack part {}: {err}",
+                path.display()
+            )
+        })?
         .len();
     if part.bytes > 0 && bytes != part.bytes {
         return Ok(false);
@@ -1053,8 +1111,12 @@ fn cleanup_existing_parts(manifest_path: &Path) -> Result<(), String> {
     for entry in &manifest.parts {
         let path = resolve_part_entry_path(manifest_path, &entry.path)?;
         if path.exists() {
-            fs::remove_file(&path)
-                .map_err(|err| format!("failed to remove stale burnpack part {}: {err}", path.display()))?;
+            fs::remove_file(&path).map_err(|err| {
+                format!(
+                    "failed to remove stale burnpack part {}: {err}",
+                    path.display()
+                )
+            })?;
         }
     }
     if manifest_path.exists() {
@@ -1110,8 +1172,8 @@ fn normalize_extension(path: &Path, extension: &str) -> PathBuf {
 mod tests {
     use super::{
         BurnpackPartEntry, BurnpackPartsManifest, apply_burnpack_parts_bytes_with_progress,
-        burnpack_parts_manifest_path, load_model_from_burnpack_part_bytes,
-        load_model_from_burnpack_candidates, manifest_is_complete, read_parts_manifest,
+        burnpack_parts_manifest_path, load_model_from_burnpack_candidates,
+        load_model_from_burnpack_part_bytes, manifest_is_complete, read_parts_manifest,
         save_model_to_burnpack, write_burnpack_parts,
     };
     use std::fs;
@@ -1191,7 +1253,11 @@ mod tests {
         .expect("load from parts");
 
         let input = Tensor::<TestBackend, 2>::from_floats([[1.0, 2.0, 3.0, 4.0]], &device);
-        let reference = model.forward(input.clone()).into_data().to_vec::<f32>().unwrap();
+        let reference = model
+            .forward(input.clone())
+            .into_data()
+            .to_vec::<f32>()
+            .unwrap();
         let restored = loaded.forward(input).into_data().to_vec::<f32>().unwrap();
         assert_eq!(reference, restored);
     }
@@ -1215,12 +1281,17 @@ mod tests {
             load_model_from_burnpack_part_bytes(&parts, || TinyModel::<TestBackend>::new(&device))
                 .expect("load from bytes");
         let mut manual = TinyModel::<TestBackend>::new(&device);
-        let manual_result = apply_burnpack_parts_bytes_with_progress(&mut manual, &parts, |_i, _n| {})
-            .expect("manual apply");
+        let manual_result =
+            apply_burnpack_parts_bytes_with_progress(&mut manual, &parts, |_i, _n| {})
+                .expect("manual apply");
         assert_eq!(loaded_result.applied, manual_result.applied);
 
         let input = Tensor::<TestBackend, 2>::from_floats([[0.5, -1.0, 0.25, 2.0]], &device);
-        let from_loaded = loaded.forward(input.clone()).into_data().to_vec::<f32>().unwrap();
+        let from_loaded = loaded
+            .forward(input.clone())
+            .into_data()
+            .to_vec::<f32>()
+            .unwrap();
         let from_manual = manual.forward(input).into_data().to_vec::<f32>().unwrap();
         assert_eq!(from_loaded, from_manual);
     }
@@ -1243,7 +1314,11 @@ mod tests {
         .expect("load monolithic burnpack");
 
         let input = Tensor::<TestBackend, 2>::from_floats([[1.0, 0.0, -1.0, 2.0]], &device);
-        let reference = model.forward(input.clone()).into_data().to_vec::<f32>().unwrap();
+        let reference = model
+            .forward(input.clone())
+            .into_data()
+            .to_vec::<f32>()
+            .unwrap();
         let restored = loaded.forward(input).into_data().to_vec::<f32>().unwrap();
         assert_eq!(reference, restored);
     }

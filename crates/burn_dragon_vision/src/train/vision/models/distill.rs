@@ -15,8 +15,15 @@ pub(crate) struct VisionDistillModel<B: BackendTrait> {
     pub(crate) teacher: Option<DistillTeacherModel<B>>,
     pub(crate) rollout: VisionRollout,
     pub(crate) rollout_supervision_frames: usize,
+    pub(crate) rollout_supervision_stride: usize,
+    pub(crate) rollout_supervision_groups: usize,
+    pub(crate) rollout_supervision_explicit_steps: Vec<usize>,
+    pub(crate) rollout_supervision_explicit_groups: Vec<Vec<usize>>,
+    pub(crate) rollout_supervision_include_step1: bool,
     pub(crate) rollout_supervision_power: f32,
     pub(crate) rollout_sampling_power: f32,
+    pub(crate) rollout_improvement_weight: f32,
+    pub(crate) rollout_improvement_margin: f32,
 }
 
 impl<B: BackendTrait> VisionDistillModel<B> {
@@ -26,14 +33,39 @@ impl<B: BackendTrait> VisionDistillModel<B> {
         teacher: Option<DistillTeacherModel<B>>,
         rollout: VisionRollout,
     ) -> Self {
+        let mut rollout_supervision_explicit_steps = config
+            .rollout_supervision_explicit_steps
+            .into_iter()
+            .filter(|step| *step > 0)
+            .collect::<Vec<_>>();
+        rollout_supervision_explicit_steps.sort_unstable();
+        rollout_supervision_explicit_steps.dedup();
+        let rollout_supervision_explicit_groups = config
+            .rollout_supervision_explicit_groups
+            .into_iter()
+            .map(|group| {
+                let mut group = group.into_iter().filter(|step| *step > 0).collect::<Vec<_>>();
+                group.sort_unstable();
+                group.dedup();
+                group
+            })
+            .filter(|group| !group.is_empty())
+            .collect::<Vec<_>>();
         Self {
             model,
             loss: config.loss,
             teacher,
             rollout,
             rollout_supervision_frames: config.rollout_supervision_frames.max(1),
+            rollout_supervision_stride: config.rollout_supervision_stride.max(1),
+            rollout_supervision_groups: config.rollout_supervision_groups.max(1),
+            rollout_supervision_explicit_steps,
+            rollout_supervision_explicit_groups,
+            rollout_supervision_include_step1: config.rollout_supervision_include_step1,
             rollout_supervision_power: config.rollout_supervision_power.max(0.0),
             rollout_sampling_power: config.rollout_sampling_power.max(0.0),
+            rollout_improvement_weight: config.rollout_improvement_weight.max(0.0),
+            rollout_improvement_margin: config.rollout_improvement_margin.max(0.0),
         }
     }
 }
@@ -59,8 +91,15 @@ impl<B: BackendTrait> Module<B> for VisionDistillModel<B> {
             teacher: self.teacher,
             rollout: self.rollout,
             rollout_supervision_frames: self.rollout_supervision_frames,
+            rollout_supervision_stride: self.rollout_supervision_stride,
+            rollout_supervision_groups: self.rollout_supervision_groups,
+            rollout_supervision_explicit_steps: self.rollout_supervision_explicit_steps,
+            rollout_supervision_explicit_groups: self.rollout_supervision_explicit_groups,
+            rollout_supervision_include_step1: self.rollout_supervision_include_step1,
             rollout_supervision_power: self.rollout_supervision_power,
             rollout_sampling_power: self.rollout_sampling_power,
+            rollout_improvement_weight: self.rollout_improvement_weight,
+            rollout_improvement_margin: self.rollout_improvement_margin,
         }
     }
 
@@ -71,8 +110,15 @@ impl<B: BackendTrait> Module<B> for VisionDistillModel<B> {
             teacher: self.teacher,
             rollout: self.rollout,
             rollout_supervision_frames: self.rollout_supervision_frames,
+            rollout_supervision_stride: self.rollout_supervision_stride,
+            rollout_supervision_groups: self.rollout_supervision_groups,
+            rollout_supervision_explicit_steps: self.rollout_supervision_explicit_steps,
+            rollout_supervision_explicit_groups: self.rollout_supervision_explicit_groups,
+            rollout_supervision_include_step1: self.rollout_supervision_include_step1,
             rollout_supervision_power: self.rollout_supervision_power,
             rollout_sampling_power: self.rollout_sampling_power,
+            rollout_improvement_weight: self.rollout_improvement_weight,
+            rollout_improvement_margin: self.rollout_improvement_margin,
         }
     }
 
@@ -88,8 +134,15 @@ impl<B: BackendTrait> Module<B> for VisionDistillModel<B> {
             teacher: self.teacher,
             rollout: self.rollout,
             rollout_supervision_frames: self.rollout_supervision_frames,
+            rollout_supervision_stride: self.rollout_supervision_stride,
+            rollout_supervision_groups: self.rollout_supervision_groups,
+            rollout_supervision_explicit_steps: self.rollout_supervision_explicit_steps,
+            rollout_supervision_explicit_groups: self.rollout_supervision_explicit_groups,
+            rollout_supervision_include_step1: self.rollout_supervision_include_step1,
             rollout_supervision_power: self.rollout_supervision_power,
             rollout_sampling_power: self.rollout_sampling_power,
+            rollout_improvement_weight: self.rollout_improvement_weight,
+            rollout_improvement_margin: self.rollout_improvement_margin,
         }
     }
 
@@ -103,8 +156,15 @@ impl<B: BackendTrait> Module<B> for VisionDistillModel<B> {
             teacher: self.teacher,
             rollout: self.rollout,
             rollout_supervision_frames: self.rollout_supervision_frames,
+            rollout_supervision_stride: self.rollout_supervision_stride,
+            rollout_supervision_groups: self.rollout_supervision_groups,
+            rollout_supervision_explicit_steps: self.rollout_supervision_explicit_steps,
+            rollout_supervision_explicit_groups: self.rollout_supervision_explicit_groups,
+            rollout_supervision_include_step1: self.rollout_supervision_include_step1,
             rollout_supervision_power: self.rollout_supervision_power,
             rollout_sampling_power: self.rollout_sampling_power,
+            rollout_improvement_weight: self.rollout_improvement_weight,
+            rollout_improvement_margin: self.rollout_improvement_margin,
         }
     }
 
@@ -126,8 +186,15 @@ impl<B: AutodiffBackend> AutodiffModule<B> for VisionDistillModel<B> {
             teacher: None,
             rollout: self.rollout,
             rollout_supervision_frames: self.rollout_supervision_frames,
+            rollout_supervision_stride: self.rollout_supervision_stride,
+            rollout_supervision_groups: self.rollout_supervision_groups,
+            rollout_supervision_explicit_steps: self.rollout_supervision_explicit_steps.clone(),
+            rollout_supervision_explicit_groups: self.rollout_supervision_explicit_groups.clone(),
+            rollout_supervision_include_step1: self.rollout_supervision_include_step1,
             rollout_supervision_power: self.rollout_supervision_power,
             rollout_sampling_power: self.rollout_sampling_power,
+            rollout_improvement_weight: self.rollout_improvement_weight,
+            rollout_improvement_margin: self.rollout_improvement_margin,
         }
     }
 
@@ -138,8 +205,15 @@ impl<B: AutodiffBackend> AutodiffModule<B> for VisionDistillModel<B> {
             teacher: None,
             rollout: module.rollout,
             rollout_supervision_frames: module.rollout_supervision_frames,
+            rollout_supervision_stride: module.rollout_supervision_stride,
+            rollout_supervision_groups: module.rollout_supervision_groups,
+            rollout_supervision_explicit_steps: module.rollout_supervision_explicit_steps,
+            rollout_supervision_explicit_groups: module.rollout_supervision_explicit_groups,
+            rollout_supervision_include_step1: module.rollout_supervision_include_step1,
             rollout_supervision_power: module.rollout_supervision_power,
             rollout_sampling_power: module.rollout_sampling_power,
+            rollout_improvement_weight: module.rollout_improvement_weight,
+            rollout_improvement_margin: module.rollout_improvement_margin,
         }
     }
 }
@@ -162,8 +236,36 @@ impl<B: BackendTrait> ModuleDisplayDefault for VisionDistillModel<B> {
                 "rollout_supervision_frames",
                 &self.rollout_supervision_frames,
             )
+            .add(
+                "rollout_supervision_stride",
+                &self.rollout_supervision_stride,
+            )
+            .add(
+                "rollout_supervision_groups",
+                &self.rollout_supervision_groups,
+            )
+            .add(
+                "rollout_supervision_explicit_steps",
+                &self.rollout_supervision_explicit_steps,
+            )
+            .add(
+                "rollout_supervision_explicit_groups",
+                &self.rollout_supervision_explicit_groups,
+            )
+            .add(
+                "rollout_supervision_include_step1",
+                &self.rollout_supervision_include_step1,
+            )
             .add("rollout_supervision_power", &self.rollout_supervision_power)
             .add("rollout_sampling_power", &self.rollout_sampling_power)
+            .add(
+                "rollout_improvement_weight",
+                &self.rollout_improvement_weight,
+            )
+            .add(
+                "rollout_improvement_margin",
+                &self.rollout_improvement_margin,
+            )
             .optional()
     }
 }

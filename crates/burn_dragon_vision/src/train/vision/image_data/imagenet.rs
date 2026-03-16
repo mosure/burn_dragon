@@ -8,11 +8,13 @@ use rand::prelude::*;
 use std::collections::{HashMap, VecDeque};
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom};
+use std::mem::size_of;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Mutex, mpsc};
 use std::thread;
+use std::time::Instant;
 
 const IMAGE_CHANNELS: usize = 3;
 const BYTES_PER_F32: u64 = 4;
@@ -388,11 +390,17 @@ impl VisionNormalize {
 
 #[derive(Debug)]
 pub struct DinoFeatureStore {
-    cls_file: Mutex<File>,
-    patch_file: Mutex<File>,
+    cls_backing: DinoFeatureBacking,
+    patch_backing: DinoFeatureBacking,
     feature_dim: usize,
     patch_tokens: usize,
     records: usize,
+}
+
+#[derive(Debug)]
+enum DinoFeatureBacking {
+    File(Mutex<File>),
+    Memory(Arc<Vec<f32>>),
 }
 
 #[derive(Debug)]
@@ -408,6 +416,24 @@ impl DinoFeatureStore {
         feature_dim: usize,
         patch_tokens: usize,
         expected_records: Option<usize>,
+    ) -> Result<Self> {
+        Self::new_with_options(
+            cls_path,
+            patch_path,
+            feature_dim,
+            patch_tokens,
+            expected_records,
+            false,
+        )
+    }
+
+    pub fn new_with_options(
+        cls_path: &Path,
+        patch_path: &Path,
+        feature_dim: usize,
+        patch_tokens: usize,
+        expected_records: Option<usize>,
+        cache_in_memory: bool,
     ) -> Result<Self> {
         if feature_dim == 0 || patch_tokens == 0 {
             return Err(anyhow!("feature dimensions must be non-zero"));
@@ -461,9 +487,28 @@ impl DinoFeatureStore {
             ));
         }
 
+        let cls_backing = if cache_in_memory {
+            DinoFeatureBacking::Memory(load_f32_file_into_memory(
+                cls_path,
+                cls_records.saturating_mul(feature_dim),
+            )?)
+        } else {
+            DinoFeatureBacking::File(Mutex::new(cls_file))
+        };
+        let patch_backing = if cache_in_memory {
+            DinoFeatureBacking::Memory(load_f32_file_into_memory(
+                patch_path,
+                patch_records
+                    .saturating_mul(feature_dim)
+                    .saturating_mul(patch_tokens),
+            )?)
+        } else {
+            DinoFeatureBacking::File(Mutex::new(patch_file))
+        };
+
         Ok(Self {
-            cls_file: Mutex::new(cls_file),
-            patch_file: Mutex::new(patch_file),
+            cls_backing,
+            patch_backing,
             feature_dim,
             patch_tokens,
             records: cls_records,
@@ -487,27 +532,16 @@ impl DinoFeatureStore {
         if batch == 0 {
             return Err(anyhow!("teacher feature batch is empty"));
         }
-        let mut cls_data = Vec::with_capacity(batch * self.feature_dim);
-        let mut patch_data = Vec::with_capacity(batch * self.feature_dim * self.patch_tokens);
+        let mut ordered = indices.iter().copied().enumerate().collect::<Vec<_>>();
+        ordered.sort_unstable_by_key(|(_, index)| *index);
 
-        {
-            let mut cls_file = self.cls_file.lock().unwrap();
-            for &index in indices {
-                let offset = index as u64 * self.feature_dim as u64 * BYTES_PER_F32;
-                let values = read_f32_block(&mut cls_file, offset, self.feature_dim)?;
-                cls_data.extend_from_slice(&values);
-            }
-        }
+        let cls_stride = self.feature_dim;
+        let patch_stride = self.feature_dim * self.patch_tokens;
+        let mut cls_data = vec![0.0; batch * cls_stride];
+        let mut patch_data = vec![0.0; batch * patch_stride];
 
-        {
-            let mut patch_file = self.patch_file.lock().unwrap();
-            let block_len = self.feature_dim * self.patch_tokens;
-            for &index in indices {
-                let offset = index as u64 * block_len as u64 * BYTES_PER_F32;
-                let values = read_f32_block(&mut patch_file, offset, block_len)?;
-                patch_data.extend_from_slice(&values);
-            }
-        }
+        load_backing_batch(&self.cls_backing, &ordered, cls_stride, &mut cls_data)?;
+        load_backing_batch(&self.patch_backing, &ordered, patch_stride, &mut patch_data)?;
 
         Ok(TeacherBatchData {
             cls: cls_data,
@@ -768,12 +802,41 @@ impl ImageNetDataset {
         batch_size: usize,
         device: &B::Device,
     ) -> ImageNetBatch<B> {
-        self.sample_batch_data(batch_size)
-            .unwrap_or_else(|err| panic!("imagenet batch failed: {err}"))
-            .into_batch(device)
+        let prof_enabled = crate::train::profile::enabled();
+        let cpu_start = prof_enabled.then(Instant::now);
+        let (data, profile) = self
+            .sample_batch_data_profiled(batch_size)
+            .unwrap_or_else(|err| panic!("imagenet batch failed: {err}"));
+        let cpu_ns = cpu_start
+            .map(|start| start.elapsed().as_nanos())
+            .unwrap_or_default();
+
+        let host_to_device_copy_bytes = data.host_to_device_copy_bytes();
+        let tensor_copy_start = prof_enabled.then(Instant::now);
+        let batch = data.into_batch(device);
+        let tensor_copy_ns = tensor_copy_start
+            .map(|start| start.elapsed().as_nanos())
+            .unwrap_or_default();
+
+        if prof_enabled {
+            crate::train::profile::record_dataloader(
+                cpu_ns,
+                profile.image_load_ns,
+                profile.image_transform_ns,
+                profile.teacher_load_ns,
+                tensor_copy_ns,
+                host_to_device_copy_bytes,
+                0,
+            );
+        }
+
+        batch
     }
 
-    fn sample_batch_data(&self, batch_size: usize) -> Result<ImageNetBatchData> {
+    fn sample_batch_data_profiled(
+        &self,
+        batch_size: usize,
+    ) -> Result<(ImageNetBatchData, ImageNetBatchCpuProfile)> {
         if batch_size == 0 {
             return Err(anyhow!("imagenet batch size must be > 0"));
         }
@@ -841,6 +904,8 @@ impl ImageNetDataset {
             None
         };
         let mut labels = Vec::with_capacity(batch_size);
+        let profile_enabled = crate::train::profile::enabled();
+        let mut profile = ImageNetBatchCpuProfile::default();
 
         for &index in &indices {
             let sample = &self.samples[index];
@@ -853,7 +918,14 @@ impl ImageNetDataset {
                 labels.push(sample.label as i64);
                 continue;
             }
+            let image_load_start = profile_enabled.then(Instant::now);
             let image = self.load_image_cached(&sample.path)?;
+            profile.image_load_ns = profile.image_load_ns.saturating_add(
+                image_load_start
+                    .map(|start| start.elapsed().as_nanos())
+                    .unwrap_or_default(),
+            );
+            let image_transform_start = profile_enabled.then(Instant::now);
             let (img_w, img_h) = image.dimensions();
             if self.global_views == 1 && self.local_views == 0 {
                 let primary = self.augmentations.apply(image.as_ref(), &mut rng);
@@ -960,11 +1032,22 @@ impl ImageNetDataset {
                 }
             }
             labels.push(sample.label as i64);
+            profile.image_transform_ns = profile.image_transform_ns.saturating_add(
+                image_transform_start
+                    .map(|start| start.elapsed().as_nanos())
+                    .unwrap_or_default(),
+            );
         }
 
         let (teacher_cls, teacher_patch, teacher_dim, teacher_tokens) = match &self.teacher {
             Some(store) => {
+                let teacher_load_start = profile_enabled.then(Instant::now);
                 let batch = store.load_batch_data(&indices)?;
+                profile.teacher_load_ns = profile.teacher_load_ns.saturating_add(
+                    teacher_load_start
+                        .map(|start| start.elapsed().as_nanos())
+                        .unwrap_or_default(),
+                );
                 (
                     Some(batch.cls),
                     Some(batch.patch),
@@ -974,25 +1057,27 @@ impl ImageNetDataset {
             }
             None => (None, None, None, None),
         };
-
-        Ok(ImageNetBatchData {
-            images,
-            target_images,
-            view_images,
-            view_crops,
-            global_view_images,
-            local_view_images,
-            labels,
-            teacher_patch,
-            teacher_cls,
-            batch_size,
-            global_image_size,
-            local_image_size,
-            global_views: self.global_views.max(1),
-            local_views: self.local_views,
-            teacher_feature_dim: teacher_dim,
-            teacher_patch_tokens: teacher_tokens,
-        })
+        Ok((
+            ImageNetBatchData {
+                images,
+                target_images,
+                view_images,
+                view_crops,
+                global_view_images,
+                local_view_images,
+                labels,
+                teacher_patch,
+                teacher_cls,
+                batch_size,
+                global_image_size,
+                local_image_size,
+                global_views: self.global_views.max(1),
+                local_views: self.local_views,
+                teacher_feature_dim: teacher_dim,
+                teacher_patch_tokens: teacher_tokens,
+            },
+            profile,
+        ))
     }
 }
 
@@ -1016,6 +1101,34 @@ struct ImageNetBatchData {
 }
 
 impl ImageNetBatchData {
+    fn host_to_device_copy_bytes(&self) -> u128 {
+        let mut bytes = 0usize;
+        bytes = bytes.saturating_add(self.images.len().saturating_mul(size_of::<f32>()));
+        bytes = bytes.saturating_add(self.labels.len().saturating_mul(size_of::<i64>()));
+        if let Some(buffer) = self.target_images.as_ref() {
+            bytes = bytes.saturating_add(buffer.len().saturating_mul(size_of::<f32>()));
+        }
+        if let Some(buffer) = self.view_images.as_ref() {
+            bytes = bytes.saturating_add(buffer.len().saturating_mul(size_of::<f32>()));
+        }
+        if let Some(buffer) = self.view_crops.as_ref() {
+            bytes = bytes.saturating_add(buffer.len().saturating_mul(size_of::<f32>()));
+        }
+        if let Some(buffer) = self.global_view_images.as_ref() {
+            bytes = bytes.saturating_add(buffer.len().saturating_mul(size_of::<f32>()));
+        }
+        if let Some(buffer) = self.local_view_images.as_ref() {
+            bytes = bytes.saturating_add(buffer.len().saturating_mul(size_of::<f32>()));
+        }
+        if let Some(buffer) = self.teacher_patch.as_ref() {
+            bytes = bytes.saturating_add(buffer.len().saturating_mul(size_of::<f32>()));
+        }
+        if let Some(buffer) = self.teacher_cls.as_ref() {
+            bytes = bytes.saturating_add(buffer.len().saturating_mul(size_of::<f32>()));
+        }
+        bytes as u128
+    }
+
     fn into_batch<B: Backend>(self, device: &B::Device) -> ImageNetBatch<B> {
         let images_tensor = Tensor::<B, 4>::from_data(
             TensorData::new(
@@ -1097,21 +1210,31 @@ impl ImageNetBatchData {
             )
         });
 
-        let teacher_cls = self.teacher_cls.map(|data| {
-            let dim = self
-                .teacher_feature_dim
-                .expect("teacher feature dim required");
-            Tensor::<B, 2>::from_data(TensorData::new(data, [self.batch_size, dim]), device)
-        });
         let teacher_patch = self.teacher_patch.map(|data| {
-            let dim = self
-                .teacher_feature_dim
-                .expect("teacher feature dim required");
-            let tokens = self
-                .teacher_patch_tokens
-                .expect("teacher patch tokens required");
             Tensor::<B, 3>::from_data(
-                TensorData::new(data, [self.batch_size, tokens, dim]),
+                TensorData::new(
+                    data,
+                    [
+                        self.batch_size,
+                        self.teacher_patch_tokens
+                            .expect("teacher patch tokens required"),
+                        self.teacher_feature_dim
+                            .expect("teacher feature dim required"),
+                    ],
+                ),
+                device,
+            )
+        });
+        let teacher_cls = self.teacher_cls.map(|data| {
+            Tensor::<B, 2>::from_data(
+                TensorData::new(
+                    data,
+                    [
+                        self.batch_size,
+                        self.teacher_feature_dim
+                            .expect("teacher feature dim required"),
+                    ],
+                ),
                 device,
             )
         });
@@ -1207,6 +1330,13 @@ impl<B: Backend> ImageNetBatch<B> {
                 .map(|tensor| tensor.clone().repeat_dim(0, repeats)),
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct ImageNetBatchCpuProfile {
+    image_load_ns: u128,
+    image_transform_ns: u128,
+    teacher_load_ns: u128,
 }
 
 pub struct ImageNetDataLoader<B: Backend> {
@@ -1370,9 +1500,26 @@ where
     }
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct ImageNetPrefetchProfile {
+    cpu_ns: u128,
+    image_load_ns: u128,
+    image_transform_ns: u128,
+    teacher_load_ns: u128,
+    tensor_copy_ns: u128,
+    host_to_device_copy_bytes: u128,
+    host_sync_points: u64,
+}
+
 enum ImageNetPrefetchItem<B: Backend> {
-    Data(Box<ImageNetBatchData>),
-    Batch(ImageNetBatch<B>),
+    Data {
+        data: Box<ImageNetBatchData>,
+        profile: ImageNetPrefetchProfile,
+    },
+    Batch {
+        batch: ImageNetBatch<B>,
+        profile: ImageNetPrefetchProfile,
+    },
 }
 
 struct ImageNetPrefetcher<B: Backend> {
@@ -1397,6 +1544,7 @@ where
         prefetch_to_device: bool,
     ) -> Self {
         let workers = prefetch_workers.max(1);
+        let prof_enabled = crate::train::profile::enabled();
         let (tx, rx) = mpsc::sync_channel(prefetch_batches.max(1));
         let remaining = Arc::new(AtomicUsize::new(steps_total));
         let stop = Arc::new(AtomicBool::new(false));
@@ -1409,6 +1557,7 @@ where
                 let tx = data_tx.clone();
                 let remaining = Arc::clone(&remaining);
                 let stop = Arc::clone(&stop);
+                let prof_enabled = prof_enabled;
                 let handle = thread::spawn(move || {
                     loop {
                         if stop.load(Ordering::Relaxed) {
@@ -1421,7 +1570,27 @@ where
                         if decremented.is_err() {
                             break;
                         }
-                        let result = dataset.sample_batch_data(batch_size);
+                        let cpu_start = prof_enabled.then(Instant::now);
+                        let result = dataset.sample_batch_data_profiled(batch_size).map(
+                            |(data, stage_profile)| {
+                                let cpu_ns = cpu_start
+                                    .map(|start| start.elapsed().as_nanos())
+                                    .unwrap_or_default();
+                                let host_to_device_copy_bytes = data.host_to_device_copy_bytes();
+                                (
+                                    data,
+                                    ImageNetPrefetchProfile {
+                                        cpu_ns,
+                                        image_load_ns: stage_profile.image_load_ns,
+                                        image_transform_ns: stage_profile.image_transform_ns,
+                                        teacher_load_ns: stage_profile.teacher_load_ns,
+                                        tensor_copy_ns: 0,
+                                        host_to_device_copy_bytes,
+                                        host_sync_points: 0,
+                                    },
+                                )
+                            },
+                        );
                         if tx.send(result).is_err() {
                             break;
                         }
@@ -1433,15 +1602,21 @@ where
 
             let device = device.clone();
             let stop = Arc::clone(&stop);
+            let prof_enabled = prof_enabled;
             let handle = thread::spawn(move || {
                 for data in data_rx {
                     if stop.load(Ordering::Relaxed) {
                         break;
                     }
                     let item = match data {
-                        Ok(data) => {
+                        Ok((data, mut profile)) => {
+                            let tensor_copy_start = prof_enabled.then(Instant::now);
                             let _guard = crate::device::device_allocation_lock().lock().ok();
-                            Ok(ImageNetPrefetchItem::Batch(data.into_batch::<B>(&device)))
+                            let batch = data.into_batch::<B>(&device);
+                            profile.tensor_copy_ns = tensor_copy_start
+                                .map(|start| start.elapsed().as_nanos())
+                                .unwrap_or_default();
+                            Ok(ImageNetPrefetchItem::Batch { batch, profile })
                         }
                         Err(err) => Err(err),
                     };
@@ -1457,6 +1632,7 @@ where
                 let tx = tx.clone();
                 let remaining = Arc::clone(&remaining);
                 let stop = Arc::clone(&stop);
+                let prof_enabled = prof_enabled;
                 let handle = thread::spawn(move || {
                     loop {
                         if stop.load(Ordering::Relaxed) {
@@ -1469,9 +1645,27 @@ where
                         if decremented.is_err() {
                             break;
                         }
-                        let result = dataset
-                            .sample_batch_data(batch_size)
-                            .map(|data| ImageNetPrefetchItem::Data(Box::new(data)));
+                        let cpu_start = prof_enabled.then(Instant::now);
+                        let result = dataset.sample_batch_data_profiled(batch_size).map(
+                            |(data, stage_profile)| {
+                                let cpu_ns = cpu_start
+                                    .map(|start| start.elapsed().as_nanos())
+                                    .unwrap_or_default();
+                                let host_to_device_copy_bytes = data.host_to_device_copy_bytes();
+                                ImageNetPrefetchItem::Data {
+                                    data: Box::new(data),
+                                    profile: ImageNetPrefetchProfile {
+                                        cpu_ns,
+                                        image_load_ns: stage_profile.image_load_ns,
+                                        image_transform_ns: stage_profile.image_transform_ns,
+                                        teacher_load_ns: stage_profile.teacher_load_ns,
+                                        tensor_copy_ns: 0,
+                                        host_to_device_copy_bytes,
+                                        host_sync_points: 0,
+                                    },
+                                }
+                            },
+                        );
                         if tx.send(result).is_err() {
                             break;
                         }
@@ -1524,6 +1718,7 @@ impl<B: Backend> Iterator for ImageNetIterator<B> {
             return None;
         }
         self.step += 1;
+        let prof_enabled = crate::train::profile::enabled();
 
         if let Some(counter) = &self.consumed_steps {
             if let Some(limit) = self.total_steps {
@@ -1537,8 +1732,39 @@ impl<B: Backend> Iterator for ImageNetIterator<B> {
         }
         let batch = if let Some(prefetcher) = &mut self.prefetcher {
             match prefetcher.recv() {
-                Some(Ok(ImageNetPrefetchItem::Batch(batch))) => batch,
-                Some(Ok(ImageNetPrefetchItem::Data(data))) => (*data).into_batch(&self.device),
+                Some(Ok(ImageNetPrefetchItem::Batch { batch, profile })) => {
+                    if prof_enabled {
+                        crate::train::profile::record_dataloader(
+                            profile.cpu_ns,
+                            profile.image_load_ns,
+                            profile.image_transform_ns,
+                            profile.teacher_load_ns,
+                            profile.tensor_copy_ns,
+                            profile.host_to_device_copy_bytes,
+                            profile.host_sync_points,
+                        );
+                    }
+                    batch
+                }
+                Some(Ok(ImageNetPrefetchItem::Data { data, mut profile })) => {
+                    let tensor_copy_start = prof_enabled.then(Instant::now);
+                    let batch = (*data).into_batch(&self.device);
+                    profile.tensor_copy_ns = tensor_copy_start
+                        .map(|start| start.elapsed().as_nanos())
+                        .unwrap_or_default();
+                    if prof_enabled {
+                        crate::train::profile::record_dataloader(
+                            profile.cpu_ns,
+                            profile.image_load_ns,
+                            profile.image_transform_ns,
+                            profile.teacher_load_ns,
+                            profile.tensor_copy_ns,
+                            profile.host_to_device_copy_bytes,
+                            profile.host_sync_points,
+                        );
+                    }
+                    batch
+                }
                 Some(Err(err)) => panic!("imagenet prefetch error: {err}"),
                 None => panic!("imagenet prefetch channel closed early"),
             }
@@ -1618,19 +1844,69 @@ fn load_image(path: &Path) -> Result<DynamicImage> {
         .map_err(|err| anyhow!("failed to decode {}: {err}", path.display()))
 }
 
-fn read_f32_block(file: &mut File, offset: u64, len: usize) -> Result<Vec<f32>> {
-    let mut buf = vec![0u8; len * BYTES_PER_F32 as usize];
+fn read_f32_block_into(
+    file: &mut File,
+    offset: u64,
+    scratch: &mut Vec<u8>,
+    out: &mut [f32],
+) -> Result<()> {
+    let bytes = out.len() * BYTES_PER_F32 as usize;
+    if scratch.len() != bytes {
+        scratch.resize(bytes, 0);
+    }
     file.seek(SeekFrom::Start(offset))
         .map_err(|err| anyhow!("failed to seek teacher features: {err}"))?;
-    file.read_exact(&mut buf)
+    file.read_exact(scratch)
         .map_err(|err| anyhow!("failed to read teacher features: {err}"))?;
 
-    let mut out = Vec::with_capacity(len);
-    for chunk in buf.chunks_exact(4) {
-        let value = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-        out.push(value);
+    for (dst, chunk) in out.iter_mut().zip(scratch.chunks_exact(4)) {
+        *dst = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
     }
-    Ok(out)
+    Ok(())
+}
+
+fn load_backing_batch(
+    backing: &DinoFeatureBacking,
+    ordered: &[(usize, usize)],
+    stride: usize,
+    out: &mut [f32],
+) -> Result<()> {
+    match backing {
+        DinoFeatureBacking::File(file) => {
+            let mut file = file.lock().unwrap();
+            let mut scratch = Vec::new();
+            for (slot, index) in ordered {
+                let offset = *index as u64 * stride as u64 * BYTES_PER_F32;
+                let start = *slot * stride;
+                let end = start + stride;
+                read_f32_block_into(&mut file, offset, &mut scratch, &mut out[start..end])?;
+            }
+        }
+        DinoFeatureBacking::Memory(data) => {
+            for (slot, index) in ordered {
+                let src_start = *index * stride;
+                let src_end = src_start + stride;
+                let dst_start = *slot * stride;
+                let dst_end = dst_start + stride;
+                out[dst_start..dst_end].copy_from_slice(&data[src_start..src_end]);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn load_f32_file_into_memory(path: &Path, floats: usize) -> Result<Arc<Vec<f32>>> {
+    let bytes_len = floats.saturating_mul(BYTES_PER_F32 as usize);
+    let mut file =
+        File::open(path).map_err(|err| anyhow!("failed to open {}: {err}", path.display()))?;
+    let mut bytes = vec![0u8; bytes_len];
+    file.read_exact(&mut bytes)
+        .map_err(|err| anyhow!("failed to read {} into memory: {err}", path.display()))?;
+    let mut data = vec![0.0f32; floats];
+    for (dst, chunk) in data.iter_mut().zip(bytes.chunks_exact(4)) {
+        *dst = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+    }
+    Ok(Arc::new(data))
 }
 
 #[cfg(test)]

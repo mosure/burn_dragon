@@ -1,5 +1,5 @@
-use burn::tensor::{Int, Tensor, activation};
 use burn::tensor::backend::Backend;
+use burn::tensor::{Int, Tensor, activation};
 
 use burn_dragon_core::kernel::relu_lowrank;
 use burn_dragon_core::lowrank_residual_step;
@@ -78,7 +78,8 @@ impl VisionDenseAttentionBenchAdapter {
         let [_, heads, time, _] = scores.shape().dims::<4>();
         if let Some(slopes) = self.slopes.as_ref() {
             let device = scores.device();
-            let slopes = Tensor::<B, 1>::from_data(slopes.as_slice(), &device).reshape([1, heads, 1, 1]);
+            let slopes =
+                Tensor::<B, 1>::from_data(slopes.as_slice(), &device).reshape([1, heads, 1, 1]);
             let pos_row = Tensor::<B, 1, Int>::arange(0..time as i64, &device)
                 .float()
                 .reshape([1, 1, time, 1]);
@@ -90,7 +91,11 @@ impl VisionDenseAttentionBenchAdapter {
         match self.attention_mode {
             VisionAttentionMode::Softmax => activation::softmax(scores, 3),
             VisionAttentionMode::RowL1 => {
-                let denom = scores.clone().abs().sum_dim(3).add_scalar(BENCH_ROW_NORM_EPS);
+                let denom = scores
+                    .clone()
+                    .abs()
+                    .sum_dim(3)
+                    .add_scalar(BENCH_ROW_NORM_EPS);
                 scores / denom
             }
         }
@@ -183,8 +188,7 @@ impl VisionDenseAttentionBenchAdapter {
                 .clone()
                 .slice_dim(2, row_range)
                 .reshape([1, 1, row_len, 1]);
-            let mut block_acc =
-                Tensor::<B, 4>::zeros([batch, heads, row_len, value_dim], &device);
+            let mut block_acc = Tensor::<B, 4>::zeros([batch, heads, row_len, value_dim], &device);
             let mut row_norm = Tensor::<B, 4>::zeros([batch, heads, row_len, 1], &device);
             for col in 0..total_blocks {
                 let col_start = col * block_size;
@@ -220,13 +224,35 @@ impl<'a, B: Backend> VisionDenseBenchAdapter<'a, B> {
         Self { model }
     }
 
-    pub fn x_projection(&self, current: Tensor<B, 4>) -> Tensor<B, 4> {
-        let fused = self.model.kernel.enabled
-            && matches!(self.model.latent_activation, VisionLatentActivation::Relu);
-        let apply_threshold = matches!(self.model.latent_activation, VisionLatentActivation::Relu);
+    pub fn x_projection(&self, current: Tensor<B, 4>) -> Tensor<B, 4>
+    where
+        B::FloatTensorPrimitive: 'static,
+    {
+        self.x_projection_with_encoder(current, self.x_projection_encoder())
+    }
+
+    pub fn x_projection_reference(&self, current: Tensor<B, 4>) -> Tensor<B, 4> {
+        self.x_projection_reference_with_encoder(current, self.x_projection_encoder())
+    }
+
+    pub fn x_projection_encoder(&self) -> Tensor<B, 4> {
         let encoder_raw = self.model.encoder.val();
         let [heads, embd_enc, latent] = encoder_raw.shape().dims::<3>();
-        let encoder = encoder_raw.reshape([1, heads, embd_enc, latent]);
+        encoder_raw.reshape([1, heads, embd_enc, latent])
+    }
+
+    pub fn x_projection_with_encoder(
+        &self,
+        current: Tensor<B, 4>,
+        encoder: Tensor<B, 4>,
+    ) -> Tensor<B, 4>
+    where
+        B::FloatTensorPrimitive: 'static,
+    {
+        let fused = self.model.kernel.enabled
+            && matches!(self.model.latent_activation, VisionLatentActivation::Relu);
+        let fused = fused && self.model.kernel.projection_executor.use_x();
+        let latent = encoder.shape().dims::<4>()[3];
         let latent_pattern = &self.model.kernel.block_sparse.latent;
         let sparse_mask = if fused && latent_pattern.is_sparse() {
             Some(latent_pattern.mask::<B>(latent, &current.device()))
@@ -234,21 +260,40 @@ impl<'a, B: Backend> VisionDenseBenchAdapter<'a, B> {
             None
         };
         if fused {
-            relu_lowrank::fused_forward(
+            relu_lowrank::fused_forward_with_executor(
                 current,
                 encoder,
                 None,
                 self.model.kernel.relu_threshold,
                 latent_pattern,
                 sparse_mask,
+                self.model.kernel.lowrank_grad_input_executor,
             )
         } else {
-            let mut x_latent = current.matmul(encoder);
-            if apply_threshold && self.model.kernel.relu_threshold != 0.0 {
-                x_latent = x_latent.sub_scalar(self.model.kernel.relu_threshold);
-            }
-            self.model.apply_latent_activation(x_latent)
+            self.x_projection_reference_with_encoder(current, encoder)
         }
+    }
+
+    pub fn x_projection_reference_with_encoder(
+        &self,
+        current: Tensor<B, 4>,
+        encoder: Tensor<B, 4>,
+    ) -> Tensor<B, 4> {
+        let latent_pattern = &self.model.kernel.block_sparse.latent;
+        let latent = encoder.shape().dims::<4>()[3];
+        let sparse_mask = if latent_pattern.is_sparse() {
+            Some(latent_pattern.mask::<B>(latent, &current.device()))
+        } else {
+            None
+        };
+        relu_lowrank::reference_forward(
+            current,
+            encoder,
+            None,
+            self.model.kernel.relu_threshold,
+            latent_pattern,
+            sparse_mask,
+        )
     }
 
     pub fn attention_context(&self, x_neuron: Tensor<B, 4>, current: Tensor<B, 4>) -> Tensor<B, 4> {
@@ -256,13 +301,35 @@ impl<'a, B: Backend> VisionDenseBenchAdapter<'a, B> {
             .apply_token_norm(self.model.full_attention(x_neuron, current))
     }
 
-    pub fn y_projection(&self, attn: Tensor<B, 4>) -> Tensor<B, 4> {
-        let fused = self.model.kernel.enabled
-            && matches!(self.model.latent_activation, VisionLatentActivation::Relu);
-        let apply_threshold = matches!(self.model.latent_activation, VisionLatentActivation::Relu);
+    pub fn y_projection(&self, attn: Tensor<B, 4>) -> Tensor<B, 4>
+    where
+        B::FloatTensorPrimitive: 'static,
+    {
+        self.y_projection_with_encoder(attn, self.y_projection_encoder())
+    }
+
+    pub fn y_projection_reference(&self, attn: Tensor<B, 4>) -> Tensor<B, 4> {
+        self.y_projection_reference_with_encoder(attn, self.y_projection_encoder())
+    }
+
+    pub fn y_projection_encoder(&self) -> Tensor<B, 4> {
         let encoder_v_raw = self.model.encoder_v.val();
         let [heads, embd, latent] = encoder_v_raw.shape().dims::<3>();
-        let encoder_v = encoder_v_raw.reshape([1, heads, embd, latent]);
+        encoder_v_raw.reshape([1, heads, embd, latent])
+    }
+
+    pub fn y_projection_with_encoder(
+        &self,
+        attn: Tensor<B, 4>,
+        encoder_v: Tensor<B, 4>,
+    ) -> Tensor<B, 4>
+    where
+        B::FloatTensorPrimitive: 'static,
+    {
+        let fused = self.model.kernel.enabled
+            && matches!(self.model.latent_activation, VisionLatentActivation::Relu);
+        let fused = fused && self.model.kernel.projection_executor.use_y();
+        let latent = encoder_v.shape().dims::<4>()[3];
         let latent_pattern = &self.model.kernel.block_sparse.latent;
         let sparse_mask = if fused && latent_pattern.is_sparse() {
             Some(latent_pattern.mask::<B>(latent, &attn.device()))
@@ -270,21 +337,78 @@ impl<'a, B: Backend> VisionDenseBenchAdapter<'a, B> {
             None
         };
         if fused {
-            relu_lowrank::fused_forward(
+            relu_lowrank::fused_forward_with_executor(
                 attn,
                 encoder_v,
                 None,
                 self.model.kernel.relu_threshold,
                 latent_pattern,
                 sparse_mask,
+                self.model.kernel.lowrank_grad_input_executor,
             )
         } else {
-            let mut y_latent = attn.matmul(encoder_v);
-            if apply_threshold && self.model.kernel.relu_threshold != 0.0 {
-                y_latent = y_latent.sub_scalar(self.model.kernel.relu_threshold);
-            }
-            self.model.apply_latent_activation(y_latent)
+            self.y_projection_reference_with_encoder(attn, encoder_v)
         }
+    }
+
+    pub fn y_projection_reference_with_encoder(
+        &self,
+        attn: Tensor<B, 4>,
+        encoder_v: Tensor<B, 4>,
+    ) -> Tensor<B, 4> {
+        let latent_pattern = &self.model.kernel.block_sparse.latent;
+        let latent = encoder_v.shape().dims::<4>()[3];
+        let sparse_mask = if latent_pattern.is_sparse() {
+            Some(latent_pattern.mask::<B>(latent, &attn.device()))
+        } else {
+            None
+        };
+        relu_lowrank::reference_forward(
+            attn,
+            encoder_v,
+            None,
+            self.model.kernel.relu_threshold,
+            latent_pattern,
+            sparse_mask,
+        )
+    }
+
+    pub fn y_path_from_attention(
+        &self,
+        current: Tensor<B, 4>,
+        x_neuron: Tensor<B, 4>,
+        attn: Tensor<B, 4>,
+    ) -> Tensor<B, 4>
+    where
+        B::FloatTensorPrimitive: 'static,
+    {
+        self.tail(current, x_neuron, self.y_projection(attn))
+    }
+
+    pub fn y_path_reference_from_attention(
+        &self,
+        current: Tensor<B, 4>,
+        x_neuron: Tensor<B, 4>,
+        attn: Tensor<B, 4>,
+    ) -> Tensor<B, 4> {
+        self.tail(current, x_neuron, self.y_projection_reference(attn))
+    }
+
+    pub fn y_path_with_encoder_from_attention(
+        &self,
+        current: Tensor<B, 4>,
+        x_neuron: Tensor<B, 4>,
+        attn: Tensor<B, 4>,
+        encoder_v: Tensor<B, 4>,
+    ) -> Tensor<B, 4>
+    where
+        B::FloatTensorPrimitive: 'static,
+    {
+        self.tail(
+            current,
+            x_neuron,
+            self.y_projection_with_encoder(attn, encoder_v),
+        )
     }
 
     pub fn tail(
@@ -294,11 +418,25 @@ impl<'a, B: Backend> VisionDenseBenchAdapter<'a, B> {
         y_gate: Tensor<B, 4>,
     ) -> Tensor<B, 4> {
         let y_neuron = self.model.dropout.forward(x_neuron * y_gate);
-        let mixed = y_neuron.swap_dims(1, 2);
-        let [batch, time, heads, latent] = mixed.shape().dims();
-        let mixed_flat = mixed.reshape([batch * time, heads * latent]);
-        let mlp_flat = mixed_flat.matmul(self.model.decoder.val());
-        let mlp_out = mlp_flat.reshape([batch, 1, time, self.model.embed_dim]);
+        let [batch, heads, time, latent] = y_neuron.shape().dims::<4>();
+        let mlp_out = if heads == 1 {
+            y_neuron
+                .reshape([batch * time, latent])
+                .matmul(self.model.decoder.val())
+                .reshape([batch, 1, time, self.model.embed_dim])
+        } else {
+            let decoder = self
+                .model
+                .decoder
+                .val()
+                .reshape([heads, latent, self.model.embed_dim]);
+            y_neuron
+                .swap_dims(0, 1)
+                .reshape([heads, batch * time, latent])
+                .matmul(decoder)
+                .sum_dim(0)
+                .reshape([batch, 1, time, self.model.embed_dim])
+        };
         let mlp_out = self.model.apply_token_norm(mlp_out);
         self.model.apply_token_norm(current + mlp_out)
     }
@@ -314,9 +452,11 @@ impl<'a, B: Backend> VisionDenseBenchAdapter<'a, B> {
 
         let fused = self.model.kernel.enabled
             && matches!(self.model.latent_activation, VisionLatentActivation::Relu);
+        let fused_x = fused && self.model.kernel.projection_executor.use_x();
+        let fused_y = fused && self.model.kernel.projection_executor.use_y();
         let apply_threshold = matches!(self.model.latent_activation, VisionLatentActivation::Relu);
         let latent_pattern = &self.model.kernel.block_sparse.latent;
-        let sparse_mask = if fused && latent_pattern.is_sparse() {
+        let sparse_mask = if (fused_x || fused_y) && latent_pattern.is_sparse() {
             Some(latent_pattern.mask::<B>(latent, &current.device()))
         } else {
             None
@@ -328,16 +468,64 @@ impl<'a, B: Backend> VisionDenseBenchAdapter<'a, B> {
             encoder_v,
             self.model.decoder.val(),
             &self.model.dropout,
-            fused,
+            fused_x,
+            fused_y,
             self.model.kernel.relu_threshold,
             apply_threshold,
             latent_pattern,
+            self.model.kernel.lowrank_grad_input_executor,
             sparse_mask,
             |query, value| self.model.full_attention(query, value),
             |values| self.model.apply_latent_activation(values),
             |values| self.model.apply_token_norm(values),
         )
         .next
+    }
+
+    pub fn x_projection_wgpu_kernel(&self, current: Tensor<B, 4>) -> Option<Tensor<B, 4>>
+    where
+        B::FloatTensorPrimitive: 'static,
+    {
+        let encoder_raw = self.model.encoder.val();
+        let [heads, embd_enc, latent] = encoder_raw.shape().dims::<3>();
+        let encoder = encoder_raw.reshape([1, heads, embd_enc, latent]);
+        let latent_pattern = &self.model.kernel.block_sparse.latent;
+        let sparse_mask = if latent_pattern.is_sparse() {
+            Some(latent_pattern.mask::<B>(latent, &current.device()))
+        } else {
+            None
+        };
+        relu_lowrank::try_wgpu_fused_forward_with_executor(
+            &current,
+            &encoder,
+            None,
+            self.model.kernel.relu_threshold,
+            sparse_mask.as_ref(),
+            self.model.kernel.lowrank_grad_input_executor,
+        )
+    }
+
+    pub fn y_projection_wgpu_kernel(&self, attn: Tensor<B, 4>) -> Option<Tensor<B, 4>>
+    where
+        B::FloatTensorPrimitive: 'static,
+    {
+        let encoder_v_raw = self.model.encoder_v.val();
+        let [heads, embd, latent] = encoder_v_raw.shape().dims::<3>();
+        let encoder_v = encoder_v_raw.reshape([1, heads, embd, latent]);
+        let latent_pattern = &self.model.kernel.block_sparse.latent;
+        let sparse_mask = if latent_pattern.is_sparse() {
+            Some(latent_pattern.mask::<B>(latent, &attn.device()))
+        } else {
+            None
+        };
+        relu_lowrank::try_wgpu_fused_forward_with_executor(
+            &attn,
+            &encoder_v,
+            None,
+            self.model.kernel.relu_threshold,
+            sparse_mask.as_ref(),
+            self.model.kernel.lowrank_grad_input_executor,
+        )
     }
 }
 
@@ -373,7 +561,11 @@ impl<'a, B: Backend> VisionRolloutScheduleBenchAdapter<'a, B> {
         indices
     }
 
-    pub fn rollout_supervision_steps(total_steps: usize, frames: usize, stride: usize) -> Vec<usize> {
+    pub fn rollout_supervision_steps(
+        total_steps: usize,
+        frames: usize,
+        stride: usize,
+    ) -> Vec<usize> {
         if total_steps == 0 {
             return Vec::new();
         }
@@ -395,7 +587,10 @@ impl<'a, B: Backend> VisionRolloutScheduleBenchAdapter<'a, B> {
         steps
     }
 
-    pub fn default_distill_steps(distill: &VisionDistillConfig, rollout_steps: usize) -> Vec<usize> {
+    pub fn default_distill_steps(
+        distill: &VisionDistillConfig,
+        rollout_steps: usize,
+    ) -> Vec<usize> {
         let steps = Self::rollout_supervision_steps(
             rollout_steps,
             distill.rollout_supervision_frames,
@@ -428,12 +623,21 @@ impl<'a, B: Backend> VisionRolloutScheduleBenchAdapter<'a, B> {
     ) -> Tensor<B, 1> {
         let mut total = None;
         for (step, backprop_steps) in schedule.iter().copied() {
-            let output = self
-                .model
-                .forward_images_steps_rollout(images.clone(), step, backprop_steps);
+            let output =
+                self.model
+                    .forward_images_steps_rollout(images.clone(), step, backprop_steps);
             total = Some(match total {
-                Some(acc) => acc + self.distill_total(output, teacher_patch.clone(), teacher_cls.clone(), loss),
-                None => self.distill_total(output, teacher_patch.clone(), teacher_cls.clone(), loss),
+                Some(acc) => {
+                    acc + self.distill_total(
+                        output,
+                        teacher_patch.clone(),
+                        teacher_cls.clone(),
+                        loss,
+                    )
+                }
+                None => {
+                    self.distill_total(output, teacher_patch.clone(), teacher_cls.clone(), loss)
+                }
             });
         }
         total.expect("at least one repeated rollout step")
@@ -447,12 +651,23 @@ impl<'a, B: Backend> VisionRolloutScheduleBenchAdapter<'a, B> {
         schedule: &[(usize, usize)],
         loss: &VisionDistillationLossConfig,
     ) -> Tensor<B, 1> {
-        let outputs = self.model.forward_images_steps_rollout_schedule(images, schedule);
+        let outputs = self
+            .model
+            .forward_images_steps_rollout_schedule(images, schedule);
         let mut total = None;
         for (_step, output) in outputs {
             total = Some(match total {
-                Some(acc) => acc + self.distill_total(output, teacher_patch.clone(), teacher_cls.clone(), loss),
-                None => self.distill_total(output, teacher_patch.clone(), teacher_cls.clone(), loss),
+                Some(acc) => {
+                    acc + self.distill_total(
+                        output,
+                        teacher_patch.clone(),
+                        teacher_cls.clone(),
+                        loss,
+                    )
+                }
+                None => {
+                    self.distill_total(output, teacher_patch.clone(), teacher_cls.clone(), loss)
+                }
             });
         }
         total.expect("at least one scheduled rollout step")

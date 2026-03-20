@@ -75,7 +75,8 @@ pub fn export_vision_encoder_checkpoint_to_burnpack(
     let bundle = match &config.mode {
         VisionTrainingModeConfig::Distill(distill) => {
             let model = VisionDragon::<ExportBackend>::new(vision_config.clone(), &device);
-            let mut distill_model = VisionDistillModel::new(model, distill.clone(), None, rollout);
+            let mut distill_model =
+                VisionDistillModel::new(model, distill.clone(), None, rollout, &device);
             let record = BinFileRecorder::<FullPrecisionSettings>::new()
                 .load::<<VisionDistillModel<ExportBackend> as Module<ExportBackend>>::Record>(
                     checkpoint_base.clone(),
@@ -169,7 +170,8 @@ pub fn load_vision_encoder_from_checkpoint<B: BackendTrait>(
     match &config.mode {
         VisionTrainingModeConfig::Distill(distill) => {
             let model = VisionDragon::<B>::new(vision_config, device);
-            let mut distill_model = VisionDistillModel::new(model, distill.clone(), None, rollout);
+            let mut distill_model =
+                VisionDistillModel::new(model, distill.clone(), None, rollout, &device);
             let record = BinFileRecorder::<FullPrecisionSettings>::new()
                 .load::<<VisionDistillModel<B> as Module<B>>::Record>(
                     checkpoint_base.clone(),
@@ -345,7 +347,7 @@ mod tests {
         let device = <ExportBackend as BackendTrait>::Device::default();
         ExportBackend::seed(&device, 1337);
         let model = VisionDragon::<ExportBackend>::new(vision_config, &device);
-        let distill_model = VisionDistillModel::new(model, distill, None, rollout);
+        let distill_model = VisionDistillModel::new(model, distill, None, rollout, &device);
         BinFileRecorder::<FullPrecisionSettings>::new()
             .record(distill_model.into_record(), checkpoint_dir.join("model-0"))
             .expect("write checkpoint");
@@ -562,12 +564,14 @@ mod tests {
             mode: VisionTrainingModeConfig::Distill(VisionDistillConfig {
                 teacher: VisionTeacherConfig::Features(VisionTeacherFeatureConfig {
                     train_cls_path: PathBuf::from("teacher/train_cls.bin"),
-                    train_patch_path: PathBuf::from("teacher/train_patch.bin"),
+                    train_patch_path: Some(PathBuf::from("teacher/train_patch.bin")),
                     val_cls_path: PathBuf::from("teacher/val_cls.bin"),
-                    val_patch_path: PathBuf::from("teacher/val_patch.bin"),
+                    val_patch_path: Some(PathBuf::from("teacher/val_patch.bin")),
                     feature_dim: 16,
                     patch_tokens: Some(16),
                 }),
+                teacher_targets: Vec::new(),
+                student_checkpoint: None,
                 loss: VisionDistillationLossConfig::default(),
                 rollout_supervision_frames: 1,
                 rollout_supervision_stride: 1,

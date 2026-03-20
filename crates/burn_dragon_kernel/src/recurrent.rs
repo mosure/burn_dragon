@@ -5,6 +5,9 @@ use burn::tensor::Tensor as BurnTensor;
 use burn::tensor::backend::{AutodiffBackend, Backend as BackendTrait};
 use burn::tensor::{DType, Shape, TensorData, TensorPrimitive};
 use burn_autodiff::Autodiff;
+use burn_cubecl::cubecl;
+#[cfg(feature = "cuda")]
+use burn_cubecl::cubecl::cuda::CudaRuntime;
 use burn_cubecl::cubecl::{prelude::*, server::Bindings};
 use burn_cubecl::fusion::FusionCubeRuntime;
 use burn_cubecl::kernel::into_contiguous;
@@ -21,11 +24,19 @@ use crate::profiling::{
 };
 
 const WORKGROUP_SIZE_X: u32 = 64;
+const RECURRENT_TILED_WORKGROUP_SIZE_X: u32 = 128;
+const RECURRENT_QUERY_TILE: usize = WORKGROUP_SIZE_X as usize;
 const META_LEN: usize = 6;
 const RECURRENT_ATTENTION_SHADER: &str = include_str!("recurrent.wgsl");
 type WgpuCubeBackend = CubeBackend<WgpuRuntime, f32, i32, u32>;
 type WgpuCubeAutodiffBackend = Autodiff<WgpuCubeBackend>;
 type WgpuCubeAutodiffTensor = <WgpuCubeAutodiffBackend as BackendTrait>::FloatTensorPrimitive;
+#[cfg(feature = "cuda")]
+type CudaCubeBackend = CubeBackend<CudaRuntime, f32, i32, u8>;
+#[cfg(feature = "cuda")]
+type CudaCubeAutodiffBackend = Autodiff<CudaCubeBackend>;
+#[cfg(feature = "cuda")]
+type CudaCubeAutodiffTensor = <CudaCubeAutodiffBackend as BackendTrait>::FloatTensorPrimitive;
 
 pub type RecurrentProfileSnapshot = KernelProfileSnapshot;
 
@@ -105,8 +116,42 @@ pub fn supports_backend<B: BackendTrait>() -> bool
 where
     B::FloatTensorPrimitive: 'static,
 {
-    matches_type::<B::FloatTensorPrimitive, CubeTensor<WgpuRuntime>>()
-        || matches_type::<B::FloatTensorPrimitive, WgpuCubeAutodiffTensor>()
+    #[cfg(feature = "cuda")]
+    {
+        matches_type::<B::FloatTensorPrimitive, CubeTensor<WgpuRuntime>>()
+            || matches_type::<B::FloatTensorPrimitive, WgpuCubeAutodiffTensor>()
+            || matches_type::<
+                B::FloatTensorPrimitive,
+                FusionTensor<FusionCubeRuntime<WgpuRuntime, u32>>,
+            >()
+            || matches_type::<
+                B::FloatTensorPrimitive,
+                FusionTensor<FusionCubeRuntime<WgpuRuntime, u8>>,
+            >()
+            || matches_type::<B::FloatTensorPrimitive, CubeTensor<CudaRuntime>>()
+            || matches_type::<B::FloatTensorPrimitive, CudaCubeAutodiffTensor>()
+            || matches_type::<
+                B::FloatTensorPrimitive,
+                FusionTensor<FusionCubeRuntime<CudaRuntime, u32>>,
+            >()
+            || matches_type::<
+                B::FloatTensorPrimitive,
+                FusionTensor<FusionCubeRuntime<CudaRuntime, u8>>,
+            >()
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        matches_type::<B::FloatTensorPrimitive, CubeTensor<WgpuRuntime>>()
+            || matches_type::<B::FloatTensorPrimitive, WgpuCubeAutodiffTensor>()
+            || matches_type::<
+                B::FloatTensorPrimitive,
+                FusionTensor<FusionCubeRuntime<WgpuRuntime, u32>>,
+            >()
+            || matches_type::<
+                B::FloatTensorPrimitive,
+                FusionTensor<FusionCubeRuntime<WgpuRuntime, u8>>,
+            >()
+    }
 }
 
 pub fn try_fused_recurrent_attention_wgpu<B: BackendTrait>(
@@ -200,7 +245,7 @@ where
         .map(|start| start.elapsed().as_nanos())
         .unwrap_or_default();
 
-    let output = try_fusion_path_wgpu::<B, u32>(
+    let output = try_fusion_path_runtime::<B, u32, WgpuRuntime>(
         &query_copy,
         &value_copy,
         &rho_copy,
@@ -208,17 +253,74 @@ where
         &meta_copy,
     )
     .or_else(|| {
-        try_fusion_path_wgpu::<B, u8>(&query_copy, &value_copy, &rho_copy, &decay_copy, &meta_copy)
-    })
-    .or_else(|| try_direct_path::<B>(&query_copy, &value_copy, &rho_copy, &decay_copy, &meta_copy))
-    .or_else(|| {
-        try_direct_path_autodiff_wgpu_cube::<B>(
+        try_fusion_path_runtime::<B, u8, WgpuRuntime>(
             &query_copy,
             &value_copy,
             &rho_copy,
             &decay_copy,
             &meta_copy,
         )
+    })
+    .or_else(|| {
+        try_direct_path_runtime::<B, WgpuRuntime>(
+            &query_copy,
+            &value_copy,
+            &rho_copy,
+            &decay_copy,
+            &meta_copy,
+        )
+    })
+    .or_else(|| {
+        try_direct_path_autodiff_cube_runtime::<B, WgpuRuntime>(
+            &query_copy,
+            &value_copy,
+            &rho_copy,
+            &decay_copy,
+            &meta_copy,
+        )
+    })
+    .or_else(|| {
+        #[cfg(feature = "cuda")]
+        {
+            try_fusion_path_runtime::<B, u32, CudaRuntime>(
+                &query_copy,
+                &value_copy,
+                &rho_copy,
+                &decay_copy,
+                &meta_copy,
+            )
+            .or_else(|| {
+                try_fusion_path_runtime::<B, u8, CudaRuntime>(
+                    &query_copy,
+                    &value_copy,
+                    &rho_copy,
+                    &decay_copy,
+                    &meta_copy,
+                )
+            })
+            .or_else(|| {
+                try_direct_path_runtime::<B, CudaRuntime>(
+                    &query_copy,
+                    &value_copy,
+                    &rho_copy,
+                    &decay_copy,
+                    &meta_copy,
+                )
+            })
+            .or_else(|| {
+                try_direct_path_autodiff_cube_runtime::<B, CudaRuntime>(
+                    &query_copy,
+                    &value_copy,
+                    &rho_copy,
+                    &decay_copy,
+                    &meta_copy,
+                )
+            })
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            None
+        }
     });
 
     if let Some(start) = total_start {
@@ -238,7 +340,7 @@ where
     output
 }
 
-fn try_fusion_path_wgpu<B, BT>(
+fn try_fusion_path_runtime<B, BT, R>(
     query: &BurnTensor<B, 4>,
     value: &BurnTensor<B, 4>,
     rho: &BurnTensor<B, 4>,
@@ -249,29 +351,27 @@ where
     B: BackendTrait,
     B::FloatTensorPrimitive: 'static,
     BT: BoolElement + 'static,
+    R: CubeRuntime + 'static,
 {
-    if !matches_type::<B::FloatTensorPrimitive, FusionTensor<FusionCubeRuntime<WgpuRuntime, BT>>>()
-    {
+    if !matches_type::<B::FloatTensorPrimitive, FusionTensor<FusionCubeRuntime<R, BT>>>() {
         return None;
     }
 
     let prim_query = query.clone().into_primitive().tensor();
-    let fusion_query: FusionTensor<FusionCubeRuntime<WgpuRuntime, BT>> =
+    let fusion_query: FusionTensor<FusionCubeRuntime<R, BT>> =
         try_cast_primitive::<B, _>(prim_query)?;
     let fusion_client = fusion_query.client.clone();
-    let query =
-        fusion_client.resolve_tensor_float::<CubeBackend<WgpuRuntime, f32, i32, BT>>(fusion_query);
+    let query = fusion_client.resolve_tensor_float::<CubeBackend<R, f32, i32, BT>>(fusion_query);
     if query.dtype != DType::F32 {
         return None;
     }
 
-    let value = resolve_fusion_tensor_wgpu::<B, BT, 4>(value)?;
-    let rho = resolve_fusion_tensor_wgpu::<B, BT, 4>(rho)?;
-    let decay = resolve_fusion_tensor_wgpu::<B, BT, 1>(decay)?;
-    let meta = resolve_fusion_tensor_wgpu::<B, BT, 1>(meta)?;
+    let value = resolve_fusion_tensor_runtime::<B, BT, R, 4>(value)?;
+    let rho = resolve_fusion_tensor_runtime::<B, BT, R, 4>(rho)?;
+    let decay = resolve_fusion_tensor_runtime::<B, BT, R, 1>(decay)?;
+    let meta = resolve_fusion_tensor_runtime::<B, BT, R, 1>(meta)?;
 
-    let (context, rho) =
-        recurrent_attention_wgsl_runtime::<WgpuRuntime>(query, value, rho, decay, meta);
+    let (context, rho) = recurrent_attention_runtime::<R>(query, value, rho, decay, meta);
 
     let context_fusion = register_fusion_float_tensor(&fusion_client, context);
     let rho_fusion = register_fusion_float_tensor(&fusion_client, rho);
@@ -285,7 +385,7 @@ where
     })
 }
 
-fn try_direct_path<B: BackendTrait>(
+fn try_direct_path_runtime<B, R>(
     query: &BurnTensor<B, 4>,
     value: &BurnTensor<B, 4>,
     rho: &BurnTensor<B, 4>,
@@ -293,40 +393,41 @@ fn try_direct_path<B: BackendTrait>(
     meta: &BurnTensor<B, 1>,
 ) -> Option<RecurrentAttentionOutput<B>>
 where
+    B: BackendTrait,
     B::FloatTensorPrimitive: 'static,
+    R: CubeRuntime + 'static,
 {
     let prim_query = query.clone().into_primitive().tensor();
-    let query: CubeTensor<WgpuRuntime> = try_cast_primitive::<B, _>(prim_query)?;
+    let query: CubeTensor<R> = try_cast_primitive::<B, _>(prim_query)?;
     if query.dtype != DType::F32 {
         return None;
     }
 
     let prim_value = value.clone().into_primitive().tensor();
-    let value: CubeTensor<WgpuRuntime> = try_cast_primitive::<B, _>(prim_value)?;
+    let value: CubeTensor<R> = try_cast_primitive::<B, _>(prim_value)?;
     if value.dtype != DType::F32 {
         return None;
     }
 
     let prim_rho = rho.clone().into_primitive().tensor();
-    let rho: CubeTensor<WgpuRuntime> = try_cast_primitive::<B, _>(prim_rho)?;
+    let rho: CubeTensor<R> = try_cast_primitive::<B, _>(prim_rho)?;
     if rho.dtype != DType::F32 {
         return None;
     }
 
     let prim_decay = decay.clone().into_primitive().tensor();
-    let decay: CubeTensor<WgpuRuntime> = try_cast_primitive::<B, _>(prim_decay)?;
+    let decay: CubeTensor<R> = try_cast_primitive::<B, _>(prim_decay)?;
     if decay.dtype != DType::F32 {
         return None;
     }
 
     let prim_meta = meta.clone().into_primitive().tensor();
-    let meta: CubeTensor<WgpuRuntime> = try_cast_primitive::<B, _>(prim_meta)?;
+    let meta: CubeTensor<R> = try_cast_primitive::<B, _>(prim_meta)?;
     if meta.dtype != DType::F32 {
         return None;
     }
 
-    let (context, rho) =
-        recurrent_attention_wgsl_runtime::<WgpuRuntime>(query, value, rho, decay, meta);
+    let (context, rho) = recurrent_attention_runtime::<R>(query, value, rho, decay, meta);
 
     let context_prim = try_cast_backend::<B, _>(context)?;
     let rho_prim = try_cast_backend::<B, _>(rho)?;
@@ -337,7 +438,7 @@ where
     })
 }
 
-fn try_direct_path_autodiff_wgpu_cube<B: BackendTrait>(
+fn try_direct_path_autodiff_cube_runtime<B, R>(
     query: &BurnTensor<B, 4>,
     value: &BurnTensor<B, 4>,
     rho: &BurnTensor<B, 4>,
@@ -345,52 +446,49 @@ fn try_direct_path_autodiff_wgpu_cube<B: BackendTrait>(
     meta: &BurnTensor<B, 1>,
 ) -> Option<RecurrentAttentionOutput<B>>
 where
+    B: BackendTrait,
     B::FloatTensorPrimitive: 'static,
+    R: CubeRuntime + 'static,
 {
     let prim_query = query.clone().into_primitive().tensor();
-    let query_ad: WgpuCubeAutodiffTensor = try_cast_primitive::<B, _>(prim_query)?;
-    let query: CubeTensor<WgpuRuntime> =
-        <WgpuCubeAutodiffBackend as AutodiffBackend>::inner(query_ad);
+    let query_ad: B::FloatTensorPrimitive = try_cast_primitive::<B, _>(prim_query)?;
+    let query: CubeTensor<R> = extract_autodiff_inner::<B, R>(query_ad)?;
     if query.dtype != DType::F32 {
         return None;
     }
 
     let prim_value = value.clone().into_primitive().tensor();
-    let value_ad: WgpuCubeAutodiffTensor = try_cast_primitive::<B, _>(prim_value)?;
-    let value: CubeTensor<WgpuRuntime> =
-        <WgpuCubeAutodiffBackend as AutodiffBackend>::inner(value_ad);
+    let value_ad: B::FloatTensorPrimitive = try_cast_primitive::<B, _>(prim_value)?;
+    let value: CubeTensor<R> = extract_autodiff_inner::<B, R>(value_ad)?;
     if value.dtype != DType::F32 {
         return None;
     }
 
     let prim_rho = rho.clone().into_primitive().tensor();
-    let rho_ad: WgpuCubeAutodiffTensor = try_cast_primitive::<B, _>(prim_rho)?;
-    let rho: CubeTensor<WgpuRuntime> = <WgpuCubeAutodiffBackend as AutodiffBackend>::inner(rho_ad);
+    let rho_ad: B::FloatTensorPrimitive = try_cast_primitive::<B, _>(prim_rho)?;
+    let rho: CubeTensor<R> = extract_autodiff_inner::<B, R>(rho_ad)?;
     if rho.dtype != DType::F32 {
         return None;
     }
 
     let prim_decay = decay.clone().into_primitive().tensor();
-    let decay_ad: WgpuCubeAutodiffTensor = try_cast_primitive::<B, _>(prim_decay)?;
-    let decay: CubeTensor<WgpuRuntime> =
-        <WgpuCubeAutodiffBackend as AutodiffBackend>::inner(decay_ad);
+    let decay_ad: B::FloatTensorPrimitive = try_cast_primitive::<B, _>(prim_decay)?;
+    let decay: CubeTensor<R> = extract_autodiff_inner::<B, R>(decay_ad)?;
     if decay.dtype != DType::F32 {
         return None;
     }
 
     let prim_meta = meta.clone().into_primitive().tensor();
-    let meta_ad: WgpuCubeAutodiffTensor = try_cast_primitive::<B, _>(prim_meta)?;
-    let meta: CubeTensor<WgpuRuntime> =
-        <WgpuCubeAutodiffBackend as AutodiffBackend>::inner(meta_ad);
+    let meta_ad: B::FloatTensorPrimitive = try_cast_primitive::<B, _>(prim_meta)?;
+    let meta: CubeTensor<R> = extract_autodiff_inner::<B, R>(meta_ad)?;
     if meta.dtype != DType::F32 {
         return None;
     }
 
-    let (context, rho) =
-        recurrent_attention_wgsl_runtime::<WgpuRuntime>(query, value, rho, decay, meta);
+    let (context, rho) = recurrent_attention_runtime::<R>(query, value, rho, decay, meta);
 
-    let context_ad = <WgpuCubeAutodiffBackend as AutodiffBackend>::from_inner(context);
-    let rho_ad = <WgpuCubeAutodiffBackend as AutodiffBackend>::from_inner(rho);
+    let context_ad = wrap_autodiff_inner::<B, R>(context)?;
+    let rho_ad = wrap_autodiff_inner::<B, R>(rho)?;
     let context_prim = try_cast_backend::<B, _>(context_ad)?;
     let rho_prim = try_cast_backend::<B, _>(rho_ad)?;
 
@@ -398,6 +496,25 @@ where
         context: BurnTensor::<B, 4>::from_primitive(TensorPrimitive::Float(context_prim)),
         rho: BurnTensor::<B, 4>::from_primitive(TensorPrimitive::Float(rho_prim)),
     })
+}
+
+fn recurrent_attention_runtime<R: CubeRuntime>(
+    query: CubeTensor<R>,
+    value: CubeTensor<R>,
+    rho: CubeTensor<R>,
+    decay: CubeTensor<R>,
+    meta: CubeTensor<R>,
+) -> (CubeTensor<R>, CubeTensor<R>) {
+    #[cfg(feature = "cuda")]
+    {
+        if TypeId::of::<R>() == TypeId::of::<CudaRuntime>() {
+            if use_cuda_tiled_recurrent_experimental() {
+                return recurrent_attention_cube_tiled_runtime::<R>(query, value, rho, decay, meta);
+            }
+            return recurrent_attention_cube_exact_runtime::<R>(query, value, rho, decay, meta);
+        }
+    }
+    recurrent_attention_wgsl_runtime::<R>(query, value, rho, decay, meta)
 }
 
 fn recurrent_attention_wgsl_runtime<R: CubeRuntime>(
@@ -455,27 +572,335 @@ fn recurrent_attention_wgsl_runtime<R: CubeRuntime>(
     (context, rho)
 }
 
+fn recurrent_attention_cube_exact_runtime<R: CubeRuntime>(
+    query: CubeTensor<R>,
+    value: CubeTensor<R>,
+    rho: CubeTensor<R>,
+    decay: CubeTensor<R>,
+    meta: CubeTensor<R>,
+) -> (CubeTensor<R>, CubeTensor<R>) {
+    let query = into_contiguous(query);
+    let value = into_contiguous(value);
+    let rho = into_contiguous(rho);
+    let decay = into_contiguous(decay);
+    let meta = into_contiguous(meta);
+
+    let [batch, heads, _time, _latent] = query.meta.shape.dims::<4>();
+    let embd = value.meta.shape.dims::<4>()[3];
+
+    let client = query.client.clone();
+    let device = query.device.clone();
+    let context = empty_device::<R, f32>(
+        client.clone(),
+        device,
+        Shape::new([batch, heads, query.meta.shape.dims::<4>()[2], embd]),
+    );
+
+    let cube_dim = CubeDim::new_1d(RECURRENT_TILED_WORKGROUP_SIZE_X);
+    let cube_count = CubeCount::Static(
+        div_ceil_u32(embd as u32, RECURRENT_TILED_WORKGROUP_SIZE_X),
+        heads as u32,
+        batch as u32,
+    );
+
+    let _ = recurrent_attention_cube_exact_kernel::launch::<R>(
+        &client,
+        cube_count,
+        cube_dim,
+        query.as_tensor_arg(1),
+        value.as_tensor_arg(1),
+        rho.as_tensor_arg(1),
+        decay.as_tensor_arg(1),
+        context.as_tensor_arg(1),
+        meta.as_tensor_arg(1),
+    );
+
+    (context, rho)
+}
+
+fn recurrent_attention_cube_tiled_runtime<R: CubeRuntime>(
+    query: CubeTensor<R>,
+    value: CubeTensor<R>,
+    rho: CubeTensor<R>,
+    decay: CubeTensor<R>,
+    meta: CubeTensor<R>,
+) -> (CubeTensor<R>, CubeTensor<R>) {
+    let query = into_contiguous(query);
+    let value = into_contiguous(value);
+    let rho = into_contiguous(rho);
+    let decay = into_contiguous(decay);
+    let meta = into_contiguous(meta);
+
+    let [batch, heads, _time, _latent] = query.meta.shape.dims::<4>();
+    let embd = value.meta.shape.dims::<4>()[3];
+
+    let client = query.client.clone();
+    let device = query.device.clone();
+    let context = empty_device::<R, f32>(
+        client.clone(),
+        device,
+        Shape::new([batch, heads, query.meta.shape.dims::<4>()[2], embd]),
+    );
+
+    let cube_dim = CubeDim::new_1d(WORKGROUP_SIZE_X);
+    let cube_count = CubeCount::Static(
+        div_ceil_u32(embd as u32, WORKGROUP_SIZE_X),
+        heads as u32,
+        batch as u32,
+    );
+
+    let _ = recurrent_attention_cube_tiled_kernel::launch::<R>(
+        &client,
+        cube_count,
+        cube_dim,
+        query.as_tensor_arg(1),
+        value.as_tensor_arg(1),
+        rho.as_tensor_arg(1),
+        decay.as_tensor_arg(1),
+        context.as_tensor_arg(1),
+        meta.as_tensor_arg(1),
+        RECURRENT_QUERY_TILE,
+    );
+
+    (context, rho)
+}
+
 fn div_ceil_u32(value: u32, divisor: u32) -> u32 {
     value.div_ceil(divisor)
 }
 
-fn resolve_fusion_tensor_wgpu<B, BT, const D: usize>(
+#[cube(launch)]
+fn recurrent_attention_cube_exact_kernel(
+    query: &Tensor<Line<f32>>,
+    value: &Tensor<Line<f32>>,
+    rho_state: &mut Tensor<Line<f32>>,
+    decay: &Tensor<Line<f32>>,
+    context: &mut Tensor<Line<f32>>,
+    params: &Tensor<Line<f32>>,
+) {
+    let batch = u32::cast_from(params[0]) as usize;
+    let heads = u32::cast_from(params[1]) as usize;
+    let value_heads = u32::cast_from(params[2]) as usize;
+    let time = u32::cast_from(params[3]) as usize;
+    let latent = u32::cast_from(params[4]) as usize;
+    let embd = u32::cast_from(params[5]) as usize;
+
+    let b = CUBE_POS_Z as usize;
+    let h = CUBE_POS_Y as usize;
+    let e = (CUBE_POS_X * CUBE_DIM_X + UNIT_POS_X) as usize;
+    if b >= batch || h >= heads || e >= embd {
+        terminate!();
+    }
+
+    let decay_value = decay[h * decay.stride(0)];
+    let mut value_head = h;
+    if value_heads == 1usize {
+        value_head = 0usize;
+    }
+    let mut t = 0usize;
+    while t < time {
+        let value_index = b * value.stride(0)
+            + value_head * value.stride(1)
+            + t * value.stride(2)
+            + e * value.stride(3);
+        let value_t = value[value_index];
+
+        let mut acc = Line::cast_from(0u32);
+        let mut l = 0usize;
+        while l < latent {
+            let query_index = b * query.stride(0)
+                + h * query.stride(1)
+                + t * query.stride(2)
+                + l * query.stride(3);
+            let rho_index = b * rho_state.stride(0)
+                + h * rho_state.stride(1)
+                + l * rho_state.stride(2)
+                + e * rho_state.stride(3);
+            let q = query[query_index];
+            let rho_prev = rho_state[rho_index];
+            acc += rho_prev * q;
+            rho_state[rho_index] = (rho_prev + q * value_t) * decay_value;
+            l += 1usize;
+        }
+
+        let out_index = b * context.stride(0)
+            + h * context.stride(1)
+            + t * context.stride(2)
+            + e * context.stride(3);
+        context[out_index] = acc;
+        t += 1usize;
+    }
+}
+
+#[cube(launch)]
+fn recurrent_attention_cube_tiled_kernel(
+    query: &Tensor<Line<f32>>,
+    value: &Tensor<Line<f32>>,
+    rho_state: &mut Tensor<Line<f32>>,
+    decay: &Tensor<Line<f32>>,
+    context: &mut Tensor<Line<f32>>,
+    params: &Tensor<Line<f32>>,
+    #[comptime] query_tile_size: usize,
+) {
+    let batch = u32::cast_from(params[0]) as usize;
+    let heads = u32::cast_from(params[1]) as usize;
+    let value_heads = u32::cast_from(params[2]) as usize;
+    let time = u32::cast_from(params[3]) as usize;
+    let latent = u32::cast_from(params[4]) as usize;
+    let embd = u32::cast_from(params[5]) as usize;
+
+    let b = CUBE_POS_Z as usize;
+    let h = CUBE_POS_Y as usize;
+    let e = (CUBE_POS_X * CUBE_DIM_X + UNIT_POS_X) as usize;
+    let lane = UNIT_POS_X as usize;
+    if b >= batch || h >= heads {
+        terminate!();
+    }
+    let active_e = e < embd;
+
+    let mut query_tile = SharedMemory::<f32>::new_lined(query_tile_size, 1usize);
+    let decay_value = decay[h * decay.stride(0)];
+    let mut value_head = h;
+    if value_heads == 1usize {
+        value_head = 0usize;
+    }
+
+    let mut t = 0usize;
+    while t < time {
+        let mut value_t = Line::cast_from(0u32);
+        if active_e {
+            let value_index = b * value.stride(0)
+                + value_head * value.stride(1)
+                + t * value.stride(2)
+                + e * value.stride(3);
+            value_t = value[value_index];
+        }
+
+        let mut acc = Line::cast_from(0u32);
+        let mut latent_base = 0usize;
+        while latent_base < latent {
+            if lane < query_tile_size {
+                if latent_base + lane < latent {
+                    let query_index = b * query.stride(0)
+                        + h * query.stride(1)
+                        + t * query.stride(2)
+                        + (latent_base + lane) * query.stride(3);
+                    query_tile[lane] = query[query_index];
+                } else {
+                    query_tile[lane] = Line::cast_from(0u32);
+                }
+            }
+            sync_cube();
+
+            let mut tile_offset = 0usize;
+            while tile_offset < query_tile_size {
+                let l = latent_base + tile_offset;
+                if active_e && l < latent {
+                    let rho_index = b * rho_state.stride(0)
+                        + h * rho_state.stride(1)
+                        + l * rho_state.stride(2)
+                        + e * rho_state.stride(3);
+                    let q = query_tile[tile_offset];
+                    let rho_prev = rho_state[rho_index];
+                    acc += rho_prev * q;
+                    rho_state[rho_index] = (rho_prev + q * value_t) * decay_value;
+                }
+                tile_offset += 1usize;
+            }
+
+            sync_cube();
+            latent_base += query_tile_size;
+        }
+
+        if active_e {
+            let out_index = b * context.stride(0)
+                + h * context.stride(1)
+                + t * context.stride(2)
+                + e * context.stride(3);
+            context[out_index] = acc;
+        }
+        t += 1usize;
+    }
+}
+
+fn use_cuda_tiled_recurrent_experimental() -> bool {
+    std::env::var("BURN_DRAGON_CUDA_TILED_RECURRENT_EXPERIMENTAL")
+        .ok()
+        .as_deref()
+        == Some("1")
+}
+
+fn resolve_fusion_tensor_runtime<B, BT, R, const D: usize>(
     tensor: &BurnTensor<B, D>,
-) -> Option<CubeTensor<WgpuRuntime>>
+) -> Option<CubeTensor<R>>
 where
     B: BackendTrait,
     B::FloatTensorPrimitive: 'static,
     BT: BoolElement + 'static,
+    R: CubeRuntime + 'static,
 {
     let prim = tensor.clone().into_primitive().tensor();
-    let fusion: FusionTensor<FusionCubeRuntime<WgpuRuntime, BT>> =
-        try_cast_primitive::<B, _>(prim)?;
+    let fusion: FusionTensor<FusionCubeRuntime<R, BT>> = try_cast_primitive::<B, _>(prim)?;
     let client = fusion.client.clone();
-    let cube = client.resolve_tensor_float::<CubeBackend<WgpuRuntime, f32, i32, BT>>(fusion);
+    let cube = client.resolve_tensor_float::<CubeBackend<R, f32, i32, BT>>(fusion);
     if cube.dtype != DType::F32 {
         return None;
     }
     Some(cube)
+}
+
+fn extract_autodiff_inner<B, R>(value: B::FloatTensorPrimitive) -> Option<CubeTensor<R>>
+where
+    B: BackendTrait,
+    B::FloatTensorPrimitive: 'static,
+    R: CubeRuntime + 'static,
+{
+    if TypeId::of::<R>() == TypeId::of::<WgpuRuntime>() {
+        let query_ad: WgpuCubeAutodiffTensor = try_cast_primitive::<B, _>(value)?;
+        let inner = <WgpuCubeAutodiffBackend as AutodiffBackend>::inner(query_ad);
+        let boxed: Box<dyn Any> = Box::new(inner);
+        return boxed.downcast::<CubeTensor<R>>().ok().map(|boxed| *boxed);
+    }
+    #[cfg(feature = "cuda")]
+    {
+        if TypeId::of::<R>() == TypeId::of::<CudaRuntime>() {
+            let query_ad: CudaCubeAutodiffTensor = try_cast_primitive::<B, _>(value)?;
+            let inner = <CudaCubeAutodiffBackend as AutodiffBackend>::inner(query_ad);
+            let boxed: Box<dyn Any> = Box::new(inner);
+            return boxed.downcast::<CubeTensor<R>>().ok().map(|boxed| *boxed);
+        }
+    }
+    None
+}
+
+fn wrap_autodiff_inner<B, R>(value: CubeTensor<R>) -> Option<B::FloatTensorPrimitive>
+where
+    B: BackendTrait,
+    B::FloatTensorPrimitive: 'static,
+    R: CubeRuntime + 'static,
+{
+    if TypeId::of::<R>() == TypeId::of::<WgpuRuntime>() {
+        let boxed: Box<dyn Any> = Box::new(value);
+        let inner = boxed
+            .downcast::<CubeTensor<WgpuRuntime>>()
+            .ok()
+            .map(|boxed| *boxed)?;
+        let ad = <WgpuCubeAutodiffBackend as AutodiffBackend>::from_inner(inner);
+        return try_cast_backend::<B, _>(ad);
+    }
+    #[cfg(feature = "cuda")]
+    {
+        if TypeId::of::<R>() == TypeId::of::<CudaRuntime>() {
+            let boxed: Box<dyn Any> = Box::new(value);
+            let inner = boxed
+                .downcast::<CubeTensor<CudaRuntime>>()
+                .ok()
+                .map(|boxed| *boxed)?;
+            let ad = <CudaCubeAutodiffBackend as AutodiffBackend>::from_inner(inner);
+            return try_cast_backend::<B, _>(ad);
+        }
+    }
+    None
 }
 
 #[derive(Clone)]
@@ -519,6 +944,8 @@ mod tests {
     use super::*;
     use burn::tensor::{Distribution, Tensor};
     use burn_cubecl::cubecl::Runtime;
+    #[cfg(feature = "cuda")]
+    use burn_cuda::Cuda;
     use burn_wgpu::{CubeBackend, RuntimeOptions, graphics};
 
     type Backend = CubeBackend<WgpuRuntime, f32, i32, u32>;
@@ -530,7 +957,12 @@ mod tests {
         });
     }
 
-    fn assert_close(lhs: Tensor<Backend, 4>, rhs: Tensor<Backend, 4>, atol: f32, rtol: f32) {
+    fn assert_close_backend<B: BackendTrait>(
+        lhs: Tensor<B, 4>,
+        rhs: Tensor<B, 4>,
+        atol: f32,
+        rtol: f32,
+    ) {
         let lhs_data = lhs
             .to_data()
             .convert::<f32>()
@@ -602,19 +1034,19 @@ mod tests {
         );
     }
 
-    fn reference_recurrent(
-        query: Tensor<Backend, 4>,
-        value: Tensor<Backend, 4>,
-        rho: Tensor<Backend, 4>,
-        decay: Tensor<Backend, 1>,
-    ) -> (Tensor<Backend, 4>, Tensor<Backend, 4>) {
+    fn reference_recurrent<B: BackendTrait>(
+        query: Tensor<B, 4>,
+        value: Tensor<B, 4>,
+        rho: Tensor<B, 4>,
+        decay: Tensor<B, 1>,
+    ) -> (Tensor<B, 4>, Tensor<B, 4>) {
         let [batch, heads, time, _latent] = query.shape().dims::<4>();
         let value_heads = value.shape().dims::<4>()[1];
         let embd = value.shape().dims::<4>()[3];
 
         let decay = decay.reshape([1, heads, 1, 1]);
         let mut state = rho;
-        let mut outputs: Vec<Tensor<Backend, 4>> = Vec::with_capacity(time);
+        let mut outputs: Vec<Tensor<B, 4>> = Vec::with_capacity(time);
 
         for t in 0..time {
             let q_t = query.clone().slice_dim(2, t..t + 1);
@@ -657,8 +1089,8 @@ mod tests {
                 .expect("wgpu fused recurrent output");
         let (reference_context, reference_rho) = reference_recurrent(query, value, rho, decay);
 
-        assert_close(fused.context, reference_context, 2e-4, 2e-4);
-        assert_close(fused.rho, reference_rho, 2e-4, 2e-4);
+        assert_close_backend(fused.context, reference_context, 2e-4, 2e-4);
+        assert_close_backend(fused.rho, reference_rho, 2e-4, 2e-4);
     }
 
     #[test]
@@ -679,8 +1111,8 @@ mod tests {
                 .expect("wgpu fused recurrent output");
         let (reference_context, reference_rho) = reference_recurrent(query, value, rho, decay);
 
-        assert_close(fused.context, reference_context, 2e-4, 2e-4);
-        assert_close(fused.rho, reference_rho, 2e-4, 2e-4);
+        assert_close_backend(fused.context, reference_context, 2e-4, 2e-4);
+        assert_close_backend(fused.rho, reference_rho, 2e-4, 2e-4);
     }
 
     #[test]
@@ -734,5 +1166,53 @@ mod tests {
             256 * 1024 * 1024,
             64 * 1024 * 1024,
         );
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn recurrent_attention_supports_cuda_backend_types() {
+        type CudaBackend = Cuda<f32, i32>;
+        type CudaAutodiffBackend = Autodiff<CudaBackend>;
+
+        assert!(supports_backend::<CudaBackend>());
+        assert!(supports_backend::<CudaAutodiffBackend>());
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn fused_recurrent_matches_reference_with_decay_on_cuda() {
+        type CudaBackend = Cuda<f32, i32>;
+
+        let device = <CudaBackend as BackendTrait>::Device::default();
+        <CudaBackend as BackendTrait>::seed(&device, 7);
+
+        let query = Tensor::<CudaBackend, 4>::random(
+            [1, 2, 6, 12],
+            Distribution::Normal(0.0, 1.0),
+            &device,
+        );
+        let value = Tensor::<CudaBackend, 4>::random(
+            [1, 1, 6, 10],
+            Distribution::Normal(0.0, 1.0),
+            &device,
+        );
+        let rho = Tensor::<CudaBackend, 4>::random(
+            [1, 2, 12, 10],
+            Distribution::Normal(0.0, 1.0),
+            &device,
+        );
+        let decay = Tensor::<CudaBackend, 1>::from_floats([0.95_f32, 0.9], &device);
+
+        let fused = try_fused_recurrent_attention_wgpu::<CudaBackend>(
+            &query,
+            &value,
+            Some(&rho),
+            Some(&decay),
+        )
+        .expect("cuda fused recurrent output");
+        let (reference_context, reference_rho) = reference_recurrent(query, value, rho, decay);
+
+        assert_close_backend(fused.context, reference_context, 2e-2, 2e-2);
+        assert_close_backend(fused.rho, reference_rho, 2e-2, 2e-2);
     }
 }

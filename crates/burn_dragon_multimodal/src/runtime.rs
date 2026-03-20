@@ -38,7 +38,6 @@ use burn_dragon_stream::StreamDataset;
 
 const TRAINING_CONFIG_SNAPSHOT_FILE_NAME: &str = "multimodal_training_config.json";
 const TOKENIZER_SNAPSHOT_FILE_NAME: &str = "multimodal_tokenizer.json";
-const MULTIMODAL_DEVICE_CLEANUP_EVERY_STEPS: usize = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -475,11 +474,6 @@ pub fn artifact_dir(run_dir: &Path) -> PathBuf {
 
 fn maybe_cleanup_multimodal_device<B: BackendTrait>(device: &B::Device, step_count: usize) {
     if step_count == 0 {
-        return;
-    }
-    if MULTIMODAL_DEVICE_CLEANUP_EVERY_STEPS > 1
-        && !step_count.is_multiple_of(MULTIMODAL_DEVICE_CLEANUP_EVERY_STEPS)
-    {
         return;
     }
     let _ = cleanup_device_memory::<B>(device, false);

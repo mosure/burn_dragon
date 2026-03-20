@@ -16,8 +16,7 @@ use serde::Serialize;
 
 pub type VisionResolutionBenchInnerBackend = CubeBackend<WgpuRuntime, f32, i32, u32>;
 pub type VisionResolutionBenchTrainBackend = Autodiff<VisionResolutionBenchInnerBackend>;
-pub type VisionResolutionBenchDevice =
-    <VisionResolutionBenchTrainBackend as BackendTrait>::Device;
+pub type VisionResolutionBenchDevice = <VisionResolutionBenchTrainBackend as BackendTrait>::Device;
 
 #[derive(Clone, Debug)]
 pub struct VisionResolutionBenchConfig {
@@ -198,9 +197,9 @@ fn run_case(
     bench: &VisionResolutionBenchConfig,
 ) -> VisionResolutionBenchCaseResult {
     let config = mutate_resolution(base_config.clone(), resolution, batch_size);
-    config.validate().unwrap_or_else(|err| {
-        panic!("invalid mutated config at resolution {resolution}: {err}")
-    });
+    config
+        .validate()
+        .unwrap_or_else(|err| panic!("invalid mutated config at resolution {resolution}: {err}"));
 
     let vision = config.vision.build();
     let rollout_steps = config
@@ -228,22 +227,22 @@ fn run_case(
         Distribution::Normal(0.0, 1.0),
         device,
     );
-    let model_inner = VisionDragon::<VisionResolutionBenchInnerBackend>::new(vision.clone(), device);
+    let model_inner =
+        VisionDragon::<VisionResolutionBenchInnerBackend>::new(vision.clone(), device);
     for _ in 0..bench.warmup {
         sync_tensor(
             model_inner
-                .forward_images_steps_rollout(
-                    images_inner.clone(),
-                    rollout_steps,
-                    backprop_steps,
-                )
+                .forward_images_steps_rollout(images_inner.clone(), rollout_steps, backprop_steps)
                 .patch_tokens
                 .sum(),
         );
     }
     let forward_ns = measure_avg(bench.iterations, || {
-        let output =
-            model_inner.forward_images_steps_rollout(images_inner.clone(), rollout_steps, backprop_steps);
+        let output = model_inner.forward_images_steps_rollout(
+            images_inner.clone(),
+            rollout_steps,
+            backprop_steps,
+        );
         sync_tensor(output.patch_tokens.sum() + output.cls_token.sum());
     });
 

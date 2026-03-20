@@ -685,7 +685,7 @@ pub fn reference_structured_pyramid_rho_step<B: Backend>(
 
 /// Fused forward boundary for the structured pyramid recurrent kernel family.
 ///
-/// This is intentionally a topology-specific hook owned by `burn_dragon_wgpu`. The current
+/// This is intentionally a topology-specific hook owned by `burn_dragon_kernel`. The current
 /// implementation is reference-only; a future fused path MUST preserve this contract so the vision
 /// adapter keeps dense-state merge logic outside the kernel layer.
 pub fn try_fused_structured_pyramid_rho_step_wgpu<B: Backend>(
@@ -1946,9 +1946,6 @@ fn update_hub_from_spatial_updates<B: Backend>(
         patch_weights,
         coarse_weights,
         hub_count,
-        hub_rho.shape().dims::<4>()[2],
-        hub_rho.shape().dims::<4>()[3],
-        &hub_rho.device(),
     )
     .unwrap_or_else(zero_delta);
     target_major_decay_add(hub_rho, delta, decay)
@@ -1977,9 +1974,6 @@ fn weighted_global_sum_pair<B: Backend>(
     patch_weights: Option<Tensor<B, 4>>,
     coarse_weights: Option<Tensor<B, 4>>,
     hub_count: usize,
-    rank: usize,
-    value_dim: usize,
-    device: &B::Device,
 ) -> Option<Tensor<B, 4>> {
     match (patch_update, coarse_update) {
         (None, None) => None,
@@ -2001,10 +1995,8 @@ fn weighted_global_sum_pair<B: Backend>(
                 coarse_width,
             ] = coarse.shape().dims::<5>();
             if coarse_batch != batch
-                || patch_rank != rank
-                || coarse_rank != rank
-                || patch_value_dim != value_dim
-                || coarse_value_dim != value_dim
+                || patch_rank != coarse_rank
+                || patch_value_dim != coarse_value_dim
             {
                 return Some(
                     weighted_global_sum(patch, patch_weights, hub_count).add(weighted_global_sum(
@@ -2017,18 +2009,22 @@ fn weighted_global_sum_pair<B: Backend>(
             let patch_tokens = patch_height * patch_width;
             let coarse_tokens = coarse_height * coarse_width;
             let patch_weights = patch_weights.unwrap_or_else(|| {
-                Tensor::<B, 4>::ones([batch, hub_count.max(1), patch_height, patch_width], device)
-                    .div_scalar(hub_count.max(1) as f32)
+                Tensor::<B, 4>::ones(
+                    [batch, hub_count.max(1), patch_height, patch_width],
+                    &patch.device(),
+                )
+                .div_scalar(hub_count.max(1) as f32)
             });
             let coarse_weights = coarse_weights.unwrap_or_else(|| {
                 Tensor::<B, 4>::ones(
                     [batch, hub_count.max(1), coarse_height, coarse_width],
-                    device,
+                    &coarse.device(),
                 )
                 .div_scalar(hub_count.max(1) as f32)
             });
-            let patch_update = patch.reshape([batch, rank, value_dim, patch_tokens]);
-            let coarse_update = coarse.reshape([batch, rank, value_dim, coarse_tokens]);
+            let patch_update = patch.reshape([batch, patch_rank, patch_value_dim, patch_tokens]);
+            let coarse_update =
+                coarse.reshape([batch, coarse_rank, coarse_value_dim, coarse_tokens]);
             let patch_weights = patch_weights.reshape([batch, hub_count.max(1), patch_tokens]);
             let coarse_weights = coarse_weights.reshape([batch, hub_count.max(1), coarse_tokens]);
             let update = Tensor::cat(vec![patch_update, coarse_update], 3).unsqueeze_dim::<5>(1);
@@ -2425,9 +2421,6 @@ mod tests {
             Some(patch_weights.clone()),
             Some(coarse_weights.clone()),
             2,
-            2,
-            1,
-            &device,
         )
         .expect("combined update");
 

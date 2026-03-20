@@ -33,31 +33,40 @@ pub use burn_dragon_train::train::gdpo::{gdpo_cpu_fallbacks, gdpo_reset_cpu_fall
 pub use burn_dragon_train::train::metrics::{loss_trace_len, loss_trace_reset, loss_trace_take};
 pub(crate) use pipeline::resolve_vision_rollout;
 pub use saccade::SaccadeFoveationSampler;
+#[cfg(all(feature = "benchmark", feature = "cuda"))]
+pub use vision::run_vision_distill_decode_probe_cuda_with_seed;
 pub use vision::train::train_vision_backend;
 #[cfg(feature = "integration_test")]
 pub use vision::train::train_vision_backend_for_test;
 pub use vision::{
     CifarBatch, CifarDataLoader, CifarDataset, CifarSplit, CifarType, DinoFeatureStore,
     ImageNetAugmentations, ImageNetBatch, ImageNetDataLoader, ImageNetDataset,
-    ImageNetDatasetConfig, ImageNetSplit, MovingMnistRenderedClip, MovingMnistSplit,
-    MovingMnistVideoDataLoader, MovingMnistVideoDataset, MovingMnistVideoDatasetConfig,
-    VideoClipBatch, VideoTargetHorizonCurriculum, VisionNormalize, VisionVideoTrainProfileSnapshot,
-    video_train_profile_reset, video_train_profile_snapshot,
+    ImageNetDatasetConfig, ImageNetSplit, ImageNetTeacherTargetBatch, ImageTeacherTargetStore,
+    MovingMnistRenderedClip, MovingMnistSplit, MovingMnistVideoDataLoader, MovingMnistVideoDataset,
+    MovingMnistVideoDatasetConfig, VideoClipBatch, VideoTargetHorizonCurriculum, VisionNormalize,
+    VisionVideoTrainProfileSnapshot, video_train_profile_reset, video_train_profile_snapshot,
 };
-pub use vision::{VisionDistillCheckpointEvalSummary, eval_vision_distill_checkpoint_backend};
 #[cfg(feature = "benchmark")]
 pub use vision::{
-    VISION_ARTIFACT_SCHEMA_VERSION, VisionArtifactHeader,
+    VISION_ARTIFACT_SCHEMA_VERSION, VISION_DISTILL_DECODE_PROBE_HARNESS_VERSION,
+    VISION_DISTILL_FEATURE_PROBE_HARNESS_VERSION, VISION_DISTILL_LINEAR_PROBE_HARNESS_VERSION,
+    VisionArtifactHeader, VisionDistillDecodeProbeReport, VisionDistillDecodeProbeStepMetrics,
     VisionDistillDeploySmokePrecision, VisionDistillDeploySmokeReport,
-    VisionDistillFeatureProbeAccuracyReport, VisionDistillFeatureProbeBackend,
-    VisionDistillFeatureProbeDevice, VisionDistillFeatureProbeReport,
-    VisionDistillFeatureProbeStepAccuracy,
-    VisionDistillServingBenchmarkBackend, VisionDistillServingBenchmarkDevice,
-    VisionDistillServingBenchmarkReport, VisionDistillServingStepMetrics,
-    push_vision_artifact_markdown_prelude,
+    VisionDistillFeatureExportReport, VisionDistillFeatureProbeAccuracyReport,
+    VisionDistillFeatureProbeBackend, VisionDistillFeatureProbeDevice,
+    VisionDistillFeatureProbeReport, VisionDistillFeatureProbeStepAccuracy,
+    VisionDistillLinearProbeAccuracyReport, VisionDistillLinearProbeReport,
+    VisionDistillLinearProbeStepAccuracy, VisionDistillServingBenchmarkBackend,
+    VisionDistillServingBenchmarkDevice, VisionDistillServingBenchmarkReport,
+    VisionDistillServingStepMetrics, export_vision_distill_feature_embeddings,
+    push_vision_artifact_markdown_prelude, run_vision_distill_decode_probe_with_seed,
     run_vision_distill_deploy_smoke, run_vision_distill_feature_probe,
-    run_vision_distill_serving_benchmark,
+    run_vision_distill_feature_probe_for_teacher_with_seed,
+    run_vision_distill_feature_probe_with_seed, run_vision_distill_linear_probe,
+    run_vision_distill_linear_probe_for_teacher_with_seed,
+    run_vision_distill_linear_probe_with_seed, run_vision_distill_serving_benchmark,
 };
+pub use vision::{VisionDistillCheckpointEvalSummary, eval_vision_distill_checkpoint_backend};
 pub(crate) use vision::{
     VisionDistillModel, VisionLejepaInit, VisionLejepaModel, VisionReconstructionInit,
 };

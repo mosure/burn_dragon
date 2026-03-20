@@ -332,7 +332,7 @@ pub(crate) fn rollout_losses_train_trm_chunk<B: AutodiffBackend>(
 
         if recon_interval > 0 && global_samples > 0 {
             let chunk_idx = steps_done / trm_chunk_size;
-            if (chunk_idx + 1).is_multiple_of(recon_interval) {
+            if (chunk_idx + 1) % recon_interval == 0 {
                 let cache_read =
                     cache
                         .clone()
@@ -374,7 +374,7 @@ pub(crate) fn rollout_losses_train_trm_chunk<B: AutodiffBackend>(
         }
 
         steps_done += chunk_len;
-        let chunk_end = steps_done.is_multiple_of(chunk_steps) || steps_done == rollout_steps;
+        let chunk_end = steps_done % chunk_steps == 0 || steps_done == rollout_steps;
         if chunk_end {
             let local_term = chunk_local_loss_sum
                 .clone()

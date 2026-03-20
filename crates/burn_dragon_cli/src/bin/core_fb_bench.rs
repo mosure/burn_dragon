@@ -8,7 +8,7 @@ use burn::tensor::{Int, Tensor, TensorData};
 use burn_autodiff::Autodiff;
 use burn_dragon::core::{BDH, BDHConfig, FusedKernelConfig};
 use burn_dragon::language::loss::language_model_loss;
-use burn_dragon_wgpu::api::recurrent::{recurrent_profile_reset, recurrent_profile_snapshot};
+use burn_dragon_kernel::api::recurrent::{recurrent_profile_reset, recurrent_profile_snapshot};
 use burn_wgpu::{CubeBackend, RuntimeOptions, WgpuRuntime, graphics};
 use clap::Parser;
 use serde::Serialize;

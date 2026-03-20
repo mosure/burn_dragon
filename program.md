@@ -78,6 +78,24 @@ Treat this as search under uncertainty.
 
 When choosing between ideas, prioritize expected information gain per unit time.
 
+## Evidence discipline
+
+Do not confuse any of the following:
+
+- a checked-in config
+- a roadmap phase
+- a launch-ready path
+- a completed run
+- a validated frontier result
+
+Report each state explicitly.
+
+If a large-scale run is blocked by missing data, missing teacher exports, invalid augmentation
+contracts, or runtime failures, say so directly. Do not write as if the model already exists.
+
+When a branch is only supported by one small surface, say that too. Promote claims only after the
+branch survives the right validation surface.
+
 ## Build once, then reuse binaries
 
 Avoid paying Cargo startup cost every run when working through a loop.
@@ -167,6 +185,30 @@ Examples of acceptable promotions:
 - a more fused or less host-fragmented executor
 - a more realistic multi-stage memory path instead of a toy single-stage branch
 
+## Current vision frontier policy
+
+The current standing read for vision is:
+
+- the old dense vision Dragon line is a control and systems-test line, not the main modeling bet
+- the graph-backed scene-slot family is the current main image line
+- the graph bridge is the current promoted quality model
+- the plain scene-slot graph is the simpler runtime/control baseline
+
+Treat this as current evidence, not a permanent freeze. Future agents may overturn it, but only
+with stronger evidence than the current broader-validation read.
+
+When comparing new vision variants, the default baseline pair should usually be:
+
+1. plain scene-slot graph
+2. graph bridge
+
+Do not spend long cycles retuning dense vision unless the goal is:
+
+- regression detection
+- evaluator hardening
+- systems comparison
+- testing whether a new idea helps the dense control too
+
 ### Vision performance protocol
 
 When a vision branch clears the old toy floor but still shows bursty, low-power behavior, treat it as an execution problem first, not an architecture-selection problem.
@@ -186,6 +228,57 @@ Preferred order of attack:
 3. fuse the hub/global path
 4. reduce host-driven recurrent substep orchestration
 5. only then resume architecture selection inside the denser training regime
+
+### Vision promotion rules
+
+Do not promote a new vision model line on a single easy surface.
+
+Prefer this minimum promotion bar:
+
+1. one matched fixed-time win on the current main surface
+2. confirmation on at least one broader non-Imagenette surface
+3. confirmation on at least one second resolution
+
+If a harder surface is obviously underfit under the short recipe, run a modest longer-horizon
+follow-up before declaring the branch weak. Underfit short runs are screening signals, not final
+judgments.
+
+At small and medium scales, prioritize:
+
+1. quality reached in fixed train time
+2. quality reached after a modest longer-horizon follow-up
+3. stability across seeds
+4. only then small throughput deltas
+
+Do not let tiny throughput differences dominate model selection while the architecture question is
+still moving materially on quality.
+
+### Vision multiteacher discipline
+
+Feature-file teachers and strong online augmentations are not interchangeable.
+
+If any teacher path is feature-file backed:
+
+- treat deterministic augmentation as the valid default unless the code explicitly supports
+  alignment-safe online teachers
+- do not describe the run as a strong-augmentation multiteacher recipe
+
+For multiteacher work, distinguish clearly between:
+
+- shared-head supervision in one projection space
+- teacher-specific decoder heads over a shared recurrent state
+
+Those are different capability levels and should not be reported as the same thing.
+
+The current preferred multimode vision recipe is:
+
+1. primary DINOv2 `patch_and_cls`
+2. auxiliary SigLIP2 `patch_and_cls` with `decoder_mode = "dedicated_spatial_projection"` when
+   full spatial features are available
+3. auxiliary SigLIP2 `global_only` only as the lower-storage fallback
+
+Do not treat the global-only auxiliary path as the main architecture if the spatial path is
+available. Treat it as the storage-constrained fallback.
 
 ## Baseline policy
 

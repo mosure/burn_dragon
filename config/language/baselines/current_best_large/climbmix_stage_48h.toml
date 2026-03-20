@@ -1,0 +1,12 @@
+extends = ["climbmix_stage_base.toml"]
+
+[training]
+# Measured stage-2 throughput is ~3.0k steps/hour on the promoted large rung.
+# 135,000 steps keeps the ClimbMix stage around 44-45 hours, which leaves a
+# small NCA warm-start stage and stage-transition overhead within a ~48h bundle.
+max_iters = 135000
+
+[optimizer.lr_schedule]
+type = "cosine"
+min_lr = 0.00003
+num_iters = 135000

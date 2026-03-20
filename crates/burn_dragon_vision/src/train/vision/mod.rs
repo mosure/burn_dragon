@@ -17,29 +17,17 @@ pub(crate) mod video;
 pub use image_data::{
     CifarBatch, CifarDataLoader, CifarDataset, CifarSplit, CifarType, DinoFeatureStore,
     ImageNetAugmentations, ImageNetBatch, ImageNetDataLoader, ImageNetDataset,
-    ImageNetDatasetConfig, ImageNetSplit, VisionNormalize,
+    ImageNetDatasetConfig, ImageNetSplit, ImageNetTeacherTargetBatch, ImageTeacherTargetStore,
+    VisionNormalize,
 };
 
-pub(crate) use dataset::maybe_download_vision_dataset;
-pub use distill_runtime::{
-    VisionDistillCheckpointEvalSummary, eval_vision_distill_checkpoint_backend,
-};
 #[cfg(feature = "benchmark")]
 pub use artifact::{
     VISION_ARTIFACT_SCHEMA_VERSION, VisionArtifactHeader, push_vision_artifact_markdown_prelude,
 };
-#[cfg(feature = "benchmark")]
-pub use serving::{
-    VisionDistillDeploySmokePrecision, VisionDistillDeploySmokeReport,
-    VisionDistillServingBenchmarkBackend, VisionDistillServingBenchmarkDevice,
-    VisionDistillServingBenchmarkReport, VisionDistillServingStepMetrics,
-    run_vision_distill_deploy_smoke, run_vision_distill_serving_benchmark,
-};
-#[cfg(feature = "benchmark")]
-pub use probe::{
-    VisionDistillFeatureProbeAccuracyReport, VisionDistillFeatureProbeBackend,
-    VisionDistillFeatureProbeDevice, VisionDistillFeatureProbeReport,
-    VisionDistillFeatureProbeStepAccuracy, run_vision_distill_feature_probe,
+pub(crate) use dataset::maybe_download_vision_dataset;
+pub use distill_runtime::{
+    VisionDistillCheckpointEvalSummary, eval_vision_distill_checkpoint_backend,
 };
 pub(crate) use ema::{
     ema_update_module, init_momentum_teacher, restore_optional_teacher_from_student,
@@ -57,6 +45,30 @@ pub(crate) use models::{
     VisionMaeLosses, VisionMaeModel, VisionProbe, VisionReconstructionHead,
     VisionReconstructionInit, VisionSaccadeHead, VisionSaccadeInputProjection,
     VisionSaccadeProjection,
+};
+#[cfg(all(feature = "benchmark", feature = "cuda"))]
+pub use probe::run_vision_distill_decode_probe_cuda_with_seed;
+#[cfg(feature = "benchmark")]
+pub use probe::{
+    VISION_DISTILL_DECODE_PROBE_HARNESS_VERSION, VISION_DISTILL_FEATURE_PROBE_HARNESS_VERSION,
+    VISION_DISTILL_LINEAR_PROBE_HARNESS_VERSION, VisionDistillDecodeProbeReport,
+    VisionDistillDecodeProbeStepMetrics, VisionDistillFeatureExportReport,
+    VisionDistillFeatureProbeAccuracyReport, VisionDistillFeatureProbeBackend,
+    VisionDistillFeatureProbeDevice, VisionDistillFeatureProbeReport,
+    VisionDistillFeatureProbeStepAccuracy, VisionDistillLinearProbeAccuracyReport,
+    VisionDistillLinearProbeReport, VisionDistillLinearProbeStepAccuracy,
+    export_vision_distill_feature_embeddings, run_vision_distill_decode_probe_with_seed,
+    run_vision_distill_feature_probe, run_vision_distill_feature_probe_for_teacher_with_seed,
+    run_vision_distill_feature_probe_with_seed, run_vision_distill_linear_probe,
+    run_vision_distill_linear_probe_for_teacher_with_seed,
+    run_vision_distill_linear_probe_with_seed,
+};
+#[cfg(feature = "benchmark")]
+pub use serving::{
+    VisionDistillDeploySmokePrecision, VisionDistillDeploySmokeReport,
+    VisionDistillServingBenchmarkBackend, VisionDistillServingBenchmarkDevice,
+    VisionDistillServingBenchmarkReport, VisionDistillServingStepMetrics,
+    run_vision_distill_deploy_smoke, run_vision_distill_serving_benchmark,
 };
 pub(crate) use train::train_vision_backend;
 #[cfg(feature = "integration_test")]

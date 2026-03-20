@@ -1,8 +1,9 @@
 [package]
 name = "burn_dragon_sudoku"
 description = "Sudoku datasets and training for burn_dragon"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
+rust-version = "1.85"
 autobins = false
 authors = ["mosure <mitchell@mosure.me>"]
 license = "MIT OR Apache-2.0"
@@ -32,9 +33,9 @@ cuda = ["burn-cuda", "burn_dragon_core/cuda", "burn_dragon_train/cuda", "dep:cub
 integration_test = ["train"]
 
 [dependencies]
-burn_dragon_core = { path = "../burn_dragon_core", version = "0.4.0", default-features = false }
-burn_dragon_train = { path = "../burn_dragon_train", version = "0.4.0", default-features = false, optional = true }
-burn_dragon_checkpoint = { path = "../burn_dragon_checkpoint", version = "0.4.0", default-features = false, optional = true }
+burn_dragon_core = { path = "../burn_dragon_core", version = "0.5.0", default-features = false }
+burn_dragon_train = { path = "../burn_dragon_train", version = "0.5.0", default-features = false, optional = true }
+burn_dragon_checkpoint = { path = "../burn_dragon_checkpoint", version = "0.5.0", default-features = false, optional = true }
 
 anyhow = "1"
 rand = "0.8"
@@ -55,7 +56,7 @@ burn-ndarray = { version = "0.21.0-pre.2", optional = true }
 burn-train = { version = "0.21.0-pre.2", optional = true, default-features = false, features = ["tui"] }
 burn-cuda = { version = "0.21.0-pre.2", optional = true, default-features = false, features = ["std"] }
 burn-wgpu = { version = "0.21.0-pre.2", optional = true, default-features = false, features = ["fusion", "std"] }
-cubecl = { version = "0.8", default-features = false, optional = true, features = ["std", "cuda"] }
+cubecl = { version = "0.10.0-pre.2", default-features = false, optional = true, features = ["std", "cuda"] }
 
 [dev-dependencies]
 tempfile = "3"

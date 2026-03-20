@@ -125,8 +125,13 @@ impl ShakespeareDataset {
         self.block_size
     }
 
-    pub fn tokens(&self) -> &[u32] {
-        &self.tokens
+    pub fn token_count(&self) -> usize {
+        self.tokens.len()
+    }
+
+    pub fn copy_token_range(&self, start: usize, dst: &mut [u32]) {
+        let end = start + dst.len();
+        dst.copy_from_slice(&self.tokens[start..end]);
     }
 
     pub fn train_len(&self) -> usize {
@@ -155,8 +160,13 @@ impl TokenSequenceDataset for ShakespeareDataset {
         self.tokenizer.clone()
     }
 
-    fn tokens(&self) -> &[u32] {
-        &self.tokens
+    fn token_count(&self) -> usize {
+        self.tokens.len()
+    }
+
+    fn copy_token_range(&self, start: usize, dst: &mut [u32]) {
+        let end = start + dst.len();
+        dst.copy_from_slice(&self.tokens[start..end]);
     }
 
     fn train_len(&self) -> usize {

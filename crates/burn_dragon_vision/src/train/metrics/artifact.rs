@@ -29,7 +29,7 @@ fn should_emit_metric(metadata: &MetricMetadata, every: usize) -> bool {
     every <= 1
         || metadata
             .iteration
-            .is_some_and(|iteration| iteration.is_multiple_of(every))
+            .is_some_and(|iteration| iteration % every == 0)
 }
 
 fn metric_epoch(metadata: &MetricMetadata) -> usize {

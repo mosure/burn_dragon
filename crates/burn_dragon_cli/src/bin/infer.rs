@@ -17,16 +17,18 @@ use burn_dragon::checkpoint::{
     candidate_burnpack_paths, try_load_model_from_burnpack_candidates,
 };
 use burn_dragon::core::BDH;
+#[cfg(feature = "viz")]
+use burn_dragon::language::build_model_config;
 use burn_dragon::language::{
     ContextStrategy, ContextStrategyConfig, GenerationConfig, TrainingConfig,
-    apply_wgpu_fused_core_override, build_model_config, build_model_config_with_tokenizer,
-    default_checkpoint_dir, generate_text, generate_tokens_chunked, generation_profile_reset,
-    generation_profile_snapshot, load_training_config_for_checkpoint, prefill_state,
-    resolve_context_strategy, sample_next_token,
+    apply_wgpu_fused_core_override, build_model_config_with_tokenizer, default_checkpoint_dir,
+    generate_text, generate_tokens_chunked, generation_profile_reset, generation_profile_snapshot,
+    load_training_config_for_checkpoint, prefill_state, resolve_context_strategy,
+    sample_next_token,
 };
 use burn_dragon::train::WgpuGenerationExecutor;
 use burn_dragon::train::wgpu::init_runtime;
-use burn_dragon_wgpu::api::recurrent::{recurrent_profile_reset, recurrent_profile_snapshot};
+use burn_dragon_kernel::api::recurrent::{recurrent_profile_reset, recurrent_profile_snapshot};
 use burn_wgpu::Wgpu;
 
 #[cfg(feature = "cuda")]
@@ -129,7 +131,7 @@ fn run() -> Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
+mod path_tests {
     use super::default_or_explicit_config_paths;
     use std::path::PathBuf;
 

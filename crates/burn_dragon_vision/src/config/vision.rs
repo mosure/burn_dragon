@@ -8,14 +8,15 @@ use burn::tensor::backend::{AutodiffBackend, Backend};
 use serde::{Deserialize, Serialize};
 use toml::Value;
 
+use crate::model::vision::VisionTrmClsReadoutKind;
 use crate::{
     SpatialPositionalEncodingKind, VisionAttentionMode, VisionBackboneKind, VisionDragonConfig,
     VisionLatentActivation, VisionPatchEmbedMode, VisionRhoStreamConfig, VisionTrmGraphConfig,
     VisionTrmGridMismatchPolicy,
 };
 use burn_dragon_core::{
-    DragonNormConfig, FusedAttentionExecutor, FusedKernelConfig,
-    ManifoldHyperConnectionCoefficientPolicy,
+    DragonNormConfig, FusedAttentionExecutor, FusedKernelConfig, FusedProjectionExecutor,
+    LowrankGradInputExecutor, ManifoldHyperConnectionCoefficientPolicy,
 };
 use burn_dragon_train::{
     GdpoConfig, GdpoHardGate, OptimizerConfig, VisionArtifactOutputMode, WgpuRuntimeConfig,
@@ -1747,6 +1748,10 @@ pub struct VisionModelConfig {
     pub fused_kernels: bool,
     #[serde(default)]
     pub fused_attention_executor: FusedAttentionExecutor,
+    #[serde(default)]
+    pub fused_projection_executor: FusedProjectionExecutor,
+    #[serde(default)]
+    pub fused_lowrank_grad_input_executor: LowrankGradInputExecutor,
     pub relu_threshold: f32,
     pub mhc: VisionManifoldHyperConnectionsConfig,
     pub trm_graph: VisionTrmGraphConfig,
@@ -1785,6 +1790,8 @@ impl Default for VisionModelConfig {
             use_alibi: true,
             fused_kernels: false,
             fused_attention_executor: FusedAttentionExecutor::default(),
+            fused_projection_executor: FusedProjectionExecutor::default(),
+            fused_lowrank_grad_input_executor: LowrankGradInputExecutor::default(),
             relu_threshold: 0.0,
             mhc: VisionManifoldHyperConnectionsConfig::default(),
             trm_graph: VisionTrmGraphConfig::default(),
@@ -1794,6 +1801,194 @@ impl Default for VisionModelConfig {
 }
 
 impl VisionModelConfig {
+    /// Construct the matched 224px scene-slot graph control on the training-facing surface.
+    pub fn scene_slot_graph_baseline_224() -> Self {
+        let mut config = Self::default();
+        config.apply_scene_slot_graph_baseline_224();
+        config
+    }
+
+    /// Construct the promoted 224px graph-bridge image baseline on the training-facing surface.
+    pub fn scene_slot_graph_bridge_baseline_224() -> Self {
+        let mut config = Self::default();
+        config.apply_scene_slot_graph_bridge_baseline_224();
+        config
+    }
+
+    /// Construct a medium-width ImageNet-1k graph-bridge launch preset for 280px multi-teacher
+    /// distillation.
+    pub fn scene_slot_graph_bridge_multiteacher_medium_280() -> Self {
+        let mut config = Self::default();
+        config.apply_scene_slot_graph_bridge_multiteacher_medium_280();
+        config
+    }
+
+    /// Construct a base-width ImageNet-1k graph-bridge launch preset for 336px multi-teacher
+    /// distillation.
+    pub fn scene_slot_graph_bridge_multiteacher_base_336() -> Self {
+        let mut config = Self::default();
+        config.apply_scene_slot_graph_bridge_multiteacher_base_336();
+        config
+    }
+
+    /// Apply the validated scene-slot graph baseline to the training-facing config surface.
+    pub fn apply_scene_slot_graph_preset(&mut self) -> &mut Self {
+        self.backbone = Some(VisionBackboneKind::Pyramid);
+        self.steps = self.steps.max(3);
+        self.trm_graph = VisionTrmGraphConfig::scene_slot_graph_preset();
+        self.rho_stream = VisionRhoStreamConfig::default();
+        self
+    }
+
+    /// Apply the promoted graph-bridge preset derived from the broader validation sweeps.
+    pub fn apply_scene_slot_graph_bridge_preset(&mut self) -> &mut Self {
+        self.backbone = Some(VisionBackboneKind::Pyramid);
+        self.steps = self.steps.max(4);
+        self.trm_graph = VisionTrmGraphConfig::scene_slot_graph_bridge_preset();
+        self.rho_stream = VisionRhoStreamConfig::default();
+        self
+    }
+
+    /// Apply the matched 224px scene-slot graph control baseline.
+    pub fn apply_scene_slot_graph_baseline_224(&mut self) -> &mut Self {
+        self.image_size = 224;
+        self.patch_size = 16;
+        self.patch_embed_mode = VisionPatchEmbedMode::default();
+        self.backbone = Some(VisionBackboneKind::Pyramid);
+        self.in_channels = 3;
+        self.embed_dim = 160;
+        self.steps = 3;
+        self.n_head = 5;
+        self.mlp_internal_dim_multiplier = 4;
+        self.dropout = 0.1;
+        self.projection_dim = 384;
+        self.projection_hidden_dim = 512;
+        self.use_cls_token = true;
+        self.cls_sync_alpha = 0.0;
+        self.num_eyes = 1;
+        self.cross_eye_steps = 0;
+        self.token_state_norm = true;
+        self.latent_activation = VisionLatentActivation::default();
+        self.pos_encoding = SpatialPositionalEncodingKind::Learned2d;
+        let grid = self.image_size.div_ceil(self.patch_size).max(1);
+        self.pos_max_height = Some(grid);
+        self.pos_max_width = Some(grid);
+        self.attention_mode = VisionAttentionMode::RowL1;
+        self.allow_softmax_attention = false;
+        self.use_alibi = true;
+        self.fused_kernels = false;
+        self.relu_threshold = 0.0;
+        self.apply_scene_slot_graph_preset();
+        self
+    }
+
+    /// Apply the promoted 224px graph-bridge image baseline.
+    pub fn apply_scene_slot_graph_bridge_baseline_224(&mut self) -> &mut Self {
+        self.image_size = 224;
+        self.patch_size = 16;
+        self.patch_embed_mode = VisionPatchEmbedMode::default();
+        self.backbone = Some(VisionBackboneKind::Pyramid);
+        self.in_channels = 3;
+        self.embed_dim = 160;
+        self.steps = 4;
+        self.n_head = 5;
+        self.mlp_internal_dim_multiplier = 4;
+        self.dropout = 0.1;
+        self.projection_dim = 384;
+        self.projection_hidden_dim = 512;
+        self.use_cls_token = true;
+        self.cls_sync_alpha = 0.0;
+        self.num_eyes = 1;
+        self.cross_eye_steps = 0;
+        self.token_state_norm = true;
+        self.latent_activation = VisionLatentActivation::default();
+        self.pos_encoding = SpatialPositionalEncodingKind::Learned2d;
+        let grid = self.image_size.div_ceil(self.patch_size).max(1);
+        self.pos_max_height = Some(grid);
+        self.pos_max_width = Some(grid);
+        self.attention_mode = VisionAttentionMode::RowL1;
+        self.allow_softmax_attention = false;
+        self.use_alibi = true;
+        self.fused_kernels = false;
+        self.relu_threshold = 0.0;
+        self.apply_scene_slot_graph_bridge_preset();
+        self
+    }
+
+    /// Apply the medium-width ImageNet-1k graph-bridge launch preset.
+    pub fn apply_scene_slot_graph_bridge_multiteacher_medium_280(&mut self) -> &mut Self {
+        self.image_size = 280;
+        self.patch_size = 14;
+        self.patch_embed_mode = VisionPatchEmbedMode::default();
+        self.backbone = Some(VisionBackboneKind::Pyramid);
+        self.in_channels = 3;
+        self.embed_dim = 320;
+        self.steps = 4;
+        self.n_head = 8;
+        self.mlp_internal_dim_multiplier = 4;
+        self.dropout = 0.0;
+        self.projection_dim = 768;
+        self.projection_hidden_dim = 1536;
+        self.use_cls_token = true;
+        self.cls_sync_alpha = 0.0;
+        self.num_eyes = 1;
+        self.cross_eye_steps = 0;
+        self.token_state_norm = true;
+        self.latent_activation = VisionLatentActivation::default();
+        self.pos_encoding = SpatialPositionalEncodingKind::Learned2d;
+        let grid = self.image_size.div_ceil(self.patch_size).max(1);
+        self.pos_max_height = Some(grid);
+        self.pos_max_width = Some(grid);
+        self.attention_mode = VisionAttentionMode::RowL1;
+        self.allow_softmax_attention = false;
+        self.use_alibi = true;
+        self.fused_kernels = false;
+        self.relu_threshold = 0.0;
+        self.apply_scene_slot_graph_bridge_preset();
+        self.trm_graph.cls_readout = VisionTrmClsReadoutKind::HubAndCoarse;
+        self.trm_graph.hub_count = 12;
+        self.trm_graph.rank = 12;
+        self.trm_graph.value_dim = 64;
+        self
+    }
+
+    /// Apply the base-width ImageNet-1k graph-bridge launch preset.
+    pub fn apply_scene_slot_graph_bridge_multiteacher_base_336(&mut self) -> &mut Self {
+        self.image_size = 336;
+        self.patch_size = 14;
+        self.patch_embed_mode = VisionPatchEmbedMode::default();
+        self.backbone = Some(VisionBackboneKind::Pyramid);
+        self.in_channels = 3;
+        self.embed_dim = 384;
+        self.steps = 5;
+        self.n_head = 12;
+        self.mlp_internal_dim_multiplier = 4;
+        self.dropout = 0.0;
+        self.projection_dim = 768;
+        self.projection_hidden_dim = 2048;
+        self.use_cls_token = true;
+        self.cls_sync_alpha = 0.0;
+        self.num_eyes = 1;
+        self.cross_eye_steps = 0;
+        self.token_state_norm = true;
+        self.latent_activation = VisionLatentActivation::default();
+        self.pos_encoding = SpatialPositionalEncodingKind::Learned2d;
+        let grid = self.image_size.div_ceil(self.patch_size).max(1);
+        self.pos_max_height = Some(grid);
+        self.pos_max_width = Some(grid);
+        self.attention_mode = VisionAttentionMode::RowL1;
+        self.allow_softmax_attention = false;
+        self.use_alibi = true;
+        self.fused_kernels = false;
+        self.relu_threshold = 0.0;
+        self.apply_scene_slot_graph_bridge_preset();
+        self.trm_graph.cls_readout = VisionTrmClsReadoutKind::HubAndCoarse;
+        self.trm_graph.hub_count = 16;
+        self.trm_graph.rank = 16;
+        self.trm_graph.value_dim = 96;
+        self
+    }
+
     pub fn resolved_backbone_kind(&self) -> Result<VisionBackboneKind> {
         let legacy_pyramid = self.trm_graph.enabled;
         let legacy_cellular = self.rho_stream.enabled;
@@ -1841,6 +2036,8 @@ impl VisionModelConfig {
         let kernels = FusedKernelConfig {
             enabled: self.fused_kernels,
             attention_executor: self.fused_attention_executor,
+            projection_executor: self.fused_projection_executor,
+            lowrank_grad_input_executor: self.fused_lowrank_grad_input_executor,
             relu_threshold: self.relu_threshold,
             ..Default::default()
         };

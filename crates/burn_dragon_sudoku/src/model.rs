@@ -6,7 +6,7 @@ use std::f32::consts::PI;
 
 use burn_dragon_core::{
     BDH, BDHConfig, FusedKernelConfig, HaltHead, ManifoldHyperConnections,
-    ManifoldHyperConnectionsConfig, ModelState,
+    ManifoldHyperConnectionsConfig, ModelState, SequenceKernelKind,
 };
 use burn_dragon_train::WgpuRuntimeConfig;
 use burn_dragon_train::wgpu::apply_wgpu_fused_core_override;
@@ -106,7 +106,7 @@ impl SudokuModelConfig {
         let total = self.neuron_space_dim();
         let heads = self.n_head.max(1);
         assert!(
-            total.is_multiple_of(heads),
+            total % heads == 0,
             "Sudoku neuron space must be divisible by the number of heads"
         );
         total / heads
@@ -126,6 +126,7 @@ impl SudokuModelConfig {
             dropout: self.dropout,
             n_head: self.n_head,
             mlp_internal_dim_multiplier: self.mlp_internal_dim_multiplier,
+            latent_fanout_schedule: None,
             n_expert: 1,
             vocab_size: VOCAB_SIZE,
             rollout_fast_steps_per_slow_step: 1,
@@ -135,6 +136,8 @@ impl SudokuModelConfig {
             y_neuron_recurrence: Default::default(),
             clocked_slow_memory: Default::default(),
             summary_memory: Default::default(),
+            sequence_kernel: SequenceKernelKind::default(),
+            mamba: Default::default(),
         }
     }
 
@@ -224,9 +227,10 @@ impl<B: Backend> SudokuSaccadeModel<B> {
             LinearConfig::new(model_config.n_embd * 2, model_config.n_embd).init(device);
         let ca_norm = LayerNormConfig::new(model_config.n_embd).init(device);
         let cache_mhc = if config.cache_mhc.enabled {
-            Some(ManifoldHyperConnections::new(
+            Some(ManifoldHyperConnections::new_with_dense_dim(
                 &config.cache_mhc.to_core(),
                 0,
+                Some(model_config.n_embd),
                 device,
             ))
         } else {

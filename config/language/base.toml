@@ -37,6 +37,7 @@ vocab_path = "vocab.json"
 [training]
 block_size = 512
 batch_size = 24
+seed = 1337
 # Optimizer updates happen every `gradient_accumulation_steps` micro-batches.
 gradient_accumulation_steps = 1
 # Optional target for automatic effective-batch recovery.
@@ -70,6 +71,36 @@ top_k = 3
 [wgpu]
 backend = "auto"
 # tasks_max and memory tuning remain optional.
+
+# Distributed/runtime planning surface.
+# The language trainer remains single-device today, but Phase 0 now makes the
+# future mesh intent explicit in configs and checkpoints.
+#
+# [parallel]
+# mode = "single"            # single | ddp | fsdp | tensor_parallel_neuron | hybrid_2d
+# world_size = 1
+#
+# [parallel.data]
+# size = 1
+# backend = "auto"           # auto | nccl | gloo
+# find_unused_parameters = false
+# gradient_as_bucket_view = true
+#
+# [parallel.tensor]
+# size = 1
+# axis = "neuron"
+# partition = "contiguous"   # contiguous | head_aligned
+# sequence_parallel = false
+#
+# [parallel.fsdp]
+# enabled = false
+# reshard_after_forward = false
+# cpu_offload = false
+# mixed_precision = "disabled"
+#
+# [parallel.checkpoint]
+# format = "unsharded_v1"    # unsharded_v1 | sharded_v2
+# async_write = false
 
 [wgpu.training]
 # Switches recurrent core implementation for language training on wgpu backends.
@@ -122,6 +153,10 @@ n_layer = 4
 n_embd = 256
 n_head = 4
 mlp_internal_dim_multiplier = 4
+# sequence kernel: "bdh_linear_attention" (default) or
+# "rwkv8_state_space_experimental" for the experimental decayed normalized
+# recurrent kernel.
+# sequence_kernel = "bdh_linear_attention"
 # Fast internal recurrent updates per emitted slow token.
 # Supported values: 1, 2, 4, 8, 16.
 rollout_fast_steps_per_slow_step = 1

@@ -11,7 +11,9 @@ pub struct TrainProfileSnapshot {
     pub host_sync_points: u64,
     pub forward_ns: u128,
     pub loss_backward_ns: u128,
+    pub optimizer_ns: u128,
     pub train_steps: u64,
+    pub optimizer_steps: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -25,13 +27,19 @@ struct TrainProfileState {
     host_sync_points: u64,
     forward_ns: u128,
     loss_backward_ns: u128,
+    optimizer_ns: u128,
     train_steps: u64,
+    optimizer_steps: u64,
 }
 
 static TRAIN_PROFILE: OnceLock<Mutex<TrainProfileState>> = OnceLock::new();
 
 pub fn enabled() -> bool {
     std::env::var_os("BDH_STAGE_PROFILE").is_some()
+}
+
+pub fn sync_timing_enabled() -> bool {
+    std::env::var_os("BDH_STAGE_PROFILE_SYNC").is_some()
 }
 
 fn state() -> &'static Mutex<TrainProfileState> {
@@ -62,7 +70,9 @@ pub fn snapshot() -> TrainProfileSnapshot {
             host_sync_points: profile.host_sync_points,
             forward_ns: profile.forward_ns,
             loss_backward_ns: profile.loss_backward_ns,
+            optimizer_ns: profile.optimizer_ns,
             train_steps: profile.train_steps,
+            optimizer_steps: profile.optimizer_steps,
         };
     }
     TrainProfileSnapshot::default()
@@ -103,5 +113,12 @@ pub fn record_train_step(forward_ns: u128, loss_backward_ns: u128) {
         profile.forward_ns = profile.forward_ns.saturating_add(forward_ns);
         profile.loss_backward_ns = profile.loss_backward_ns.saturating_add(loss_backward_ns);
         profile.train_steps = profile.train_steps.saturating_add(1);
+    });
+}
+
+pub fn record_optimizer_step(optimizer_ns: u128) {
+    record(|profile| {
+        profile.optimizer_ns = profile.optimizer_ns.saturating_add(optimizer_ns);
+        profile.optimizer_steps = profile.optimizer_steps.saturating_add(1);
     });
 }

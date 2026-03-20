@@ -7,10 +7,8 @@ fn main() {
 mod real {
     use std::path::PathBuf;
 
+    use burn_dragon::vision::{load_vision_training_config, run_vision_distill_serving_benchmark};
     use burn_dragon_cli::bench::artifact::write_optional_report_artifacts;
-    use burn_dragon::vision::{
-        load_vision_training_config, run_vision_distill_serving_benchmark,
-    };
     use clap::Parser;
 
     #[derive(Parser, Debug)]

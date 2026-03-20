@@ -1,8 +1,9 @@
 [package]
 name = "burn_dragon_multimodal"
 description = "Multimodal Dragon composition and VL-JEPA training"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
+rust-version = "1.85"
 authors = ["mosure <mitchell@mosure.me>"]
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/mosure/burn_bdh"
@@ -35,18 +36,29 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png"]
 serde_json = { version = "1.0", optional = true }
 toml = { version = "0.9", optional = true }
 
-burn_dragon_checkpoint = { path = "../burn_dragon_checkpoint", version = "0.4.0", default-features = false, optional = true }
-burn_dragon_core = { path = "../burn_dragon_core", version = "0.4.0", default-features = false }
-burn_dragon_language = { path = "../burn_dragon_language", version = "0.4.0", default-features = false }
-burn_dragon_stream = { path = "../burn_dragon_stream", version = "0.4.0", default-features = false }
-burn_dragon_train = { path = "../burn_dragon_train", version = "0.4.0", default-features = false, optional = true }
-burn_dragon_vision = { path = "../burn_dragon_vision", version = "0.4.0", default-features = false }
+burn_dragon_checkpoint = { path = "../burn_dragon_checkpoint", version = "0.5.0", default-features = false, optional = true }
+burn_dragon_core = { path = "../burn_dragon_core", version = "0.5.0", default-features = false }
+burn_dragon_language = { path = "../burn_dragon_language", version = "0.5.0", default-features = false }
+burn_dragon_stream = { path = "../burn_dragon_stream", version = "0.5.0", default-features = false }
+burn_dragon_train = { path = "../burn_dragon_train", version = "0.5.0", default-features = false, optional = true }
+burn_dragon_vision = { path = "../burn_dragon_vision", version = "0.5.0", default-features = false }
 
 [dev-dependencies]
 criterion = { version = "0.7", features = ["html_reports"] }
 tempfile = "3"
+burn-ndarray = "0.21.0-pre.2"
 burn-wgpu = { version = "0.21.0-pre.2", default-features = false, features = ["fusion", "std"] }
 
 [lib]
 path = "src/lib.rs"
 crate-type = ["rlib"]
+
+[[bench]]
+name = "vl_jepa_collate"
+harness = false
+required-features = ["train"]
+
+[[bench]]
+name = "vl_jepa_forward"
+harness = false
+required-features = ["train"]

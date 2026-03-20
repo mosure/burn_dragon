@@ -162,10 +162,22 @@ impl VisionDenseAttentionBenchReport {
         let _ = writeln!(out);
         let _ = writeln!(out, "- Full attention ms: {:.3}", self.full_attention_ms);
         let _ = writeln!(out, "- QK scores ms: {:.3}", self.qk_scores_ms);
-        let _ = writeln!(out, "- QK scores direct 4D ms: {:.3}", self.qk_scores_direct_4d_ms);
-        let _ = writeln!(out, "- ALiBi + row norm ms: {:.3}", self.alibi_and_row_norm_ms);
+        let _ = writeln!(
+            out,
+            "- QK scores direct 4D ms: {:.3}",
+            self.qk_scores_direct_4d_ms
+        );
+        let _ = writeln!(
+            out,
+            "- ALiBi + row norm ms: {:.3}",
+            self.alibi_and_row_norm_ms
+        );
         if let Some(raw_ms) = self.raw_direct_wgpu_rowl1_scores_ms {
-            let _ = writeln!(out, "- Raw direct WGPU fused row_l1 scores ms: {:.3}", raw_ms);
+            let _ = writeln!(
+                out,
+                "- Raw direct WGPU fused row_l1 scores ms: {:.3}",
+                raw_ms
+            );
         }
         if let Some(speedup) = self.raw_direct_wgpu_speedup_vs_current_score_path {
             let _ = writeln!(
@@ -181,9 +193,21 @@ impl VisionDenseAttentionBenchReport {
                 max_abs
             );
         }
-        let _ = writeln!(out, "- Repeated value expand ms: {:.3}", self.repeated_value_expand_ms);
-        let _ = writeln!(out, "- Repeated value matmul ms: {:.3}", self.repeated_value_matmul_ms);
-        let _ = writeln!(out, "- Repeated value total ms: {:.3}", self.repeated_value_total_ms);
+        let _ = writeln!(
+            out,
+            "- Repeated value expand ms: {:.3}",
+            self.repeated_value_expand_ms
+        );
+        let _ = writeln!(
+            out,
+            "- Repeated value matmul ms: {:.3}",
+            self.repeated_value_matmul_ms
+        );
+        let _ = writeln!(
+            out,
+            "- Repeated value total ms: {:.3}",
+            self.repeated_value_total_ms
+        );
         let _ = writeln!(
             out,
             "- Shared-value batchmatmul ms: {:.3}",
@@ -222,13 +246,17 @@ pub fn run_vision_dense_attention_bench(
     let mut vision_config = config.vision.clone();
     if let Some(attention_mode) = bench.attention_mode {
         vision_config.attention_mode = attention_mode;
-        vision_config.allow_softmax_attention = matches!(attention_mode, VisionAttentionMode::Softmax);
+        vision_config.allow_softmax_attention =
+            matches!(attention_mode, VisionAttentionMode::Softmax);
     }
     if let Some(use_alibi) = bench.use_alibi {
         vision_config.use_alibi = use_alibi;
     }
     let vision = vision_config.build();
-    let batch_size = bench.batch_size.unwrap_or(config.training.batch_size).max(1);
+    let batch_size = bench
+        .batch_size
+        .unwrap_or(config.training.batch_size)
+        .max(1);
     let patch_grid = vision.image_size.div_ceil(vision.patch_size.max(1)).max(1);
     let patch_tokens_per_image = patch_grid * patch_grid;
     let sequence_len = patch_tokens_per_image + usize::from(vision.use_cls_token);
@@ -336,18 +364,16 @@ pub fn run_vision_dense_attention_bench(
     let normalized_scores =
         attention_bench.apply_alibi_and_norm(attention_bench.qk_scores(query.clone()));
     let repeated_value_matmul_ms = measure_avg(bench.iterations, || {
-        sync_tensor(attention_bench.repeated_value_attention(
-            normalized_scores.clone(),
-            value.clone(),
-        ));
+        sync_tensor(
+            attention_bench.repeated_value_attention(normalized_scores.clone(), value.clone()),
+        );
     });
     let repeated_value_total_ms = repeated_value_expand_ms + repeated_value_matmul_ms;
 
     let shared_value_batchmatmul_ms = measure_avg(bench.iterations, || {
-        sync_tensor(attention_bench.shared_value_batchmatmul(
-            normalized_scores.clone(),
-            value.clone(),
-        ));
+        sync_tensor(
+            attention_bench.shared_value_batchmatmul(normalized_scores.clone(), value.clone()),
+        );
     });
     let blockwise64_ms =
         if matches!(vision.attention_mode, VisionAttentionMode::RowL1) && sequence_len > 1 {
@@ -420,9 +446,13 @@ pub fn run_vision_dense_attention_bench(
         } else {
             0.0
         },
-        raw_direct_wgpu_speedup_vs_current_score_path: raw_direct_wgpu_rowl1_scores_ms.map(
-            |raw| if raw > 0.0 { current_score_path / raw } else { 0.0 },
-        ),
+        raw_direct_wgpu_speedup_vs_current_score_path: raw_direct_wgpu_rowl1_scores_ms.map(|raw| {
+            if raw > 0.0 {
+                current_score_path / raw
+            } else {
+                0.0
+            }
+        }),
         blockwise64_ms,
         blockwise128_ms,
         dominant_component,

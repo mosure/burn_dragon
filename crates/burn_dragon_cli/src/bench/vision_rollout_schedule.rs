@@ -78,8 +78,16 @@ impl VisionRolloutScheduleBenchReport {
         let _ = writeln!(out, "- Repeated rollout ms: {:.3}", self.repeated_ms);
         let _ = writeln!(out, "- Scheduled rollout ms: {:.3}", self.scheduled_ms);
         let _ = writeln!(out, "- Speedup: {:.3}x", self.speedup);
-        let _ = writeln!(out, "- Repeated tokens/sec: {:.2}", self.repeated_tokens_per_sec);
-        let _ = writeln!(out, "- Scheduled tokens/sec: {:.2}", self.scheduled_tokens_per_sec);
+        let _ = writeln!(
+            out,
+            "- Repeated tokens/sec: {:.2}",
+            self.repeated_tokens_per_sec
+        );
+        let _ = writeln!(
+            out,
+            "- Scheduled tokens/sec: {:.2}",
+            self.scheduled_tokens_per_sec
+        );
         out
     }
 }
@@ -94,9 +102,14 @@ pub fn run_vision_rollout_schedule_bench(
     let vision = config.vision.build();
     let distill = match &config.mode {
         VisionTrainingModeConfig::Distill(distill) => distill.clone(),
-        other => panic!("vision_distill_rollout_schedule_bench requires distill mode, got {other:?}"),
+        other => {
+            panic!("vision_distill_rollout_schedule_bench requires distill mode, got {other:?}")
+        }
     };
-    let batch_size = bench.batch_size.unwrap_or(config.training.batch_size).max(1);
+    let batch_size = bench
+        .batch_size
+        .unwrap_or(config.training.batch_size)
+        .max(1);
     let rollout_steps = config
         .training
         .rollout_max_steps
@@ -110,10 +123,11 @@ pub fn run_vision_rollout_schedule_bench(
             rollout_steps,
         )
     });
-    let steps = VisionRolloutScheduleBenchAdapter::<VisionRolloutScheduleBenchBackend>::normalize_steps(
-        &steps,
-        rollout_steps,
-    );
+    let steps =
+        VisionRolloutScheduleBenchAdapter::<VisionRolloutScheduleBenchBackend>::normalize_steps(
+            &steps,
+            rollout_steps,
+        );
     assert!(
         steps.len() >= 2,
         "vision_distill_rollout_schedule_bench requires at least two supervision steps"
@@ -123,7 +137,12 @@ pub fn run_vision_rollout_schedule_bench(
     let patch_tokens_per_image = patch_grid * patch_grid;
     let total_tokens = patch_tokens_per_image * batch_size * steps.len();
     let images = Tensor::<VisionRolloutScheduleBenchBackend, 4>::random(
-        [batch_size, vision.in_channels, vision.image_size, vision.image_size],
+        [
+            batch_size,
+            vision.in_channels,
+            vision.image_size,
+            vision.image_size,
+        ],
         Distribution::Normal(0.0, 1.0),
         &device,
     );

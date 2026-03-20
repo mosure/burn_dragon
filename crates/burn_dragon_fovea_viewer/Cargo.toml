@@ -1,8 +1,9 @@
 [package]
 name = "burn_dragon_fovea_viewer"
 description = "Foveation viewer for burn_dragon vision sampling"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
+rust-version = "1.85"
 authors = ["mosure <mitchell@mosure.me>"]
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/mosure/burn_bdh"
@@ -36,7 +37,7 @@ bevy = { version = "0.17", default-features = false, features = [
 bevy_shader = "0.17"
 burn = { version = "0.21.0-pre.2", default-features = false, features = ["std", "wgpu"] }
 burn-wgpu = { version = "0.21.0-pre.2", default-features = false, features = ["std"] }
-burn_dragon_vision = { path = "../burn_dragon_vision", version = "0.4.0", default-features = false, features = ["train"] }
+burn_dragon_vision = { path = "../burn_dragon_vision", version = "0.5.0", default-features = false, features = ["train"] }
 half = "2"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 noise = "0.9"

@@ -131,14 +131,14 @@ pub(super) fn validate_vision_trm_graph(vision: &VisionModelConfig) -> Result<()
     let grid = vision.image_size.div_ceil(patch_size);
     let grid_h = vision.pos_max_height.unwrap_or(grid);
     let grid_w = vision.pos_max_width.unwrap_or(grid);
-    if !grid_h.is_multiple_of(vision.trm_graph.coarse_stride) {
+    if grid_h % vision.trm_graph.coarse_stride != 0 {
         return Err(anyhow!(
             "vision.trm_graph.coarse_stride ({}) must divide grid height ({})",
             vision.trm_graph.coarse_stride,
             grid_h
         ));
     }
-    if !grid_w.is_multiple_of(vision.trm_graph.coarse_stride) {
+    if grid_w % vision.trm_graph.coarse_stride != 0 {
         return Err(anyhow!(
             "vision.trm_graph.coarse_stride ({}) must divide grid width ({})",
             vision.trm_graph.coarse_stride,
@@ -191,151 +191,18 @@ pub(super) fn validate_vision_mode(
                 ));
             }
             validate_distill_loss(&distill.loss)?;
-            match &distill.teacher {
-                VisionTeacherConfig::Features(config) => {
-                    if config.feature_dim == 0 {
-                        return Err(anyhow!("mode.teacher.feature_dim must be > 0"));
-                    }
-                    if matches!(config.patch_tokens, Some(0)) {
-                        return Err(anyhow!("mode.teacher.patch_tokens must be > 0 when set"));
-                    }
-                    if distill.rollout_supervision_frames == 0 {
-                        return Err(anyhow!(
-                            "mode.rollout_supervision_frames must be > 0 for distill mode"
-                        ));
-                    }
-                    if distill.rollout_supervision_groups == 0 {
-                        return Err(anyhow!(
-                            "mode.rollout_supervision_groups must be > 0 for distill mode"
-                        ));
-                    }
-                    if distill
-                        .rollout_supervision_explicit_steps
-                        .iter()
-                        .any(|step| *step == 0)
-                    {
-                        return Err(anyhow!(
-                            "mode.rollout_supervision_explicit_steps entries must be > 0 for distill mode"
-                        ));
-                    }
-                    if distill
-                        .rollout_supervision_explicit_groups
-                        .iter()
-                        .flatten()
-                        .any(|step| *step == 0)
-                    {
-                        return Err(anyhow!(
-                            "mode.rollout_supervision_explicit_groups entries must be > 0 for distill mode"
-                        ));
-                    }
-                    if distill.rollout_supervision_stride == 0 {
-                        return Err(anyhow!(
-                            "mode.rollout_supervision_stride must be > 0 for distill mode"
-                        ));
-                    }
-                    if distill.rollout_supervision_power < 0.0 {
-                        return Err(anyhow!(
-                            "mode.rollout_supervision_power must be >= 0 for distill mode"
-                        ));
-                    }
-                    if distill.rollout_sampling_power < 0.0 {
-                        return Err(anyhow!(
-                            "mode.rollout_sampling_power must be >= 0 for distill mode"
-                        ));
-                    }
-                    if distill.rollout_improvement_weight < 0.0 {
-                        return Err(anyhow!(
-                            "mode.rollout_improvement_weight must be >= 0 for distill mode"
-                        ));
-                    }
-                    if distill.rollout_improvement_margin < 0.0 {
-                        return Err(anyhow!(
-                            "mode.rollout_improvement_margin must be >= 0 for distill mode"
-                        ));
-                    }
-                    let deterministic_train_features = augment.flip_prob <= 0.0
-                        && augment.color_jitter_prob <= 0.0
-                        && augment.grayscale_prob <= 0.0
-                        && augment.blur_prob <= 0.0
-                        && augment.solarize_prob <= 0.0
-                        && (augment.min_scale - 1.0).abs() <= f32::EPSILON
-                        && (augment.max_scale - 1.0).abs() <= f32::EPSILON
-                        && (augment.min_aspect_ratio - 1.0).abs() <= f32::EPSILON
-                        && (augment.max_aspect_ratio - 1.0).abs() <= f32::EPSILON;
-                    if !deterministic_train_features {
-                        return Err(anyhow!(
-                            "distill mode with feature-file teachers requires deterministic train augmentations so precomputed teacher features match the student view"
-                        ));
-                    }
-                }
-                VisionTeacherConfig::Model(config) => {
-                    if matches!(config.image_size, Some(0)) {
-                        return Err(anyhow!("mode.teacher.image_size must be > 0 when set"));
-                    }
-                    if matches!(config.patch_size, Some(0)) {
-                        return Err(anyhow!("mode.teacher.patch_size must be > 0 when set"));
-                    }
-                    if matches!(config.feature_dim, Some(0)) {
-                        return Err(anyhow!("mode.teacher.feature_dim must be > 0 when set"));
-                    }
-                    if matches!(config.patch_tokens, Some(0)) {
-                        return Err(anyhow!("mode.teacher.patch_tokens must be > 0 when set"));
-                    }
-                    if distill.rollout_supervision_frames == 0 {
-                        return Err(anyhow!(
-                            "mode.rollout_supervision_frames must be > 0 for distill mode"
-                        ));
-                    }
-                    if distill.rollout_supervision_groups == 0 {
-                        return Err(anyhow!(
-                            "mode.rollout_supervision_groups must be > 0 for distill mode"
-                        ));
-                    }
-                    if distill
-                        .rollout_supervision_explicit_steps
-                        .iter()
-                        .any(|step| *step == 0)
-                    {
-                        return Err(anyhow!(
-                            "mode.rollout_supervision_explicit_steps entries must be > 0 for distill mode"
-                        ));
-                    }
-                    if distill
-                        .rollout_supervision_explicit_groups
-                        .iter()
-                        .flatten()
-                        .any(|step| *step == 0)
-                    {
-                        return Err(anyhow!(
-                            "mode.rollout_supervision_explicit_groups entries must be > 0 for distill mode"
-                        ));
-                    }
-                    if distill.rollout_supervision_stride == 0 {
-                        return Err(anyhow!(
-                            "mode.rollout_supervision_stride must be > 0 for distill mode"
-                        ));
-                    }
-                    if distill.rollout_supervision_power < 0.0 {
-                        return Err(anyhow!(
-                            "mode.rollout_supervision_power must be >= 0 for distill mode"
-                        ));
-                    }
-                    if distill.rollout_sampling_power < 0.0 {
-                        return Err(anyhow!(
-                            "mode.rollout_sampling_power must be >= 0 for distill mode"
-                        ));
-                    }
-                    if distill.rollout_improvement_weight < 0.0 {
-                        return Err(anyhow!(
-                            "mode.rollout_improvement_weight must be >= 0 for distill mode"
-                        ));
-                    }
-                    if distill.rollout_improvement_margin < 0.0 {
-                        return Err(anyhow!(
-                            "mode.rollout_improvement_margin must be >= 0 for distill mode"
-                        ));
-                    }
-                }
+            validate_distill_supervision(distill)?;
+            validate_distill_primary_teacher(&distill.teacher, vision)?;
+            validate_distill_auxiliary_teacher_targets(distill, vision)?;
+
+            let has_feature_targets = distill
+                .resolved_teacher_targets()
+                .into_iter()
+                .any(|target| matches!(target.teacher, VisionTeacherConfig::Features(_)));
+            if has_feature_targets && !distill_train_features_are_deterministic(augment) {
+                return Err(anyhow!(
+                    "distill mode with feature-file teachers requires deterministic train augmentations so precomputed teacher features match the student view"
+                ));
             }
         }
         VisionTrainingModeConfig::Lejepa(lejepa) => {
@@ -453,7 +320,7 @@ pub(super) fn validate_vision_mode(
                     video.temporal.rollout_fast_steps_per_slow_step
                 ));
             }
-            if !vision.embed_dim.is_multiple_of(video.temporal.n_head) {
+            if vision.embed_dim % video.temporal.n_head != 0 {
                 return Err(anyhow!(
                     "vision.embed_dim ({}) must be divisible by mode.temporal.n_head ({})",
                     vision.embed_dim,
@@ -738,6 +605,217 @@ pub(super) fn validate_vision_mode(
         }
     }
     Ok(())
+}
+
+fn validate_distill_supervision(distill: &VisionDistillConfig) -> Result<()> {
+    if distill.rollout_supervision_frames == 0 {
+        return Err(anyhow!(
+            "mode.rollout_supervision_frames must be > 0 for distill mode"
+        ));
+    }
+    if distill.rollout_supervision_groups == 0 {
+        return Err(anyhow!(
+            "mode.rollout_supervision_groups must be > 0 for distill mode"
+        ));
+    }
+    if distill.rollout_supervision_explicit_steps.contains(&0) {
+        return Err(anyhow!(
+            "mode.rollout_supervision_explicit_steps entries must be > 0 for distill mode"
+        ));
+    }
+    if distill
+        .rollout_supervision_explicit_groups
+        .iter()
+        .flatten()
+        .any(|step| *step == 0)
+    {
+        return Err(anyhow!(
+            "mode.rollout_supervision_explicit_groups entries must be > 0 for distill mode"
+        ));
+    }
+    if distill.rollout_supervision_stride == 0 {
+        return Err(anyhow!(
+            "mode.rollout_supervision_stride must be > 0 for distill mode"
+        ));
+    }
+    if distill.rollout_supervision_power < 0.0 {
+        return Err(anyhow!(
+            "mode.rollout_supervision_power must be >= 0 for distill mode"
+        ));
+    }
+    if distill.rollout_sampling_power < 0.0 {
+        return Err(anyhow!(
+            "mode.rollout_sampling_power must be >= 0 for distill mode"
+        ));
+    }
+    if distill.rollout_improvement_weight < 0.0 {
+        return Err(anyhow!(
+            "mode.rollout_improvement_weight must be >= 0 for distill mode"
+        ));
+    }
+    if distill.rollout_improvement_margin < 0.0 {
+        return Err(anyhow!(
+            "mode.rollout_improvement_margin must be >= 0 for distill mode"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_distill_primary_teacher(
+    teacher: &VisionTeacherConfig,
+    vision: &VisionModelConfig,
+) -> Result<()> {
+    match teacher {
+        VisionTeacherConfig::Features(config) => {
+            if config.feature_dim == 0 {
+                return Err(anyhow!("mode.teacher.feature_dim must be > 0"));
+            }
+            if !config.has_patch_targets() {
+                return Err(anyhow!(
+                    "mode.teacher feature teachers currently require train_patch_path and val_patch_path"
+                ));
+            }
+            if matches!(config.patch_tokens, Some(0)) {
+                return Err(anyhow!("mode.teacher.patch_tokens must be > 0 when set"));
+            }
+            if config.feature_dim != vision.projection_dim {
+                return Err(anyhow!(
+                    "mode.teacher.feature_dim ({}) must match vision.projection_dim ({})",
+                    config.feature_dim,
+                    vision.projection_dim
+                ));
+            }
+        }
+        VisionTeacherConfig::Model(config) => {
+            if matches!(config.image_size, Some(0)) {
+                return Err(anyhow!("mode.teacher.image_size must be > 0 when set"));
+            }
+            if matches!(config.patch_size, Some(0)) {
+                return Err(anyhow!("mode.teacher.patch_size must be > 0 when set"));
+            }
+            if matches!(config.feature_dim, Some(0)) {
+                return Err(anyhow!("mode.teacher.feature_dim must be > 0 when set"));
+            }
+            if matches!(config.patch_tokens, Some(0)) {
+                return Err(anyhow!("mode.teacher.patch_tokens must be > 0 when set"));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_distill_auxiliary_teacher_targets(
+    distill: &VisionDistillConfig,
+    vision: &VisionModelConfig,
+) -> Result<()> {
+    let student_patch_tokens = vision.image_size.div_ceil(vision.patch_size.max(1)).pow(2);
+    let mut names = std::collections::BTreeSet::new();
+    for (index, target) in distill.teacher_targets.iter().enumerate() {
+        let prefix = format!("mode.teacher_targets[{index}]");
+        let name = target.name.trim();
+        if name.is_empty() {
+            return Err(anyhow!("{prefix}.name must not be empty"));
+        }
+        if name == VisionDistillConfig::PRIMARY_TEACHER_NAME {
+            return Err(anyhow!(
+                "{prefix}.name \"{}\" is reserved for the legacy primary teacher",
+                VisionDistillConfig::PRIMARY_TEACHER_NAME
+            ));
+        }
+        if !names.insert(name.to_string()) {
+            return Err(anyhow!("{prefix}.name must be unique"));
+        }
+        if target.weight < 0.0 {
+            return Err(anyhow!("{prefix}.weight must be >= 0"));
+        }
+        if matches!(target.decoder_hidden_dim, Some(0)) {
+            return Err(anyhow!("{prefix}.decoder_hidden_dim must be > 0 when set"));
+        }
+        match &target.teacher {
+            VisionTeacherConfig::Features(config) => {
+                if config.feature_dim == 0 {
+                    return Err(anyhow!("{prefix}.teacher.feature_dim must be > 0"));
+                }
+                if matches!(config.patch_tokens, Some(0)) {
+                    return Err(anyhow!(
+                        "{prefix}.teacher.patch_tokens must be > 0 when set"
+                    ));
+                }
+                if matches!(target.target_kind, VisionTeacherTargetKind::PatchAndCls)
+                    && !config.has_patch_targets()
+                {
+                    return Err(anyhow!(
+                        "{prefix}.teacher requires train_patch_path and val_patch_path for target_kind = \"patch_and_cls\""
+                    ));
+                }
+                match target.decoder_mode {
+                    VisionTeacherDecoderMode::SharedProjection => {
+                        if config.feature_dim != vision.projection_dim {
+                            return Err(anyhow!(
+                                "{prefix}.teacher.feature_dim ({}) must match vision.projection_dim ({}) for decoder_mode = \"shared_projection\"",
+                                config.feature_dim,
+                                vision.projection_dim
+                            ));
+                        }
+                        if matches!(target.target_kind, VisionTeacherTargetKind::PatchAndCls) {
+                            if let Some(tokens) = config
+                                .patch_tokens
+                                .filter(|tokens| *tokens != student_patch_tokens)
+                            {
+                                return Err(anyhow!(
+                                    "{prefix}.teacher.patch_tokens ({tokens}) must match the student patch count ({student_patch_tokens}) for decoder_mode = \"shared_projection\""
+                                ));
+                            }
+                        }
+                    }
+                    VisionTeacherDecoderMode::DedicatedProjection => {
+                        if matches!(target.target_kind, VisionTeacherTargetKind::PatchAndCls)
+                            && let Some(tokens) = config
+                                .patch_tokens
+                                .filter(|tokens| *tokens != student_patch_tokens)
+                        {
+                            return Err(anyhow!(
+                                "{prefix}.teacher.patch_tokens ({tokens}) must match the student patch count ({student_patch_tokens}) for decoder_mode = \"dedicated_projection\"; use \"dedicated_spatial_projection\" to supervise a different spatial grid"
+                            ));
+                        }
+                    }
+                    VisionTeacherDecoderMode::DedicatedSpatialProjection => {
+                        if matches!(target.target_kind, VisionTeacherTargetKind::PatchAndCls) {
+                            let patch_tokens = config.patch_tokens.ok_or_else(|| {
+                                anyhow!(
+                                    "{prefix}.teacher.patch_tokens is required for decoder_mode = \"dedicated_spatial_projection\" with patch-and-cls targets"
+                                )
+                            })?;
+                            let side = (patch_tokens as f64).sqrt().round() as usize;
+                            if side.saturating_mul(side) != patch_tokens {
+                                return Err(anyhow!(
+                                    "{prefix}.teacher.patch_tokens ({patch_tokens}) must form a square patch grid for decoder_mode = \"dedicated_spatial_projection\""
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+            VisionTeacherConfig::Model(_) => {
+                return Err(anyhow!(
+                    "{prefix}.teacher model-backed auxiliary targets are not supported yet; use precomputed feature targets"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn distill_train_features_are_deterministic(augment: &VisionAugmentationConfig) -> bool {
+    augment.flip_prob <= 0.0
+        && augment.color_jitter_prob <= 0.0
+        && augment.grayscale_prob <= 0.0
+        && augment.blur_prob <= 0.0
+        && augment.solarize_prob <= 0.0
+        && (augment.min_scale - 1.0).abs() <= f32::EPSILON
+        && (augment.max_scale - 1.0).abs() <= f32::EPSILON
+        && (augment.min_aspect_ratio - 1.0).abs() <= f32::EPSILON
+        && (augment.max_aspect_ratio - 1.0).abs() <= f32::EPSILON
 }
 
 fn validate_input_projection(config: &VisionSaccadeInputProjectionConfig) -> Result<()> {

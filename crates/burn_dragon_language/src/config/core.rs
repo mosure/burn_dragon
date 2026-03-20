@@ -1,8 +1,10 @@
 use serde::{Deserialize, Serialize};
 
 use burn_dragon_core::{
-    ClockedSlowMemoryConfig, DragonNormConfig, ManifoldHyperConnectionsConfig, RotaryEmbedding,
-    SummaryMemoryConfig, YNeuronRecurrenceConfig,
+    ClockedSlowMemoryConfig, DragonNormConfig, LatentFanoutScheduleConfig,
+    MambaSequenceConfig, ManifoldHyperConnectionsConfig, RotaryEmbedding, SequenceKernelKind,
+    SummaryMemoryConfig,
+    YNeuronRecurrenceConfig,
 };
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -34,6 +36,11 @@ pub struct ModelOverrides {
     pub n_embd: Option<usize>,
     pub n_head: Option<usize>,
     pub mlp_internal_dim_multiplier: Option<usize>,
+    #[serde(alias = "neuron_space_dim")]
+    pub latent_total: Option<usize>,
+    pub sequence_kernel: Option<SequenceKernelKind>,
+    pub mamba: Option<MambaSequenceConfig>,
+    pub latent_fanout_schedule: Option<LatentFanoutScheduleConfig>,
     pub relu_threshold: Option<f32>,
     pub dropout: Option<f64>,
     pub normalization: Option<DragonNormConfig>,

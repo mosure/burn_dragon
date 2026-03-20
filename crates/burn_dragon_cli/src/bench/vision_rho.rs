@@ -4,10 +4,8 @@ use std::time::Instant;
 use anyhow::Result;
 use burn::tensor::backend::Backend as BackendTrait;
 use burn::tensor::{Distribution, Tensor, TensorData};
-use burn_dragon::vision::{
-    VisionArtifactHeader, push_vision_artifact_markdown_prelude,
-};
-use burn_dragon_wgpu::api::spatial::{
+use burn_dragon::vision::{VisionArtifactHeader, push_vision_artifact_markdown_prelude};
+use burn_dragon_kernel::api::spatial::{
     LocalGridNeighborhood, LocalGridShape2d, local_grid_rho_profile_reset,
     local_grid_rho_profile_snapshot, try_fused_local_grid_rho_attention_wgpu_head_decay,
 };

@@ -1,8 +1,9 @@
 [package]
 name = "bevy_dragon"
 description = "Bevy visualization for burn_dragon"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
+rust-version = "1.85"
 authors = ["mosure <mitchell@mosure.me>"]
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/mosure/burn_bdh"
@@ -18,7 +19,7 @@ viz = []
 burn = { version = "0.21.0-pre.2", default-features = false, features = ["std", "wgpu"] }
 burn-wgpu = { version = "0.21.0-pre.2", default-features = false, features = ["fusion", "std"] }
 bevy_burn = "0.4"
-burn_dragon_core = { path = "../burn_dragon_core", version = "0.4.0", default-features = false, features = ["viz"] }
+burn_dragon_core = { path = "../burn_dragon_core", version = "0.5.0", default-features = false, features = ["viz"] }
 
 [dependencies.bevy]
 version = "0.17"

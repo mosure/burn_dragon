@@ -472,7 +472,7 @@ fn resolve_micro_vit_heads(embed_dim: usize, patch_size: usize, heads: usize) ->
         (2 * scale).min(8)
     };
     heads = heads.max(1).min(embed_dim.max(1));
-    while heads > 1 && !embed_dim.is_multiple_of(heads) {
+    while heads > 1 && embed_dim % heads != 0 {
         heads -= 1;
     }
     heads.max(1)

@@ -2,8 +2,8 @@ use burn::optim::{AdamWConfig, GradientsParams, LearningRate, Optimizer};
 use burn::tensor::backend::Backend;
 use burn::tensor::{Int, Tensor, TensorData};
 use burn_autodiff::Autodiff;
-use burn_dragon_core::{BDH, BDHConfig, FusedKernelConfig};
-use burn_dragon_wgpu::api::recurrent::supports_recurrent_backend;
+use burn_dragon_core::{BDH, BDHConfig, FusedKernelConfig, SequenceKernelKind};
+use burn_dragon_kernel::api::recurrent::supports_recurrent_backend;
 use burn_wgpu::{CubeBackend, RuntimeOptions, WgpuRuntime, graphics};
 
 type InnerBackend = CubeBackend<WgpuRuntime, f32, i32, u32>;
@@ -52,6 +52,26 @@ fn build_case_config(
     };
     config.fused_kernels.set_block_sizes(8, 8);
     config.set_rollout_fast_steps_per_slow_step(rollout_fast_steps);
+    config
+}
+
+fn build_dense_score_case_config(case: &TrainParityCase, wgpu_rollout_fused: bool) -> BDHConfig {
+    let mut config = BDHConfig {
+        n_layer: case.n_layer,
+        n_embd: case.n_embd,
+        n_head: case.n_head,
+        mlp_internal_dim_multiplier: case.mlp_internal_dim_multiplier,
+        vocab_size: case.vocab_size,
+        dropout: 0.0,
+        fused_kernels: FusedKernelConfig {
+            enabled: true,
+            wgpu_rollout_fused,
+            ..Default::default()
+        },
+        sequence_kernel: SequenceKernelKind::BdhLinearDenseScoreExperimental,
+        ..Default::default()
+    };
+    config.fused_kernels.set_block_sizes(8, 8);
     config
 }
 
@@ -251,4 +271,47 @@ fn recurrent_wgpu_kernel_autodiff_tracks_forward_backward_across_config_matrix()
             run_autodiff_case(case, &device, 2_026 + idx as u64 * 17, rollout_fast_steps);
         }
     }
+}
+
+#[test]
+fn dense_score_wgpu_kernel_autodiff_tracks_forward_and_backward() {
+    let device = <TrainBackend as Backend>::Device::default();
+    init_runtime(&device);
+
+    let case = TrainParityCase {
+        name: "dense_score_default",
+        n_layer: 2,
+        n_embd: 32,
+        n_head: 4,
+        mlp_internal_dim_multiplier: 2,
+        vocab_size: 128,
+        loss_tol: 1e-1,
+        logits_atol: 6e-1,
+        logits_rtol: 6e-1,
+    };
+
+    <TrainBackend as Backend>::seed(&device, 4040);
+    let baseline = BDH::<TrainBackend>::new(build_dense_score_case_config(&case, false), &device);
+    <TrainBackend as Backend>::seed(&device, 4040);
+    let fused = BDH::<TrainBackend>::new(build_dense_score_case_config(&case, true), &device);
+
+    let inputs = sample_tokens(&device);
+    let (baseline_model, baseline_loss) = train_one_step(baseline, inputs.clone());
+    let (fused_model, fused_loss) = train_one_step(fused, inputs.clone());
+
+    let loss_diff = (baseline_loss - fused_loss).abs();
+    assert!(
+        loss_diff <= case.loss_tol,
+        "dense_score training loss drift {loss_diff} exceeds tolerance {}",
+        case.loss_tol
+    );
+
+    let baseline_logits = baseline_model.forward(inputs.clone()).inner();
+    let fused_logits = fused_model.forward(inputs).inner();
+    let _ = assert_close(
+        baseline_logits,
+        fused_logits,
+        case.logits_atol,
+        case.logits_rtol,
+    );
 }

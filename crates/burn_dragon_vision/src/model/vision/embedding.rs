@@ -353,10 +353,10 @@ fn patch_downsample_strides(patch_size: usize) -> Vec<usize> {
     let mut remaining = patch_size.max(1);
     let mut strides = Vec::new();
     while remaining > 1 {
-        if remaining.is_multiple_of(4) {
+        if remaining % 4 == 0 {
             strides.push(4);
             remaining /= 4;
-        } else if remaining.is_multiple_of(2) {
+        } else if remaining % 2 == 0 {
             strides.push(2);
             remaining /= 2;
         } else {
@@ -546,7 +546,7 @@ impl<B: Backend> SpatialPositionalEncoding<B> {
 
     fn sincos_positions(&self, grid: PatchGrid, device: &B::Device) -> Tensor<B, 3> {
         assert!(
-            self.dim.is_multiple_of(4),
+            self.dim % 4 == 0,
             "sine-cosine positional encoding requires dim divisible by 4"
         );
         let quarter = self.dim / 4;

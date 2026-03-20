@@ -4,6 +4,8 @@ mod prelude;
 
 pub mod backend;
 pub mod profile;
+#[cfg(feature = "rerun")]
+pub mod rerun;
 pub mod schedule;
 pub mod startup_autotune;
 pub mod steps;
@@ -13,6 +15,9 @@ pub mod utils;
 pub use backend::*;
 #[allow(unused_imports)]
 pub use profile::*;
+#[cfg(feature = "rerun")]
+#[allow(unused_imports)]
+pub use rerun::*;
 #[allow(unused_imports)]
 pub use schedule::*;
 #[allow(unused_imports)]

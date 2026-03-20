@@ -124,6 +124,23 @@ pub enum VisionTrmGridMismatchPolicy {
     FallbackDefault,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum VisionTrmPredictSubstepKind {
+    #[default]
+    CoarseOnly,
+    LocalBridge,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum VisionTrmClsReadoutKind {
+    #[default]
+    PatchMean,
+    Hub,
+    HubAndCoarse,
+}
+
 impl core::fmt::Display for VisionAttentionMode {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{self:?}")
@@ -153,6 +170,26 @@ impl core::fmt::Display for VisionTrmGridMismatchPolicy {
         write!(f, "{self:?}")
     }
 }
+
+impl core::fmt::Display for VisionTrmPredictSubstepKind {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+
+impl core::fmt::Display for VisionTrmClsReadoutKind {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+
+impl ModuleDisplayDefault for VisionTrmClsReadoutKind {
+    fn content(&self, content: Content) -> Option<Content> {
+        content.add_formatted(self).optional()
+    }
+}
+
+impl ModuleDisplay for VisionTrmClsReadoutKind {}
 
 impl<B: Backend> Module<B> for VisionAttentionMode {
     type Record = ();
@@ -294,6 +331,62 @@ impl<B: Backend> Module<B> for VisionTrmGridMismatchPolicy {
     fn into_record(self) -> Self::Record {}
 }
 
+impl<B: Backend> Module<B> for VisionTrmPredictSubstepKind {
+    type Record = ();
+
+    fn collect_devices(&self, devices: Devices<B>) -> Devices<B> {
+        devices
+    }
+
+    fn fork(self, _device: &B::Device) -> Self {
+        self
+    }
+
+    fn to_device(self, _device: &B::Device) -> Self {
+        self
+    }
+
+    fn visit<Visitor: ModuleVisitor<B>>(&self, _visitor: &mut Visitor) {}
+
+    fn map<Mapper: ModuleMapper<B>>(self, _mapper: &mut Mapper) -> Self {
+        self
+    }
+
+    fn load_record(self, _record: Self::Record) -> Self {
+        self
+    }
+
+    fn into_record(self) -> Self::Record {}
+}
+
+impl<B: Backend> Module<B> for VisionTrmClsReadoutKind {
+    type Record = ();
+
+    fn collect_devices(&self, devices: Devices<B>) -> Devices<B> {
+        devices
+    }
+
+    fn fork(self, _device: &B::Device) -> Self {
+        self
+    }
+
+    fn to_device(self, _device: &B::Device) -> Self {
+        self
+    }
+
+    fn visit<Visitor: ModuleVisitor<B>>(&self, _visitor: &mut Visitor) {}
+
+    fn map<Mapper: ModuleMapper<B>>(self, _mapper: &mut Mapper) -> Self {
+        self
+    }
+
+    fn load_record(self, _record: Self::Record) -> Self {
+        self
+    }
+
+    fn into_record(self) -> Self::Record {}
+}
+
 impl<B: AutodiffBackend> AutodiffModule<B> for VisionAttentionMode {
     type InnerModule = VisionAttentionMode;
 
@@ -354,6 +447,30 @@ impl<B: AutodiffBackend> AutodiffModule<B> for VisionTrmGridMismatchPolicy {
     }
 }
 
+impl<B: AutodiffBackend> AutodiffModule<B> for VisionTrmPredictSubstepKind {
+    type InnerModule = VisionTrmPredictSubstepKind;
+
+    fn valid(&self) -> Self::InnerModule {
+        *self
+    }
+
+    fn from_inner(module: Self::InnerModule) -> Self {
+        module
+    }
+}
+
+impl<B: AutodiffBackend> AutodiffModule<B> for VisionTrmClsReadoutKind {
+    type InnerModule = VisionTrmClsReadoutKind;
+
+    fn valid(&self) -> Self::InnerModule {
+        *self
+    }
+
+    fn from_inner(module: Self::InnerModule) -> Self {
+        module
+    }
+}
+
 impl ModuleDisplayDefault for VisionAttentionMode {
     fn content(&self, content: Content) -> Option<Content> {
         content.add_formatted(self).optional()
@@ -384,6 +501,12 @@ impl ModuleDisplayDefault for VisionTrmGridMismatchPolicy {
     }
 }
 
+impl ModuleDisplayDefault for VisionTrmPredictSubstepKind {
+    fn content(&self, content: Content) -> Option<Content> {
+        content.add_formatted(self).optional()
+    }
+}
+
 impl ModuleDisplay for VisionAttentionMode {}
 
 impl ModuleDisplay for VisionPatchEmbedMode {}
@@ -393,6 +516,8 @@ impl ModuleDisplay for VisionBackboneKind {}
 impl ModuleDisplay for VisionLatentActivation {}
 
 impl ModuleDisplay for VisionTrmGridMismatchPolicy {}
+
+impl ModuleDisplay for VisionTrmPredictSubstepKind {}
 
 impl ModuleDisplayDefault for VisionTrmGraphBankModeConfig {
     fn content(&self, content: Content) -> Option<Content> {
@@ -467,7 +592,33 @@ impl Default for VisionTrmGraphBankModeConfig {
 }
 
 impl VisionTrmGraphBankModeConfig {
-    pub fn coarse_only_predict_substep(&self) -> Self {
+    /// Predict-time schedule for scene-slot style graph routing.
+    ///
+    /// The patch path reads its late predict context primarily from the hub / scene-slot bank,
+    /// while the coarse path continues local refinement and hub updates.
+    pub fn scene_slot_predict_preset() -> Self {
+        Self {
+            patch_local_read: false,
+            patch_local_write: false,
+            coarse_local_read: true,
+            coarse_local_write: true,
+            patch_from_coarse_read: false,
+            patch_from_hub_read: true,
+            coarse_from_hub_read: true,
+            patch_to_coarse_write: false,
+            patch_to_global_write: false,
+            coarse_to_global_write: true,
+            patch_decay_scale: 1.0,
+            coarse_decay_scale: 1.0,
+            global_decay_scale: 1.0,
+        }
+    }
+
+    /// Coarse-only bridge substep used between full predict updates.
+    ///
+    /// This preserves the coarse / hub routing surface while freezing the patch bank for the
+    /// intermediate bridge pass.
+    pub fn bridge_predict_substep(&self) -> Self {
         Self {
             patch_local_read: false,
             patch_local_write: false,
@@ -483,6 +634,32 @@ impl VisionTrmGraphBankModeConfig {
             coarse_decay_scale: self.coarse_decay_scale,
             global_decay_scale: self.global_decay_scale,
         }
+    }
+
+    /// Local diffusion bridge substep used by the promoted graph-bridge image recipe.
+    ///
+    /// This keeps patch/coarse local state evolution active while suppressing cross-bank reads
+    /// and writes during the intermediate bridge pass.
+    pub fn local_bridge_predict_substep(&self) -> Self {
+        Self {
+            patch_local_read: true,
+            patch_local_write: true,
+            coarse_local_read: true,
+            coarse_local_write: true,
+            patch_from_coarse_read: false,
+            patch_from_hub_read: false,
+            coarse_from_hub_read: false,
+            patch_to_coarse_write: false,
+            patch_to_global_write: false,
+            coarse_to_global_write: false,
+            patch_decay_scale: self.patch_decay_scale,
+            coarse_decay_scale: self.coarse_decay_scale,
+            global_decay_scale: self.global_decay_scale,
+        }
+    }
+
+    pub fn coarse_only_predict_substep(&self) -> Self {
+        self.bridge_predict_substep()
     }
 }
 
@@ -512,6 +689,8 @@ impl ModuleDisplayDefault for VisionTrmGraphConfig {
             .add("coarse_local_diagonals", &self.coarse_local_diagonals)
             .add("coarse_local_self", &self.coarse_local_self)
             .add("predict_coarse_substeps", &self.predict_coarse_substeps)
+            .add("predict_substep_kind", &self.predict_substep_kind)
+            .add("cls_readout", &self.cls_readout)
             .add("decay", &self.decay)
             .add("hub_gates", &self.hub_gates)
             .add("bank_schedule", &self.bank_schedule)
@@ -540,6 +719,8 @@ pub struct VisionTrmGraphConfig {
     pub coarse_local_diagonals: Option<bool>,
     pub coarse_local_self: Option<bool>,
     pub predict_coarse_substeps: usize,
+    pub predict_substep_kind: VisionTrmPredictSubstepKind,
+    pub cls_readout: VisionTrmClsReadoutKind,
     pub decay: f32,
     pub hub_gates: bool,
     pub bank_schedule: VisionTrmGraphBankScheduleConfig,
@@ -564,6 +745,8 @@ impl Default for VisionTrmGraphConfig {
             coarse_local_diagonals: None,
             coarse_local_self: None,
             predict_coarse_substeps: 1,
+            predict_substep_kind: VisionTrmPredictSubstepKind::CoarseOnly,
+            cls_readout: VisionTrmClsReadoutKind::PatchMean,
             decay: 0.9,
             hub_gates: true,
             bank_schedule: VisionTrmGraphBankScheduleConfig::default(),
@@ -601,6 +784,45 @@ impl<B: Backend> Module<B> for VisionTrmGraphConfig {
 }
 
 impl VisionTrmGraphConfig {
+    /// Scene-slot style graph baseline distilled from the current broader-validation image sweeps.
+    pub fn scene_slot_graph_preset() -> Self {
+        Self {
+            enabled: true,
+            coarse_stride: 2,
+            hub_count: 8,
+            rank: 8,
+            patch_rank: None,
+            coarse_rank: None,
+            global_rank: None,
+            value_dim: 32,
+            local_radius: 1,
+            local_diagonals: true,
+            local_self: true,
+            coarse_local_radius: Some(1),
+            coarse_local_diagonals: Some(true),
+            coarse_local_self: Some(true),
+            predict_coarse_substeps: 1,
+            predict_substep_kind: VisionTrmPredictSubstepKind::CoarseOnly,
+            cls_readout: VisionTrmClsReadoutKind::PatchMean,
+            decay: 0.9,
+            hub_gates: true,
+            bank_schedule: VisionTrmGraphBankScheduleConfig {
+                observe: VisionTrmGraphBankModeConfig::default(),
+                refine: VisionTrmGraphBankModeConfig::default(),
+                predict: VisionTrmGraphBankModeConfig::scene_slot_predict_preset(),
+            },
+            grid_mismatch_policy: VisionTrmGridMismatchPolicy::FallbackDefault,
+        }
+    }
+
+    /// Promoted graph-bridge preset: scene-slot hubs plus one extra coarse-only bridge substep.
+    pub fn scene_slot_graph_bridge_preset() -> Self {
+        let mut preset = Self::scene_slot_graph_preset();
+        preset.predict_coarse_substeps = 2;
+        preset.predict_substep_kind = VisionTrmPredictSubstepKind::LocalBridge;
+        preset
+    }
+
     pub fn patch_rank_resolved(&self) -> usize {
         self.patch_rank.unwrap_or(self.rank).max(1)
     }
@@ -819,10 +1041,191 @@ impl Default for VisionDragonConfig {
 }
 
 impl VisionDragonConfig {
+    /// Construct the matched 224px scene-slot graph control from the current sweeps.
+    pub fn scene_slot_graph_baseline_224() -> Self {
+        let mut config = Self::default();
+        config.apply_scene_slot_graph_baseline_224();
+        config
+    }
+
+    /// Construct the promoted 224px graph-bridge image baseline from the current sweeps.
+    pub fn scene_slot_graph_bridge_baseline_224() -> Self {
+        let mut config = Self::default();
+        config.apply_scene_slot_graph_bridge_baseline_224();
+        config
+    }
+
+    /// Construct a medium-width ImageNet-1k graph-bridge launch preset sized for 280px,
+    /// multi-teacher distillation against 768-dim target spaces.
+    pub fn scene_slot_graph_bridge_multiteacher_medium_280() -> Self {
+        let mut config = Self::default();
+        config.apply_scene_slot_graph_bridge_multiteacher_medium_280();
+        config
+    }
+
+    /// Construct a base-width ImageNet-1k graph-bridge launch preset sized for 336px and
+    /// 768-dim teacher target spaces.
+    pub fn scene_slot_graph_bridge_multiteacher_base_336() -> Self {
+        let mut config = Self::default();
+        config.apply_scene_slot_graph_bridge_multiteacher_base_336();
+        config
+    }
+
+    /// Apply the validated scene-slot graph baseline to an existing vision config.
+    pub fn apply_scene_slot_graph_preset(&mut self) -> &mut Self {
+        self.backbone = VisionBackboneKind::Pyramid;
+        self.steps = self.steps.max(3);
+        self.trm_graph = VisionTrmGraphConfig::scene_slot_graph_preset();
+        self.rho_stream = VisionRhoStreamConfig::default();
+        self
+    }
+
+    /// Apply the promoted graph-bridge preset derived from the current vision sweeps.
+    pub fn apply_scene_slot_graph_bridge_preset(&mut self) -> &mut Self {
+        self.backbone = VisionBackboneKind::Pyramid;
+        self.steps = self.steps.max(4);
+        self.trm_graph = VisionTrmGraphConfig::scene_slot_graph_bridge_preset();
+        self.rho_stream = VisionRhoStreamConfig::default();
+        self
+    }
+
+    /// Apply the matched 224px scene-slot graph control baseline.
+    ///
+    /// This is the simpler slot-graph control paired against the promoted local-bridge variant.
+    pub fn apply_scene_slot_graph_baseline_224(&mut self) -> &mut Self {
+        self.image_size = 224;
+        self.patch_size = 16;
+        self.patch_embed_mode = VisionPatchEmbedMode::default();
+        self.backbone = VisionBackboneKind::Pyramid;
+        self.in_channels = 3;
+        self.embed_dim = 160;
+        self.steps = 3;
+        self.n_head = 5;
+        self.mlp_internal_dim_multiplier = 4;
+        self.dropout = 0.1;
+        self.projection_dim = 384;
+        self.projection_hidden_dim = 512;
+        self.use_cls_token = true;
+        self.cls_sync_alpha = 0.0;
+        self.num_eyes = 1;
+        self.cross_eye_steps = 0;
+        self.token_state_norm = true;
+        self.latent_activation = VisionLatentActivation::default();
+        self.pos_encoding = SpatialPositionalEncodingKind::Learned2d;
+        let grid = self.image_size.div_ceil(self.patch_size).max(1);
+        self.pos_max_height = grid;
+        self.pos_max_width = grid;
+        self.attention_mode = VisionAttentionMode::RowL1;
+        self.use_alibi = true;
+        self.apply_scene_slot_graph_preset();
+        self
+    }
+
+    /// Apply the promoted 224px graph-bridge image baseline.
+    ///
+    /// This captures the currently strongest small image backbone recipe surfaced by the broader
+    /// graph validation work: `patch16 / embed160 / heads5 / steps4 / local_bridge`.
+    pub fn apply_scene_slot_graph_bridge_baseline_224(&mut self) -> &mut Self {
+        self.image_size = 224;
+        self.patch_size = 16;
+        self.patch_embed_mode = VisionPatchEmbedMode::default();
+        self.backbone = VisionBackboneKind::Pyramid;
+        self.in_channels = 3;
+        self.embed_dim = 160;
+        self.steps = 4;
+        self.n_head = 5;
+        self.mlp_internal_dim_multiplier = 4;
+        self.dropout = 0.1;
+        self.projection_dim = 384;
+        self.projection_hidden_dim = 512;
+        self.use_cls_token = true;
+        self.cls_sync_alpha = 0.0;
+        self.num_eyes = 1;
+        self.cross_eye_steps = 0;
+        self.token_state_norm = true;
+        self.latent_activation = VisionLatentActivation::default();
+        self.pos_encoding = SpatialPositionalEncodingKind::Learned2d;
+        let grid = self.image_size.div_ceil(self.patch_size).max(1);
+        self.pos_max_height = grid;
+        self.pos_max_width = grid;
+        self.attention_mode = VisionAttentionMode::RowL1;
+        self.use_alibi = true;
+        self.apply_scene_slot_graph_bridge_preset();
+        self
+    }
+
+    /// Apply the medium-width ImageNet-1k graph-bridge launch preset.
+    pub fn apply_scene_slot_graph_bridge_multiteacher_medium_280(&mut self) -> &mut Self {
+        self.image_size = 280;
+        self.patch_size = 14;
+        self.patch_embed_mode = VisionPatchEmbedMode::default();
+        self.backbone = VisionBackboneKind::Pyramid;
+        self.in_channels = 3;
+        self.embed_dim = 320;
+        self.steps = 4;
+        self.n_head = 8;
+        self.mlp_internal_dim_multiplier = 4;
+        self.dropout = 0.0;
+        self.projection_dim = 768;
+        self.projection_hidden_dim = 1536;
+        self.use_cls_token = true;
+        self.cls_sync_alpha = 0.0;
+        self.num_eyes = 1;
+        self.cross_eye_steps = 0;
+        self.token_state_norm = true;
+        self.latent_activation = VisionLatentActivation::default();
+        self.pos_encoding = SpatialPositionalEncodingKind::Learned2d;
+        let grid = self.image_size.div_ceil(self.patch_size).max(1);
+        self.pos_max_height = grid;
+        self.pos_max_width = grid;
+        self.attention_mode = VisionAttentionMode::RowL1;
+        self.use_alibi = true;
+        self.fused_kernels = FusedKernelConfig::default();
+        self.apply_scene_slot_graph_bridge_preset();
+        self.trm_graph.hub_count = 12;
+        self.trm_graph.rank = 12;
+        self.trm_graph.value_dim = 64;
+        self
+    }
+
+    /// Apply the base-width ImageNet-1k graph-bridge launch preset.
+    pub fn apply_scene_slot_graph_bridge_multiteacher_base_336(&mut self) -> &mut Self {
+        self.image_size = 336;
+        self.patch_size = 14;
+        self.patch_embed_mode = VisionPatchEmbedMode::default();
+        self.backbone = VisionBackboneKind::Pyramid;
+        self.in_channels = 3;
+        self.embed_dim = 384;
+        self.steps = 5;
+        self.n_head = 12;
+        self.mlp_internal_dim_multiplier = 4;
+        self.dropout = 0.0;
+        self.projection_dim = 768;
+        self.projection_hidden_dim = 2048;
+        self.use_cls_token = true;
+        self.cls_sync_alpha = 0.0;
+        self.num_eyes = 1;
+        self.cross_eye_steps = 0;
+        self.token_state_norm = true;
+        self.latent_activation = VisionLatentActivation::default();
+        self.pos_encoding = SpatialPositionalEncodingKind::Learned2d;
+        let grid = self.image_size.div_ceil(self.patch_size).max(1);
+        self.pos_max_height = grid;
+        self.pos_max_width = grid;
+        self.attention_mode = VisionAttentionMode::RowL1;
+        self.use_alibi = true;
+        self.fused_kernels = FusedKernelConfig::default();
+        self.apply_scene_slot_graph_bridge_preset();
+        self.trm_graph.hub_count = 16;
+        self.trm_graph.rank = 16;
+        self.trm_graph.value_dim = 96;
+        self
+    }
+
     pub fn latent_per_head(&self) -> usize {
         let total = self.mlp_internal_dim_multiplier * self.embed_dim;
         assert!(
-            total.is_multiple_of(self.n_head),
+            total % self.n_head == 0,
             "latent size must be divisible by the number of heads"
         );
         total / self.n_head

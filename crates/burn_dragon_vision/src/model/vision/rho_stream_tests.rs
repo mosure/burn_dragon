@@ -1,3 +1,6 @@
+use super::pyramid_ops::{
+    CompiledLocalBridgeProjectionPairPlan, CompiledStructuredDenseUpdatePairPlan,
+};
 use super::*;
 #[cfg(all(feature = "train", not(target_arch = "wasm32")))]
 use burn::optim::{AdamWConfig, GradientsParams, LearningRate, Optimizer};
@@ -12,7 +15,6 @@ use burn_dragon_core::{FusedKernelConfig, ManifoldHyperConnectionsConfig};
 use burn_ndarray::NdArray;
 #[cfg(all(feature = "train", not(target_arch = "wasm32")))]
 use burn_wgpu::WgpuRuntime;
-
 #[derive(Clone, Copy)]
 struct RhoStreamTestConfig {
     use_cls_token: bool,
@@ -137,6 +139,8 @@ fn make_pyramid_config() -> VisionDragonConfig {
             coarse_local_diagonals: None,
             coarse_local_self: None,
             predict_coarse_substeps: 1,
+            predict_substep_kind: VisionTrmPredictSubstepKind::CoarseOnly,
+            cls_readout: VisionTrmClsReadoutKind::PatchMean,
             decay: 0.9,
             hub_gates: true,
             bank_schedule: VisionTrmGraphBankScheduleConfig::default(),
@@ -162,6 +166,7 @@ fn make_pyramid_model_with_kernel<B: BackendTrait>(
     VisionDragon::<B>::new(config, device)
 }
 
+#[cfg(all(feature = "train", not(target_arch = "wasm32")))]
 fn make_stage_aware_pyramid_config() -> VisionDragonConfig {
     let mut config = make_pyramid_config();
     config.image_size = 8;
@@ -178,25 +183,12 @@ fn make_stage_aware_pyramid_config() -> VisionDragonConfig {
     config.trm_graph.bank_schedule = VisionTrmGraphBankScheduleConfig {
         observe: VisionTrmGraphBankModeConfig::default(),
         refine: VisionTrmGraphBankModeConfig::default(),
-        predict: VisionTrmGraphBankModeConfig {
-            patch_local_read: false,
-            patch_local_write: false,
-            patch_from_coarse_read: false,
-            patch_from_hub_read: true,
-            patch_to_coarse_write: false,
-            patch_to_global_write: false,
-            coarse_local_read: true,
-            coarse_local_write: true,
-            coarse_from_hub_read: true,
-            coarse_to_global_write: true,
-            patch_decay_scale: 1.0,
-            coarse_decay_scale: 1.0,
-            global_decay_scale: 1.0,
-        },
+        predict: VisionTrmGraphBankModeConfig::scene_slot_predict_preset(),
     };
     config
 }
 
+#[cfg(all(feature = "train", not(target_arch = "wasm32")))]
 fn make_stage_aware_pyramid_model_with_kernel<B: BackendTrait>(
     device: &B::Device,
     kernel_enabled: bool,
@@ -976,6 +968,78 @@ fn pyramid_hub_bank_produces_nonzero_patch_readout() {
 }
 
 #[test]
+fn pyramid_patch_mean_summary_ignores_hub_rho() {
+    type Backend = NdArray<f32>;
+    let device = <Backend as BackendTrait>::Device::default();
+    let mut config = make_pyramid_config();
+    config.trm_graph.cls_readout = VisionTrmClsReadoutKind::PatchMean;
+    let model = VisionDragon::<Backend>::new(config, &device);
+    let tokens =
+        Tensor::<Backend, 3>::from_data(TensorData::new(vec![1.0; 16], [1, 4, 4]), &device);
+
+    let mut state = model.pyramid_state_from_patch_tokens(tokens);
+    let baseline = model.pyramid_summary(&state);
+    *state.hub_rho_mut() =
+        Tensor::<Backend, 4>::from_data(TensorData::new(vec![5.0; 16], [1, 2, 2, 4]), &device);
+    let changed = model.pyramid_summary(&state);
+
+    assert!(
+        max_abs_diff(baseline, changed) < 1e-6,
+        "patch-mean summary should ignore hub rho changes"
+    );
+}
+
+#[test]
+fn pyramid_hub_cls_readout_responds_to_hub_rho() {
+    type Backend = NdArray<f32>;
+    let device = <Backend as BackendTrait>::Device::default();
+    let mut config = make_pyramid_config();
+    config.trm_graph.cls_readout = VisionTrmClsReadoutKind::Hub;
+    let model = VisionDragon::<Backend>::new(config, &device);
+    let tokens =
+        Tensor::<Backend, 3>::from_data(TensorData::new(vec![1.0; 16], [1, 4, 4]), &device);
+
+    let mut state = model.pyramid_state_from_patch_tokens(tokens);
+    *state.hub_rho_mut() = Tensor::<Backend, 4>::zeros([1, 2, 2, 4], &device);
+    let baseline = model.pyramid_summary(&state);
+    *state.hub_rho_mut() = Tensor::<Backend, 4>::from_data(
+        TensorData::new(
+            (0..16).map(|value| value as f32).collect::<Vec<_>>(),
+            [1, 2, 2, 4],
+        ),
+        &device,
+    );
+    let changed = model.pyramid_summary(&state);
+
+    assert!(
+        max_abs_diff(baseline, changed) > 1e-6,
+        "hub cls readout should respond to hub rho changes"
+    );
+}
+
+#[test]
+fn pyramid_hub_and_coarse_cls_readout_responds_to_coarse_state() {
+    type Backend = NdArray<f32>;
+    let device = <Backend as BackendTrait>::Device::default();
+    let mut config = make_pyramid_config();
+    config.trm_graph.cls_readout = VisionTrmClsReadoutKind::HubAndCoarse;
+    let model = VisionDragon::<Backend>::new(config, &device);
+    let tokens =
+        Tensor::<Backend, 3>::from_data(TensorData::new(vec![1.0; 16], [1, 4, 4]), &device);
+
+    let mut state = model.pyramid_state_from_patch_tokens(tokens);
+    let baseline = model.pyramid_summary(&state);
+    *state.context_state_mut() =
+        Tensor::<Backend, 4>::from_data(TensorData::new(vec![7.0; 4], [1, 4, 1, 1]), &device);
+    let changed = model.pyramid_summary(&state);
+
+    assert!(
+        max_abs_diff(baseline, changed) > 1e-6,
+        "hub+coarse cls readout should respond to coarse state changes"
+    );
+}
+
+#[test]
 fn pyramid_project_spatial_pair_matches_individual_projection() {
     type Backend = NdArray<f32>;
     let device = <Backend as BackendTrait>::Device::default();
@@ -1018,6 +1082,90 @@ fn pyramid_project_spatial_pair_matches_individual_projection() {
             .convert::<f32>()
             .into_vec::<f32>()
             .expect("pair coarse projection")
+    );
+}
+
+#[test]
+fn pyramid_local_bridge_projection_pair_matches_individual_projection() {
+    type Backend = NdArray<f32>;
+    let device = <Backend as BackendTrait>::Device::default();
+    let model = make_pyramid_model::<Backend>(&device);
+    let tokens =
+        Tensor::<Backend, 3>::from_data(TensorData::new(vec![1.0; 16], [1, 4, 4]), &device);
+
+    let state = model.pyramid_state_from_patch_tokens(tokens);
+    let h8 = state.patch_state().clone();
+    let h32 = state.coarse_state().clone();
+    let patch_x_layer = model
+        .pyramid_patch_x_neuron_proj
+        .as_ref()
+        .expect("pyramid patch x projection");
+    let coarse_x_layer = model
+        .pyramid_coarse_x_neuron_proj
+        .as_ref()
+        .expect("pyramid coarse x projection");
+    let value_layer = model
+        .pyramid_write_value_proj
+        .as_ref()
+        .expect("pyramid value projection");
+    let plan =
+        CompiledLocalBridgeProjectionPairPlan::new(patch_x_layer, coarse_x_layer, value_layer)
+            .expect("local bridge projection pair plan");
+
+    let patch_x = model.project_spatial(h8.clone(), patch_x_layer);
+    let patch_v = model.project_spatial(h8.clone(), value_layer);
+    let coarse_x = model.project_spatial(h32.clone(), coarse_x_layer);
+    let coarse_v = model.project_spatial(h32.clone(), value_layer);
+    let (pair_patch_x, pair_patch_v, pair_coarse_x, pair_coarse_v) =
+        model.project_local_bridge_pair_with_plan(h8, h32, &plan);
+
+    assert_eq!(
+        patch_x
+            .into_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .expect("single patch x projection"),
+        pair_patch_x
+            .into_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .expect("pair patch x projection")
+    );
+    assert_eq!(
+        patch_v
+            .into_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .expect("single patch value projection"),
+        pair_patch_v
+            .into_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .expect("pair patch value projection")
+    );
+    assert_eq!(
+        coarse_x
+            .into_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .expect("single coarse x projection"),
+        pair_coarse_x
+            .into_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .expect("pair coarse x projection")
+    );
+    assert_eq!(
+        coarse_v
+            .into_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .expect("single coarse value projection"),
+        pair_coarse_v
+            .into_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .expect("pair coarse value projection")
     );
 }
 
@@ -1085,6 +1233,107 @@ fn pyramid_update_states_matches_individual_updates() {
         delta_proj,
         value_norm,
     );
+
+    assert_eq!(
+        single_h8
+            .into_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .expect("single patch update"),
+        pair_h8
+            .into_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .expect("pair patch update")
+    );
+    assert_eq!(
+        single_h32
+            .into_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .expect("single coarse update"),
+        pair_h32
+            .into_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .expect("pair coarse update")
+    );
+}
+
+#[test]
+fn pyramid_update_states_separate_with_plan_matches_individual_updates() {
+    type Backend = NdArray<f32>;
+    let device = <Backend as BackendTrait>::Device::default();
+    let model = make_pyramid_model::<Backend>(&device);
+    let tokens =
+        Tensor::<Backend, 3>::from_data(TensorData::new(vec![1.0; 16], [1, 4, 4]), &device);
+
+    let state = model.pyramid_state_from_patch_tokens(tokens);
+    let h8 = state.patch_state().clone();
+    let h32 = state.coarse_state().clone();
+    let x8_proj = model
+        .pyramid_patch_x_neuron_proj
+        .as_ref()
+        .expect("pyramid patch x projection");
+    let x32_proj = model
+        .pyramid_coarse_x_neuron_proj
+        .as_ref()
+        .expect("pyramid coarse x projection");
+    let v_proj = model
+        .pyramid_write_value_proj
+        .as_ref()
+        .expect("pyramid value projection");
+    let patch_y_gate_proj = model
+        .pyramid_patch_y_gate_proj
+        .as_ref()
+        .expect("pyramid patch y gate projection");
+    let patch_delta_proj = model
+        .pyramid_patch_delta_proj
+        .as_ref()
+        .expect("pyramid patch delta projection");
+    let coarse_y_gate_proj = model
+        .pyramid_coarse_y_gate_proj
+        .as_ref()
+        .expect("pyramid coarse y gate projection");
+    let coarse_delta_proj = model
+        .pyramid_coarse_delta_proj
+        .as_ref()
+        .expect("pyramid coarse delta projection");
+    let value_norm = model
+        .pyramid_value_norm
+        .as_ref()
+        .expect("pyramid value norm");
+    let plan = CompiledStructuredDenseUpdatePairPlan::new(
+        patch_y_gate_proj,
+        patch_delta_proj,
+        coarse_y_gate_proj,
+        coarse_delta_proj,
+    )
+    .expect("matching patch/coarse update plan");
+
+    let x8 = activation::relu(model.project_spatial(h8.clone(), x8_proj));
+    let msg8 = model.project_spatial(h8.clone(), v_proj);
+    let x32 = activation::relu(model.project_spatial(h32.clone(), x32_proj));
+    let msg32 = model.project_spatial(h32.clone(), v_proj);
+
+    let single_h8 = model.pyramid_update_state(
+        h8.clone(),
+        x8.clone(),
+        msg8.clone(),
+        patch_y_gate_proj,
+        patch_delta_proj,
+        value_norm,
+    );
+    let single_h32 = model.pyramid_update_state(
+        h32.clone(),
+        x32.clone(),
+        msg32.clone(),
+        coarse_y_gate_proj,
+        coarse_delta_proj,
+        value_norm,
+    );
+    let (pair_h8, pair_h32) = model
+        .pyramid_update_states_separate_with_plan(h8, x8, msg8, h32, x32, msg32, value_norm, &plan);
 
     assert_eq!(
         single_h8
@@ -1210,6 +1459,57 @@ fn pyramid_predict_schedule_can_disable_patch_local_bank() {
     assert!(
         patch_rho_diff > 1e-5,
         "predict schedule should change patch rho"
+    );
+}
+
+#[cfg(feature = "train")]
+#[test]
+fn scene_slot_graph_bridge_preset_changes_predict_rollout_state() {
+    type Backend = NdArray<f32>;
+    let device = <Backend as BackendTrait>::Device::default();
+    let tokens =
+        Tensor::<Backend, 3>::from_data(TensorData::new(vec![1.0; 16 * 8], [1, 16, 8]), &device);
+
+    let make_model = |trm_graph: VisionTrmGraphConfig| {
+        let mut config = make_stage_aware_pyramid_config();
+        config.steps = 2;
+        config.trm_graph = trm_graph;
+        config.trm_graph.patch_rank = Some(1);
+        config.trm_graph.coarse_rank = Some(4);
+        config.trm_graph.global_rank = Some(2);
+        VisionDragon::<Backend>::new(config, &device)
+    };
+
+    let bridge_model = make_model(VisionTrmGraphConfig::scene_slot_graph_bridge_preset());
+    let scene_slot_model = make_model(VisionTrmGraphConfig::scene_slot_graph_preset())
+        .load_record(bridge_model.clone().into_record());
+
+    let bridge_state = bridge_model.forward_pyramid_state_rollout_mode_unbounded(
+        bridge_model.pyramid_state_from_patch_tokens(tokens.clone()),
+        2,
+        2,
+        StructuredStepMode::Predict,
+    );
+    let scene_slot_state = scene_slot_model.forward_pyramid_state_rollout_mode_unbounded(
+        scene_slot_model.pyramid_state_from_patch_tokens(tokens),
+        2,
+        2,
+        StructuredStepMode::Predict,
+    );
+
+    assert!(
+        max_abs_diff(
+            bridge_state.context_state().clone(),
+            scene_slot_state.context_state().clone(),
+        ) > 1e-5,
+        "bridge preset should change coarse context state during predict rollout"
+    );
+    assert!(
+        max_abs_diff(
+            bridge_state.hub_rho().clone(),
+            scene_slot_state.hub_rho().clone()
+        ) > 1e-5,
+        "bridge preset should change hub rho during predict rollout"
     );
 }
 
@@ -1348,7 +1648,6 @@ fn assert_close<const D: usize>(
     );
 }
 
-#[cfg(all(feature = "train", not(target_arch = "wasm32")))]
 fn max_abs_diff<B: BackendTrait, const D: usize>(lhs: Tensor<B, D>, rhs: Tensor<B, D>) -> f32 {
     let lhs = lhs
         .to_data()

@@ -18,7 +18,7 @@ This repository is now organized as a generic Dragon framework with curated libr
 
 - root facade: `burn_dragon::api`
 - core Dragon concepts: `burn_dragon_core::api`
-- fused execution layer: `burn_dragon_wgpu::api`
+- fused execution layer: `burn_dragon_kernel::api`
 - checkpoint/deployment helpers: `burn_dragon_checkpoint::api`
 - shared stream semantics: `burn_dragon_stream::api`
 - multimodal composition: `burn_dragon_multimodal::api`
@@ -232,6 +232,19 @@ cargo run -p burn_dragon_cli --features train,web --bin export_burnpack -- \
 | `0.2`                   | `0.19` |
 | `0.1`                   | `0.18` |
 
+## citation
+
+If you found this useful, copy the below citation.
+
+```bibtex
+@misc{mosure2026dragonvision,
+  title        = {Dragon Vision: Compact Recurrent Students Distilled from DINOv2},
+  author       = {Mosure, Mitchell},
+  year         = {2026},
+  note         = {Manuscript in preparation},
+  howpublished = {\url{https://github.com/mosure/burn_dragon/tree/main/docs/paper}}
+}
+```
 
 ## license
 licensed under either of

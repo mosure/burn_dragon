@@ -604,7 +604,7 @@ impl<B: AutodiffBackend> VisionDistillTrainStepBench<B> {
     ) -> Result<Self> {
         let rollout = resolve_vision_rollout(training, vision.steps)?;
         let model = VisionDragon::<B>::new(vision, device);
-        let distill = VisionDistillModel::new(model, distill, None, rollout);
+        let distill = VisionDistillModel::new(model, distill, None, rollout, device);
         let optimizer =
             adamw_config_from_optimizer(optimizer_cfg).init::<B, VisionDistillModel<B>>();
         let lr = optimizer_cfg.learning_rate;

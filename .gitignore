@@ -48,6 +48,8 @@ config/**/README.md
 docs/*
 !docs/assets/
 !docs/assets/**
+docs/paper/
+docs/paper/**
 docs/README.md
 docs/artifacts/
 docs/core/

@@ -6,16 +6,22 @@ mod init;
 mod mhc;
 mod norm;
 mod residual_stream;
+mod sequence;
 mod state;
 mod structured_mode;
 mod structured_routing;
 mod structured_state;
 mod structured_step;
 
-pub use bdh::BDH;
+pub use bdh::{
+    BDH, LanguageMhcLayerDiagnostics, LogitsProjectionProfileSnapshot,
+    logits_projection_profile_reset, logits_projection_profile_snapshot,
+};
+pub use burn_dragon_kernel::api::projection::LowrankGradInputExecutor;
 pub use config::{
     BDHConfig, ClockedSlowMemoryConfig, FusedAttentionExecutor, FusedKernelConfig,
-    SummaryMemoryConfig, YNeuronRecurrenceConfig,
+    FusedProjectionExecutor, LatentFanoutScheduleConfig, SequenceKernelKind, SummaryMemoryConfig,
+    YNeuronRecurrenceConfig,
 };
 pub use halt::HaltHead;
 pub use init::{
@@ -24,12 +30,19 @@ pub use init::{
 };
 pub use mhc::{
     ManifoldHyperConnectionCoefficientPolicy, ManifoldHyperConnectionCoefficients,
+    ManifoldHyperConnectionStreamCoefficients, ManifoldHyperConnectionStreamOutput,
     ManifoldHyperConnectionWidthOutput, ManifoldHyperConnections, ManifoldHyperConnectionsConfig,
     mhc_merge, mhc_merge_with_coefficients, mhc_passthrough, mhc_passthrough_with_coefficients,
     mhc_split, mhc_split_with_coefficients,
 };
 pub use norm::{DragonNorm, DragonNormConfig, DragonNormKind};
-pub use residual_stream::{LowRankResidualOutput, lowrank_residual_step};
+pub use residual_stream::{
+    LowRankResidualOutput, LowRankResidualProfileSnapshot, lowrank_residual_profile_reset,
+    lowrank_residual_profile_snapshot, lowrank_residual_step,
+};
+pub use sequence::{
+    MambaSequenceConfig, SequenceKernelConfig, SequenceKernelFamily, SequenceTrainingExecutor,
+};
 #[cfg(feature = "viz")]
 pub use state::LayerVizState;
 pub use state::{LayerState, ModelState};

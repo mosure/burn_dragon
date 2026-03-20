@@ -157,6 +157,8 @@ pub fn detach_model_state<B: Backend>(state: &ModelState<B>) -> ModelState<B> {
             .iter()
             .map(|layer| LayerState {
                 rho: layer.rho.clone().map(Tensor::detach),
+                rho_norm: layer.rho_norm.clone().map(Tensor::detach),
+                sequence_aux: layer.sequence_aux.clone().map(Tensor::detach),
                 y_neuron_state: layer.y_neuron_state.clone().map(Tensor::detach),
                 clocked_slow_hidden: layer.clocked_slow_hidden.clone().map(Tensor::detach),
                 summary_memory_hidden: layer.summary_memory_hidden.clone().map(Tensor::detach),
@@ -173,6 +175,8 @@ pub fn model_state_inner<B: AutodiffBackend>(state: &ModelState<B>) -> ModelStat
             .iter()
             .map(|layer| LayerState {
                 rho: layer.rho.clone().map(Tensor::inner),
+                rho_norm: layer.rho_norm.clone().map(Tensor::inner),
+                sequence_aux: layer.sequence_aux.clone().map(Tensor::inner),
                 y_neuron_state: layer.y_neuron_state.clone().map(Tensor::inner),
                 clocked_slow_hidden: layer.clocked_slow_hidden.clone().map(Tensor::inner),
                 summary_memory_hidden: layer.summary_memory_hidden.clone().map(Tensor::inner),
@@ -191,6 +195,8 @@ pub fn model_state_from_inner<B: AutodiffBackend>(
             .into_iter()
             .map(|layer| LayerState {
                 rho: layer.rho.map(Tensor::from_inner),
+                rho_norm: layer.rho_norm.map(Tensor::from_inner),
+                sequence_aux: layer.sequence_aux.map(Tensor::from_inner),
                 y_neuron_state: layer.y_neuron_state.map(Tensor::from_inner),
                 clocked_slow_hidden: layer.clocked_slow_hidden.map(Tensor::from_inner),
                 summary_memory_hidden: layer.summary_memory_hidden.map(Tensor::from_inner),

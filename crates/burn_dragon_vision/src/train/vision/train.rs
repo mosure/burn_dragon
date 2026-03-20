@@ -1,6 +1,11 @@
 use super::distill_runtime::{DistillDatasetRequest, build_distill_datasets_and_teacher};
 use super::video::dataset::MovingMnistVideoLoaderConfig;
+use crate::model::{stage_aware_host_profile_reset, stage_aware_host_profile_snapshot};
 use crate::train::prelude::*;
+use burn::record::Recorder;
+use burn_dragon_kernel::api::spatial::{
+    structured_pyramid_profile_reset, structured_pyramid_profile_snapshot,
+};
 use std::time::Instant;
 
 pub fn train_vision_backend<B, Init>(
@@ -16,6 +21,8 @@ where
     let stage_profile = crate::train::profile::enabled();
     if stage_profile {
         crate::train::profile::reset();
+        stage_aware_host_profile_reset();
+        structured_pyramid_profile_reset();
     }
     let train_wall_start = stage_profile.then(Instant::now);
 
@@ -166,10 +173,7 @@ where
                 if lejepa.local_image_size == 0 {
                     return Err(anyhow!("lejepa.local_image_size must be > 0"));
                 }
-                if !lejepa
-                    .local_image_size
-                    .is_multiple_of(vision_config.patch_size)
-                {
+                if lejepa.local_image_size % vision_config.patch_size != 0 {
                     return Err(anyhow!(
                         "lejepa.local_image_size ({}) must be divisible by patch_size ({})",
                         lejepa.local_image_size,
@@ -268,6 +272,7 @@ where
                 local_augmentations: local_train_aug.clone(),
                 normalize,
                 teacher: None,
+                teacher_targets: Vec::new(),
                 views: global_views,
                 local_views,
                 min_view_overlap: lejepa.min_view_overlap,
@@ -284,6 +289,7 @@ where
                 local_augmentations: local_val_aug.clone(),
                 normalize,
                 teacher: None,
+                teacher_targets: Vec::new(),
                 views: global_views,
                 local_views,
                 min_view_overlap: lejepa.min_view_overlap,
@@ -337,6 +343,7 @@ where
                 local_augmentations: None,
                 normalize,
                 teacher: None,
+                teacher_targets: Vec::new(),
                 views,
                 local_views: 0,
                 min_view_overlap,
@@ -353,6 +360,7 @@ where
                 local_augmentations: None,
                 normalize,
                 teacher: None,
+                teacher_targets: Vec::new(),
                 views,
                 local_views: 0,
                 min_view_overlap,
@@ -486,6 +494,7 @@ where
                 local_augmentations: None,
                 normalize,
                 teacher: None,
+                teacher_targets: Vec::new(),
                 views,
                 local_views: 0,
                 min_view_overlap,
@@ -502,6 +511,7 @@ where
                 local_augmentations: None,
                 normalize,
                 teacher: None,
+                teacher_targets: Vec::new(),
                 views,
                 local_views: 0,
                 min_view_overlap,
@@ -605,7 +615,30 @@ where
                 VisionTrainingModeConfig::Distill(distill) => distill.clone(),
                 _ => unreachable!("distill mode branch should only run for distill configs"),
             };
-            let mut model = Some(VisionDistillModel::new(model, distill, teacher, rollout));
+            let mut distill_model =
+                VisionDistillModel::new(model, distill.clone(), teacher, rollout, &device);
+            if let Some(checkpoint) = distill.student_checkpoint.as_ref() {
+                let (checkpoint_base, epoch) =
+                    crate::checkpoint::resolve_checkpoint_base(checkpoint, None)?;
+                let record = BinFileRecorder::<FullPrecisionSettings>::new()
+                    .load::<<VisionDistillModel<B> as Module<B>>::Record>(
+                        checkpoint_base.clone(),
+                        &device,
+                    )
+                    .map_err(|err| {
+                        anyhow!(burn_dragon_checkpoint::format_checkpoint_load_error(
+                            &checkpoint_base,
+                            err
+                        ))
+                    })?;
+                distill_model = distill_model.load_record(record);
+                info!(
+                    "loaded distill student warm start from {} (epoch {})",
+                    checkpoint.display(),
+                    epoch
+                );
+            }
+            let mut model = Some(distill_model);
             let mut optim =
                 Some(adamw_config_from_optimizer(optimizer_cfg).init::<B, VisionDistillModel<B>>());
             let diagnostics = Some(VisionDiagnostics {
@@ -949,8 +982,10 @@ where
     if let Some(start) = train_wall_start {
         let elapsed_ns = start.elapsed().as_nanos();
         let snapshot = crate::train::profile::snapshot();
+        let structured = structured_pyramid_profile_snapshot();
+        let stage_aware = stage_aware_host_profile_snapshot();
         info!(
-            "[stage-profile][training] total_ns={elapsed_ns} dataloader_cpu_ns={} dataloader_image_load_ns={} dataloader_image_transform_ns={} dataloader_teacher_load_ns={} dataloader_tensor_copy_ns={} dataloader_host_to_device_copy_bytes={} host_sync_points={} forward_ns={} loss_backward_ns={} train_steps={}",
+            "[stage-profile][training] total_ns={elapsed_ns} dataloader_cpu_ns={} dataloader_image_load_ns={} dataloader_image_transform_ns={} dataloader_teacher_load_ns={} dataloader_tensor_copy_ns={} dataloader_host_to_device_copy_bytes={} host_sync_points={} forward_ns={} loss_backward_ns={} optimizer_ns={} train_steps={} optimizer_steps={}",
             snapshot.dataloader_cpu_ns,
             snapshot.dataloader_image_load_ns,
             snapshot.dataloader_image_transform_ns,
@@ -960,7 +995,34 @@ where
             snapshot.host_sync_points,
             snapshot.forward_ns,
             snapshot.loss_backward_ns,
+            snapshot.optimizer_ns,
             snapshot.train_steps,
+            snapshot.optimizer_steps,
+        );
+        info!(
+            "[stage-profile][training-structured] calls={} launches={} total_ns={} setup_ns={} copy_ns={} dispatch_ns={} transient_allocations={} metadata_upload_bytes={} metadata_reuse_hits={} metadata_reuse_bytes={} resident_rollout_steps={}",
+            structured.calls,
+            structured.launches,
+            structured.total_ns,
+            structured.setup_ns,
+            structured.copy_ns,
+            structured.dispatch_ns,
+            structured.transient_allocations,
+            structured.metadata_upload_bytes,
+            structured.metadata_reuse_hits,
+            structured.metadata_reuse_bytes,
+            structured.resident_rollout_steps,
+        );
+        info!(
+            "[stage-profile][training-stageaware] step_calls={} coarse_only_step_calls={} patch_local_ns={} coarse_local_ns={} patch_from_coarse_ns={} hub_read_ns={} patch_to_coarse_ns={} hub_update_ns={}",
+            stage_aware.step_calls,
+            stage_aware.coarse_only_step_calls,
+            stage_aware.patch_local_ns,
+            stage_aware.coarse_local_ns,
+            stage_aware.patch_from_coarse_ns,
+            stage_aware.hub_read_ns,
+            stage_aware.patch_to_coarse_ns,
+            stage_aware.hub_update_ns,
         );
     }
 

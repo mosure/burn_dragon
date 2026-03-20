@@ -20,13 +20,17 @@ pub mod checkpoint;
 #[cfg(feature = "train")]
 pub mod dataset;
 #[cfg(feature = "train")]
+pub mod stages;
+#[cfg(feature = "train")]
 pub mod train;
 
 pub mod api {
     //! Curated language-facing Dragon API.
 
     pub mod core {
-        pub use burn_dragon_core::api::config::{BDHConfig, YNeuronRecurrenceConfig};
+        pub use burn_dragon_core::api::config::{
+            BDHConfig, SequenceKernelKind, YNeuronRecurrenceConfig,
+        };
         pub use burn_dragon_core::api::recurrent::BDH;
         pub use burn_dragon_core::api::state::ModelState;
     }
@@ -68,11 +72,12 @@ pub mod api {
     #[cfg(feature = "train")]
     pub mod train {
         pub use crate::dataset;
+        pub use crate::stages;
         pub use crate::train;
     }
 }
 
-pub use burn_dragon_core::{BDH, BDHConfig, ModelState};
+pub use burn_dragon_core::{BDH, BDHConfig, ModelState, SequenceKernelKind};
 #[cfg(feature = "train")]
 pub use checkpoint::{
     LanguageBurnpackExportReport, LanguageRunConfigSnapshot, default_checkpoint_dir,
@@ -95,6 +100,17 @@ pub use inference::{
     is_wgpu_backend_name,
 };
 pub use loss::language_model_loss;
+#[cfg(feature = "train")]
+pub use stages::{
+    BUNDLE_STATE_FILE_NAME, ExperimentBackend, ExperimentBundleConfig, ExperimentBundleState,
+    ExperimentStageArtifact, ExperimentStageConfig, ExperimentStageKind, ExperimentStageState,
+    ExperimentStageStatus, RESOLVED_CONFIG_FILE_NAME, STAGE_STATE_FILE_NAME, build_bundle_state,
+    bundle_state_path, load_experiment_bundle_config, load_stage_state,
+    prepare_language_stage_config, prepare_universality_stage_config, resolve_bundle_root,
+    resolve_stage_dependency_artifacts, resolve_stage_dir, resolve_training_stage_artifact,
+    resolved_stage_config_path, stage_state_path, unix_timestamp_now, write_bundle_state,
+    write_resolved_config, write_stage_state,
+};
 pub use summary_events::{
     resolve_summary_memory_write_triggers, summary_event_mask_from_flat_batch,
     summary_event_mask_from_tokens, summary_event_mask_tensor,

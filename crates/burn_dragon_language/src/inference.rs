@@ -22,6 +22,27 @@ pub fn build_model_config(overrides: &ModelOverrides, training_block_size: usize
     if let Some(multiplier) = overrides.mlp_internal_dim_multiplier {
         model_config.mlp_internal_dim_multiplier = multiplier;
     }
+    if let Some(latent_total) = overrides.latent_total {
+        assert!(
+            latent_total % model_config.n_embd == 0,
+            "model.latent_total must be divisible by n_embd (got latent_total={} n_embd={})",
+            latent_total,
+            model_config.n_embd
+        );
+        model_config.mlp_internal_dim_multiplier = latent_total / model_config.n_embd;
+    }
+    if let Some(sequence_kernel) = overrides.sequence_kernel {
+        model_config.sequence_kernel = sequence_kernel;
+    }
+    if let Some(mamba) = &overrides.mamba {
+        model_config.mamba = mamba.clone();
+    }
+    if let Some(schedule) = &overrides.latent_fanout_schedule {
+        if let Err(message) = model_config.validate_latent_fanout_schedule(schedule) {
+            panic!("{message}");
+        }
+        model_config.latent_fanout_schedule = Some(schedule.clone());
+    }
     if let Some(relu_threshold) = overrides.relu_threshold {
         model_config.fused_kernels.relu_threshold = relu_threshold;
     }
@@ -170,5 +191,53 @@ mod tests {
 
         let config = build_model_config(&overrides, 32);
         assert_eq!(config.rollout_fast_steps_per_slow_step, 8);
+    }
+
+    #[test]
+    fn model_override_applies_explicit_latent_total() {
+        let overrides = ModelOverrides {
+            n_embd: Some(256),
+            latent_total: Some(32768),
+            ..ModelOverrides::default()
+        };
+
+        let config = build_model_config(&overrides, 32);
+        assert_eq!(config.latent_total(), 32768);
+        assert_eq!(config.mlp_internal_dim_multiplier, 128);
+    }
+
+    #[test]
+    fn model_override_applies_latent_fanout_schedule() {
+        let overrides = ModelOverrides {
+            n_layer: Some(8),
+            n_embd: Some(256),
+            n_head: Some(4),
+            latent_total: Some(32768),
+            latent_fanout_schedule: Some(burn_dragon_core::LatentFanoutScheduleConfig::LateLayer {
+                base_latent_total: 8192,
+                last_layers: 4,
+            }),
+            ..ModelOverrides::default()
+        };
+
+        let config = build_model_config(&overrides, 32);
+        assert_eq!(config.latent_total_for_layer(0), 8192);
+        assert_eq!(config.latent_total_for_layer(7), 32768);
+    }
+
+    #[test]
+    fn model_override_applies_sequence_kernel() {
+        let overrides = ModelOverrides {
+            sequence_kernel: Some(
+                burn_dragon_core::SequenceKernelKind::Rwkv8StateSpaceExperimental,
+            ),
+            ..ModelOverrides::default()
+        };
+
+        let config = build_model_config(&overrides, 32);
+        assert_eq!(
+            config.sequence_kernel,
+            burn_dragon_core::SequenceKernelKind::Rwkv8StateSpaceExperimental
+        );
     }
 }

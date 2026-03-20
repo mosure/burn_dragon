@@ -28,17 +28,22 @@ pub(crate) use burn::optim::grad_clipping::GradientClippingConfig;
 pub(crate) use burn::optim::{
     AdamW, AdamWConfig, GradientsAccumulator, GradientsParams, LearningRate,
 };
+pub(crate) use burn::record::{BinFileRecorder, FullPrecisionSettings, Recorder};
 pub(crate) use burn::tensor::Distribution as TensorDistribution;
 pub(crate) use burn::tensor::backend::{AutodiffBackend, Backend as BackendTrait};
 pub(crate) use burn::tensor::{Int, Tensor, TensorData};
-pub(crate) use burn_train::metric::{LearningRateMetric, LossMetric};
+#[cfg(feature = "ddp")]
+pub(crate) use burn_collective::{
+    PeerId, ReduceOperation, all_reduce, finish_collective, register,
+};
+#[cfg(feature = "ddp")]
+pub(crate) use burn_train::checkpoint::{Checkpointer, FileCheckpointer};
+pub(crate) use burn_train::metric::{Adaptor, ItemLazy, LearningRateMetric, LossMetric};
 pub(crate) use burn_train::{
-    InferenceStep as ValidStep, LearningResult as TrainingResult, SupervisedTraining, TrainOutput,
-    TrainStep, TrainingStrategy as LearningStrategy,
+    InferenceStep as ValidStep, LearningResult as TrainingResult, MultiDeviceOptim,
+    SupervisedTraining, TrainOutput, TrainStep, TrainingStrategy as LearningStrategy,
 };
 pub(crate) use tracing::info;
-
-pub(crate) use burn::record::{BinFileRecorder, FullPrecisionSettings};
 
 #[cfg(all(feature = "cuda", test))]
 pub(crate) use burn_cuda::Cuda;
@@ -47,10 +52,11 @@ pub(crate) use serde::Serialize;
 
 pub(crate) use crate::config::{
     DatasetConfig, DatasetSourceConfig, HuggingFaceDatasetConfig, HuggingFaceRecordFormat,
-    TrainingConfig, TrainingHyperparameters,
+    TrainingConfig, TrainingHyperparameters, ValidationDatasetConfig,
 };
 pub(crate) use crate::dataset::{
-    Dataset, DatasetSplit, RandomDataLoader, SequenceBatch, build_dataset, sample_batch_with_shape,
+    Dataset, DatasetSplit, RandomDataLoader, SequenceBatch, StreamingDataLoader, build_dataset,
+    sample_batch_with_shape,
 };
 pub(crate) use crate::inference::{
     apply_wgpu_fused_core_override, build_model_config, build_model_config_with_tokenizer,
@@ -65,15 +71,21 @@ pub(crate) use burn_dragon_train::train::constants::{
     FAST_TRAIN, ValidBackend, fast_train_enabled,
 };
 pub(crate) use burn_dragon_train::train::metrics::{
-    DeviceMetric, LanguageModelOutput, LanguageModelTrainItem, LossValue, ScalarMetric,
+    DeviceMetric, LanguageModelOutput, LanguageModelTrainItem, LossValue, MetricSinkEntry,
+    MetricSinkSplit, MetricSinkValueKind, MetricsSinkSpec, ScalarMetric, ScalarValue,
 };
 pub(crate) use burn_dragon_train::train::pipeline::{
     ResolvedLrScheduler, ScheduleSource, TrainSchedule, adamw_config_from_optimizer,
     create_run_dir, resolve_valid_steps_per_epoch, write_latest_run,
 };
+#[cfg(feature = "ddp")]
+pub(crate) use burn_dragon_train::train::runtime::resolve_collective_config;
 pub(crate) use burn_dragon_train::train::runtime::{
-    DeviceMemoryUsage, cleanup_device_memory, device_memory_usage_safe,
+    DeviceMemoryUsage, ParallelRuntime, cleanup_device_memory, device_memory_usage_safe,
+    resolve_parallel_runtime, resolve_training_devices,
 };
 pub(crate) use burn_dragon_train::{
-    GdpoConfig, GdpoHardGate, LearningRateScheduleConfig, OptimizerConfig, WgpuRuntimeConfig,
+    GdpoConfig, GdpoHardGate, KernelSpec, LayerStateSpec, LearningRateScheduleConfig, ModelSpec,
+    OptimizerConfig, ParallelConfig, ParallelSpec, ParallelismKind, SequenceKernelKind,
+    StateAxisSpec, StateLayout, StateTensorSpec, WgpuRuntimeConfig,
 };

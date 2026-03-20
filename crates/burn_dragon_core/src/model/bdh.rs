@@ -1,14 +1,20 @@
-use burn::module::{Module, Param};
+use burn::module::{Ignored, Module, Param};
 use burn::nn::{Dropout, DropoutConfig, Embedding, EmbeddingConfig};
 use burn::tensor::backend::Backend;
 use burn::tensor::{Distribution as TensorDistribution, Int, Tensor, TensorData, activation};
-use burn_dragon_wgpu::api::recurrent::{
+use burn_dragon_kernel::api::attention::{
+    supports_dense_causal_attention_backend, try_fused_dense_causal_attention_wgpu,
+};
+use burn_dragon_kernel::api::recurrent::{
     CompiledRecurrentAttentionPlan, supports_recurrent_backend, try_fused_recurrent_attention_wgpu,
     try_fused_recurrent_attention_wgpu_with_plan,
 };
 use rand::distributions::{Distribution, WeightedIndex};
 use rand::prelude::*;
+use serde::Serialize;
 use std::cmp::Ordering;
+use std::sync::{Mutex, OnceLock};
+use std::time::Instant;
 
 use super::attention::Attention;
 use super::config::{
@@ -20,11 +26,27 @@ use super::init::{
     near_critical_residual_output_std,
 };
 use super::norm::DragonNorm;
-use super::residual_stream::lowrank_residual_step;
+use super::residual_stream::{lowrank_residual_step, lowrank_residual_step_next};
+use super::sequence::linear::{
+    recurrent_attention_dense_score_final_rho_reference,
+    recurrent_attention_dense_score_initial_context_reference,
+    recurrent_attention_dense_score_reference, recurrent_attention_reference,
+};
+use super::sequence::mamba::{
+    MambaReferenceState, MambaSequenceParameters, ResolvedMambaSequenceConfig, mamba_reference,
+};
+use super::sequence::rwkv8::recurrent_rwkv8_state_space_reference;
+use super::sequence::state::{
+    linear_attention_state, mamba_state, rwkv8_state, write_linear_attention_state,
+    write_mamba_state, write_rwkv8_state,
+};
+use super::sequence::{SequenceKernelConfig, SequenceKernelFamily, SequenceTrainingExecutor};
 #[cfg(feature = "viz")]
 use super::state::LayerVizState;
 use super::state::{LayerState, ModelState};
 use super::{ManifoldHyperConnections, mhc_merge_with_coefficients, mhc_split_with_coefficients};
+#[cfg(test)]
+use crate::model::config::SequenceKernelKind;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RecurrentPositionMode {
@@ -38,6 +60,96 @@ enum RolloutExecutorMode {
     WgpuFused,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LogitsProjectionProfileSnapshot {
+    pub calls: u64,
+    pub total_ns: u128,
+}
+
+#[derive(Default)]
+struct LogitsProjectionProfileState {
+    calls: u64,
+    total_ns: u128,
+}
+
+static LOGITS_PROJECTION_PROFILE: OnceLock<Mutex<LogitsProjectionProfileState>> = OnceLock::new();
+
+fn logits_projection_profile_enabled() -> bool {
+    std::env::var_os("BDH_STAGE_PROFILE").is_some()
+}
+
+pub fn logits_projection_profile_reset() {
+    if let Ok(mut state) = LOGITS_PROJECTION_PROFILE
+        .get_or_init(|| Mutex::new(LogitsProjectionProfileState::default()))
+        .lock()
+    {
+        *state = LogitsProjectionProfileState::default();
+    }
+}
+
+pub fn logits_projection_profile_snapshot() -> LogitsProjectionProfileSnapshot {
+    if let Ok(state) = LOGITS_PROJECTION_PROFILE
+        .get_or_init(|| Mutex::new(LogitsProjectionProfileState::default()))
+        .lock()
+    {
+        return LogitsProjectionProfileSnapshot {
+            calls: state.calls,
+            total_ns: state.total_ns,
+        };
+    }
+    LogitsProjectionProfileSnapshot::default()
+}
+
+fn logits_projection_profile_record(elapsed_ns: u128) {
+    if let Ok(mut state) = LOGITS_PROJECTION_PROFILE
+        .get_or_init(|| Mutex::new(LogitsProjectionProfileState::default()))
+        .lock()
+    {
+        state.calls = state.calls.saturating_add(1);
+        state.total_ns = state.total_ns.saturating_add(elapsed_ns);
+    }
+}
+
+struct LanguageMhcLayerBindings<B: Backend> {
+    branch_input: Tensor<B, 4>,
+    residuals_base: Tensor<B, 4>,
+    legacy_beta: Option<Tensor<B, 2>>,
+    stream_coefficients: Option<super::ManifoldHyperConnectionStreamCoefficients<B>>,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct LanguageMhcLayerDiagnostics {
+    pub layer_index: usize,
+    pub num_streams: usize,
+    pub stream_norm_mean: f64,
+    pub stream_norm_variance: f64,
+    pub pairwise_stream_cosine_mean: Option<f64>,
+    pub alpha_entropy_mean: f64,
+    pub alpha_entropy_normalized_mean: f64,
+    pub beta_entropy_mean: Option<f64>,
+    pub beta_entropy_normalized_mean: Option<f64>,
+    pub residual_distance_identity_l1_mean: f64,
+    pub residual_distance_uniform_l1_mean: f64,
+}
+
+#[derive(Clone, Debug, Default)]
+struct LanguageMhcLayerDiagnosticsAccumulator {
+    count: usize,
+    num_streams: usize,
+    stream_norm_mean_sum: f64,
+    stream_norm_variance_sum: f64,
+    pairwise_stream_cosine_mean_sum: f64,
+    pairwise_stream_cosine_mean_count: usize,
+    alpha_entropy_mean_sum: f64,
+    alpha_entropy_normalized_mean_sum: f64,
+    beta_entropy_mean_sum: f64,
+    beta_entropy_mean_count: usize,
+    beta_entropy_normalized_mean_sum: f64,
+    beta_entropy_normalized_mean_count: usize,
+    residual_distance_identity_l1_mean_sum: f64,
+    residual_distance_uniform_l1_mean_sum: f64,
+}
+
 #[derive(Module, Debug)]
 pub struct BDH<B: Backend> {
     n_layer: usize,
@@ -45,19 +157,25 @@ pub struct BDH<B: Backend> {
     n_head: usize,
     mlp_internal_dim_multiplier: usize,
     vocab_size: usize,
+    sequence_kernel: SequenceKernelConfig,
     rollout_fast_steps_per_slow_step: usize,
     kernel: FusedKernelConfig,
     y_neuron_recurrence: YNeuronRecurrenceConfig,
     clocked_slow_memory: ClockedSlowMemoryConfig,
     summary_memory: SummaryMemoryConfig,
+    layer_latent_totals: Ignored<Vec<usize>>,
     embed: Embedding<B>,
     dropout: Dropout,
     norm: DragonNorm<B>,
     attention: Attention<B>,
-    mhc_layers: Option<Vec<Option<ManifoldHyperConnections<B>>>>,
+    mhc_first_layer: usize,
+    mhc_shared: Option<ManifoldHyperConnections<B>>,
+    rwkv_time_decay: Param<Tensor<B, 2>>,
     encoder: Param<Tensor<B, 3>>,
     encoder_v: Param<Tensor<B, 3>>,
     decoder: Param<Tensor<B, 2>>,
+    mamba_config: Ignored<ResolvedMambaSequenceConfig>,
+    mamba: Option<MambaSequenceParameters<B>>,
     lm_head: Param<Tensor<B, 2>>,
 }
 
@@ -77,6 +195,11 @@ impl<B: Backend> BDH<B> {
             device,
             &config.fused_kernels,
         );
+        let rwkv_time_decay = Param::from_tensor(Self::init_rwkv_time_decay(
+            config.n_head,
+            latent_per_head,
+            device,
+        ));
         let residual_depth = config.n_layer.max(1) * config.rollout_fast_steps_per_slow_step.max(1);
         let encoder_std =
             near_critical_residual_output_std(config.n_embd, latent_per_head, residual_depth);
@@ -101,37 +224,37 @@ impl<B: Backend> BDH<B> {
             TensorDistribution::Normal(0.0, decoder_std),
             device,
         ));
-        let mhc_layers = if config.mhc.enabled
+        let mhc_first_layer = config
+            .mhc
+            .last_layers
+            .map(|last_layers| config.n_layer.max(1).saturating_sub(last_layers))
+            .unwrap_or(0);
+        let mhc_shared = if config.mhc.enabled
             && (config.mhc.resolved_num_streams() > 1 || config.mhc.resolved_num_views() > 1)
         {
-            let first_mhc_layer = config
-                .mhc
-                .last_layers
-                .map(|last_layers| config.n_layer.max(1).saturating_sub(last_layers))
-                .unwrap_or(0);
-            Some(
-                (0..config.n_layer.max(1))
-                    .map(|layer_index| {
-                        if layer_index >= first_mhc_layer {
-                            Some(ManifoldHyperConnections::new(
-                                &config.mhc,
-                                layer_index,
-                                device,
-                            ))
-                        } else {
-                            None
-                        }
-                    })
-                    .collect(),
-            )
+            Some(ManifoldHyperConnections::new_with_dense_dim(
+                &config.mhc,
+                mhc_first_layer,
+                Some(config.n_embd),
+                device,
+            ))
         } else {
             None
         };
+        let sequence_kernel = config.resolved_sequence_kernel_config();
+        let mamba_config = config.mamba.resolve(config.n_embd);
+        let mamba = (sequence_kernel.family == SequenceKernelFamily::Mamba1SelectiveSsm)
+            .then(|| MambaSequenceParameters::new(mamba_config, device));
         let lm_head = Param::from_tensor(Tensor::<B, 2>::random(
             [config.n_embd, config.vocab_size],
             TensorDistribution::Normal(0.0, lm_head_std),
             device,
         ));
+        let layer_latent_totals = Ignored(
+            (0..config.n_layer)
+                .map(|layer_idx| config.latent_total_for_layer(layer_idx))
+                .collect(),
+        );
 
         Self {
             n_layer: config.n_layer,
@@ -139,21 +262,63 @@ impl<B: Backend> BDH<B> {
             n_head: config.n_head,
             mlp_internal_dim_multiplier: config.mlp_internal_dim_multiplier,
             vocab_size: config.vocab_size,
+            sequence_kernel,
             rollout_fast_steps_per_slow_step: config.rollout_fast_steps_per_slow_step,
             kernel: config.fused_kernels,
             y_neuron_recurrence: config.y_neuron_recurrence,
             clocked_slow_memory: config.clocked_slow_memory,
             summary_memory: config.summary_memory,
+            layer_latent_totals,
             embed,
             dropout,
             norm,
             attention,
-            mhc_layers,
+            mhc_first_layer,
+            mhc_shared,
+            rwkv_time_decay,
             encoder,
             encoder_v,
             decoder,
+            mamba_config: Ignored(mamba_config),
+            mamba,
             lm_head,
         }
+    }
+
+    fn init_rwkv_time_decay(
+        n_head: usize,
+        latent_per_head: usize,
+        device: &B::Device,
+    ) -> Tensor<B, 2> {
+        let mut values = Vec::with_capacity(n_head * latent_per_head);
+        for head_idx in 0..n_head {
+            let head_ratio = if n_head <= 1 {
+                0.0
+            } else {
+                head_idx as f32 / (n_head - 1) as f32
+            };
+            for latent_idx in 0..latent_per_head {
+                let latent_ratio = if latent_per_head <= 1 {
+                    0.0
+                } else {
+                    latent_idx as f32 / (latent_per_head - 1) as f32
+                };
+                let target_decay =
+                    (0.995 - 0.22 * latent_ratio - 0.03 * head_ratio).clamp(0.55, 0.995);
+                let raw = (target_decay / (1.0 - target_decay)).ln();
+                values.push(raw);
+            }
+        }
+        Tensor::<B, 1>::from_floats(values.as_slice(), device).reshape([n_head, latent_per_head])
+    }
+
+    fn rwkv_decay(&self, latent: usize) -> Tensor<B, 3> {
+        activation::sigmoid(
+            self.rwkv_time_decay
+                .val()
+                .slice([0..self.n_head, 0..latent])
+                .reshape([1, self.n_head, latent]),
+        )
     }
 
     pub fn forward(&self, tokens: Tensor<B, 2, Int>) -> Tensor<B, 3> {
@@ -193,6 +358,27 @@ impl<B: Backend> BDH<B> {
         summary_event_mask: Tensor<B, 2, Int>,
     ) -> Tensor<B, 3> {
         self.forward_with_summary_event_mask(tokens, summary_event_mask)
+    }
+
+    pub fn collect_language_mhc_diagnostics(
+        &self,
+        tokens: Tensor<B, 2, Int>,
+    ) -> Vec<LanguageMhcLayerDiagnostics> {
+        let mut state = self.init_state();
+        self.collect_language_mhc_diagnostics_with_state(tokens, &mut state)
+    }
+
+    pub fn collect_language_mhc_diagnostics_with_summary_event_mask(
+        &self,
+        tokens: Tensor<B, 2, Int>,
+        summary_event_mask: Tensor<B, 2, Int>,
+    ) -> Vec<LanguageMhcLayerDiagnostics> {
+        let mut state = self.init_state();
+        self.collect_language_mhc_diagnostics_with_state_and_summary_event_mask(
+            tokens,
+            summary_event_mask,
+            &mut state,
+        )
     }
 
     pub fn generate(
@@ -283,8 +469,48 @@ impl<B: Backend> BDH<B> {
         ModelState::new(self.n_layer)
     }
 
+    fn layer_latent_total(&self, layer_idx: usize) -> usize {
+        self.layer_latent_totals
+            .0
+            .get(layer_idx)
+            .copied()
+            .unwrap_or(self.mlp_internal_dim_multiplier * self.n_embd)
+    }
+
+    fn layer_latent_per_head(&self, layer_idx: usize) -> usize {
+        let total = self.layer_latent_total(layer_idx);
+        assert_eq!(
+            total % self.n_head,
+            0,
+            "layer latent total must divide evenly across heads"
+        );
+        total / self.n_head
+    }
+
+    fn layer_lowrank_weights(
+        &self,
+        layer_idx: usize,
+    ) -> (Tensor<B, 4>, Tensor<B, 4>, Tensor<B, 2>, usize) {
+        let latent_per_head = self.layer_latent_per_head(layer_idx);
+        let latent_total = self.layer_latent_total(layer_idx);
+        let encoder = self
+            .encoder
+            .val()
+            .slice([0..self.n_head, 0..self.n_embd, 0..latent_per_head])
+            .reshape([1, self.n_head, self.n_embd, latent_per_head]);
+        let encoder_v = self
+            .encoder_v
+            .val()
+            .slice([0..self.n_head, 0..self.n_embd, 0..latent_per_head])
+            .reshape([1, self.n_head, self.n_embd, latent_per_head]);
+        let decoder = self.decoder.val().slice([0..latent_total, 0..self.n_embd]);
+        (encoder, encoder_v, decoder, latent_per_head)
+    }
+
     fn rollout_executor_mode(&self) -> RolloutExecutorMode {
-        if self.kernel.enabled
+        if self.sequence_kernel.family == SequenceKernelFamily::LinearAttention
+            && self.sequence_kernel.executor == SequenceTrainingExecutor::Reference
+            && self.kernel.enabled
             && self.kernel.wgpu_recurrent_kernel
             && self.kernel.wgpu_rollout_fused
             && supports_recurrent_backend::<B>()
@@ -301,42 +527,48 @@ impl<B: Backend> BDH<B> {
         rho_state: Option<Tensor<B, 4>>,
         decay: Option<Tensor<B, 1>>,
     ) -> (Tensor<B, 4>, Tensor<B, 4>) {
-        let [batch, heads, time, latent] = query.shape().dims();
-        let n_embd = value.shape().dims::<4>()[3];
-        let device = value.device();
-        let decay = decay.map(|tensor| tensor.reshape([1, heads, 1, 1]));
+        recurrent_attention_reference(query, value, rho_state, decay)
+    }
 
-        let mut rho = match rho_state {
-            Some(existing) => {
-                let dims = existing.shape().dims::<4>();
-                if dims == [batch, heads, latent, n_embd] {
-                    existing
-                } else {
-                    Tensor::<B, 4>::zeros([batch, heads, latent, n_embd], &device)
-                }
-            }
-            None => Tensor::<B, 4>::zeros([batch, heads, latent, n_embd], &device),
-        };
+    fn recurrent_attention_dense_score_reference(
+        &self,
+        query: Tensor<B, 4>,
+        value: Tensor<B, 4>,
+        rho_state: Option<Tensor<B, 4>>,
+        decay: Option<Tensor<B, 1>>,
+    ) -> (Tensor<B, 4>, Tensor<B, 4>) {
+        recurrent_attention_dense_score_reference(query, value, rho_state, decay)
+    }
 
-        let mut outputs: Vec<Tensor<B, 4>> = Vec::with_capacity(time);
+    fn recurrent_attention_dense_score_final_rho_reference(
+        &self,
+        query: Tensor<B, 4>,
+        value: Tensor<B, 4>,
+        rho_state: Option<Tensor<B, 4>>,
+        decay: Option<Tensor<B, 1>>,
+    ) -> Tensor<B, 4> {
+        recurrent_attention_dense_score_final_rho_reference(query, value, rho_state, decay)
+    }
 
-        for t in 0..time {
-            let x_t = query.clone().slice_dim(2, t..t + 1);
-            let v_t = value.clone().slice_dim(2, t..t + 1).repeat_dim(1, heads);
-            let x_t_latent = x_t.swap_dims(2, 3);
+    fn recurrent_attention_dense_score_initial_context_reference(
+        &self,
+        query: Tensor<B, 4>,
+        rho_state: Option<Tensor<B, 4>>,
+        decay: Option<Tensor<B, 1>>,
+        n_embd: usize,
+    ) -> Tensor<B, 4> {
+        recurrent_attention_dense_score_initial_context_reference(query, rho_state, decay, n_embd)
+    }
 
-            let attn_t = (rho.clone() * x_t_latent.clone())
-                .sum_dim(2)
-                .reshape([batch, heads, 1, n_embd]);
-            outputs.push(attn_t);
-
-            rho = rho + x_t_latent * v_t;
-            if let Some(decay) = &decay {
-                rho = rho * decay.clone();
-            }
-        }
-
-        (Tensor::cat(outputs, 2), rho)
+    fn recurrent_rwkv8_state_space_reference(
+        &self,
+        query: Tensor<B, 4>,
+        value: Tensor<B, 4>,
+        rho_state: Option<Tensor<B, 4>>,
+        rho_norm_state: Option<Tensor<B, 3>>,
+        decay: Tensor<B, 3>,
+    ) -> (Tensor<B, 4>, Tensor<B, 4>, Tensor<B, 3>) {
+        recurrent_rwkv8_state_space_reference(query, value, rho_state, rho_norm_state, decay)
     }
 
     fn project_lowrank_positive(
@@ -346,15 +578,19 @@ impl<B: Backend> BDH<B> {
         use_fused: bool,
         latent_pattern: &crate::kernel::BlockPattern1d,
         sparse_mask: Option<Tensor<B, 4>>,
-    ) -> Tensor<B, 4> {
+    ) -> Tensor<B, 4>
+    where
+        B::FloatTensorPrimitive: 'static,
+    {
         if use_fused {
-            crate::kernel::relu_lowrank::fused_forward(
+            crate::kernel::relu_lowrank::fused_forward_with_executor(
                 dense,
                 projector,
                 None,
                 self.kernel.relu_threshold,
                 latent_pattern,
                 sparse_mask,
+                self.kernel.lowrank_grad_input_executor,
             )
         } else {
             let mut latent = dense.matmul(projector);
@@ -517,58 +753,191 @@ impl<B: Backend> BDH<B> {
         position_mode: RecurrentPositionMode,
         fused_plan: Option<&CompiledRecurrentAttentionPlan<B>>,
     ) -> Tensor<B, 4> {
-        let query = match position_mode {
-            RecurrentPositionMode::Sequential => self.attention.rotate_positions(query, position),
-            RecurrentPositionMode::Fixed => self.attention.rotate_positions_fixed(query, position),
-        };
-        let decay = self.attention.alibi_decay();
-        let initial_rho = layer_state.rho.as_ref().cloned();
-        let device = query.device();
+        match (self.sequence_kernel.family, self.sequence_kernel.executor) {
+            (SequenceKernelFamily::LinearAttention, SequenceTrainingExecutor::Reference) => {
+                let query = match position_mode {
+                    RecurrentPositionMode::Sequential => {
+                        self.attention.rotate_positions(query, position)
+                    }
+                    RecurrentPositionMode::Fixed => {
+                        self.attention.rotate_positions_fixed(query, position)
+                    }
+                };
+                let decay = self.attention.alibi_decay();
+                let initial_rho = linear_attention_state(layer_state).rho;
+                let device = query.device();
 
-        if self.kernel.enabled && self.kernel.wgpu_recurrent_kernel {
-            let fused = if let Some(plan) = fused_plan {
-                try_fused_recurrent_attention_wgpu_with_plan(
-                    &query,
-                    &value,
-                    initial_rho.as_ref(),
-                    decay.as_ref(),
-                    plan,
-                )
-            } else {
-                try_fused_recurrent_attention_wgpu(
-                    &query,
-                    &value,
-                    initial_rho.as_ref(),
-                    decay.as_ref(),
-                )
-            };
-            if let Some(output) = fused {
-                if B::ad_enabled(&device) {
-                    // Keep fused forward values while reusing tensor-core backward semantics.
-                    let (reference_context, reference_rho) = self.recurrent_attention_reference(
-                        query.clone(),
-                        value.clone(),
-                        initial_rho,
-                        decay,
-                    );
-                    let context =
-                        reference_context.clone() + output.context - reference_context.detach();
-                    let rho = reference_rho.clone() + output.rho - reference_rho.detach();
-                    layer_state.rho = Some(rho);
-                    return context;
+                if self.kernel.enabled && self.kernel.wgpu_recurrent_kernel {
+                    let fused = if let Some(plan) = fused_plan {
+                        try_fused_recurrent_attention_wgpu_with_plan(
+                            &query,
+                            &value,
+                            initial_rho.as_ref(),
+                            decay.as_ref(),
+                            plan,
+                        )
+                    } else {
+                        try_fused_recurrent_attention_wgpu(
+                            &query,
+                            &value,
+                            initial_rho.as_ref(),
+                            decay.as_ref(),
+                        )
+                    };
+                    if let Some(output) = fused {
+                        if B::ad_enabled(&device) {
+                            let (reference_context, reference_rho) = self
+                                .recurrent_attention_reference(
+                                    query.clone(),
+                                    value.clone(),
+                                    initial_rho,
+                                    decay,
+                                );
+                            let context = reference_context.clone() + output.context
+                                - reference_context.detach();
+                            let rho = reference_rho.clone() + output.rho - reference_rho.detach();
+                            write_linear_attention_state(layer_state, rho);
+                            return context;
+                        }
+                        write_linear_attention_state(layer_state, output.rho);
+                        return output.context;
+                    }
                 }
-                layer_state.rho = Some(output.rho);
-                return output.context;
-            }
-        }
 
-        let (context, rho) = self.recurrent_attention_reference(query, value, initial_rho, decay);
-        layer_state.rho = Some(rho);
-        context
+                let (context, rho) =
+                    self.recurrent_attention_reference(query, value, initial_rho, decay);
+                write_linear_attention_state(layer_state, rho);
+                context
+            }
+            (
+                SequenceKernelFamily::LinearAttention,
+                SequenceTrainingExecutor::DenseScoreShortContext,
+            ) => {
+                let query = match position_mode {
+                    RecurrentPositionMode::Sequential => {
+                        self.attention.rotate_positions(query, position)
+                    }
+                    RecurrentPositionMode::Fixed => {
+                        self.attention.rotate_positions_fixed(query, position)
+                    }
+                };
+                let decay = self.attention.alibi_decay();
+                let initial_rho = linear_attention_state(layer_state).rho;
+                let device = query.device();
+                if self.kernel.enabled
+                    && self.kernel.wgpu_rollout_fused
+                    && supports_dense_causal_attention_backend::<B>()
+                {
+                    let decay_tensor = decay
+                        .clone()
+                        .unwrap_or_else(|| Tensor::<B, 1>::ones([self.n_head], &device));
+                    if let Some(fused_context) =
+                        try_fused_dense_causal_attention_wgpu(&query, &value, &decay_tensor)
+                    {
+                        let initial_context = self
+                            .recurrent_attention_dense_score_initial_context_reference(
+                                query.clone(),
+                                initial_rho.clone(),
+                                decay.clone(),
+                                value.shape().dims::<4>()[3],
+                            );
+                        let rho = self.recurrent_attention_dense_score_final_rho_reference(
+                            query.clone(),
+                            value.clone(),
+                            initial_rho.clone(),
+                            decay.clone(),
+                        );
+                        if B::ad_enabled(&device) {
+                            let (reference_context, reference_rho) = self
+                                .recurrent_attention_dense_score_reference(
+                                    query.clone(),
+                                    value.clone(),
+                                    initial_rho,
+                                    decay,
+                                );
+                            let context = reference_context.clone()
+                                + (initial_context.clone() + fused_context)
+                                - reference_context.detach();
+                            write_linear_attention_state(
+                                layer_state,
+                                reference_rho.clone() + rho - reference_rho.detach(),
+                            );
+                            return context;
+                        }
+                        write_linear_attention_state(layer_state, rho);
+                        return initial_context + fused_context;
+                    }
+                }
+                let (context, rho) = self.recurrent_attention_dense_score_reference(
+                    query,
+                    value,
+                    initial_rho,
+                    decay,
+                );
+                write_linear_attention_state(layer_state, rho);
+                context
+            }
+            (SequenceKernelFamily::Rwkv8, SequenceTrainingExecutor::Reference) => {
+                let [batch, heads, _time, latent] = query.shape().dims::<4>();
+                let device = query.device();
+                let initial_state = rwkv8_state(layer_state, batch, heads, latent, &device);
+                let decay = self.rwkv_decay(latent);
+                let (context, rho, rho_norm) = self.recurrent_rwkv8_state_space_reference(
+                    query,
+                    value,
+                    initial_state.rho,
+                    Some(initial_state.rho_norm),
+                    decay,
+                );
+                write_rwkv8_state(layer_state, rho, rho_norm);
+                context
+            }
+            (SequenceKernelFamily::Mamba1SelectiveSsm, SequenceTrainingExecutor::Reference) => {
+                let params = self
+                    .mamba
+                    .as_ref()
+                    .expect("mamba sequence family requires initialized mamba params");
+                let [batch, views, _time, dim] = value.shape().dims::<4>();
+                assert_eq!(
+                    views, 1,
+                    "Mamba sequence family expects a single dense stream view"
+                );
+                assert_eq!(
+                    dim, self.n_embd,
+                    "Mamba dense stream dim {} must match model dim {}",
+                    dim, self.n_embd
+                );
+                let config = self.mamba_config.0;
+                let device = value.device();
+                let initial_state = mamba_state(
+                    layer_state,
+                    batch,
+                    config.d_inner,
+                    config.d_state,
+                    config.d_conv,
+                    &device,
+                );
+                let (context, next_state) = mamba_reference(
+                    value,
+                    params,
+                    Some(MambaReferenceState {
+                        conv: initial_state.conv,
+                        ssm: initial_state.ssm,
+                    }),
+                );
+                write_mamba_state(layer_state, next_state.ssm, next_state.conv);
+                context
+            }
+            (family, executor) => panic!(
+                "sequence kernel family {:?} with executor {:?} is not implemented in BDH yet",
+                family, executor
+            ),
+        }
     }
 
     fn forward_branch_clocked_slow_layer(
         &self,
+        layer_idx: usize,
         branch_input: Tensor<B, 4>,
         layer_state: &mut LayerState<B>,
         start_pos: usize,
@@ -601,17 +970,12 @@ impl<B: Backend> BDH<B> {
         }
 
         let flat_batch = branch_batch * branch_views;
-        let encoder_raw = self.encoder.val();
-        let [heads, embd_enc, latent] = encoder_raw.shape().dims::<3>();
-        let encoder = encoder_raw.reshape([1, heads, embd_enc, latent]);
-
-        let encoder_v_raw = self.encoder_v.val();
-        let [heads_v, embd_v, latent_v] = encoder_v_raw.shape().dims::<3>();
-        let encoder_v = encoder_v_raw.reshape([1, heads_v, embd_v, latent_v]);
-        let decoder = self.decoder.val();
+        let (encoder, encoder_v, decoder, latent) = self.layer_lowrank_weights(layer_idx);
         let fused = self.kernel.enabled;
+        let fused_x = fused && self.kernel.projection_executor.use_x();
+        let fused_y = fused && self.kernel.projection_executor.use_y();
         let latent_pattern = &self.kernel.block_sparse.latent;
-        let sparse_mask = if fused && latent_pattern.is_sparse() {
+        let sparse_mask = if (fused_x || fused_y) && latent_pattern.is_sparse() {
             Some(latent_pattern.mask::<B>(latent, &branch_input.device()))
         } else {
             None
@@ -629,16 +993,18 @@ impl<B: Backend> BDH<B> {
                 RecurrentPositionMode::Sequential => start_pos / chunk_tokens + slow_idx,
                 RecurrentPositionMode::Fixed => start_pos / chunk_tokens,
             };
-            let output = lowrank_residual_step(
+            let next = lowrank_residual_step_next(
                 summary_flat,
                 encoder.clone(),
                 encoder_v.clone(),
                 decoder.clone(),
                 &self.dropout,
-                fused,
+                fused_x,
+                fused_y,
                 self.kernel.relu_threshold,
                 true,
                 latent_pattern,
+                self.kernel.lowrank_grad_input_executor,
                 sparse_mask.clone(),
                 |query, value| {
                     self.recurrent_attention_with_plan(
@@ -653,9 +1019,7 @@ impl<B: Backend> BDH<B> {
                 activation::relu,
                 |values| self.norm.forward(values),
             );
-            let slow_hidden = output
-                .next
-                .reshape([branch_batch, branch_views, 1, branch_dim]);
+            let slow_hidden = next.reshape([branch_batch, branch_views, 1, branch_dim]);
             last_slow_hidden = Some(slow_hidden.clone());
             let broadcast = slow_hidden.repeat_dim(2, chunk_len);
             next_chunks.push(chunk + broadcast.mul_scalar(self.clocked_slow_memory.residual_scale));
@@ -808,15 +1172,14 @@ impl<B: Backend> BDH<B> {
         let Some(mhc) = mhc else {
             return residuals;
         };
-        let target_streams = mhc.num_streams().max(1);
-        let [_, streams, _, _] = residuals.shape().dims::<4>();
-        if streams == target_streams {
-            residuals
-        } else if streams == 1 && target_streams > 1 {
-            residuals.repeat_dim(1, target_streams)
-        } else {
-            residuals
+        mhc.bootstrap_streams(residuals)
+    }
+
+    fn mhc_for_layer(&self, layer_idx: usize) -> Option<&ManifoldHyperConnections<B>> {
+        if layer_idx < self.mhc_first_layer {
+            return None;
         }
+        self.mhc_shared.as_ref()
     }
 
     fn collapse_language_streams(&self, current: Tensor<B, 4>) -> Tensor<B, 3> {
@@ -826,6 +1189,645 @@ impl<B: Backend> BDH<B> {
         } else {
             current.mean_dim(1).reshape([batch, time, dim])
         }
+    }
+
+    fn split_language_residuals_for_layer(
+        &self,
+        current: Tensor<B, 4>,
+        mhc: Option<&ManifoldHyperConnections<B>>,
+        mhc_coefficients: Option<&super::ManifoldHyperConnectionCoefficients<B>>,
+    ) -> LanguageMhcLayerBindings<B> {
+        let current_residuals = self.prepare_language_mhc_residuals(current, mhc);
+        match mhc {
+            Some(mhc) if mhc.coefficient_policy().uses_dynamic_stream_controller() => {
+                let output = mhc.stream_width_connection(current_residuals);
+                LanguageMhcLayerBindings {
+                    branch_input: output.branch_input,
+                    residuals_base: output.residuals_out,
+                    legacy_beta: None,
+                    stream_coefficients: Some(output.coefficients),
+                }
+            }
+            _ => {
+                let (branch_input, residuals_base, legacy_beta) =
+                    mhc_split_with_coefficients(mhc, current_residuals, mhc_coefficients);
+                LanguageMhcLayerBindings {
+                    branch_input,
+                    residuals_base,
+                    legacy_beta,
+                    stream_coefficients: None,
+                }
+            }
+        }
+    }
+
+    fn merge_language_residuals_for_layer(
+        &self,
+        branch_out: Tensor<B, 4>,
+        bindings: LanguageMhcLayerBindings<B>,
+        mhc: Option<&ManifoldHyperConnections<B>>,
+        mhc_coefficients: Option<&super::ManifoldHyperConnectionCoefficients<B>>,
+    ) -> Tensor<B, 4> {
+        match mhc {
+            Some(mhc) if mhc.coefficient_policy().uses_dynamic_stream_controller() => mhc
+                .stream_depth_connection(
+                    branch_out,
+                    bindings.residuals_base,
+                    &bindings
+                        .stream_coefficients
+                        .expect("dynamic stream coefficients"),
+                ),
+            _ => mhc_merge_with_coefficients(
+                mhc,
+                branch_out,
+                bindings.residuals_base,
+                mhc_coefficients,
+                bindings.legacy_beta,
+            ),
+        }
+    }
+
+    fn summarize_language_mhc_layer_diagnostics(
+        &self,
+        layer_index: usize,
+        current_residuals: Tensor<B, 4>,
+        mhc: Option<&ManifoldHyperConnections<B>>,
+    ) -> Option<LanguageMhcLayerDiagnostics> {
+        let Some(mhc) = mhc else {
+            return None;
+        };
+
+        let [batch, streams, time, dim] = current_residuals.shape().dims::<4>();
+        if streams <= 1 || time == 0 || dim == 0 {
+            return None;
+        }
+
+        let residual_values = current_residuals
+            .clone()
+            .to_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .expect("residual diagnostics values");
+        let coeffs = mhc.stream_coefficients(current_residuals);
+        let alpha_values = coeffs
+            .branch_input_weights
+            .to_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .expect("alpha diagnostics values");
+        let beta_values = coeffs.branch_output_weights.as_ref().map(|weights| {
+            weights
+                .clone()
+                .to_data()
+                .convert::<f32>()
+                .into_vec::<f32>()
+                .expect("beta diagnostics values")
+        });
+        let residual_weight_values = coeffs
+            .residual_weights
+            .to_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .expect("residual weight diagnostics values");
+
+        let mut stream_norm_sum = 0.0f64;
+        let mut stream_norm_sq_sum = 0.0f64;
+        let mut stream_norm_count = 0usize;
+        let mut pairwise_cosine_sum = 0.0f64;
+        let mut pairwise_cosine_count = 0usize;
+        let mut alpha_entropy_sum = 0.0f64;
+        let mut alpha_entropy_norm_sum = 0.0f64;
+        let mut beta_entropy_sum = 0.0f64;
+        let mut beta_entropy_norm_sum = 0.0f64;
+        let mut beta_entropy_count = 0usize;
+        let mut residual_identity_l1_sum = 0.0f64;
+        let mut residual_uniform_l1_sum = 0.0f64;
+
+        let entropy_norm = (streams as f64).ln().max(1.0e-12);
+        let uniform_weight = 1.0f64 / streams as f64;
+
+        for batch_idx in 0..batch {
+            for time_idx in 0..time {
+                let mut stream_norms = vec![0.0f64; streams];
+                for stream_idx in 0..streams {
+                    let mut sum_sq = 0.0f64;
+                    let base = ((batch_idx * streams + stream_idx) * time + time_idx) * dim;
+                    for dim_idx in 0..dim {
+                        let value = residual_values[base + dim_idx] as f64;
+                        sum_sq += value * value;
+                    }
+                    let norm = sum_sq.sqrt();
+                    stream_norms[stream_idx] = norm;
+                    stream_norm_sum += norm;
+                    stream_norm_sq_sum += norm * norm;
+                    stream_norm_count += 1;
+                }
+
+                if streams > 1 {
+                    for left in 0..streams {
+                        for right in (left + 1)..streams {
+                            let left_base = ((batch_idx * streams + left) * time + time_idx) * dim;
+                            let right_base =
+                                ((batch_idx * streams + right) * time + time_idx) * dim;
+                            let mut dot = 0.0f64;
+                            for dim_idx in 0..dim {
+                                dot += residual_values[left_base + dim_idx] as f64
+                                    * residual_values[right_base + dim_idx] as f64;
+                            }
+                            let denom = (stream_norms[left] * stream_norms[right]).max(1.0e-12);
+                            pairwise_cosine_sum += dot / denom;
+                            pairwise_cosine_count += 1;
+                        }
+                    }
+                }
+
+                let alpha_base = (batch_idx * time + time_idx) * streams;
+                let alpha_slice = &alpha_values[alpha_base..alpha_base + streams];
+                let alpha_entropy = shannon_entropy(alpha_slice);
+                alpha_entropy_sum += alpha_entropy;
+                alpha_entropy_norm_sum += alpha_entropy / entropy_norm;
+
+                if let Some(beta_values) = beta_values.as_ref() {
+                    let beta_slice = &beta_values[alpha_base..alpha_base + streams];
+                    let beta_entropy = shannon_entropy(beta_slice);
+                    beta_entropy_sum += beta_entropy;
+                    beta_entropy_norm_sum += beta_entropy / entropy_norm;
+                    beta_entropy_count += 1;
+                }
+
+                let weight_base = (batch_idx * time + time_idx) * streams * streams;
+                let matrix = &residual_weight_values[weight_base..weight_base + streams * streams];
+                let mut identity_l1 = 0.0f64;
+                let mut uniform_l1 = 0.0f64;
+                for row in 0..streams {
+                    for col in 0..streams {
+                        let value = matrix[row * streams + col] as f64;
+                        let identity = if row == col { 1.0 } else { 0.0 };
+                        identity_l1 += (value - identity).abs();
+                        uniform_l1 += (value - uniform_weight).abs();
+                    }
+                }
+                residual_identity_l1_sum += identity_l1;
+                residual_uniform_l1_sum += uniform_l1;
+            }
+        }
+
+        let stream_norm_count_f = stream_norm_count.max(1) as f64;
+        let token_count = (batch * time).max(1) as f64;
+        let stream_norm_mean = stream_norm_sum / stream_norm_count_f;
+        let stream_norm_variance =
+            (stream_norm_sq_sum / stream_norm_count_f) - stream_norm_mean * stream_norm_mean;
+
+        Some(LanguageMhcLayerDiagnostics {
+            layer_index,
+            num_streams: streams,
+            stream_norm_mean,
+            stream_norm_variance: stream_norm_variance.max(0.0),
+            pairwise_stream_cosine_mean: (pairwise_cosine_count > 0)
+                .then_some(pairwise_cosine_sum / pairwise_cosine_count as f64),
+            alpha_entropy_mean: alpha_entropy_sum / token_count,
+            alpha_entropy_normalized_mean: alpha_entropy_norm_sum / token_count,
+            beta_entropy_mean: (beta_entropy_count > 0)
+                .then_some(beta_entropy_sum / beta_entropy_count as f64),
+            beta_entropy_normalized_mean: (beta_entropy_count > 0)
+                .then_some(beta_entropy_norm_sum / beta_entropy_count as f64),
+            residual_distance_identity_l1_mean: residual_identity_l1_sum / token_count,
+            residual_distance_uniform_l1_mean: residual_uniform_l1_sum / token_count,
+        })
+    }
+
+    fn collect_language_mhc_diagnostics_from_embedded(
+        &self,
+        embedded: Tensor<B, 3>,
+        state: &mut ModelState<B>,
+        summary_event_mask: Option<Tensor<B, 2, Int>>,
+    ) -> Vec<LanguageMhcLayerDiagnostics> {
+        if self.rollout_fast_steps_per_slow_step <= 1 {
+            let start_pos = state.position;
+            return self.collect_language_mhc_diagnostics_from_embedded_single_pass(
+                embedded,
+                state,
+                start_pos,
+                true,
+                RecurrentPositionMode::Sequential,
+                summary_event_mask,
+            );
+        }
+
+        let [_batch, slow_steps, _embd] = embedded.shape().dims::<3>();
+        if slow_steps == 0 {
+            return Vec::new();
+        }
+
+        let mut per_pass = Vec::new();
+        for slow_idx in 0..slow_steps {
+            let token_embedded = embedded.clone().slice_dim(1, slow_idx..slow_idx + 1);
+            let token_summary_event_mask = summary_event_mask
+                .as_ref()
+                .map(|mask| mask.clone().slice_dim(1, slow_idx..slow_idx + 1));
+            let start_pos = state.position;
+            for _ in 0..self.rollout_fast_steps_per_slow_step {
+                per_pass.push(
+                    self.collect_language_mhc_diagnostics_from_embedded_single_pass(
+                        token_embedded.clone(),
+                        state,
+                        start_pos,
+                        false,
+                        RecurrentPositionMode::Sequential,
+                        token_summary_event_mask.clone(),
+                    ),
+                );
+            }
+            state.position = state.position.saturating_add(1);
+        }
+
+        average_language_mhc_diagnostics(per_pass)
+    }
+
+    fn collect_language_mhc_diagnostics_from_embedded_single_pass(
+        &self,
+        embedded: Tensor<B, 3>,
+        state: &mut ModelState<B>,
+        start_pos: usize,
+        advance_position: bool,
+        position_mode: RecurrentPositionMode,
+        summary_event_mask: Option<Tensor<B, 2, Int>>,
+    ) -> Vec<LanguageMhcLayerDiagnostics> {
+        if self.y_neuron_recurrence.enabled {
+            return self
+                .collect_language_mhc_diagnostics_from_embedded_single_pass_y_neuron_recurrence(
+                    embedded,
+                    state,
+                    start_pos,
+                    advance_position,
+                    position_mode,
+                );
+        }
+
+        assert_eq!(
+            state.layers.len(),
+            self.n_layer,
+            "model state layers mismatch"
+        );
+        let [batch, time, embd] = embedded.shape().dims::<3>();
+        let mut current = self.norm.forward(embedded.reshape([batch, 1, time, embd]));
+        let fused = self.kernel.enabled;
+        let static_mhc_coefficients = self.mhc_shared.as_ref().and_then(|mhc| {
+            (!mhc.coefficient_policy().uses_dynamic_stream_controller()).then(|| mhc.coefficients())
+        });
+
+        let mut diagnostics = Vec::new();
+        for (layer_idx, layer_state) in state.layers.iter_mut().enumerate() {
+            let mhc = self.mhc_for_layer(layer_idx);
+            let current_residuals = self.prepare_language_mhc_residuals(current.clone(), mhc);
+            if let Some(layer_diag) =
+                self.summarize_language_mhc_layer_diagnostics(layer_idx, current_residuals, mhc)
+            {
+                diagnostics.push(layer_diag);
+            }
+            let mhc_coefficients = mhc.and_then(|_| static_mhc_coefficients.as_ref());
+            let bindings = self.split_language_residuals_for_layer(current, mhc, mhc_coefficients);
+            let branch_input = if self.summary_memory_applies_to_layer(layer_idx) {
+                self.forward_branch_summary_memory(
+                    bindings.branch_input.clone(),
+                    layer_state,
+                    start_pos,
+                    summary_event_mask.clone(),
+                )
+            } else {
+                layer_state.summary_memory_hidden = None;
+                bindings.branch_input.clone()
+            };
+
+            if self.clocked_slow_memory_applies_to_layer(layer_idx) {
+                let branch_out = self.forward_branch_clocked_slow_layer(
+                    layer_idx,
+                    branch_input,
+                    layer_state,
+                    start_pos,
+                    position_mode,
+                );
+                let next = self.merge_language_residuals_for_layer(
+                    branch_out,
+                    bindings,
+                    mhc,
+                    mhc_coefficients,
+                );
+                current = if mhc.is_some() {
+                    self.norm.forward(next)
+                } else {
+                    next
+                };
+                continue;
+            }
+            layer_state.clocked_slow_hidden = None;
+
+            let [branch_batch, branch_views, branch_time, branch_dim] =
+                branch_input.shape().dims::<4>();
+            let branch_flat =
+                branch_input.reshape([branch_batch * branch_views, 1, branch_time, branch_dim]);
+            let (encoder, encoder_v, decoder, latent) = self.layer_lowrank_weights(layer_idx);
+            let latent_pattern = &self.kernel.block_sparse.latent;
+            let sparse_mask = if fused && latent_pattern.is_sparse() {
+                Some(latent_pattern.mask::<B>(latent, &branch_flat.device()))
+            } else {
+                None
+            };
+            let fused_recurrent_plan = if self.kernel.enabled
+                && self.kernel.wgpu_recurrent_kernel
+                && supports_recurrent_backend::<B>()
+            {
+                Some(CompiledRecurrentAttentionPlan::new(
+                    branch_batch * branch_views,
+                    self.n_head,
+                    1,
+                    branch_time,
+                    latent,
+                    branch_dim,
+                    &branch_flat.device(),
+                ))
+            } else {
+                None
+            };
+            let next = lowrank_residual_step_next(
+                branch_flat,
+                encoder.clone(),
+                encoder_v.clone(),
+                decoder.clone(),
+                &self.dropout,
+                fused && self.kernel.projection_executor.use_x(),
+                fused && self.kernel.projection_executor.use_y(),
+                self.kernel.relu_threshold,
+                true,
+                latent_pattern,
+                self.kernel.lowrank_grad_input_executor,
+                sparse_mask.clone(),
+                |query, value| {
+                    self.recurrent_attention_with_plan(
+                        query,
+                        value,
+                        layer_state,
+                        start_pos,
+                        position_mode,
+                        fused_recurrent_plan.as_ref(),
+                    )
+                },
+                |values| activation::relu(values),
+                |values| self.norm.forward(values),
+            );
+            let branch_out = next.reshape([branch_batch, branch_views, branch_time, branch_dim]);
+            let next = self.merge_language_residuals_for_layer(
+                branch_out,
+                bindings,
+                mhc,
+                mhc_coefficients,
+            );
+            current = if mhc.is_some() {
+                self.norm.forward(next)
+            } else {
+                next
+            };
+        }
+
+        if advance_position {
+            state.position = state.position.saturating_add(time);
+        }
+
+        diagnostics
+    }
+
+    fn collect_language_mhc_diagnostics_from_embedded_single_pass_y_neuron_recurrence(
+        &self,
+        embedded: Tensor<B, 3>,
+        state: &mut ModelState<B>,
+        start_pos: usize,
+        advance_position: bool,
+        position_mode: RecurrentPositionMode,
+    ) -> Vec<LanguageMhcLayerDiagnostics> {
+        assert_eq!(
+            state.layers.len(),
+            self.n_layer,
+            "model state layers mismatch"
+        );
+        let [batch, time, embd] = embedded.shape().dims::<3>();
+        let mut current = self.norm.forward(embedded.reshape([batch, 1, time, embd]));
+        let fused = self.kernel.enabled;
+        let static_mhc_coefficients = self.mhc_shared.as_ref().and_then(|mhc| {
+            (!mhc.coefficient_policy().uses_dynamic_stream_controller()).then(|| mhc.coefficients())
+        });
+
+        let mut diagnostics = Vec::new();
+        for (layer_idx, layer_state) in state.layers.iter_mut().enumerate() {
+            let mhc = self.mhc_for_layer(layer_idx);
+            let current_residuals = self.prepare_language_mhc_residuals(current.clone(), mhc);
+            if let Some(layer_diag) =
+                self.summarize_language_mhc_layer_diagnostics(layer_idx, current_residuals, mhc)
+            {
+                diagnostics.push(layer_diag);
+            }
+            let mhc_coefficients = mhc.and_then(|_| static_mhc_coefficients.as_ref());
+            let bindings = self.split_language_residuals_for_layer(current, mhc, mhc_coefficients);
+            layer_state.clocked_slow_hidden = None;
+            layer_state.summary_memory_hidden = None;
+
+            let [branch_batch, branch_views, branch_time, branch_dim] =
+                bindings.branch_input.shape().dims::<4>();
+            let flat_batch = branch_batch * branch_views;
+            let branch_flat =
+                bindings
+                    .branch_input
+                    .clone()
+                    .reshape([flat_batch, 1, branch_time, branch_dim]);
+            let (encoder, encoder_v, decoder, latent) = self.layer_lowrank_weights(layer_idx);
+            let heads = self.n_head;
+            let latent_pattern = &self.kernel.block_sparse.latent;
+            let sparse_mask = if fused && latent_pattern.is_sparse() {
+                Some(latent_pattern.mask::<B>(latent, &branch_flat.device()))
+            } else {
+                None
+            };
+            if !self.y_neuron_recurrence_applies_to_layer(layer_idx) {
+                layer_state.y_neuron_state = None;
+                let fused_recurrent_plan = if self.kernel.enabled
+                    && self.kernel.wgpu_recurrent_kernel
+                    && supports_recurrent_backend::<B>()
+                {
+                    Some(CompiledRecurrentAttentionPlan::new(
+                        flat_batch,
+                        self.n_head,
+                        1,
+                        branch_time,
+                        latent,
+                        branch_dim,
+                        &branch_flat.device(),
+                    ))
+                } else {
+                    None
+                };
+                let next = lowrank_residual_step_next(
+                    branch_flat,
+                    encoder.clone(),
+                    encoder_v.clone(),
+                    decoder.clone(),
+                    &self.dropout,
+                    fused && self.kernel.projection_executor.use_x(),
+                    fused && self.kernel.projection_executor.use_y(),
+                    self.kernel.relu_threshold,
+                    true,
+                    latent_pattern,
+                    self.kernel.lowrank_grad_input_executor,
+                    sparse_mask.clone(),
+                    |query, value| {
+                        self.recurrent_attention_with_plan(
+                            query,
+                            value,
+                            layer_state,
+                            start_pos,
+                            position_mode,
+                            fused_recurrent_plan.as_ref(),
+                        )
+                    },
+                    |values| activation::relu(values),
+                    |values| self.norm.forward(values),
+                );
+                let branch_out =
+                    next.reshape([branch_batch, branch_views, branch_time, branch_dim]);
+                let next = self.merge_language_residuals_for_layer(
+                    branch_out,
+                    bindings,
+                    mhc,
+                    mhc_coefficients,
+                );
+                current = if mhc.is_some() {
+                    self.norm.forward(next)
+                } else {
+                    next
+                };
+                continue;
+            }
+            let x_base = self.project_lowrank_positive(
+                branch_flat.clone(),
+                encoder.clone(),
+                fused,
+                latent_pattern,
+                sparse_mask.clone(),
+            );
+            let mut next_tokens = Vec::with_capacity(branch_time);
+            let mut y_neuron_state = self.resolve_y_neuron_state(
+                layer_state,
+                flat_batch,
+                self.n_head,
+                latent,
+                &branch_flat.device(),
+            );
+            let chunk_tokens = self
+                .y_neuron_recurrence
+                .chunk_tokens
+                .max(1)
+                .min(branch_time.max(1));
+            let fused_recurrent_plan = if self.kernel.enabled
+                && self.kernel.wgpu_recurrent_kernel
+                && supports_recurrent_backend::<B>()
+            {
+                Some(CompiledRecurrentAttentionPlan::new(
+                    flat_batch,
+                    self.n_head,
+                    1,
+                    chunk_tokens,
+                    latent,
+                    branch_dim,
+                    &branch_flat.device(),
+                ))
+            } else {
+                None
+            };
+            let tail_plan = if self.kernel.enabled
+                && self.kernel.wgpu_recurrent_kernel
+                && supports_recurrent_backend::<B>()
+                && branch_time % chunk_tokens != 0
+            {
+                let tail_tokens = branch_time % chunk_tokens;
+                Some(CompiledRecurrentAttentionPlan::new(
+                    flat_batch,
+                    self.n_head,
+                    1,
+                    tail_tokens,
+                    latent,
+                    branch_dim,
+                    &branch_flat.device(),
+                ))
+            } else {
+                None
+            };
+
+            for chunk_start in (0..branch_time).step_by(chunk_tokens) {
+                let chunk_end = (chunk_start + chunk_tokens).min(branch_time);
+                let chunk_len = chunk_end - chunk_start;
+                let x_neuron_base = x_base.clone().slice_dim(2, chunk_start..chunk_end);
+                let x_neuron = self.inject_y_neuron_state(x_neuron_base, y_neuron_state.clone());
+                let current_token = branch_flat.clone().slice_dim(2, chunk_start..chunk_end);
+                let token_position = match position_mode {
+                    RecurrentPositionMode::Sequential => start_pos + chunk_start,
+                    RecurrentPositionMode::Fixed => start_pos,
+                };
+                let a_dense = self.recurrent_attention_with_plan(
+                    x_neuron.clone(),
+                    current_token.clone(),
+                    layer_state,
+                    token_position,
+                    position_mode,
+                    if chunk_len == chunk_tokens {
+                        fused_recurrent_plan.as_ref()
+                    } else {
+                        tail_plan.as_ref()
+                    },
+                );
+                let a_dense = self.norm.forward(a_dense);
+                let y_gate = self.project_lowrank_positive(
+                    a_dense,
+                    encoder_v.clone(),
+                    fused,
+                    latent_pattern,
+                    sparse_mask.clone(),
+                );
+                let y_neuron = self.dropout.forward(x_neuron.clone() * y_gate.clone());
+                let mixed = y_neuron.clone().swap_dims(1, 2);
+                let mixed_flat = mixed.reshape([flat_batch * chunk_len, heads * latent]);
+                let mlp_flat = mixed_flat.matmul(decoder.clone());
+                let mlp_out = self
+                    .norm
+                    .forward(mlp_flat.reshape([flat_batch, 1, chunk_len, branch_dim]));
+                next_tokens.push(self.norm.forward(current_token + mlp_out));
+                let y_neuron_last = y_neuron.clone().slice_dim(2, (chunk_len - 1)..chunk_len);
+                y_neuron_state = self.update_y_neuron_state(y_neuron_state, y_neuron_last);
+            }
+
+            layer_state.y_neuron_state = Some(y_neuron_state);
+
+            let branch_out = Tensor::cat(next_tokens, 2).reshape([
+                branch_batch,
+                branch_views,
+                branch_time,
+                branch_dim,
+            ]);
+            let next = self.merge_language_residuals_for_layer(
+                branch_out,
+                bindings,
+                mhc,
+                mhc_coefficients,
+            );
+            current = if mhc.is_some() {
+                self.norm.forward(next)
+            } else {
+                next
+            };
+        }
+
+        if advance_position {
+            state.position = state.position.saturating_add(time);
+        }
+
+        diagnostics
     }
 
     fn forward_with_state_impl(
@@ -1001,7 +2003,32 @@ impl<B: Backend> BDH<B> {
         position_mode: RecurrentPositionMode,
         summary_event_mask: Option<Tensor<B, 2, Int>>,
     ) -> Tensor<B, 3> {
+        self.forward_hidden_with_state_from_embedded_single_pass_layer_limit(
+            embedded,
+            state,
+            start_pos,
+            advance_position,
+            position_mode,
+            summary_event_mask,
+            self.n_layer,
+        )
+    }
+
+    fn forward_hidden_with_state_from_embedded_single_pass_layer_limit(
+        &self,
+        embedded: Tensor<B, 3>,
+        state: &mut ModelState<B>,
+        start_pos: usize,
+        advance_position: bool,
+        position_mode: RecurrentPositionMode,
+        summary_event_mask: Option<Tensor<B, 2, Int>>,
+        layer_limit: usize,
+    ) -> Tensor<B, 3> {
         if self.y_neuron_recurrence.enabled {
+            assert_eq!(
+                layer_limit, self.n_layer,
+                "layer-limited profiling is not supported with y-neuron recurrence enabled"
+            );
             return self.forward_hidden_with_state_from_embedded_single_pass_y_neuron_recurrence(
                 embedded,
                 state,
@@ -1018,67 +2045,40 @@ impl<B: Backend> BDH<B> {
         let [batch, time, embd] = embedded.shape().dims::<3>();
         let mut current = embedded.reshape([batch, 1, time, embd]);
         current = self.norm.forward(current);
-
-        let encoder_raw = self.encoder.val();
-        let [heads, embd_enc, latent] = encoder_raw.shape().dims::<3>();
-        let encoder = encoder_raw.reshape([1, heads, embd_enc, latent]);
-
-        let encoder_v_raw = self.encoder_v.val();
-        let [heads_v, embd_v, latent_v] = encoder_v_raw.shape().dims::<3>();
-        let encoder_v = encoder_v_raw.reshape([1, heads_v, embd_v, latent_v]);
-        let decoder = self.decoder.val();
         let fused = self.kernel.enabled;
-        let latent_pattern = &self.kernel.block_sparse.latent;
-        let sparse_mask = if fused && latent_pattern.is_sparse() {
-            Some(latent_pattern.mask::<B>(latent, &current.device()))
-        } else {
-            None
-        };
-        let mhc_coefficients = self.mhc_layers.as_ref().map(|layers| {
-            layers
-                .iter()
-                .map(|mhc| mhc.as_ref().map(|mhc| mhc.coefficients()))
-                .collect::<Vec<_>>()
+        let static_mhc_coefficients = self.mhc_shared.as_ref().and_then(|mhc| {
+            (!mhc.coefficient_policy().uses_dynamic_stream_controller()).then(|| mhc.coefficients())
         });
 
-        for (layer_idx, layer_state) in state.layers.iter_mut().enumerate() {
-            let mhc = self
-                .mhc_layers
-                .as_ref()
-                .and_then(|layers| layers.get(layer_idx))
-                .and_then(|mhc| mhc.as_ref());
-            let mhc_coefficients = mhc_coefficients
-                .as_ref()
-                .and_then(|coefficients| coefficients.get(layer_idx))
-                .and_then(|coefficients| coefficients.as_ref());
-            let current_residuals = self.prepare_language_mhc_residuals(current, mhc);
-            let (branch_input, residuals_base, beta) =
-                mhc_split_with_coefficients(mhc, current_residuals, mhc_coefficients);
+        for (layer_idx, layer_state) in state.layers.iter_mut().enumerate().take(layer_limit) {
+            let mhc = self.mhc_for_layer(layer_idx);
+            let mhc_coefficients = mhc.and_then(|_| static_mhc_coefficients.as_ref());
+            let bindings = self.split_language_residuals_for_layer(current, mhc, mhc_coefficients);
             let branch_input = if self.summary_memory_applies_to_layer(layer_idx) {
                 self.forward_branch_summary_memory(
-                    branch_input,
+                    bindings.branch_input.clone(),
                     layer_state,
                     start_pos,
                     summary_event_mask.clone(),
                 )
             } else {
                 layer_state.summary_memory_hidden = None;
-                branch_input
+                bindings.branch_input.clone()
             };
 
             if self.clocked_slow_memory_applies_to_layer(layer_idx) {
                 let branch_out = self.forward_branch_clocked_slow_layer(
+                    layer_idx,
                     branch_input,
                     layer_state,
                     start_pos,
                     position_mode,
                 );
-                let next = mhc_merge_with_coefficients(
-                    mhc,
+                let next = self.merge_language_residuals_for_layer(
                     branch_out,
-                    residuals_base,
+                    bindings,
+                    mhc,
                     mhc_coefficients,
-                    beta,
                 );
                 current = if mhc.is_some() {
                     self.norm.forward(next)
@@ -1093,13 +2093,20 @@ impl<B: Backend> BDH<B> {
                 branch_input.shape().dims::<4>();
             let branch_flat =
                 branch_input.reshape([branch_batch * branch_views, 1, branch_time, branch_dim]);
+            let (encoder, encoder_v, decoder, latent) = self.layer_lowrank_weights(layer_idx);
+            let latent_pattern = &self.kernel.block_sparse.latent;
+            let sparse_mask = if fused && latent_pattern.is_sparse() {
+                Some(latent_pattern.mask::<B>(latent, &branch_flat.device()))
+            } else {
+                None
+            };
             let fused_recurrent_plan = if self.kernel.enabled
                 && self.kernel.wgpu_recurrent_kernel
                 && supports_recurrent_backend::<B>()
             {
                 Some(CompiledRecurrentAttentionPlan::new(
                     branch_batch * branch_views,
-                    heads,
+                    self.n_head,
                     1,
                     branch_time,
                     latent,
@@ -1115,10 +2122,12 @@ impl<B: Backend> BDH<B> {
                 encoder_v.clone(),
                 decoder.clone(),
                 &self.dropout,
-                fused,
+                fused && self.kernel.projection_executor.use_x(),
+                fused && self.kernel.projection_executor.use_y(),
                 self.kernel.relu_threshold,
                 true,
                 latent_pattern,
+                self.kernel.lowrank_grad_input_executor,
                 sparse_mask.clone(),
                 |query, value| {
                     self.recurrent_attention_with_plan(
@@ -1200,12 +2209,11 @@ impl<B: Backend> BDH<B> {
                 output
                     .next
                     .reshape([branch_batch, branch_views, branch_time, branch_dim]);
-            let next = mhc_merge_with_coefficients(
-                mhc,
+            let next = self.merge_language_residuals_for_layer(
                 branch_out,
-                residuals_base,
+                bindings,
+                mhc,
                 mhc_coefficients,
-                beta,
             );
             current = if mhc.is_some() {
                 self.norm.forward(next)
@@ -1238,49 +2246,34 @@ impl<B: Backend> BDH<B> {
         );
         let [batch, time, embd] = embedded.shape().dims::<3>();
         let mut current = self.norm.forward(embedded.reshape([batch, 1, time, embd]));
-
-        let encoder_raw = self.encoder.val();
-        let [heads, embd_enc, latent] = encoder_raw.shape().dims::<3>();
-        let encoder = encoder_raw.reshape([1, heads, embd_enc, latent]);
-
-        let encoder_v_raw = self.encoder_v.val();
-        let [heads_v, embd_v, latent_v] = encoder_v_raw.shape().dims::<3>();
-        let encoder_v = encoder_v_raw.reshape([1, heads_v, embd_v, latent_v]);
-        let decoder = self.decoder.val();
         let fused = self.kernel.enabled;
-        let latent_pattern = &self.kernel.block_sparse.latent;
-        let sparse_mask = if fused && latent_pattern.is_sparse() {
-            Some(latent_pattern.mask::<B>(latent, &current.device()))
-        } else {
-            None
-        };
-        let mhc_coefficients = self.mhc_layers.as_ref().map(|layers| {
-            layers
-                .iter()
-                .map(|mhc| mhc.as_ref().map(|mhc| mhc.coefficients()))
-                .collect::<Vec<_>>()
+        let static_mhc_coefficients = self.mhc_shared.as_ref().and_then(|mhc| {
+            (!mhc.coefficient_policy().uses_dynamic_stream_controller()).then(|| mhc.coefficients())
         });
 
         for (layer_idx, layer_state) in state.layers.iter_mut().enumerate() {
-            let mhc = self
-                .mhc_layers
-                .as_ref()
-                .and_then(|layers| layers.get(layer_idx))
-                .and_then(|mhc| mhc.as_ref());
-            let mhc_coefficients = mhc_coefficients
-                .as_ref()
-                .and_then(|coefficients| coefficients.get(layer_idx))
-                .and_then(|coefficients| coefficients.as_ref());
-            let current_residuals = self.prepare_language_mhc_residuals(current, mhc);
-            let (branch_input, residuals_base, beta) =
-                mhc_split_with_coefficients(mhc, current_residuals, mhc_coefficients);
+            let mhc = self.mhc_for_layer(layer_idx);
+            let mhc_coefficients = mhc.and_then(|_| static_mhc_coefficients.as_ref());
+            let bindings = self.split_language_residuals_for_layer(current, mhc, mhc_coefficients);
             layer_state.clocked_slow_hidden = None;
             layer_state.summary_memory_hidden = None;
 
             let [branch_batch, branch_views, branch_time, branch_dim] =
-                branch_input.shape().dims::<4>();
+                bindings.branch_input.shape().dims::<4>();
             let flat_batch = branch_batch * branch_views;
-            let branch_flat = branch_input.reshape([flat_batch, 1, branch_time, branch_dim]);
+            let branch_flat =
+                bindings
+                    .branch_input
+                    .clone()
+                    .reshape([flat_batch, 1, branch_time, branch_dim]);
+            let (encoder, encoder_v, decoder, latent) = self.layer_lowrank_weights(layer_idx);
+            let heads = self.n_head;
+            let latent_pattern = &self.kernel.block_sparse.latent;
+            let sparse_mask = if fused && latent_pattern.is_sparse() {
+                Some(latent_pattern.mask::<B>(latent, &branch_flat.device()))
+            } else {
+                None
+            };
             if !self.y_neuron_recurrence_applies_to_layer(layer_idx) {
                 layer_state.y_neuron_state = None;
                 let fused_recurrent_plan = if self.kernel.enabled
@@ -1305,10 +2298,12 @@ impl<B: Backend> BDH<B> {
                     encoder_v.clone(),
                     decoder.clone(),
                     &self.dropout,
-                    fused,
+                    fused && self.kernel.projection_executor.use_x(),
+                    fused && self.kernel.projection_executor.use_y(),
                     self.kernel.relu_threshold,
                     true,
                     latent_pattern,
+                    self.kernel.lowrank_grad_input_executor,
                     sparse_mask.clone(),
                     |query, value| {
                         self.recurrent_attention_with_plan(
@@ -1385,12 +2380,11 @@ impl<B: Backend> BDH<B> {
                     output
                         .next
                         .reshape([branch_batch, branch_views, branch_time, branch_dim]);
-                let next = mhc_merge_with_coefficients(
-                    mhc,
+                let next = self.merge_language_residuals_for_layer(
                     branch_out,
-                    residuals_base,
+                    bindings,
+                    mhc,
                     mhc_coefficients,
-                    beta,
                 );
                 current = if mhc.is_some() {
                     self.norm.forward(next)
@@ -1564,12 +2558,11 @@ impl<B: Backend> BDH<B> {
                 branch_time,
                 branch_dim,
             ]);
-            let next = mhc_merge_with_coefficients(
-                mhc,
+            let next = self.merge_language_residuals_for_layer(
                 branch_out,
-                residuals_base,
+                bindings,
+                mhc,
                 mhc_coefficients,
-                beta,
             );
             current = if mhc.is_some() {
                 self.norm.forward(next)
@@ -1588,11 +2581,21 @@ impl<B: Backend> BDH<B> {
     }
 
     fn project_hidden_to_logits(&self, hidden: Tensor<B, 3>) -> Tensor<B, 3> {
+        let prof_enabled = logits_projection_profile_enabled();
+        let start = prof_enabled.then(Instant::now);
         let [batch, time, dim] = hidden.shape().dims();
-        hidden
+        let logits = hidden
             .reshape([batch * time, dim])
             .matmul(self.lm_head.val())
-            .reshape([batch, time, self.vocab_size])
+            .reshape([batch, time, self.vocab_size]);
+        if let Some(start) = start {
+            logits_projection_profile_record(start.elapsed().as_nanos());
+        }
+        logits
+    }
+
+    pub fn logits_from_hidden(&self, hidden: Tensor<B, 3>) -> Tensor<B, 3> {
+        self.project_hidden_to_logits(hidden)
     }
 
     pub fn forward_with_state(
@@ -1649,16 +2652,595 @@ impl<B: Backend> BDH<B> {
         self.forward_with_state_from_embedded(embedded, state, None)
     }
 
+    #[doc(hidden)]
+    pub fn forward_hidden_prefix_layers_from_embedded_for_profile(
+        &self,
+        embedded: Tensor<B, 3>,
+        layer_limit: usize,
+        summary_event_mask: Option<Tensor<B, 2, Int>>,
+    ) -> Tensor<B, 3> {
+        let mut state = self.init_state();
+        self.forward_hidden_with_state_from_embedded_single_pass_layer_limit(
+            embedded,
+            &mut state,
+            0,
+            true,
+            RecurrentPositionMode::Sequential,
+            summary_event_mask,
+            layer_limit.min(self.n_layer),
+        )
+    }
+
+    pub fn collect_language_mhc_diagnostics_with_state(
+        &self,
+        tokens: Tensor<B, 2, Int>,
+        state: &mut ModelState<B>,
+    ) -> Vec<LanguageMhcLayerDiagnostics> {
+        let embedded = self.embed.forward(tokens);
+        self.collect_language_mhc_diagnostics_from_embedded(embedded, state, None)
+    }
+
+    pub fn collect_language_mhc_diagnostics_with_state_and_summary_event_mask(
+        &self,
+        tokens: Tensor<B, 2, Int>,
+        summary_event_mask: Tensor<B, 2, Int>,
+        state: &mut ModelState<B>,
+    ) -> Vec<LanguageMhcLayerDiagnostics> {
+        let embedded = self.embed.forward(tokens);
+        self.collect_language_mhc_diagnostics_from_embedded(
+            embedded,
+            state,
+            Some(summary_event_mask),
+        )
+    }
+
     pub fn summary_memory_write_trigger_token_ids(&self) -> Option<&[u32]> {
         self.summary_memory.write_trigger_token_ids.as_deref()
     }
 }
 
+fn shannon_entropy(probabilities: &[f32]) -> f64 {
+    let total = probabilities
+        .iter()
+        .copied()
+        .filter(|value| *value > 0.0)
+        .map(f64::from)
+        .sum::<f64>();
+    if total <= 0.0 {
+        return 0.0;
+    }
+
+    probabilities
+        .iter()
+        .copied()
+        .filter(|value| *value > 0.0)
+        .map(|value| {
+            let value = value as f64 / total;
+            -value * value.ln()
+        })
+        .sum()
+}
+
+fn average_language_mhc_diagnostics(
+    diagnostics_runs: Vec<Vec<LanguageMhcLayerDiagnostics>>,
+) -> Vec<LanguageMhcLayerDiagnostics> {
+    use std::collections::BTreeMap;
+
+    let mut accumulators = BTreeMap::<usize, LanguageMhcLayerDiagnosticsAccumulator>::new();
+    for run in diagnostics_runs {
+        for diag in run {
+            let accumulator = accumulators.entry(diag.layer_index).or_default();
+            accumulator.count += 1;
+            accumulator.num_streams = diag.num_streams;
+            accumulator.stream_norm_mean_sum += diag.stream_norm_mean;
+            accumulator.stream_norm_variance_sum += diag.stream_norm_variance;
+            if let Some(value) = diag.pairwise_stream_cosine_mean {
+                accumulator.pairwise_stream_cosine_mean_sum += value;
+                accumulator.pairwise_stream_cosine_mean_count += 1;
+            }
+            accumulator.alpha_entropy_mean_sum += diag.alpha_entropy_mean;
+            accumulator.alpha_entropy_normalized_mean_sum += diag.alpha_entropy_normalized_mean;
+            if let Some(value) = diag.beta_entropy_mean {
+                accumulator.beta_entropy_mean_sum += value;
+                accumulator.beta_entropy_mean_count += 1;
+            }
+            if let Some(value) = diag.beta_entropy_normalized_mean {
+                accumulator.beta_entropy_normalized_mean_sum += value;
+                accumulator.beta_entropy_normalized_mean_count += 1;
+            }
+            accumulator.residual_distance_identity_l1_mean_sum +=
+                diag.residual_distance_identity_l1_mean;
+            accumulator.residual_distance_uniform_l1_mean_sum +=
+                diag.residual_distance_uniform_l1_mean;
+        }
+    }
+
+    accumulators
+        .into_iter()
+        .map(|(layer_index, accumulator)| {
+            let count = accumulator.count.max(1) as f64;
+            LanguageMhcLayerDiagnostics {
+                layer_index,
+                num_streams: accumulator.num_streams,
+                stream_norm_mean: accumulator.stream_norm_mean_sum / count,
+                stream_norm_variance: accumulator.stream_norm_variance_sum / count,
+                pairwise_stream_cosine_mean: (accumulator.pairwise_stream_cosine_mean_count > 0)
+                    .then_some(
+                        accumulator.pairwise_stream_cosine_mean_sum
+                            / accumulator.pairwise_stream_cosine_mean_count as f64,
+                    ),
+                alpha_entropy_mean: accumulator.alpha_entropy_mean_sum / count,
+                alpha_entropy_normalized_mean: accumulator.alpha_entropy_normalized_mean_sum
+                    / count,
+                beta_entropy_mean: (accumulator.beta_entropy_mean_count > 0).then_some(
+                    accumulator.beta_entropy_mean_sum / accumulator.beta_entropy_mean_count as f64,
+                ),
+                beta_entropy_normalized_mean: (accumulator.beta_entropy_normalized_mean_count > 0)
+                    .then_some(
+                        accumulator.beta_entropy_normalized_mean_sum
+                            / accumulator.beta_entropy_normalized_mean_count as f64,
+                    ),
+                residual_distance_identity_l1_mean: accumulator
+                    .residual_distance_identity_l1_mean_sum
+                    / count,
+                residual_distance_uniform_l1_mean: accumulator
+                    .residual_distance_uniform_l1_mean_sum
+                    / count,
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::LatentFanoutScheduleConfig;
     use burn::tensor::backend::Backend as BackendTrait;
+    use burn::tensor::{Int, TensorData};
     use burn_ndarray::NdArray;
+
+    type RecurrenceBackend = NdArray<f32>;
+
+    fn recurrence_test_model_with_shape(
+        kernel: SequenceKernelKind,
+        n_layer: usize,
+        n_embd: usize,
+        n_head: usize,
+        latent_total: usize,
+        vocab_size: usize,
+    ) -> BDH<RecurrenceBackend> {
+        let device = <RecurrenceBackend as BackendTrait>::Device::default();
+        <RecurrenceBackend as BackendTrait>::seed(&device, 2026);
+        assert_eq!(
+            latent_total % n_embd,
+            0,
+            "latent_total must be divisible by n_embd in recurrence tests"
+        );
+        BDH::<RecurrenceBackend>::new(
+            BDHConfig {
+                n_layer,
+                n_embd,
+                n_head,
+                mlp_internal_dim_multiplier: latent_total / n_embd,
+                vocab_size,
+                dropout: 0.0,
+                sequence_kernel: kernel,
+                fused_kernels: FusedKernelConfig {
+                    enabled: false,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            &device,
+        )
+    }
+
+    fn recurrence_test_tokens_with_shape(
+        device: &<RecurrenceBackend as BackendTrait>::Device,
+        values: Vec<i64>,
+        shape: [usize; 2],
+    ) -> Tensor<RecurrenceBackend, 2, Int> {
+        Tensor::<RecurrenceBackend, 2, Int>::from_data(TensorData::new(values, shape), device)
+    }
+
+    fn tensor_max_abs_diff<const D: usize>(
+        lhs: Tensor<RecurrenceBackend, D>,
+        rhs: Tensor<RecurrenceBackend, D>,
+    ) -> f32 {
+        let lhs_vec = lhs
+            .to_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .expect("lhs vec");
+        let rhs_vec = rhs
+            .to_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .expect("rhs vec");
+        lhs_vec
+            .iter()
+            .zip(rhs_vec.iter())
+            .map(|(lhs, rhs)| (lhs - rhs).abs())
+            .fold(0.0f32, f32::max)
+    }
+
+    fn option_tensor_max_abs_diff<const D: usize>(
+        lhs: &Option<Tensor<RecurrenceBackend, D>>,
+        rhs: &Option<Tensor<RecurrenceBackend, D>>,
+    ) -> f32 {
+        match (lhs, rhs) {
+            (None, None) => 0.0,
+            (Some(lhs), Some(rhs)) => tensor_max_abs_diff(lhs.clone(), rhs.clone()),
+            _ => f32::INFINITY,
+        }
+    }
+
+    fn model_state_max_abs_diff(
+        lhs: &ModelState<RecurrenceBackend>,
+        rhs: &ModelState<RecurrenceBackend>,
+    ) -> f32 {
+        if lhs.position != rhs.position || lhs.layers.len() != rhs.layers.len() {
+            return f32::INFINITY;
+        }
+
+        let mut max_diff = 0.0f32;
+        for (lhs_layer, rhs_layer) in lhs.layers.iter().zip(rhs.layers.iter()) {
+            max_diff = max_diff.max(option_tensor_max_abs_diff(&lhs_layer.rho, &rhs_layer.rho));
+            max_diff = max_diff.max(option_tensor_max_abs_diff(
+                &lhs_layer.rho_norm,
+                &rhs_layer.rho_norm,
+            ));
+            max_diff = max_diff.max(option_tensor_max_abs_diff(
+                &lhs_layer.sequence_aux,
+                &rhs_layer.sequence_aux,
+            ));
+            max_diff = max_diff.max(option_tensor_max_abs_diff(
+                &lhs_layer.y_neuron_state,
+                &rhs_layer.y_neuron_state,
+            ));
+            max_diff = max_diff.max(option_tensor_max_abs_diff(
+                &lhs_layer.clocked_slow_hidden,
+                &rhs_layer.clocked_slow_hidden,
+            ));
+            max_diff = max_diff.max(option_tensor_max_abs_diff(
+                &lhs_layer.summary_memory_hidden,
+                &rhs_layer.summary_memory_hidden,
+            ));
+        }
+        max_diff
+    }
+
+    fn assert_full_forward_matches_token_step_recurrence(kernel: SequenceKernelKind) {
+        let tokens = vec![1i64, 2, 3, 4, 5, 6];
+        assert_full_forward_matches_token_step_recurrence_with_shape(
+            kernel,
+            2,
+            8,
+            2,
+            32,
+            32,
+            tokens,
+            [1, 6],
+        );
+    }
+
+    fn assert_full_forward_matches_token_step_recurrence_with_shape(
+        kernel: SequenceKernelKind,
+        n_layer: usize,
+        n_embd: usize,
+        n_head: usize,
+        latent_total: usize,
+        vocab_size: usize,
+        token_values: Vec<i64>,
+        token_shape: [usize; 2],
+    ) {
+        let device = <RecurrenceBackend as BackendTrait>::Device::default();
+        let model = recurrence_test_model_with_shape(
+            kernel,
+            n_layer,
+            n_embd,
+            n_head,
+            latent_total,
+            vocab_size,
+        );
+        let tokens = recurrence_test_tokens_with_shape(&device, token_values, token_shape);
+
+        let logits_full = model.forward(tokens.clone());
+        let mut recurrent_state = model.init_state();
+        let mut logits_steps = Vec::new();
+        for step in 0..tokens.shape().dims::<2>()[1] {
+            let step_tokens = tokens.clone().slice_dim(1, step..step + 1);
+            logits_steps.push(model.forward_with_state(step_tokens, &mut recurrent_state));
+        }
+        let logits_stepwise = Tensor::cat(logits_steps, 1);
+        let max_diff = tensor_max_abs_diff(logits_full, logits_stepwise);
+
+        assert!(
+            max_diff <= 1.0e-4,
+            "expected full forward and token-step recurrence to match for {kernel:?}, max diff {max_diff}"
+        );
+    }
+
+    fn assert_chunked_recurrence_matches_uninterrupted_state(kernel: SequenceKernelKind) {
+        let tokens = vec![1i64, 2, 3, 4, 5, 6];
+        assert_chunked_recurrence_matches_uninterrupted_state_with_shape(
+            kernel,
+            2,
+            8,
+            2,
+            32,
+            32,
+            tokens,
+            [1, 6],
+            &[1, 2, 3],
+        );
+    }
+
+    fn assert_chunked_recurrence_matches_uninterrupted_state_with_shape(
+        kernel: SequenceKernelKind,
+        n_layer: usize,
+        n_embd: usize,
+        n_head: usize,
+        latent_total: usize,
+        vocab_size: usize,
+        token_values: Vec<i64>,
+        token_shape: [usize; 2],
+        chunk_sizes: &[usize],
+    ) {
+        let device = <RecurrenceBackend as BackendTrait>::Device::default();
+        let model = recurrence_test_model_with_shape(
+            kernel,
+            n_layer,
+            n_embd,
+            n_head,
+            latent_total,
+            vocab_size,
+        );
+        let tokens = recurrence_test_tokens_with_shape(&device, token_values, token_shape);
+        let logits_full = model.forward(tokens.clone());
+
+        let mut uninterrupted_state = model.init_state();
+        let logits_uninterrupted =
+            model.forward_with_state(tokens.clone(), &mut uninterrupted_state);
+        let uninterrupted_diff = tensor_max_abs_diff(logits_full.clone(), logits_uninterrupted);
+        assert!(
+            uninterrupted_diff <= 1.0e-4,
+            "expected uninterrupted stateful forward to match full forward for {kernel:?}, max diff {uninterrupted_diff}"
+        );
+
+        for &chunk_tokens in chunk_sizes {
+            let mut chunked_state = model.init_state();
+            let mut logits_chunks = Vec::new();
+            let seq_len = tokens.shape().dims::<2>()[1];
+            for chunk_start in (0..seq_len).step_by(chunk_tokens) {
+                let chunk_end = (chunk_start + chunk_tokens).min(seq_len);
+                let chunk = tokens.clone().slice_dim(1, chunk_start..chunk_end);
+                logits_chunks.push(model.forward_with_state(chunk, &mut chunked_state));
+            }
+            let logits_chunked = Tensor::cat(logits_chunks, 1);
+            let logits_diff = tensor_max_abs_diff(logits_full.clone(), logits_chunked);
+            let state_diff = model_state_max_abs_diff(&uninterrupted_state, &chunked_state);
+
+            assert!(
+                logits_diff <= 1.0e-4,
+                "expected chunked recurrence to match full forward for {kernel:?} chunk_tokens={chunk_tokens}, max diff {logits_diff}"
+            );
+            assert!(
+                state_diff <= 1.0e-4,
+                "expected chunked recurrence state to match uninterrupted state for {kernel:?} chunk_tokens={chunk_tokens}, max diff {state_diff}"
+            );
+        }
+    }
+
+    fn repeat_value_heads_for_recurrence(
+        value: Tensor<RecurrenceBackend, 4>,
+        heads: usize,
+    ) -> Tensor<RecurrenceBackend, 4> {
+        match value.shape().dims::<4>()[1] {
+            1 => value.repeat_dim(1, heads),
+            existing if existing == heads => value,
+            existing => panic!("value heads {existing} must be 1 or {heads}"),
+        }
+    }
+
+    fn exclusive_prefix_sum_time_5d(
+        tensor: Tensor<RecurrenceBackend, 5>,
+    ) -> Tensor<RecurrenceBackend, 5> {
+        let [batch, heads, time, latent, embd] = tensor.shape().dims::<5>();
+        let prefix = tensor.cumsum(2);
+        let zero = Tensor::<RecurrenceBackend, 5>::zeros(
+            [batch, heads, 1, latent, embd],
+            &prefix.device(),
+        );
+        if time == 1 {
+            zero
+        } else {
+            Tensor::cat(vec![zero, prefix.slice_dim(2, 0..time - 1)], 2)
+        }
+    }
+
+    fn exclusive_prefix_sum_time_4d(
+        tensor: Tensor<RecurrenceBackend, 4>,
+    ) -> Tensor<RecurrenceBackend, 4> {
+        let [batch, heads, time, latent] = tensor.shape().dims::<4>();
+        let prefix = tensor.cumsum(2);
+        let zero =
+            Tensor::<RecurrenceBackend, 4>::zeros([batch, heads, 1, latent], &prefix.device());
+        if time == 1 {
+            zero
+        } else {
+            Tensor::cat(vec![zero, prefix.slice_dim(2, 0..time - 1)], 2)
+        }
+    }
+
+    fn recurrent_attention_tensorized_no_decay_reference(
+        query: Tensor<RecurrenceBackend, 4>,
+        value: Tensor<RecurrenceBackend, 4>,
+    ) -> (Tensor<RecurrenceBackend, 4>, Tensor<RecurrenceBackend, 4>) {
+        let [batch, heads, time, latent] = query.shape().dims::<4>();
+        let embd = value.shape().dims::<4>()[3];
+        let value = repeat_value_heads_for_recurrence(value, heads);
+
+        let delta = query.clone().unsqueeze_dim::<5>(4) * value.clone().unsqueeze_dim::<5>(3);
+        let rho_before = exclusive_prefix_sum_time_5d(delta.clone());
+        let context = (rho_before.clone() * query.clone().unsqueeze_dim::<5>(4))
+            .sum_dim(3)
+            .reshape([batch, heads, time, embd]);
+        let rho = delta
+            .cumsum(2)
+            .slice_dim(2, time - 1..time)
+            .reshape([batch, heads, latent, embd]);
+
+        (context, rho)
+    }
+
+    fn recurrent_attention_dense_score_reference(
+        query: Tensor<RecurrenceBackend, 4>,
+        value: Tensor<RecurrenceBackend, 4>,
+        decay: Option<Tensor<RecurrenceBackend, 1>>,
+    ) -> (Tensor<RecurrenceBackend, 4>, Tensor<RecurrenceBackend, 4>) {
+        let [batch, heads, time, latent] = query.shape().dims::<4>();
+        let embd = value.shape().dims::<4>()[3];
+        let device = query.device();
+        let value = repeat_value_heads_for_recurrence(value, heads);
+
+        let pos_row = Tensor::<RecurrenceBackend, 1, Int>::arange(0..time as i64, &device)
+            .float()
+            .reshape([1, 1, time, 1]);
+        let pos_col = Tensor::<RecurrenceBackend, 1, Int>::arange(0..time as i64, &device)
+            .float()
+            .reshape([1, 1, 1, time]);
+
+        let mut scores = query.clone().matmul(query.clone().swap_dims(2, 3)).tril(-1);
+        let rho = if let Some(decay) = decay {
+            let diff = (pos_row.clone() - pos_col.clone())
+                .tril(-1)
+                .repeat_dim(1, heads);
+            let decay_score = decay
+                .clone()
+                .reshape([1, heads, 1, 1])
+                .repeat_dim(2, time)
+                .repeat_dim(3, time);
+            scores = scores * decay_score.powf(diff);
+
+            let final_exponents = pos_row
+                .clone()
+                .mul_scalar(-1.0)
+                .add_scalar(time as f32)
+                .repeat_dim(1, heads);
+            let decay_final = decay
+                .reshape([1, heads, 1, 1])
+                .repeat_dim(2, time)
+                .powf(final_exponents);
+            query.mul(decay_final).swap_dims(2, 3).matmul(value.clone())
+        } else {
+            query.swap_dims(2, 3).matmul(value.clone())
+        };
+
+        let context = scores.matmul(value).reshape([batch, heads, time, embd]);
+        assert_eq!(rho.shape().dims::<4>(), [batch, heads, latent, embd]);
+
+        (context, rho)
+    }
+
+    fn recurrent_rwkv8_tensorized_reference(
+        query: Tensor<RecurrenceBackend, 4>,
+        value: Tensor<RecurrenceBackend, 4>,
+        decay: Tensor<RecurrenceBackend, 3>,
+    ) -> (
+        Tensor<RecurrenceBackend, 4>,
+        Tensor<RecurrenceBackend, 4>,
+        Tensor<RecurrenceBackend, 3>,
+    ) {
+        let [batch, heads, time, latent] = query.shape().dims::<4>();
+        let embd = value.shape().dims::<4>()[3];
+        let device = query.device();
+        let value = repeat_value_heads_for_recurrence(value, heads);
+        let time_idx = Tensor::<RecurrenceBackend, 1, Int>::arange(0..time as i64, &device).float();
+
+        let delta = query.clone().unsqueeze_dim::<5>(4) * value.clone().unsqueeze_dim::<5>(3);
+
+        let decay5 = decay
+            .clone()
+            .reshape([1, heads, 1, latent, 1])
+            .repeat_dim(2, time);
+        let state_exp5 = time_idx
+            .clone()
+            .reshape([1, 1, time, 1, 1])
+            .repeat_dim(1, heads)
+            .repeat_dim(3, latent);
+        let inv_exp5 = time_idx
+            .clone()
+            .add_scalar(1.0)
+            .mul_scalar(-1.0)
+            .reshape([1, 1, time, 1, 1])
+            .repeat_dim(1, heads)
+            .repeat_dim(3, latent);
+        let rho_before =
+            exclusive_prefix_sum_time_5d(delta.clone() * decay5.clone().powf(inv_exp5))
+                * decay5.clone().powf(state_exp5);
+
+        let decay4 = decay
+            .clone()
+            .reshape([1, heads, 1, latent])
+            .repeat_dim(2, time);
+        let state_exp4 = time_idx
+            .clone()
+            .reshape([1, 1, time, 1])
+            .repeat_dim(1, heads)
+            .repeat_dim(3, latent);
+        let inv_exp4 = time_idx
+            .clone()
+            .add_scalar(1.0)
+            .mul_scalar(-1.0)
+            .reshape([1, 1, time, 1])
+            .repeat_dim(1, heads)
+            .repeat_dim(3, latent);
+        let rho_norm_before =
+            exclusive_prefix_sum_time_4d(query.clone() * decay4.clone().powf(inv_exp4))
+                * decay4.clone().powf(state_exp4);
+
+        let q_weights = query.clone().div(
+            query
+                .clone()
+                .sum_dim(3)
+                .add_scalar(1.0e-6)
+                .reshape([batch, heads, time, 1]),
+        );
+        let context = rho_before
+            .clone()
+            .div(
+                rho_norm_before
+                    .clone()
+                    .add_scalar(1.0e-6)
+                    .unsqueeze_dim::<5>(4),
+            )
+            .mul(q_weights.unsqueeze_dim::<5>(4))
+            .sum_dim(3)
+            .reshape([batch, heads, time, embd]);
+
+        let last_rho_before = rho_before
+            .slice_dim(2, time - 1..time)
+            .reshape([batch, heads, latent, embd]);
+        let last_rho_norm_before = rho_norm_before
+            .slice_dim(2, time - 1..time)
+            .reshape([batch, heads, latent]);
+        let last_delta = delta
+            .slice_dim(2, time - 1..time)
+            .reshape([batch, heads, latent, embd]);
+        let last_query = query
+            .slice_dim(2, time - 1..time)
+            .reshape([batch, heads, latent]);
+
+        let rho = last_rho_before
+            .mul(decay.clone().reshape([1, heads, latent, 1]))
+            .add(last_delta);
+        let rho_norm = last_rho_norm_before
+            .mul(decay.reshape([1, heads, latent]))
+            .add(last_query);
+
+        (context, rho, rho_norm)
+    }
 
     fn deterministic_y_neuron_recurrence_model_with_layers(
         recurrence: YNeuronRecurrenceConfig,
@@ -1746,6 +3328,389 @@ mod tests {
     }
 
     #[test]
+    fn recurrent_rwkv8_state_space_reference_matches_decayed_normalized_contract() {
+        type Backend = NdArray<f32>;
+        let device = <Backend as BackendTrait>::Device::default();
+        let model = BDH::<Backend>::new(
+            BDHConfig {
+                n_layer: 1,
+                n_embd: 2,
+                n_head: 1,
+                mlp_internal_dim_multiplier: 1,
+                vocab_size: 8,
+                dropout: 0.0,
+                sequence_kernel: SequenceKernelKind::Rwkv8StateSpaceExperimental,
+                ..Default::default()
+            },
+            &device,
+        );
+
+        let query = Tensor::<Backend, 4>::from_data(
+            TensorData::new(vec![2.0, 0.0, 1.0, 3.0], [1, 1, 2, 2]),
+            &device,
+        );
+        let value = Tensor::<Backend, 4>::from_data(
+            TensorData::new(vec![10.0, 20.0, 30.0, 40.0], [1, 1, 2, 2]),
+            &device,
+        );
+        let decay = Tensor::<Backend, 1>::from_data(TensorData::new(vec![0.5, 0.5], [2]), &device)
+            .reshape([1, 1, 2]);
+
+        let (context, rho, rho_norm) =
+            model.recurrent_rwkv8_state_space_reference(query, value, None, None, decay);
+
+        let context_vec = context
+            .to_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .expect("context vec");
+        let rho_vec = rho
+            .to_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .expect("rho vec");
+        let rho_norm_vec = rho_norm
+            .to_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .expect("rho norm vec");
+
+        for (actual, expected) in context_vec.iter().zip([0.0, 0.0, 2.5, 5.0]) {
+            assert!((actual - expected).abs() < 1.0e-4);
+        }
+        for (actual, expected) in rho_vec.iter().zip([40.0, 60.0, 90.0, 120.0]) {
+            assert!((actual - expected).abs() < 1.0e-4);
+        }
+        for (actual, expected) in rho_norm_vec.iter().zip([2.0, 3.0]) {
+            assert!((actual - expected).abs() < 1.0e-4);
+        }
+    }
+
+    #[test]
+    fn rwkv8_forward_with_state_populates_rho_norm() {
+        type Backend = NdArray<f32>;
+        let device = <Backend as BackendTrait>::Device::default();
+        let model = BDH::<Backend>::new(
+            BDHConfig {
+                n_layer: 2,
+                n_embd: 8,
+                n_head: 2,
+                mlp_internal_dim_multiplier: 2,
+                vocab_size: 32,
+                dropout: 0.0,
+                sequence_kernel: SequenceKernelKind::Rwkv8StateSpaceExperimental,
+                ..Default::default()
+            },
+            &device,
+        );
+        let tokens =
+            Tensor::<Backend, 2, Int>::from_data(TensorData::new(vec![1, 2, 3], [1, 3]), &device);
+        let mut state = model.init_state();
+        let _ = model.forward_with_state(tokens, &mut state);
+
+        assert!(state.layers.iter().all(|layer| layer.rho.is_some()));
+        assert!(state.layers.iter().all(|layer| layer.rho_norm.is_some()));
+    }
+
+    #[test]
+    fn mamba_forward_with_state_populates_sequence_aux() {
+        type Backend = NdArray<f32>;
+        let device = <Backend as BackendTrait>::Device::default();
+        let model = BDH::<Backend>::new(
+            BDHConfig {
+                n_layer: 2,
+                n_embd: 8,
+                n_head: 2,
+                mlp_internal_dim_multiplier: 2,
+                vocab_size: 32,
+                dropout: 0.0,
+                sequence_kernel: SequenceKernelKind::MambaSelectiveSsmExperimental,
+                ..Default::default()
+            },
+            &device,
+        );
+        let tokens =
+            Tensor::<Backend, 2, Int>::from_data(TensorData::new(vec![1, 2, 3], [1, 3]), &device);
+        let mut state = model.init_state();
+        let _ = model.forward_with_state(tokens, &mut state);
+
+        assert!(state.layers.iter().all(|layer| layer.rho.is_some()));
+        assert!(state.layers.iter().all(|layer| layer.sequence_aux.is_some()));
+        assert!(state.layers.iter().all(|layer| layer.rho_norm.is_none()));
+    }
+
+    #[test]
+    fn linear_full_forward_matches_token_step_recurrence() {
+        assert_full_forward_matches_token_step_recurrence(SequenceKernelKind::BdhLinearAttention);
+    }
+
+    #[test]
+    fn rwkv8_full_forward_matches_token_step_recurrence() {
+        assert_full_forward_matches_token_step_recurrence(
+            SequenceKernelKind::Rwkv8StateSpaceExperimental,
+        );
+    }
+
+    #[test]
+    fn mamba_full_forward_matches_token_step_recurrence() {
+        assert_full_forward_matches_token_step_recurrence(
+            SequenceKernelKind::MambaSelectiveSsmExperimental,
+        );
+    }
+
+    #[test]
+    fn linear_chunked_recurrence_matches_uninterrupted_state_and_logits() {
+        assert_chunked_recurrence_matches_uninterrupted_state(
+            SequenceKernelKind::BdhLinearAttention,
+        );
+    }
+
+    #[test]
+    fn linear_dense_score_full_forward_matches_token_step_recurrence() {
+        assert_full_forward_matches_token_step_recurrence(
+            SequenceKernelKind::BdhLinearDenseScoreExperimental,
+        );
+    }
+
+    #[test]
+    fn linear_dense_score_chunked_recurrence_matches_uninterrupted_state_and_logits() {
+        assert_chunked_recurrence_matches_uninterrupted_state(
+            SequenceKernelKind::BdhLinearDenseScoreExperimental,
+        );
+    }
+
+    #[test]
+    fn rwkv8_chunked_recurrence_matches_uninterrupted_state_and_logits() {
+        assert_chunked_recurrence_matches_uninterrupted_state(
+            SequenceKernelKind::Rwkv8StateSpaceExperimental,
+        );
+    }
+
+    #[test]
+    fn mamba_chunked_recurrence_matches_uninterrupted_state_and_logits() {
+        assert_chunked_recurrence_matches_uninterrupted_state(
+            SequenceKernelKind::MambaSelectiveSsmExperimental,
+        );
+    }
+
+    #[test]
+    fn linear_multi_head_recurrence_matches_token_step_and_chunked_state() {
+        let token_values = vec![1i64, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+        assert_full_forward_matches_token_step_recurrence_with_shape(
+            SequenceKernelKind::BdhLinearAttention,
+            3,
+            12,
+            3,
+            72,
+            64,
+            token_values.clone(),
+            [2, 5],
+        );
+        assert_chunked_recurrence_matches_uninterrupted_state_with_shape(
+            SequenceKernelKind::BdhLinearAttention,
+            3,
+            12,
+            3,
+            72,
+            64,
+            token_values,
+            [2, 5],
+            &[1, 2, 4],
+        );
+    }
+
+    #[test]
+    fn linear_dense_score_multi_head_recurrence_matches_token_step_and_chunked_state() {
+        let token_values = vec![1i64, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+        assert_full_forward_matches_token_step_recurrence_with_shape(
+            SequenceKernelKind::BdhLinearDenseScoreExperimental,
+            3,
+            12,
+            3,
+            72,
+            64,
+            token_values.clone(),
+            [2, 5],
+        );
+        assert_chunked_recurrence_matches_uninterrupted_state_with_shape(
+            SequenceKernelKind::BdhLinearDenseScoreExperimental,
+            3,
+            12,
+            3,
+            72,
+            64,
+            token_values,
+            [2, 5],
+            &[1, 2, 4],
+        );
+    }
+
+    #[test]
+    fn rwkv8_multi_head_recurrence_matches_token_step_and_chunked_state() {
+        let token_values = vec![1i64, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+        assert_full_forward_matches_token_step_recurrence_with_shape(
+            SequenceKernelKind::Rwkv8StateSpaceExperimental,
+            3,
+            12,
+            3,
+            72,
+            64,
+            token_values.clone(),
+            [2, 5],
+        );
+        assert_chunked_recurrence_matches_uninterrupted_state_with_shape(
+            SequenceKernelKind::Rwkv8StateSpaceExperimental,
+            3,
+            12,
+            3,
+            72,
+            64,
+            token_values,
+            [2, 5],
+            &[1, 2, 4],
+        );
+    }
+
+    #[test]
+    fn linear_tensorized_parallel_reference_matches_host_loop_reference() {
+        type Backend = NdArray<f32>;
+        let device = <Backend as BackendTrait>::Device::default();
+        let model = BDH::<Backend>::new(
+            BDHConfig {
+                n_layer: 1,
+                n_embd: 2,
+                n_head: 2,
+                mlp_internal_dim_multiplier: 2,
+                vocab_size: 16,
+                dropout: 0.0,
+                ..Default::default()
+            },
+            &device,
+        );
+
+        let query = Tensor::<Backend, 4>::from_data(
+            TensorData::new(
+                vec![
+                    1.0, 2.0, 3.0, 4.0, 2.0, 1.0, 1.5, 0.5, 0.5, 1.5, 2.5, 3.5, 3.0, 2.0, 1.0, 0.5,
+                    1.25, 0.75, 2.25, 1.75, 0.25, 1.0, 1.5, 2.0,
+                ],
+                [1, 2, 3, 4],
+            ),
+            &device,
+        );
+        let value = Tensor::<Backend, 4>::from_data(
+            TensorData::new(vec![1.0, 0.5, 0.25, 1.5, 2.0, 1.0], [1, 1, 3, 2]),
+            &device,
+        );
+
+        let (context_host, rho_host) =
+            model.recurrent_attention_reference(query.clone(), value.clone(), None, None);
+        let (context_tensorized, rho_tensorized) =
+            recurrent_attention_tensorized_no_decay_reference(query, value);
+
+        assert!(tensor_max_abs_diff(context_host, context_tensorized) <= 1.0e-4);
+        assert!(tensor_max_abs_diff(rho_host, rho_tensorized) <= 1.0e-4);
+    }
+
+    #[test]
+    fn rwkv8_tensorized_parallel_reference_matches_host_loop_reference() {
+        type Backend = NdArray<f32>;
+        let device = <Backend as BackendTrait>::Device::default();
+        let model = BDH::<Backend>::new(
+            BDHConfig {
+                n_layer: 1,
+                n_embd: 2,
+                n_head: 2,
+                mlp_internal_dim_multiplier: 2,
+                vocab_size: 16,
+                dropout: 0.0,
+                sequence_kernel: SequenceKernelKind::Rwkv8StateSpaceExperimental,
+                ..Default::default()
+            },
+            &device,
+        );
+
+        let query = Tensor::<Backend, 4>::from_data(
+            TensorData::new(
+                vec![
+                    1.0, 2.0, 1.5, 0.5, 2.0, 1.0, 0.5, 1.5, 1.25, 0.75, 2.25, 1.75, 0.25, 1.0, 1.5,
+                    2.0, 0.75, 1.25, 1.0, 2.0, 2.5, 1.5, 0.75, 1.25,
+                ],
+                [1, 2, 3, 4],
+            ),
+            &device,
+        );
+        let value = Tensor::<Backend, 4>::from_data(
+            TensorData::new(vec![1.0, 0.5, 0.25, 1.5, 2.0, 1.0], [1, 1, 3, 2]),
+            &device,
+        );
+        let decay = Tensor::<Backend, 3>::from_data(
+            TensorData::new(vec![0.95, 0.9, 0.85, 0.8, 0.9, 0.85, 0.8, 0.75], [1, 2, 4]),
+            &device,
+        );
+
+        let (context_host, rho_host, rho_norm_host) = model.recurrent_rwkv8_state_space_reference(
+            query.clone(),
+            value.clone(),
+            None,
+            None,
+            decay.clone(),
+        );
+        let (context_tensorized, rho_tensorized, rho_norm_tensorized) =
+            recurrent_rwkv8_tensorized_reference(query, value, decay);
+
+        assert!(tensor_max_abs_diff(context_host, context_tensorized) <= 1.0e-4);
+        assert!(tensor_max_abs_diff(rho_host, rho_tensorized) <= 1.0e-4);
+        assert!(tensor_max_abs_diff(rho_norm_host, rho_norm_tensorized) <= 1.0e-4);
+    }
+
+    #[test]
+    fn linear_dense_score_reference_matches_host_loop_reference_with_decay() {
+        type Backend = NdArray<f32>;
+        let device = <Backend as BackendTrait>::Device::default();
+        let model = BDH::<Backend>::new(
+            BDHConfig {
+                n_layer: 1,
+                n_embd: 2,
+                n_head: 2,
+                mlp_internal_dim_multiplier: 2,
+                vocab_size: 16,
+                dropout: 0.0,
+                ..Default::default()
+            },
+            &device,
+        );
+
+        let query = Tensor::<Backend, 4>::from_data(
+            TensorData::new(
+                vec![
+                    1.0, 2.0, 3.0, 4.0, 2.0, 1.0, 1.5, 0.5, 0.5, 1.5, 2.5, 3.5, 3.0, 2.0, 1.0, 0.5,
+                    1.25, 0.75, 2.25, 1.75, 0.25, 1.0, 1.5, 2.0,
+                ],
+                [1, 2, 3, 4],
+            ),
+            &device,
+        );
+        let value = Tensor::<Backend, 4>::from_data(
+            TensorData::new(vec![1.0, 0.5, 0.25, 1.5, 2.0, 1.0], [1, 1, 3, 2]),
+            &device,
+        );
+        let decay = Tensor::<Backend, 1>::from_data(TensorData::new(vec![0.9, 0.8], [2]), &device);
+
+        let (context_host, rho_host) = model.recurrent_attention_reference(
+            query.clone(),
+            value.clone(),
+            None,
+            Some(decay.clone()),
+        );
+        let (context_dense, rho_dense) =
+            recurrent_attention_dense_score_reference(query, value, Some(decay));
+
+        assert!(tensor_max_abs_diff(context_host, context_dense) <= 1.0e-4);
+        assert!(tensor_max_abs_diff(rho_host, rho_dense) <= 1.0e-4);
+    }
+
+    #[test]
     fn bdh_mhc_two_view_wrapper_matches_manual_layer_contract() {
         type Backend = NdArray<f32>;
         let device = <Backend as BackendTrait>::Device::default();
@@ -1779,13 +3744,7 @@ mod tests {
         let embedded = model.embed.forward(tokens);
         let [batch, time, dim] = embedded.shape().dims::<3>();
         let current = model.norm.forward(embedded.reshape([batch, 1, time, dim]));
-        let mhc = model
-            .mhc_layers
-            .as_ref()
-            .expect("mhc layers")
-            .first()
-            .and_then(|mhc| mhc.as_ref())
-            .expect("first mhc");
+        let mhc = model.mhc_for_layer(0).expect("mhc");
         let coeffs = mhc.coefficients();
         let (branch_input, residuals_base, beta) =
             mhc_split_with_coefficients(Some(mhc), current, Some(&coeffs));
@@ -1807,9 +3766,13 @@ mod tests {
         let decoder = model.decoder.val();
         let mut layer_state = LayerState {
             rho: None,
+            rho_norm: None,
+            sequence_aux: None,
             y_neuron_state: None,
             clocked_slow_hidden: None,
             summary_memory_hidden: None,
+            #[cfg(feature = "viz")]
+            viz: None,
         };
         let output = lowrank_residual_step(
             branch_flat,
@@ -1818,9 +3781,11 @@ mod tests {
             decoder,
             &model.dropout,
             false,
+            false,
             0.0,
             true,
             &model.kernel.block_sparse.latent,
+            model.kernel.lowrank_grad_input_executor,
             None,
             |query, value| {
                 model.recurrent_attention_with_plan(
@@ -1864,6 +3829,161 @@ mod tests {
     }
 
     #[test]
+    fn bdh_mhc_dynamic_stream_wrapper_matches_manual_layer_contract() {
+        type Backend = NdArray<f32>;
+        let device = <Backend as BackendTrait>::Device::default();
+        let model = BDH::<Backend>::new(
+            BDHConfig {
+                n_layer: 1,
+                n_embd: 8,
+                n_head: 1,
+                mlp_internal_dim_multiplier: 1,
+                vocab_size: 16,
+                dropout: 0.0,
+                mhc: super::super::mhc::ManifoldHyperConnectionsConfig {
+                    enabled: true,
+                    num_streams: 2,
+                    num_views: 1,
+                    coefficient_policy:
+                        super::super::mhc::ManifoldHyperConnectionCoefficientPolicy::DynamicPositive,
+                    mhc_iters: 4,
+                    mhc_tau: 0.1,
+                    add_branch_out_to_residual: true,
+                    dropout: 0.0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            &device,
+        );
+        let tokens =
+            Tensor::<Backend, 2, Int>::from_data(TensorData::new(vec![1, 2, 3], [1, 3]), &device);
+        let mut state = model.init_state();
+        let (hidden, _logits) = model.forward_with_hidden_and_state(tokens.clone(), &mut state);
+
+        let embedded = model.embed.forward(tokens);
+        let [batch, time, dim] = embedded.shape().dims::<3>();
+        let current = model.norm.forward(embedded.reshape([batch, 1, time, dim]));
+        let mhc = model.mhc_for_layer(0).expect("mhc");
+        let current_residuals = model.prepare_language_mhc_residuals(current, Some(mhc));
+        let stream_output = mhc.stream_width_connection(current_residuals);
+        let branch_input = stream_output.branch_input.clone();
+        let encoder =
+            model
+                .encoder
+                .val()
+                .reshape([1, 1, dim, model.mlp_internal_dim_multiplier * dim]);
+        let encoder_v =
+            model
+                .encoder_v
+                .val()
+                .reshape([1, 1, dim, model.mlp_internal_dim_multiplier * dim]);
+        let decoder = model.decoder.val();
+        let mut layer_state = LayerState {
+            rho: None,
+            rho_norm: None,
+            sequence_aux: None,
+            y_neuron_state: None,
+            clocked_slow_hidden: None,
+            summary_memory_hidden: None,
+            #[cfg(feature = "viz")]
+            viz: None,
+        };
+        let output = lowrank_residual_step(
+            branch_input.clone(),
+            encoder,
+            encoder_v,
+            decoder,
+            &model.dropout,
+            false,
+            false,
+            0.0,
+            true,
+            &model.kernel.block_sparse.latent,
+            model.kernel.lowrank_grad_input_executor,
+            None,
+            |query, value| {
+                model.recurrent_attention_with_plan(
+                    query,
+                    value,
+                    &mut layer_state,
+                    0,
+                    RecurrentPositionMode::Sequential,
+                    None,
+                )
+            },
+            activation::relu,
+            |values| model.norm.forward(values),
+        );
+        let manual =
+            model.collapse_language_streams(model.norm.forward(mhc.stream_depth_connection(
+                output.next,
+                stream_output.residuals_out,
+                &stream_output.coefficients,
+            )));
+
+        let hidden_vec = hidden
+            .to_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .expect("hidden vec");
+        let manual_vec = manual
+            .to_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .expect("manual vec");
+
+        assert_eq!(hidden_vec, manual_vec);
+    }
+
+    #[test]
+    fn bdh_language_mhc_diagnostics_report_non_uniform_stream_behavior() {
+        type Backend = NdArray<f32>;
+        let device = <Backend as BackendTrait>::Device::default();
+        let model = BDH::<Backend>::new(
+            BDHConfig {
+                n_layer: 1,
+                n_embd: 8,
+                n_head: 1,
+                mlp_internal_dim_multiplier: 1,
+                vocab_size: 16,
+                dropout: 0.0,
+                mhc: super::super::mhc::ManifoldHyperConnectionsConfig {
+                    enabled: true,
+                    num_streams: 3,
+                    num_views: 1,
+                    coefficient_policy:
+                        super::super::mhc::ManifoldHyperConnectionCoefficientPolicy::DynamicPositive,
+                    mhc_iters: 4,
+                    mhc_tau: 0.1,
+                    add_branch_out_to_residual: true,
+                    dropout: 0.0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            &device,
+        );
+        let tokens =
+            Tensor::<Backend, 2, Int>::from_data(TensorData::new(vec![1, 2, 3], [1, 3]), &device);
+
+        let diagnostics = model.collect_language_mhc_diagnostics(tokens);
+        let layer0 = diagnostics.first().expect("layer diagnostics");
+
+        assert_eq!(layer0.layer_index, 0);
+        assert_eq!(layer0.num_streams, 3);
+        assert!(layer0.stream_norm_mean.is_finite());
+        assert!(layer0.alpha_entropy_normalized_mean < 1.0);
+        assert!(
+            layer0
+                .pairwise_stream_cosine_mean
+                .is_some_and(|value| value.is_finite()),
+            "pairwise cosine should be finite for multi-stream diagnostics"
+        );
+        assert!(layer0.residual_distance_identity_l1_mean > 0.0);
+    }
+
+    #[test]
     fn bdh_mhc_single_stream_single_view_skips_per_layer_mhc_allocation() {
         type Backend = NdArray<f32>;
         let device = <Backend as BackendTrait>::Device::default();
@@ -1894,7 +4014,7 @@ mod tests {
         let output = model.forward(tokens);
         let [batch, time, vocab] = output.shape().dims::<3>();
 
-        assert!(model.mhc_layers.is_none());
+        assert!(model.mhc_shared.is_none());
         assert_eq!([batch, time, vocab], [1, 3, 16]);
     }
 
@@ -1929,12 +4049,12 @@ mod tests {
         let output = model.forward(tokens);
         let [batch, time, vocab] = output.shape().dims::<3>();
 
-        assert!(model.mhc_layers.is_some());
+        assert!(model.mhc_shared.is_some());
         assert_eq!([batch, time, vocab], [1, 3, 16]);
     }
 
     #[test]
-    fn bdh_mhc_last_layers_only_allocates_top_layers() {
+    fn bdh_mhc_shared_wrapper_respects_last_layers_gate() {
         type Backend = NdArray<f32>;
         let device = <Backend as BackendTrait>::Device::default();
         let model = BDH::<Backend>::new(
@@ -1960,11 +4080,84 @@ mod tests {
             },
             &device,
         );
-        let layers = model.mhc_layers.as_ref().expect("mhc layers");
-        assert!(layers[0].is_none());
-        assert!(layers[1].is_none());
-        assert!(layers[2].is_none());
-        assert!(layers[3].is_some());
+        assert!(model.mhc_shared.is_some());
+        assert_eq!(model.mhc_first_layer, 3);
+        assert!(model.mhc_for_layer(0).is_none());
+        assert!(model.mhc_for_layer(1).is_none());
+        assert!(model.mhc_for_layer(2).is_none());
+        assert!(model.mhc_for_layer(3).is_some());
+    }
+
+    #[test]
+    fn bdh_mhc_reuses_same_wrapper_weights_across_active_layers() {
+        type Backend = NdArray<f32>;
+        let device = <Backend as BackendTrait>::Device::default();
+        let model = BDH::<Backend>::new(
+            BDHConfig {
+                n_layer: 3,
+                n_embd: 8,
+                n_head: 1,
+                mlp_internal_dim_multiplier: 1,
+                vocab_size: 16,
+                dropout: 0.0,
+                mhc: super::super::mhc::ManifoldHyperConnectionsConfig {
+                    enabled: true,
+                    num_streams: 2,
+                    num_views: 1,
+                    coefficient_policy:
+                        super::super::mhc::ManifoldHyperConnectionCoefficientPolicy::DynamicPositive,
+                    mhc_iters: 4,
+                    mhc_tau: 0.1,
+                    add_branch_out_to_residual: true,
+                    dropout: 0.0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            &device,
+        );
+
+        let layer0 = model.mhc_for_layer(0).expect("layer 0 mhc");
+        let layer1 = model.mhc_for_layer(1).expect("layer 1 mhc");
+        let layer2 = model.mhc_for_layer(2).expect("layer 2 mhc");
+
+        assert!(std::ptr::eq(layer0, layer1));
+        assert!(std::ptr::eq(layer1, layer2));
+    }
+
+    #[test]
+    fn bdh_layer_lowrank_weights_follow_latent_fanout_schedule() {
+        type Backend = NdArray<f32>;
+        let device = <Backend as BackendTrait>::Device::default();
+        let model = BDH::<Backend>::new(
+            BDHConfig {
+                n_layer: 4,
+                n_embd: 8,
+                n_head: 2,
+                mlp_internal_dim_multiplier: 8,
+                latent_fanout_schedule: Some(LatentFanoutScheduleConfig::LateLayer {
+                    base_latent_total: 16,
+                    last_layers: 2,
+                }),
+                vocab_size: 16,
+                dropout: 0.0,
+                ..Default::default()
+            },
+            &device,
+        );
+
+        let (encoder0, encoder_v0, decoder0, latent0) = model.layer_lowrank_weights(0);
+        let (encoder3, encoder_v3, decoder3, latent3) = model.layer_lowrank_weights(3);
+
+        assert_eq!(latent0, 8);
+        assert_eq!(encoder0.shape().dims::<4>(), [1, 2, 8, 8]);
+        assert_eq!(encoder_v0.shape().dims::<4>(), [1, 2, 8, 8]);
+        assert_eq!(decoder0.shape().dims::<2>(), [16, 8]);
+
+        assert_eq!(latent3, 32);
+        assert_eq!(encoder3.shape().dims::<4>(), [1, 2, 8, 32]);
+        assert_eq!(encoder_v3.shape().dims::<4>(), [1, 2, 8, 32]);
+        assert_eq!(decoder3.shape().dims::<2>(), [64, 8]);
     }
 
     #[test]
@@ -2217,9 +4410,13 @@ mod tests {
 
         let mut layer_state = LayerState {
             rho: None,
+            rho_norm: None,
+            sequence_aux: None,
             y_neuron_state: None,
             clocked_slow_hidden: None,
             summary_memory_hidden: None,
+            #[cfg(feature = "viz")]
+            viz: None,
         };
         let first_chunk =
             Tensor::<Backend, 4>::from_data(TensorData::new(vec![2.0, 4.0], [1, 1, 2, 1]), &device);
@@ -2274,9 +4471,13 @@ mod tests {
 
         let mut layer_state = LayerState {
             rho: None,
+            rho_norm: None,
+            sequence_aux: None,
             y_neuron_state: None,
             clocked_slow_hidden: None,
             summary_memory_hidden: None,
+            #[cfg(feature = "viz")]
+            viz: None,
         };
 
         let first_chunk =
@@ -2333,9 +4534,13 @@ mod tests {
 
         let mut layer_state = LayerState {
             rho: None,
+            rho_norm: None,
+            sequence_aux: None,
             y_neuron_state: None,
             clocked_slow_hidden: None,
             summary_memory_hidden: None,
+            #[cfg(feature = "viz")]
+            viz: None,
         };
         let first_chunk =
             Tensor::<Backend, 4>::from_data(TensorData::new(vec![2.0, 4.0], [1, 1, 2, 1]), &device);

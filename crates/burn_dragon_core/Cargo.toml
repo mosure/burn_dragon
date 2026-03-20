@@ -1,8 +1,9 @@
 [package]
 name = "burn_dragon_core"
 description = "burn dragon core model and utilities"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
+rust-version = "1.85"
 authors = ["mosure <mitchell@mosure.me>"]
 license = "MIT OR Apache-2.0"
 keywords = [
@@ -34,7 +35,7 @@ default = []
 
 benchmark = ["burn/autotune", "burn/fusion"]
 train = ["burn/dataset", "dep:image"]
-cuda = ["burn-cuda"]
+cuda = ["burn-cuda", "burn_dragon_kernel/cuda"]
 viz = []
 web = []
 
@@ -42,7 +43,7 @@ web = []
 rand = "0.8"
 serde = { version = "1.0", features = ["derive"] }
 anyhow = "1"
-burn_dragon_wgpu = { path = "../burn_dragon_wgpu", version = "0.4.0" }
+burn_dragon_kernel = { path = "../burn_dragon_kernel", version = "0.5.0" }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"], optional = true }
 
 
@@ -73,6 +74,7 @@ burn-autodiff = "0.21.0-pre.2"
 burn-ndarray = "0.21.0-pre.2"
 burn-wgpu = { version = "0.21.0-pre.2", default-features = false, features = ["fusion", "std"] }
 burn-cubecl = { version = "0.21.0-pre.2", default-features = false, features = ["std"] }
+serde_json = "1.0"
 tempfile = "3"
 
 [lib]

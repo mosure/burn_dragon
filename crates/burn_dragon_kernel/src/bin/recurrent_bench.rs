@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use burn::tensor::backend::Backend as BackendTrait;
 use burn::tensor::{Distribution, Tensor};
 use burn_cubecl::cubecl::Runtime;
-use burn_dragon_wgpu::api::recurrent::{
+use burn_dragon_kernel::api::recurrent::{
     RecurrentAttentionOutput, try_fused_recurrent_attention_wgpu,
 };
 use burn_wgpu::{CubeBackend, RuntimeOptions, WgpuRuntime, graphics};
@@ -17,7 +17,7 @@ type Backend = CubeBackend<WgpuRuntime, f32, i32, u32>;
 type Device = <Backend as BackendTrait>::Device;
 
 const CORE_FUSED_PATH_DISTINCT: bool = false;
-const CORE_FUSED_PATH_DESCRIPTION: &str = "burn_dragon_core recurrent path delegates directly to burn_dragon_wgpu::api::recurrent::try_fused_recurrent_attention_wgpu when wgpu_recurrent_kernel is enabled";
+const CORE_FUSED_PATH_DESCRIPTION: &str = "burn_dragon_core recurrent path delegates directly to burn_dragon_kernel::api::recurrent::try_fused_recurrent_attention_wgpu when wgpu_recurrent_kernel is enabled";
 const STRICT_CONTEXT_MAX_ABS: f64 = 1e-3;
 const STRICT_CONTEXT_RMSE_MAX: f64 = 2e-4;
 const STRICT_RHO_MAX_ABS: f64 = 1e-3;
@@ -225,7 +225,7 @@ fn main() {
     let after = memory_snapshot(&device);
 
     let report = SweepReport {
-        benchmark: "burn_dragon_wgpu recurrent scaling sweep",
+        benchmark: "burn_dragon_kernel recurrent scaling sweep",
         adapter,
         warmup: config.warmup,
         repetitions: config.repetitions,

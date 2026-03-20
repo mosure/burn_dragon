@@ -21,16 +21,15 @@ use crate::config::{VisionTeacherConfig, VisionTrainingConfig, VisionTrainingMod
 use crate::loss::{VisionDistillationLossConfig, vision_distillation_loss_terms};
 use crate::model::{VisionDragon, VisionDragonOutput};
 use crate::train::{
-    DinoFeatureStore, ImageNetAugmentations, ImageNetBatch, ImageNetDataset,
-    ImageNetDatasetConfig, ImageNetSplit, VisionNormalize,
+    DinoFeatureStore, ImageNetAugmentations, ImageNetBatch, ImageNetDataset, ImageNetDatasetConfig,
+    ImageNetSplit, VisionNormalize,
 };
 
 pub type VisionDistillServingBenchmarkBackend = CubeBackend<WgpuRuntime, f32, i32, u32>;
 pub type VisionDistillServingBenchmarkDevice =
     <VisionDistillServingBenchmarkBackend as BackendTrait>::Device;
 pub type VisionDistillDeploySmokeBackend = NdArray<f32>;
-pub type VisionDistillDeploySmokeDevice =
-    <VisionDistillDeploySmokeBackend as BackendTrait>::Device;
+pub type VisionDistillDeploySmokeDevice = <VisionDistillDeploySmokeBackend as BackendTrait>::Device;
 
 #[derive(Clone, Serialize)]
 pub struct VisionDistillServingStepMetrics {
@@ -175,7 +174,12 @@ impl VisionDistillServingBenchmarkReport {
         )
         .unwrap();
         if let Some(gain_per_extra_ms) = self.total_gain_per_extra_ms {
-            writeln!(&mut out, "- total gain / extra ms: {:.6}", gain_per_extra_ms).unwrap();
+            writeln!(
+                &mut out,
+                "- total gain / extra ms: {:.6}",
+                gain_per_extra_ms
+            )
+            .unwrap();
         }
         writeln!(&mut out).unwrap();
         writeln!(
@@ -238,7 +242,12 @@ impl VisionDistillDeploySmokeReport {
             self.checkpoint_forward_ms
         )
         .unwrap();
-        writeln!(&mut out, "- burnpack forward: {:.3} ms", self.burnpack_forward_ms).unwrap();
+        writeln!(
+            &mut out,
+            "- burnpack forward: {:.3} ms",
+            self.burnpack_forward_ms
+        )
+        .unwrap();
         writeln!(&mut out, "- latency scale: {:.3}", self.latency_scale).unwrap();
         writeln!(
             &mut out,
@@ -315,7 +324,10 @@ pub fn run_vision_distill_serving_benchmark(
     config.validate()?;
     let batch_size = batch_size.max(1);
     let probe = build_validation_probe_batch::<VisionDistillServingBenchmarkBackend>(
-        config, batch_size, &device, "vision_distill_serving_bench",
+        config,
+        batch_size,
+        &device,
+        "vision_distill_serving_bench",
     )?;
     let model = load_or_init_serving_model(config, checkpoint, config_paths, &device)?;
     let vision = config.vision.build();
@@ -454,7 +466,10 @@ pub fn run_vision_distill_deploy_smoke(
     .0;
 
     let probe = build_validation_probe_batch::<VisionDistillDeploySmokeBackend>(
-        config, batch_size, &device, "vision_distill_deploy_smoke",
+        config,
+        batch_size,
+        &device,
+        "vision_distill_deploy_smoke",
     )?;
     let checkpoint_output = checkpoint_model.forward_images_steps_rollout_unbounded(
         probe.batch.images.clone(),
@@ -498,8 +513,10 @@ pub fn run_vision_distill_deploy_smoke(
         checkpoint_output.patch_tokens.clone(),
         burnpack_output.patch_tokens.clone(),
     );
-    let cls_max_abs_diff =
-        max_abs_diff_2d(checkpoint_output.cls_token.clone(), burnpack_output.cls_token.clone());
+    let cls_max_abs_diff = max_abs_diff_2d(
+        checkpoint_output.cls_token.clone(),
+        burnpack_output.cls_token.clone(),
+    );
 
     Ok(VisionDistillDeploySmokeReport {
         artifact: VisionArtifactHeader::new("vision_distill_deploy_smoke"),
@@ -548,9 +565,7 @@ fn build_validation_probe_batch<B: BackendTrait>(
     let distill = match &config.mode {
         VisionTrainingModeConfig::Distill(distill) => distill.clone(),
         other => {
-            return Err(anyhow!(
-                "{tool_name} requires distill mode, got {other:?}"
-            ));
+            return Err(anyhow!("{tool_name} requires distill mode, got {other:?}"));
         }
     };
 
@@ -564,6 +579,10 @@ fn build_validation_probe_batch<B: BackendTrait>(
     };
 
     let student_patch_tokens = vision.image_size.div_ceil(vision.patch_size.max(1)).pow(2);
+    let teacher_patch_path = teacher
+        .val_patch_path
+        .as_deref()
+        .ok_or_else(|| anyhow!("{tool_name} requires mode.teacher.val_patch_path"))?;
     let teacher_patch_tokens = teacher.patch_tokens.unwrap_or(student_patch_tokens);
     if teacher_patch_tokens != student_patch_tokens {
         return Err(anyhow!(
@@ -571,7 +590,8 @@ fn build_validation_probe_batch<B: BackendTrait>(
         ));
     }
 
-    let normalize = VisionNormalize::new(config.augment.normalize_mean, config.augment.normalize_std);
+    let normalize =
+        VisionNormalize::new(config.augment.normalize_mean, config.augment.normalize_std);
     let val_aug = ImageNetAugmentations::new(
         ImageNetSplit::Val,
         config.augment.image_size,
@@ -602,6 +622,7 @@ fn build_validation_probe_batch<B: BackendTrait>(
         local_augmentations: None,
         normalize,
         teacher: None,
+        teacher_targets: Vec::new(),
         views: 1,
         local_views: 0,
         min_view_overlap: 0.0,
@@ -614,7 +635,7 @@ fn build_validation_probe_batch<B: BackendTrait>(
     let teacher_store = Arc::new(
         DinoFeatureStore::new(
             &teacher.val_cls_path,
-            &teacher.val_patch_path,
+            teacher_patch_path,
             teacher.feature_dim,
             teacher_patch_tokens,
             Some(record_count),
@@ -622,7 +643,7 @@ fn build_validation_probe_batch<B: BackendTrait>(
         .with_context(|| {
             format!(
                 "failed to open teacher features patch={} cls={}",
-                teacher.val_patch_path.display(),
+                teacher_patch_path.display(),
                 teacher.val_cls_path.display()
             )
         })?,
@@ -642,12 +663,9 @@ fn load_or_init_serving_model(
     device: &VisionDistillServingBenchmarkDevice,
 ) -> Result<VisionDragon<VisionDistillServingBenchmarkBackend>> {
     match checkpoint {
-        Some(checkpoint) => load_vision_encoder_from_checkpoint::<VisionDistillServingBenchmarkBackend>(
-            checkpoint,
-            None,
-            config_paths,
-            device,
-        ),
+        Some(checkpoint) => load_vision_encoder_from_checkpoint::<
+            VisionDistillServingBenchmarkBackend,
+        >(checkpoint, None, config_paths, device),
         None => Ok(VisionDragon::new(config.vision.build(), device)),
     }
 }
@@ -681,11 +699,8 @@ fn run_serving_step_case(
         ));
     }) / 1_000_000.0;
 
-    let output = model.forward_images_steps_rollout_unbounded(
-        batch.images.clone(),
-        step,
-        backprop_steps,
-    );
+    let output =
+        model.forward_images_steps_rollout_unbounded(batch.images.clone(), step, backprop_steps);
     let teacher_patch = batch
         .teacher_patch
         .clone()
@@ -724,11 +739,8 @@ fn run_forward_loss(
     step: usize,
     backprop_steps: usize,
 ) -> Tensor<VisionDistillServingBenchmarkBackend, 1> {
-    let output = model.forward_images_steps_rollout_unbounded(
-        batch.images.clone(),
-        step,
-        backprop_steps,
-    );
+    let output =
+        model.forward_images_steps_rollout_unbounded(batch.images.clone(), step, backprop_steps);
     let teacher_patch = batch
         .teacher_patch
         .clone()

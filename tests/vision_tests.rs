@@ -1,6 +1,6 @@
 use burn::tensor::backend::Backend as BackendTrait;
 use burn::tensor::{Distribution, Tensor};
-use burn_dragon::core::{FusedKernelConfig, ManifoldHyperConnectionsConfig};
+use burn_dragon::core::{DragonNormConfig, FusedKernelConfig, ManifoldHyperConnectionsConfig};
 use burn_dragon::vision::{
     PatchEmbed, PatchGrid, SpatialPositionalEncodingKind, VisionAttentionMode, VisionBackboneKind,
     VisionDragon, VisionDragonConfig, VisionLatentActivation, VisionPatchEmbedMode,
@@ -39,6 +39,7 @@ fn patch_embed_and_model_shapes() {
         use_alibi: true,
         fused_kernels: FusedKernelConfig::default(),
         mhc: ManifoldHyperConnectionsConfig::default(),
+        normalization: DragonNormConfig::default(),
         trm_graph: Default::default(),
         rho_stream: Default::default(),
     };
@@ -87,6 +88,7 @@ fn patch_embed_raw_matches_add_position() {
         use_alibi: true,
         fused_kernels: FusedKernelConfig::default(),
         mhc: ManifoldHyperConnectionsConfig::default(),
+        normalization: DragonNormConfig::default(),
         trm_graph: Default::default(),
         rho_stream: Default::default(),
     };
@@ -136,6 +138,7 @@ fn vision_forward_steps_shapes() {
         use_alibi: true,
         fused_kernels: FusedKernelConfig::default(),
         mhc: ManifoldHyperConnectionsConfig::default(),
+        normalization: DragonNormConfig::default(),
         trm_graph: Default::default(),
         rho_stream: Default::default(),
     };

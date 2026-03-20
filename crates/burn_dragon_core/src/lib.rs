@@ -23,9 +23,14 @@ pub mod api {
     pub mod config {
         pub use crate::{
             BDHConfig, ClockedSlowMemoryConfig, DragonNormConfig, DragonNormKind,
-            FusedAttentionExecutor, FusedKernelConfig, ManifoldHyperConnectionCoefficientPolicy,
-            ManifoldHyperConnectionsConfig, SummaryMemoryConfig, YNeuronRecurrenceConfig,
+            FusedAttentionExecutor, FusedKernelConfig, FusedProjectionExecutor,
+            LatentFanoutScheduleConfig, MambaSequenceConfig,
+            ManifoldHyperConnectionCoefficientPolicy,
+            ManifoldHyperConnectionsConfig, SequenceKernelConfig, SequenceKernelFamily,
+            SequenceKernelKind, SequenceTrainingExecutor, SummaryMemoryConfig,
+            YNeuronRecurrenceConfig,
         };
+        pub use burn_dragon_kernel::api::projection::LowrankGradInputExecutor;
     }
 
     pub mod state {
@@ -37,14 +42,19 @@ pub mod api {
 
     pub mod recurrent {
         pub use crate::{
-            BDH, DragonNorm, HaltHead, LowRankResidualOutput, StructuredDenseUpdateOutput,
-            lowrank_residual_step, structured_dense_update_tokens,
+            BDH, DragonNorm, HaltHead, LanguageMhcLayerDiagnostics,
+            LogitsProjectionProfileSnapshot, LowRankResidualOutput, LowRankResidualProfileSnapshot,
+            StructuredDenseUpdateOutput, logits_projection_profile_reset,
+            logits_projection_profile_snapshot, lowrank_residual_profile_reset,
+            lowrank_residual_profile_snapshot, lowrank_residual_step,
+            structured_dense_update_tokens,
         };
     }
 
     pub mod mhc {
         pub use crate::{
-            ManifoldHyperConnectionCoefficients, ManifoldHyperConnectionWidthOutput,
+            ManifoldHyperConnectionCoefficients, ManifoldHyperConnectionStreamCoefficients,
+            ManifoldHyperConnectionStreamOutput, ManifoldHyperConnectionWidthOutput,
             ManifoldHyperConnections, mhc_merge, mhc_merge_with_coefficients, mhc_passthrough,
             mhc_passthrough_with_coefficients, mhc_split, mhc_split_with_coefficients,
         };
@@ -63,22 +73,30 @@ pub mod api {
     }
 }
 
+pub use burn_dragon_kernel::api::projection::LowrankGradInputExecutor;
 pub use kernel::{BlockPattern1d, BlockPattern2d, BlockSparseConfig};
 #[cfg(feature = "viz")]
 pub use model::LayerVizState;
 pub use model::{
     BDH, BDHConfig, BankedRhoState, ClockedSlowMemoryConfig, DragonNorm, DragonNormConfig,
-    DragonNormKind, FusedAttentionExecutor, FusedKernelConfig, HaltHead, LowRankResidualOutput,
+    DragonNormKind, FusedAttentionExecutor, FusedKernelConfig, FusedProjectionExecutor, HaltHead,
+    LanguageMhcLayerDiagnostics, LatentFanoutScheduleConfig, LogitsProjectionProfileSnapshot,
+    MambaSequenceConfig,
+    LowRankResidualOutput, LowRankResidualProfileSnapshot,
     ManifoldHyperConnectionCoefficientPolicy, ManifoldHyperConnectionCoefficients,
+    ManifoldHyperConnectionStreamCoefficients, ManifoldHyperConnectionStreamOutput,
     ManifoldHyperConnectionWidthOutput, ManifoldHyperConnections, ManifoldHyperConnectionsConfig,
-    ModelState, StructuredBankRole, StructuredDenseUpdateOutput, StructuredGridState,
+    ModelState, SequenceKernelConfig, SequenceKernelFamily, SequenceKernelKind,
+    SequenceTrainingExecutor, StructuredBankRole, StructuredDenseUpdateOutput, StructuredGridState,
     StructuredRouteOperation, StructuredRoutePattern, StructuredRouteSpec, StructuredRoutingSpec,
     StructuredStepMode, StructuredTopologyState, SummaryMemoryConfig, YNeuronRecurrenceConfig,
-    lowrank_residual_step, mhc_merge, mhc_merge_with_coefficients, mhc_passthrough,
-    mhc_passthrough_with_coefficients, mhc_split, mhc_split_with_coefficients,
-    near_critical_embedding_initializer, near_critical_embedding_std, near_critical_projection_std,
-    near_critical_residual_output_std, structured_dense_update_tokens, structured_predict_decay,
-    target_major_apply_decay, target_major_decay_add, target_major_identity_read,
-    target_major_identity_write, target_major_outer_product,
+    logits_projection_profile_reset, logits_projection_profile_snapshot,
+    lowrank_residual_profile_reset, lowrank_residual_profile_snapshot, lowrank_residual_step,
+    mhc_merge, mhc_merge_with_coefficients, mhc_passthrough, mhc_passthrough_with_coefficients,
+    mhc_split, mhc_split_with_coefficients, near_critical_embedding_initializer,
+    near_critical_embedding_std, near_critical_projection_std, near_critical_residual_output_std,
+    structured_dense_update_tokens, structured_predict_decay, target_major_apply_decay,
+    target_major_decay_add, target_major_identity_read, target_major_identity_write,
+    target_major_outer_product,
 };
 pub use positional::RotaryEmbedding;

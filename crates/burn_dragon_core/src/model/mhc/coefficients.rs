@@ -24,3 +24,17 @@ impl<B: Backend> ManifoldHyperConnectionWidthOutput<B> {
         )
     }
 }
+
+#[derive(Debug, Clone)]
+pub struct ManifoldHyperConnectionStreamCoefficients<B: Backend> {
+    pub residual_weights: Tensor<B, 4>,
+    pub branch_input_weights: Tensor<B, 3>,
+    pub branch_output_weights: Option<Tensor<B, 3>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ManifoldHyperConnectionStreamOutput<B: Backend> {
+    pub branch_input: Tensor<B, 4>,
+    pub residuals_out: Tensor<B, 4>,
+    pub coefficients: ManifoldHyperConnectionStreamCoefficients<B>,
+}

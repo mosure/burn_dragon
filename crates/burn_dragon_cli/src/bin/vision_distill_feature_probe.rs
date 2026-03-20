@@ -7,8 +7,10 @@ fn main() {
 mod real {
     use std::path::PathBuf;
 
+    use burn_dragon::vision::{
+        load_vision_training_config, run_vision_distill_feature_probe_for_teacher_with_seed,
+    };
     use burn_dragon_cli::bench::artifact::write_optional_report_artifacts;
-    use burn_dragon::vision::{load_vision_training_config, run_vision_distill_feature_probe};
     use clap::Parser;
 
     #[derive(Parser, Debug)]
@@ -22,6 +24,14 @@ mod real {
         #[arg(long, default_value_t = 32)]
         batch_size: usize,
         #[arg(long)]
+        max_train_samples: Option<usize>,
+        #[arg(long)]
+        max_val_samples: Option<usize>,
+        #[arg(long, default_value_t = 0)]
+        subset_seed: u64,
+        #[arg(long)]
+        teacher_target: Option<String>,
+        #[arg(long)]
         markdown_path: Option<PathBuf>,
         #[arg(long)]
         json_path: Option<PathBuf>,
@@ -32,12 +42,16 @@ mod real {
         let config = load_vision_training_config(&args.config).unwrap_or_else(|err| {
             panic!("failed to load config overlays {:?}: {err}", args.config)
         });
-        let report = run_vision_distill_feature_probe(
+        let report = run_vision_distill_feature_probe_for_teacher_with_seed(
             &config,
             &args.config,
             &args.checkpoint,
             &args.steps,
             args.batch_size,
+            args.max_train_samples,
+            args.max_val_samples,
+            args.subset_seed,
+            args.teacher_target.as_deref(),
         )
         .unwrap_or_else(|err| panic!("feature probe failed: {err:#}"));
         let markdown = report.to_markdown();

@@ -9,13 +9,19 @@ const MHC_EPS: f32 = 1e-6;
 pub enum ManifoldHyperConnectionCoefficientPolicy {
     #[default]
     StaticSinkhorn,
+    DynamicPositive,
 }
 
 impl ManifoldHyperConnectionCoefficientPolicy {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::StaticSinkhorn => "static_sinkhorn",
+            Self::DynamicPositive => "dynamic_positive",
         }
+    }
+
+    pub const fn uses_dynamic_stream_controller(self) -> bool {
+        matches!(self, Self::DynamicPositive)
     }
 }
 

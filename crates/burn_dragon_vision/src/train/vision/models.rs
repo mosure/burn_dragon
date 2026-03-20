@@ -71,7 +71,7 @@ fn build_denorm_std_patch<B: BackendTrait>(
     }
     let patch_dim = recon.patch_dim.max(1);
     let channels = recon.in_channels.max(1);
-    let area = if patch_dim.is_multiple_of(channels) {
+    let area = if patch_dim % channels == 0 {
         patch_dim / channels
     } else {
         recon

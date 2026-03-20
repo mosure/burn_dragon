@@ -3,7 +3,9 @@ use std::fs;
 use burn::optim::{AdamWConfig, GradientsParams, LearningRate, Optimizer};
 use burn::tensor::backend::Backend as BackendTrait;
 use burn_autodiff::Autodiff;
-use burn_dragon::core::{BDH, BDHConfig};
+use burn_dragon::core::{
+    BDH, BDHConfig, ManifoldHyperConnectionCoefficientPolicy, ManifoldHyperConnectionsConfig,
+};
 use burn_dragon::language::dataset::{ShakespeareDataset, ShakespeareSplit};
 use burn_dragon::language::loss::language_model_loss;
 use burn_dragon::language::tokenizer::TokenizerConfig;
@@ -53,4 +55,68 @@ fn single_training_step_executes() {
     let grads = loss.backward();
     let grads = GradientsParams::from_grads(grads, &model);
     let _ = optimizer.step(lr, model, grads);
+}
+
+#[test]
+fn multi_stream_dynamic_mhc_training_steps_stay_finite() {
+    let dir = tempdir().expect("tempdir");
+    let cache_dir = dir.path();
+    let file_path = cache_dir.join("tinyshakespeare.txt");
+    let content = b"To be, or not to be, that is the question.\n".repeat(512);
+    fs::write(&file_path, content).expect("write dataset");
+
+    let block_size = 32;
+    let batch_size = 4;
+    let tokenizer = TokenizerConfig::default();
+    let dataset = ShakespeareDataset::new(cache_dir, block_size, batch_size, 0.9, &tokenizer)
+        .expect("dataset");
+
+    type Backend = Autodiff<NdArray<f32>>;
+    let device = <Backend as BackendTrait>::Device::default();
+    <Backend as BackendTrait>::seed(&device, 321);
+
+    let mut model_config = BDHConfig {
+        n_layer: 2,
+        n_embd: 32,
+        n_head: 2,
+        mlp_internal_dim_multiplier: 1,
+        mhc: ManifoldHyperConnectionsConfig {
+            enabled: true,
+            num_streams: 2,
+            num_views: 1,
+            coefficient_policy: ManifoldHyperConnectionCoefficientPolicy::DynamicPositive,
+            mhc_iters: 4,
+            mhc_tau: 0.1,
+            add_branch_out_to_residual: true,
+            dropout: 0.0,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    model_config.vocab_size = dataset.tokenizer().len();
+    let mut model = BDH::<Backend>::new(model_config, &device);
+    let mut optimizer = AdamWConfig::new()
+        .with_weight_decay(0.1)
+        .init::<Backend, BDH<Backend>>();
+    let lr: LearningRate = 5e-4;
+
+    let mut last_loss = None;
+    for _step in 0..3 {
+        let batch = dataset.sample_batch::<Backend>(ShakespeareSplit::Train, &device);
+        let logits = model.forward(batch.inputs.clone());
+        let loss = language_model_loss::<Backend>(logits, batch.targets.clone());
+        let loss_scalar = loss
+            .clone()
+            .to_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .expect("loss vec")[0];
+        assert!(loss_scalar.is_finite(), "loss must stay finite");
+        last_loss = Some(loss_scalar);
+        let grads = loss.backward();
+        let grads = GradientsParams::from_grads(grads, &model);
+        model = optimizer.step(lr, model, grads);
+    }
+
+    assert!(last_loss.expect("last loss").is_finite());
 }

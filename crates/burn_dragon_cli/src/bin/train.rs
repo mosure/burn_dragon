@@ -1,20 +1,24 @@
 #![recursion_limit = "256"]
 
 #[cfg(feature = "train")]
+use std::fs;
+#[cfg(feature = "train")]
 use std::path::PathBuf;
+#[cfg(all(feature = "train", feature = "ddp"))]
+use std::process::{Command as ProcessCommand, Stdio};
 #[cfg(feature = "train")]
 use std::sync::atomic::Ordering;
-
-#[cfg(all(feature = "train", target_os = "windows"))]
-use anyhow::Context;
 #[cfg(feature = "train")]
-use anyhow::Result;
-#[cfg(all(feature = "train", any(target_os = "windows", not(feature = "cuda"))))]
-use anyhow::anyhow;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+#[cfg(feature = "train")]
+use anyhow::{Context, Result, anyhow};
 #[cfg(feature = "train")]
 use burn::tensor::backend::AutodiffBackend;
 #[cfg(feature = "train")]
 use burn_autodiff::Autodiff;
+#[cfg(all(feature = "train", feature = "ddp"))]
+use burn_collective::start_global_orchestrator;
 #[cfg(feature = "train")]
 use burn_dragon::language::train::{
     build_vocab_only, prepare_dataset, train_backend as train_language_backend,
@@ -32,19 +36,19 @@ use burn_dragon::multimodal::{
 #[cfg(feature = "train")]
 use burn_dragon::train::train::constants::FAST_TRAIN;
 #[cfg(feature = "train")]
-use burn_dragon::train::wgpu::init_runtime;
-#[cfg(feature = "train")]
-use burn_dragon::vision::load_vision_training_config;
+use burn_dragon::train::wgpu::{init_runtime, is_wgpu_backend_name};
 #[cfg(feature = "train")]
 use burn_dragon::vision::train::train_vision_backend;
+#[cfg(feature = "train")]
+use burn_dragon::vision::{VisionTrainingConfig, load_vision_training_config};
+#[cfg(feature = "train")]
+use burn_dragon_kernel::api::recurrent::{recurrent_profile_reset, recurrent_profile_snapshot};
 #[cfg(feature = "train")]
 use burn_dragon_sudoku::config::{
     SudokuTrainingConfig, load_training_config as load_sudoku_training_config,
 };
 #[cfg(feature = "train")]
 use burn_dragon_sudoku::train::train_backend as train_sudoku_backend;
-#[cfg(feature = "train")]
-use burn_dragon_wgpu::api::recurrent::{recurrent_profile_reset, recurrent_profile_snapshot};
 #[cfg(feature = "train")]
 use burn_ndarray::NdArray;
 #[cfg(feature = "train")]
@@ -57,6 +61,8 @@ use burn_cuda::Cuda;
 
 #[cfg(feature = "train")]
 type WgpuNoFusion = CubeBackend<WgpuRuntime, f32, i32, u32>;
+#[cfg(feature = "train")]
+const RUN_ROOT_ENV: &str = "BURN_DRAGON_RUN_ROOT";
 
 #[cfg(feature = "train")]
 fn default_or_explicit_config_paths(default_base: &str, explicit: &[PathBuf]) -> Vec<PathBuf> {
@@ -64,6 +70,22 @@ fn default_or_explicit_config_paths(default_base: &str, explicit: &[PathBuf]) ->
         vec![PathBuf::from(default_base)]
     } else {
         explicit.to_vec()
+    }
+}
+
+#[cfg(feature = "train")]
+fn apply_wgpu_vision_training_overrides(config: &mut VisionTrainingConfig, backend_name: &str) {
+    if !is_wgpu_backend_name(backend_name) {
+        return;
+    }
+
+    let fused_override = config
+        .wgpu
+        .training
+        .fused_core_rollout
+        .or(config.wgpu.training.fused_core_recurrent);
+    if let Some(enabled) = fused_override {
+        config.vision.fused_kernels = enabled;
     }
 }
 
@@ -80,6 +102,12 @@ struct Cli {
 enum Command {
     /// Train language models and optional vocabulary build.
     Language(LanguageArgs),
+    /// Launch local multi-process language DDP with a shared run directory and Burn orchestrator.
+    #[cfg(feature = "ddp")]
+    LanguageLocalDdp(LanguageLocalDdpArgs),
+    /// Run the Burn collective orchestrator used for multi-process DDP experiments.
+    #[cfg(feature = "ddp")]
+    CollectiveOrchestrator(CollectiveOrchestratorArgs),
     /// Train vision distill/LeJEPA models.
     Vision(VisionArgs),
     /// Train sudoku models.
@@ -100,6 +128,31 @@ struct LanguageArgs {
     /// Build vocabulary and exit without training.
     #[arg(long)]
     build_vocab_only: bool,
+}
+
+#[cfg(all(feature = "train", feature = "ddp"))]
+#[derive(Args, Debug)]
+struct LanguageLocalDdpArgs {
+    /// Additional configuration files applied in order (later files override earlier ones).
+    #[arg(short = 'c', long = "config", value_name = "PATH")]
+    config: Vec<PathBuf>,
+    /// Backend to use for training.
+    #[arg(long, value_enum, default_value_t = BackendArg::Ndarray)]
+    backend: BackendArg,
+    /// Number of launched ranks.
+    #[arg(long, default_value_t = 2)]
+    world_size: usize,
+    /// Websocket port used by the Burn collective orchestrator.
+    #[arg(long, default_value_t = 32100)]
+    orchestrator_port: u16,
+}
+
+#[cfg(all(feature = "train", feature = "ddp"))]
+#[derive(Args, Debug)]
+struct CollectiveOrchestratorArgs {
+    /// Websocket port to bind the orchestrator on.
+    #[arg(long)]
+    port: u16,
 }
 
 #[cfg(feature = "train")]
@@ -334,10 +387,206 @@ fn run_language(args: LanguageArgs) -> Result<()> {
     })
 }
 
+#[cfg(all(feature = "train", feature = "ddp"))]
+fn local_ddp_run_name() -> Result<String> {
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|err| anyhow!("failed to read system time: {err}"))?
+        .as_secs();
+    Ok(format!(
+        "language-local-ddp-{}-{suffix}",
+        std::process::id()
+    ))
+}
+
+#[cfg(feature = "train")]
+fn resolve_cli_run_root() -> PathBuf {
+    std::env::var_os(RUN_ROOT_ENV)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("runs"))
+}
+
+#[cfg(all(feature = "train", feature = "ddp"))]
+fn backend_arg_cli_value(backend: BackendArg) -> &'static str {
+    match backend {
+        BackendArg::Cuda => "cuda",
+        BackendArg::Wgpu => "wgpu",
+        BackendArg::WgpuNoFusion => "wgpu-no-fusion",
+        BackendArg::Ndarray => "ndarray",
+    }
+}
+
+#[cfg(all(feature = "train", feature = "ddp"))]
+fn write_language_local_ddp_overlay(
+    root: &PathBuf,
+    rank: usize,
+    world_size: usize,
+    orchestrator_port: u16,
+) -> Result<PathBuf> {
+    fs::create_dir_all(root).map_err(|err| {
+        anyhow!(
+            "failed to create DDP overlay directory {}: {err}",
+            root.display()
+        )
+    })?;
+    let node_port = orchestrator_port
+        .checked_add(1)
+        .and_then(|base| base.checked_add(rank as u16))
+        .ok_or_else(|| anyhow!("orchestrator port overflow for local DDP launch"))?;
+    let overlay = root.join(format!("rank-{rank}.toml"));
+    let contents = format!(
+        r#"[parallel]
+mode = "ddp"
+world_size = {world_size}
+
+[parallel.data]
+size = {world_size}
+collective_num_nodes = {world_size}
+collective_global_address = "ws://127.0.0.1:{orchestrator_port}"
+collective_node_address = "ws://127.0.0.1:{node_port}"
+collective_data_service_port = {node_port}
+"#
+    );
+    fs::write(&overlay, contents)
+        .map_err(|err| anyhow!("failed to write DDP overlay {}: {err}", overlay.display()))?;
+    Ok(overlay)
+}
+
+#[cfg(all(feature = "train", feature = "ddp"))]
+fn run_language_local_ddp(args: LanguageLocalDdpArgs) -> Result<()> {
+    if args.world_size == 0 {
+        return Err(anyhow!("--world-size must be at least 1"));
+    }
+
+    let current_exe = std::env::current_exe().context("resolve current train binary")?;
+    let config_paths = default_or_explicit_config_paths("config/language/base.toml", &args.config);
+    let config = load_language_training_config(&config_paths)?;
+    let run_root = resolve_cli_run_root();
+    let (run_name, run_dir) = match &config.training.resume_run_dir {
+        Some(run_dir) => {
+            if !run_dir.is_dir() {
+                return Err(anyhow!(
+                    "training.resume_run_dir does not exist or is not a directory: {}",
+                    run_dir.display()
+                ));
+            }
+            let run_name = run_dir
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| anyhow!("failed to derive run name from {}", run_dir.display()))?
+                .to_string();
+            (run_name, run_dir.clone())
+        }
+        None => {
+            let run_name = local_ddp_run_name()?;
+            let run_dir = run_root.join(&run_name);
+            fs::create_dir_all(&run_dir).map_err(|err| {
+                anyhow!(
+                    "failed to create shared DDP run directory {}: {err}",
+                    run_dir.display()
+                )
+            })?;
+            (run_name, run_dir)
+        }
+    };
+
+    let overlay_root = std::env::temp_dir().join(format!(
+        "burn_dragon_language_local_ddp_{}_{}",
+        std::process::id(),
+        run_name
+    ));
+    let overlays = (0..args.world_size)
+        .map(|rank| {
+            write_language_local_ddp_overlay(
+                &overlay_root,
+                rank,
+                args.world_size,
+                args.orchestrator_port,
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let orchestrator_stdout = fs::File::create(run_dir.join("orchestrator.stdout.log"))
+        .context("create orchestrator stdout log")?;
+    let orchestrator_stderr = fs::File::create(run_dir.join("orchestrator.stderr.log"))
+        .context("create orchestrator stderr log")?;
+    let mut orchestrator = ProcessCommand::new(&current_exe)
+        .arg("collective-orchestrator")
+        .arg("--port")
+        .arg(args.orchestrator_port.to_string())
+        .stdout(Stdio::from(orchestrator_stdout))
+        .stderr(Stdio::from(orchestrator_stderr))
+        .spawn()
+        .context("spawn Burn collective orchestrator")?;
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    let mut children = Vec::with_capacity(args.world_size);
+    for (rank, overlay) in overlays.iter().enumerate() {
+        let rank_stdout = fs::File::create(run_dir.join(format!("rank-{rank}.stdout.log")))
+            .with_context(|| format!("create stdout log for local DDP rank {rank}"))?;
+        let rank_stderr = fs::File::create(run_dir.join(format!("rank-{rank}.stderr.log")))
+            .with_context(|| format!("create stderr log for local DDP rank {rank}"))?;
+        let mut command = ProcessCommand::new(&current_exe);
+        command.arg("language");
+        for config in &config_paths {
+            command.arg("--config").arg(config);
+        }
+        command.arg("--config").arg(overlay);
+        command
+            .arg("--backend")
+            .arg(backend_arg_cli_value(args.backend))
+            .env("WORLD_SIZE", args.world_size.to_string())
+            .env("RANK", rank.to_string())
+            .env("LOCAL_RANK", rank.to_string())
+            .env("BURN_DRAGON_PROCESS_GROUP_RUN_DIR", &run_dir)
+            .env("BURN_DRAGON_PROCESS_GROUP_RUN_NAME", &run_name)
+            .stdout(Stdio::from(rank_stdout))
+            .stderr(Stdio::from(rank_stderr));
+        children.push(
+            command
+                .spawn()
+                .with_context(|| format!("spawn local DDP rank {rank}"))?,
+        );
+    }
+
+    let mut first_error = None;
+    for (rank, mut child) in children.into_iter().enumerate() {
+        let status = child
+            .wait()
+            .with_context(|| format!("wait for local DDP rank {rank}"))?;
+        if !status.success() && first_error.is_none() {
+            first_error = Some(anyhow!("local DDP rank {rank} exited with status {status}"));
+        }
+    }
+
+    let _ = orchestrator.kill();
+    let _ = orchestrator.wait();
+
+    if let Some(err) = first_error {
+        return Err(err);
+    }
+
+    Ok(())
+}
+
+#[cfg(all(feature = "train", feature = "ddp"))]
+fn run_collective_orchestrator(args: CollectiveOrchestratorArgs) -> Result<()> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(start_global_orchestrator(args.port));
+    Ok(())
+}
+
 #[cfg(all(test, feature = "train"))]
 mod tests {
-    use super::default_or_explicit_config_paths;
+    use super::{
+        apply_wgpu_vision_training_overrides, backend_arg_cli_value,
+        default_or_explicit_config_paths, write_language_local_ddp_overlay,
+    };
+    use burn_dragon::vision::VisionTrainingConfig;
     use std::path::PathBuf;
+    use tempfile::tempdir;
 
     #[test]
     fn default_or_explicit_config_paths_uses_default_only_when_no_explicit_configs() {
@@ -353,6 +602,58 @@ mod tests {
             vec![PathBuf::from("config/language/custom.toml")]
         );
     }
+
+    #[test]
+    fn apply_wgpu_vision_training_overrides_enables_fused_kernels() {
+        let mut config =
+            VisionTrainingConfig::scene_slot_graph_bridge_multimode_spatial_imagenet1k_medium_launch();
+        config.vision.fused_kernels = false;
+        config.wgpu.training.fused_core_recurrent = Some(true);
+
+        apply_wgpu_vision_training_overrides(&mut config, "wgpu");
+
+        assert!(config.vision.fused_kernels);
+    }
+
+    #[test]
+    fn apply_wgpu_vision_training_overrides_ignores_non_wgpu_backend() {
+        let mut config =
+            VisionTrainingConfig::scene_slot_graph_bridge_multimode_spatial_imagenet1k_medium_launch();
+        config.vision.fused_kernels = false;
+        config.wgpu.training.fused_core_recurrent = Some(true);
+
+        apply_wgpu_vision_training_overrides(&mut config, "cuda");
+
+        assert!(!config.vision.fused_kernels);
+    }
+
+    #[cfg(feature = "ddp")]
+    #[test]
+    fn backend_arg_cli_value_formats_expected_ddp_backend_flags() {
+        assert_eq!(backend_arg_cli_value(super::BackendArg::Ndarray), "ndarray");
+        assert_eq!(backend_arg_cli_value(super::BackendArg::Cuda), "cuda");
+        assert_eq!(backend_arg_cli_value(super::BackendArg::Wgpu), "wgpu");
+        assert_eq!(
+            backend_arg_cli_value(super::BackendArg::WgpuNoFusion),
+            "wgpu-no-fusion"
+        );
+    }
+
+    #[cfg(feature = "ddp")]
+    #[test]
+    fn write_language_local_ddp_overlay_emits_rank_specific_collective_config() {
+        let dir = tempdir().expect("tempdir");
+        let overlay = write_language_local_ddp_overlay(&dir.path().join("overlays"), 1, 2, 32100)
+            .expect("overlay");
+        let contents = std::fs::read_to_string(&overlay).expect("read overlay");
+
+        assert!(contents.contains("mode = \"ddp\""));
+        assert!(contents.contains("world_size = 2"));
+        assert!(contents.contains("collective_num_nodes = 2"));
+        assert!(contents.contains("collective_global_address = \"ws://127.0.0.1:32100\""));
+        assert!(contents.contains("collective_node_address = \"ws://127.0.0.1:32102\""));
+        assert!(contents.contains("collective_data_service_port = 32102"));
+    }
 }
 
 #[cfg(feature = "train")]
@@ -366,15 +667,29 @@ fn run_vision(args: VisionArgs) -> Result<()> {
             train_vision_backend::<Autodiff<NdArray<f32>>, _>(&config, "cpu", |_| {})
         }
         BackendArg::Wgpu => {
-            let wgpu_config = config.wgpu.clone();
-            train_vision_backend::<Autodiff<Wgpu<f32>>, _>(&config, "wgpu", move |device| {
-                init_runtime(device, &wgpu_config)
-            })
+            let mut resolved = config.clone();
+            apply_wgpu_vision_training_overrides(&mut resolved, "wgpu");
+            let wgpu_config = resolved.wgpu.clone();
+            let backend_name = if resolved.vision.fused_kernels {
+                "wgpu-fused-core"
+            } else {
+                "wgpu-nofusion"
+            };
+            eprintln!(
+                "vision training: routing --backend wgpu through CubeBackend (backend={backend_name}) to enable the measured fused pyramid path"
+            );
+            train_vision_backend::<Autodiff<WgpuNoFusion>, _>(
+                &resolved,
+                backend_name,
+                move |device| init_runtime(device, &wgpu_config),
+            )
         }
         BackendArg::WgpuNoFusion => {
-            let wgpu_config = config.wgpu.clone();
+            let mut resolved = config.clone();
+            resolved.vision.fused_kernels = false;
+            let wgpu_config = resolved.wgpu.clone();
             train_vision_backend::<Autodiff<WgpuNoFusion>, _>(
-                &config,
+                &resolved,
                 "wgpu-nofusion",
                 move |device| init_runtime(device, &wgpu_config),
             )
@@ -506,6 +821,10 @@ fn run() -> Result<()> {
     let args = Cli::parse();
     match args.command {
         Command::Language(cmd) => run_language(cmd),
+        #[cfg(feature = "ddp")]
+        Command::LanguageLocalDdp(cmd) => run_language_local_ddp(cmd),
+        #[cfg(feature = "ddp")]
+        Command::CollectiveOrchestrator(cmd) => run_collective_orchestrator(cmd),
         Command::Vision(cmd) => run_vision(cmd),
         Command::Sudoku(cmd) => run_sudoku(cmd),
         Command::Multimodal(cmd) => run_multimodal(cmd),

@@ -5,10 +5,8 @@ use anyhow::Result;
 use burn::tensor::backend::Backend as BackendTrait;
 use burn::tensor::{Distribution, Tensor, TensorData};
 use burn_autodiff::Autodiff;
-use burn_dragon::vision::{
-    VisionArtifactHeader, push_vision_artifact_markdown_prelude,
-};
-use burn_dragon_wgpu::api::spatial::{
+use burn_dragon::vision::{VisionArtifactHeader, push_vision_artifact_markdown_prelude};
+use burn_dragon_kernel::api::spatial::{
     CompiledStructuredPyramidRhoPlan, LocalGridNeighborhood, LocalGridShape2d,
     StructuredPyramidRhoStepInput, StructuredPyramidRhoStepOutput, StructuredPyramidShape,
     reference_structured_pyramid_rho_step, structured_pyramid_profile_reset,
@@ -293,8 +291,13 @@ fn run_case(
         let _ = run_forward_backward(shape, input.clone(), None, 1, device);
         let _ = run_forward_backward(shape, input.clone(), Some(&plan), 1, device);
         let _ = run_forward_backward(shape, input.clone(), None, config.steps.max(1), device);
-        let _ =
-            run_forward_backward(shape, input.clone(), Some(&plan), config.steps.max(1), device);
+        let _ = run_forward_backward(
+            shape,
+            input.clone(),
+            Some(&plan),
+            config.steps.max(1),
+            device,
+        );
     }
 
     let mut baseline_one_step = Vec::with_capacity(config.repetitions);

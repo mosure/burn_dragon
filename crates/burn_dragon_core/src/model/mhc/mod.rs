@@ -2,7 +2,10 @@ mod coefficients;
 mod config;
 mod reference;
 
-pub use coefficients::{ManifoldHyperConnectionCoefficients, ManifoldHyperConnectionWidthOutput};
+pub use coefficients::{
+    ManifoldHyperConnectionCoefficients, ManifoldHyperConnectionStreamCoefficients,
+    ManifoldHyperConnectionStreamOutput, ManifoldHyperConnectionWidthOutput,
+};
 pub use config::{ManifoldHyperConnectionCoefficientPolicy, ManifoldHyperConnectionsConfig};
 pub use reference::ManifoldHyperConnections;
 

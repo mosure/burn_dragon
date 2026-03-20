@@ -1,0 +1,410 @@
+use anyhow::{Context, Result, anyhow};
+use rand::Rng;
+use rand::SeedableRng;
+use rand::rngs::StdRng;
+use std::sync::Arc;
+
+use crate::config::{NcaCorpusConfig, NcaFamilyConfig, NcaFamilyKind};
+use crate::manifest::{SampleSplit, UniversalityTokenizerManifest};
+use crate::nca::{compute_sample_stats, generate_sample, patch_token_ids, serialize_sample};
+use crate::stats::{ComplexityHistogramBin, SampleStats, build_complexity_histogram};
+use crate::tokenize::CorpusTokenizer;
+
+const TRAIN_SPLIT_TAG: u64 = 0xA8A7_9B1C_D3E4_F501;
+const VAL_SPLIT_TAG: u64 = 0x5EED_CAFE_1357_2468;
+const DEFAULT_PROBE_SAMPLES: usize = 32;
+
+#[derive(Debug, Clone)]
+pub struct RuntimeCorpusSummary {
+    pub sample_count: usize,
+    pub token_count: usize,
+    pub document_token_count: usize,
+    pub mean_gzip_complexity_ratio: f32,
+    pub min_gzip_complexity_ratio: f32,
+    pub max_gzip_complexity_ratio: f32,
+    pub mean_complexity_score: f32,
+    pub complexity_histogram: Vec<ComplexityHistogramBin>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RuntimeSampleDocument {
+    pub split: SampleSplit,
+    pub sample_index: usize,
+    pub family: String,
+    pub complexity_band: String,
+    pub rule_seed: Option<u64>,
+    pub complexity_filter_matched: bool,
+    pub token_count: usize,
+    pub tokens: Vec<u32>,
+    pub serialized_preview: String,
+    pub stats: SampleStats,
+}
+
+#[derive(Clone)]
+pub struct OnlineNcaCorpus {
+    config: NcaCorpusConfig,
+    tokenizer: Arc<CorpusTokenizer>,
+    tokenizer_manifest: UniversalityTokenizerManifest,
+    document_token_count: usize,
+}
+
+impl OnlineNcaCorpus {
+    pub fn new(config: NcaCorpusConfig) -> Result<Self> {
+        config.validate()?;
+        let tokenizer = Arc::new(CorpusTokenizer::from_config(&config.tokenization)?);
+        let tokenizer_manifest = tokenizer.manifest();
+        let document_token_count = fixed_document_token_count(&config)?;
+        Ok(Self {
+            config,
+            tokenizer,
+            tokenizer_manifest,
+            document_token_count,
+        })
+    }
+
+    pub fn load(path: &std::path::Path) -> Result<Self> {
+        let config = crate::load_nca_config(path)?;
+        Self::new(config)
+    }
+
+    pub fn config(&self) -> &NcaCorpusConfig {
+        &self.config
+    }
+
+    pub fn dataset_name(&self) -> &str {
+        &self.config.name
+    }
+
+    pub fn tokenizer_manifest(&self) -> &UniversalityTokenizerManifest {
+        &self.tokenizer_manifest
+    }
+
+    pub fn train_samples(&self) -> usize {
+        self.config.train_samples
+    }
+
+    pub fn validation_samples(&self) -> usize {
+        self.config.validation_samples
+    }
+
+    pub fn sample_count(&self, split: SampleSplit) -> usize {
+        match split {
+            SampleSplit::Train => self.train_samples(),
+            SampleSplit::Validation => self.validation_samples(),
+        }
+    }
+
+    pub fn document_token_count(&self) -> usize {
+        self.document_token_count
+    }
+
+    pub fn train_token_count(&self) -> usize {
+        self.train_samples()
+            .saturating_mul(self.document_token_count())
+    }
+
+    pub fn val_token_count(&self) -> usize {
+        self.validation_samples()
+            .saturating_mul(self.document_token_count())
+    }
+
+    pub fn total_token_count(&self) -> usize {
+        self.train_token_count()
+            .saturating_add(self.val_token_count())
+    }
+
+    pub fn generate_document(
+        &self,
+        split: SampleSplit,
+        sample_index: usize,
+    ) -> Result<RuntimeSampleDocument> {
+        let sample = self.generate_raw_sample(split, sample_index)?;
+        let tokens = self.encode_tokens_from_sample(&sample)?;
+        if tokens.len() != self.document_token_count {
+            return Err(anyhow!(
+                "on-the-fly NCA document token length drifted (expected={} actual={})",
+                self.document_token_count,
+                tokens.len()
+            ));
+        }
+        let stats = compute_sample_stats(&sample, &self.config.serialization);
+        let serialized_preview = serialize_sample(&sample, &self.config.serialization);
+        Ok(RuntimeSampleDocument {
+            split,
+            sample_index,
+            family: family_kind_label(sample.family_kind).to_string(),
+            complexity_band: format!("{:?}", sample.complexity_band).to_lowercase(),
+            rule_seed: sample.rule_seed,
+            complexity_filter_matched: sample.complexity_filter_matched,
+            token_count: tokens.len(),
+            tokens,
+            serialized_preview,
+            stats,
+        })
+    }
+
+    pub fn generate_document_tokens(
+        &self,
+        split: SampleSplit,
+        sample_index: usize,
+    ) -> Result<Vec<u32>> {
+        let sample = self.generate_raw_sample(split, sample_index)?;
+        let tokens = self.encode_tokens_from_sample(&sample)?;
+        if tokens.len() != self.document_token_count {
+            return Err(anyhow!(
+                "on-the-fly NCA document token length drifted (expected={} actual={})",
+                self.document_token_count,
+                tokens.len()
+            ));
+        }
+        Ok(tokens)
+    }
+
+    fn generate_raw_sample(
+        &self,
+        split: SampleSplit,
+        sample_index: usize,
+    ) -> Result<crate::nca::NcaSample> {
+        let sample_count = self.sample_count(split);
+        if sample_index >= sample_count {
+            return Err(anyhow!(
+                "sample_index {} out of range for {:?} split with {} samples",
+                sample_index,
+                split,
+                sample_count
+            ));
+        }
+        let mut rng =
+            StdRng::seed_from_u64(derive_sample_seed(self.config.seed, split, sample_index));
+        let family = choose_family(&self.config, &mut rng);
+        Ok(generate_sample(
+            family,
+            &self.config.serialization,
+            &mut rng,
+        ))
+    }
+
+    fn encode_tokens_from_sample(&self, sample: &crate::nca::NcaSample) -> Result<Vec<u32>> {
+        match self.tokenizer.as_ref() {
+            CorpusTokenizer::PatchTokenIds { .. } => {
+                let patch_tokens = patch_token_ids(sample, &self.config.serialization);
+                self.tokenizer.encode_patch_tokens(&patch_tokens)
+            }
+            _ => Err(anyhow!(
+                "on-the-fly NCA training currently requires patch_token_ids tokenization"
+            )),
+        }
+    }
+
+    pub fn probe_summary(
+        &self,
+        split: SampleSplit,
+        max_samples: usize,
+    ) -> Result<RuntimeCorpusSummary> {
+        let sample_count = self.sample_count(split);
+        let probe_count = sample_count.min(max_samples.max(1));
+        let mut gzip_ratios = Vec::with_capacity(probe_count);
+        let mut complexity_scores = Vec::with_capacity(probe_count);
+        for sample_index in 0..probe_count {
+            let sample = self.generate_document(split, sample_index)?;
+            gzip_ratios.push(sample.stats.gzip_complexity_ratio);
+            complexity_scores.push(sample.stats.complexity_score);
+        }
+        let histogram = build_complexity_histogram(&complexity_scores);
+        let mean_gzip_complexity_ratio = mean(gzip_ratios.iter().copied());
+        let min_gzip_complexity_ratio = gzip_ratios
+            .iter()
+            .copied()
+            .reduce(f32::min)
+            .unwrap_or_default();
+        let max_gzip_complexity_ratio = gzip_ratios
+            .iter()
+            .copied()
+            .reduce(f32::max)
+            .unwrap_or_default();
+        let mean_complexity_score = mean(complexity_scores.iter().copied());
+        Ok(RuntimeCorpusSummary {
+            sample_count,
+            token_count: sample_count.saturating_mul(self.document_token_count()),
+            document_token_count: self.document_token_count(),
+            mean_gzip_complexity_ratio,
+            min_gzip_complexity_ratio,
+            max_gzip_complexity_ratio,
+            mean_complexity_score,
+            complexity_histogram: histogram,
+        })
+    }
+
+    pub fn default_probe_summary(&self, split: SampleSplit) -> Result<RuntimeCorpusSummary> {
+        self.probe_summary(split, DEFAULT_PROBE_SAMPLES)
+    }
+}
+
+pub fn fixed_document_token_count(config: &NcaCorpusConfig) -> Result<usize> {
+    match &config.tokenization {
+        crate::config::NcaTokenizationConfig::PatchTokenIds { eos_id, .. } => {
+            let mut expected: Option<usize> = None;
+            for (index, family) in config.families.iter().enumerate() {
+                let grid =
+                    fixed_range_value(family.grid_size, &format!("families[{index}].grid_size"))?;
+                let steps = fixed_range_value(family.steps, &format!("families[{index}].steps"))?;
+                if grid % config.serialization.patch_size != 0 {
+                    return Err(anyhow!(
+                        "families[{index}].grid_size={} must be divisible by serialization.patch_size={}",
+                        grid,
+                        config.serialization.patch_size
+                    ));
+                }
+                let patches_per_frame = (grid / config.serialization.patch_size)
+                    * (grid / config.serialization.patch_size);
+                let token_count = steps
+                    .checked_mul(patches_per_frame)
+                    .and_then(|value| value.checked_add(usize::from(eos_id.is_some())))
+                    .ok_or_else(|| anyhow!("on-the-fly NCA token length overflow"))?;
+                if let Some(previous) = expected {
+                    if previous != token_count {
+                        return Err(anyhow!(
+                            "on-the-fly NCA training currently requires fixed document length across families (got {} and {})",
+                            previous,
+                            token_count
+                        ));
+                    }
+                } else {
+                    expected = Some(token_count);
+                }
+            }
+            expected.context("on-the-fly NCA training requires at least one family")
+        }
+        _ => Err(anyhow!(
+            "on-the-fly NCA training currently requires tokenization.type = `patch_token_ids`"
+        )),
+    }
+}
+
+fn fixed_range_value(range: Option<crate::config::UsizeRangeConfig>, label: &str) -> Result<usize> {
+    let Some(range) = range else {
+        return Err(anyhow!(
+            "{label} must be specified explicitly for on-the-fly NCA training"
+        ));
+    };
+    if range.min != range.max {
+        return Err(anyhow!(
+            "{label} must have min == max for on-the-fly NCA training"
+        ));
+    }
+    Ok(range.min)
+}
+
+fn choose_family<'a>(config: &'a NcaCorpusConfig, rng: &mut StdRng) -> &'a NcaFamilyConfig {
+    let total_weight = config
+        .families
+        .iter()
+        .map(|family| family.weight)
+        .sum::<usize>()
+        .max(1);
+    let mut cursor = rng.gen_range(0..total_weight);
+    for family in &config.families {
+        if cursor < family.weight {
+            return family;
+        }
+        cursor -= family.weight;
+    }
+    &config.families[0]
+}
+
+fn derive_sample_seed(base_seed: u64, split: SampleSplit, sample_index: usize) -> u64 {
+    let split_tag = match split {
+        SampleSplit::Train => TRAIN_SPLIT_TAG,
+        SampleSplit::Validation => VAL_SPLIT_TAG,
+    };
+    let mixed = base_seed ^ split_tag ^ (sample_index as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    splitmix64(mixed)
+}
+
+fn splitmix64(mut value: u64) -> u64 {
+    value = value.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    value = (value ^ (value >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    value ^ (value >> 31)
+}
+
+fn family_kind_label(kind: NcaFamilyKind) -> &'static str {
+    match kind {
+        NcaFamilyKind::NeuralStochastic => "neural_stochastic",
+        NcaFamilyKind::LifeLikeBinary => "life_like_binary",
+        NcaFamilyKind::Cyclic => "cyclic",
+        NcaFamilyKind::NeuralTotalistic => "neural_totalistic",
+    }
+}
+
+fn mean(values: impl IntoIterator<Item = f32>) -> f32 {
+    let mut total = 0.0f32;
+    let mut count = 0usize;
+    for value in values {
+        total += value;
+        count += 1;
+    }
+    if count == 0 {
+        0.0
+    } else {
+        total / count as f32
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{
+        NcaCorpusConfig, NcaSerializationConfig, NcaTokenizationConfig, default_families,
+    };
+
+    fn fixed_patch_config() -> NcaCorpusConfig {
+        let mut config = NcaCorpusConfig {
+            output_dir: "ignored".into(),
+            seed: 1337,
+            name: "runtime".to_string(),
+            train_samples: 8,
+            validation_samples: 4,
+            chunk_token_capacity: 1024,
+            serialization: NcaSerializationConfig::default(),
+            tokenization: NcaTokenizationConfig::default(),
+            families: default_families(),
+        };
+        for family in &mut config.families {
+            family.grid_size = Some(crate::config::UsizeRangeConfig { min: 12, max: 12 });
+            family.steps = Some(crate::config::UsizeRangeConfig { min: 10, max: 10 });
+            family.state_count = Some(crate::config::UsizeRangeConfig { min: 10, max: 10 });
+            family.step_stride = Some(crate::config::UsizeRangeConfig { min: 2, max: 2 });
+            family.start_step = Some(crate::config::UsizeRangeConfig { min: 0, max: 0 });
+            family.identity_bias = Some(crate::config::FloatRangeConfig { min: 0.0, max: 0.0 });
+            family.temperature = Some(crate::config::FloatRangeConfig { min: 0.0, max: 0.0 });
+        }
+        config
+    }
+
+    #[test]
+    fn online_corpus_reports_fixed_document_token_count() {
+        let config = fixed_patch_config();
+        let corpus = OnlineNcaCorpus::new(config).expect("runtime corpus");
+        assert_eq!(corpus.document_token_count(), 361);
+        assert_eq!(corpus.train_token_count(), 8 * 361);
+        assert_eq!(corpus.val_token_count(), 4 * 361);
+    }
+
+    #[test]
+    fn online_corpus_is_deterministic_per_split_and_index() {
+        let config = fixed_patch_config();
+        let corpus = OnlineNcaCorpus::new(config).expect("runtime corpus");
+        let first = corpus
+            .generate_document(SampleSplit::Train, 2)
+            .expect("first sample");
+        let second = corpus
+            .generate_document(SampleSplit::Train, 2)
+            .expect("second sample");
+        let val = corpus
+            .generate_document(SampleSplit::Validation, 2)
+            .expect("val sample");
+        assert_eq!(first.tokens, second.tokens);
+        assert_ne!(first.tokens, val.tokens);
+    }
+}

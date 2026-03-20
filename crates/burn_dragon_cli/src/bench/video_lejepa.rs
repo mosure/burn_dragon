@@ -150,7 +150,11 @@ pub fn detect_wgpu_adapter_info() -> String {
 impl VideoLejepaBenchReport {
     pub fn to_markdown(&self) -> String {
         let mut out = String::new();
-        push_vision_artifact_markdown_prelude(&mut out, "Video LEJEPA Fused Benchmark", &self.artifact);
+        push_vision_artifact_markdown_prelude(
+            &mut out,
+            "Video LEJEPA Fused Benchmark",
+            &self.artifact,
+        );
         let _ = writeln!(&mut out, "- adapter: {}", self.adapter);
         let _ = writeln!(&mut out, "- warmup: {}", self.warmup);
         let _ = writeln!(&mut out, "- iterations: {}", self.iterations);
@@ -230,24 +234,32 @@ fn run_case(
     }
 
     let baseline_forward_ns = (0..config.iterations)
-        .map(|_| time_ns(|| {
-            let _ = baseline_forward_bench.forward_loss(batch.clone());
-        }))
+        .map(|_| {
+            time_ns(|| {
+                let _ = baseline_forward_bench.forward_loss(batch.clone());
+            })
+        })
         .collect::<Vec<_>>();
     let fused_forward_ns = (0..config.iterations)
-        .map(|_| time_ns(|| {
-            let _ = fused_forward_bench.forward_loss(batch.clone());
-        }))
+        .map(|_| {
+            time_ns(|| {
+                let _ = fused_forward_bench.forward_loss(batch.clone());
+            })
+        })
         .collect::<Vec<_>>();
     let baseline_train_ns = (0..config.iterations)
-        .map(|_| time_ns(|| {
-            let _ = baseline_train_bench.train_step(batch.clone());
-        }))
+        .map(|_| {
+            time_ns(|| {
+                let _ = baseline_train_bench.train_step(batch.clone());
+            })
+        })
         .collect::<Vec<_>>();
     let fused_train_ns = (0..config.iterations)
-        .map(|_| time_ns(|| {
-            let _ = fused_train_bench.train_step(batch.clone());
-        }))
+        .map(|_| {
+            time_ns(|| {
+                let _ = fused_train_bench.train_step(batch.clone());
+            })
+        })
         .collect::<Vec<_>>();
 
     let baseline_forward_avg = mean_u128(&baseline_forward_ns);

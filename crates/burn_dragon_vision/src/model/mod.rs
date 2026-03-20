@@ -12,8 +12,8 @@ pub use vision::{
     VisionCellularState, VisionDragon, VisionDragonConfig, VisionDragonMultiOutput,
     VisionDragonOutput, VisionLatentActivation, VisionPatchEmbedMode, VisionPyramidConfig,
     VisionRhoStreamConfig, VisionRolloutState, VisionTrmGraphConfig, VisionTrmGridMismatchPolicy,
-    patchify, pool_patch_tokens, stage_aware_host_profile_reset, stage_aware_host_profile_snapshot,
-    unpatchify,
+    VisionTrmPredictSubstepKind, patchify, pool_patch_tokens, stage_aware_host_profile_reset,
+    stage_aware_host_profile_snapshot, unpatchify,
 };
 #[cfg(feature = "benchmark")]
 pub use vision::{

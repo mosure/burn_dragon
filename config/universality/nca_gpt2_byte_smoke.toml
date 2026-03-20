@@ -1,0 +1,31 @@
+name = "nca_gpt2_byte_smoke"
+output_dir = "data/universality/nca_gpt2_byte_smoke"
+seed = 1337
+train_samples = 32
+validation_samples = 8
+chunk_token_capacity = 16384
+
+[serialization]
+patch_size = 2
+include_observable_header = true
+preview_samples = 6
+
+[tokenization]
+type = "gpt2_byte_compatible"
+vocab_size = 50257
+eos_id = 50256
+
+[[families]]
+kind = "life_like_binary"
+weight = 2
+complexity = "simple"
+
+[[families]]
+kind = "cyclic"
+weight = 2
+complexity = "medium"
+
+[[families]]
+kind = "neural_totalistic"
+weight = 3
+complexity = "complex"

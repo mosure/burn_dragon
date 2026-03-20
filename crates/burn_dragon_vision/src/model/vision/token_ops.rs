@@ -1,6 +1,6 @@
 use super::*;
 use burn_dragon_core::FusedAttentionExecutor;
-use burn_dragon_wgpu::api::attention::{
+use burn_dragon_kernel::api::attention::{
     CompiledDenseAttentionPlan, CompiledDenseScoresPlan, try_fused_dense_row_l1_attention_wgpu,
     try_fused_dense_row_l1_attention_wgpu_with_plan, try_fused_dense_row_l1_scores_wgpu,
     try_fused_dense_row_l1_scores_wgpu_with_plan,
@@ -297,7 +297,7 @@ mod tests {
             .expect("expected attention vec");
 
         assert_eq!(actual.len(), expected.len());
-        for (index, (lhs, rhs)) in actual.into_iter().zip(expected.into_iter()).enumerate() {
+        for (index, (lhs, rhs)) in actual.into_iter().zip(expected).enumerate() {
             assert!(
                 (lhs - rhs).abs() <= 1e-5,
                 "attention mismatch at index {index}: lhs={lhs}, rhs={rhs}"
@@ -326,7 +326,7 @@ mod tests {
             .expect("expected attention vec");
 
         assert_eq!(actual.len(), expected.len());
-        for (index, (lhs, rhs)) in actual.into_iter().zip(expected.into_iter()).enumerate() {
+        for (index, (lhs, rhs)) in actual.into_iter().zip(expected).enumerate() {
             assert!(
                 (lhs - rhs).abs() <= 1e-5,
                 "attention mismatch at index {index}: lhs={lhs}, rhs={rhs}"
@@ -370,6 +370,104 @@ mod tests {
             assert!(
                 (lhs - rhs).abs() <= 1e-5,
                 "dense step mismatch at index {index}: lhs={lhs}, rhs={rhs}"
+            );
+        }
+    }
+
+    #[cfg(all(feature = "benchmark", feature = "train", not(target_arch = "wasm32")))]
+    #[test]
+    fn benchmark_wgpu_projection_kernel_matches_reference_projections() {
+        use burn::tensor::backend::Backend as BackendTrait;
+        use burn_wgpu::{CubeBackend, WgpuRuntime};
+
+        type WgpuBackend = CubeBackend<WgpuRuntime, f32, i32, u32>;
+
+        let _guard = crate::train::wgpu_test_guard();
+        let device = <WgpuBackend as BackendTrait>::Device::default();
+        crate::train::init_wgpu_test_runtime(&device);
+        <WgpuBackend as BackendTrait>::seed(&device, 17_271);
+
+        let mut config = make_test_config(4);
+        config.fused_kernels = FusedKernelConfig {
+            enabled: true,
+            ..FusedKernelConfig::default()
+        };
+        let model = VisionDragon::<WgpuBackend>::new(config, &device);
+        let dense = super::VisionDenseBenchAdapter::new(&model);
+        let tokens = Tensor::<WgpuBackend, 3>::random([2, 17, 8], Distribution::Default, &device);
+        let state = model.rollout_state_from_tokens(tokens);
+        let VisionRolloutState::Dense { token_state } = state else {
+            panic!("expected dense rollout state");
+        };
+        let [batch, time, dim] = token_state.shape().dims::<3>();
+        let current = token_state.reshape([batch, 1, time, dim]);
+
+        let x_reference = dense
+            .x_projection_reference(current.clone())
+            .to_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .expect("x reference");
+        let x_auto = dense
+            .x_projection(current.clone())
+            .to_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .expect("x auto");
+        let x_fused = dense
+            .x_projection_wgpu_kernel(current.clone())
+            .expect("wgpu x kernel")
+            .to_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .expect("x fused");
+        assert_eq!(x_reference.len(), x_auto.len());
+        for (index, (lhs, rhs)) in x_reference.iter().zip(x_auto.iter()).enumerate() {
+            assert!(
+                (lhs - rhs).abs() <= 1e-4,
+                "x auto mismatch at index {index}: lhs={lhs}, rhs={rhs}"
+            );
+        }
+        assert_eq!(x_reference.len(), x_fused.len());
+        for (index, (lhs, rhs)) in x_reference.into_iter().zip(x_fused).enumerate() {
+            assert!(
+                (lhs - rhs).abs() <= 1e-4,
+                "x projection mismatch at index {index}: lhs={lhs}, rhs={rhs}"
+            );
+        }
+
+        let attn = dense.attention_context(dense.x_projection_reference(current.clone()), current);
+        let y_reference = dense
+            .y_projection_reference(attn.clone())
+            .to_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .expect("y reference");
+        let y_auto = dense
+            .y_projection(attn.clone())
+            .to_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .expect("y auto");
+        let y_fused = dense
+            .y_projection_wgpu_kernel(attn)
+            .expect("wgpu y kernel")
+            .to_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .expect("y fused");
+        assert_eq!(y_reference.len(), y_auto.len());
+        for (index, (lhs, rhs)) in y_reference.iter().zip(y_auto.iter()).enumerate() {
+            assert!(
+                (lhs - rhs).abs() <= 1e-4,
+                "y auto mismatch at index {index}: lhs={lhs}, rhs={rhs}"
+            );
+        }
+        assert_eq!(y_reference.len(), y_fused.len());
+        for (index, (lhs, rhs)) in y_reference.into_iter().zip(y_fused).enumerate() {
+            assert!(
+                (lhs - rhs).abs() <= 1e-4,
+                "y projection mismatch at index {index}: lhs={lhs}, rhs={rhs}"
             );
         }
     }

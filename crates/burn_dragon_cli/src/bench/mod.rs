@@ -1,9 +1,10 @@
 pub mod artifact;
+pub mod training_density;
 pub mod video_lejepa;
 pub mod video_lejepa_stageaware;
-pub mod training_density;
 pub mod vision_dense_attention;
 pub mod vision_dense_step;
+pub mod vision_lowrank_projection;
 pub mod vision_pyramid;
 pub mod vision_pyramid_fb;
 pub mod vision_resolution;

@@ -1,23 +1,29 @@
 [package]
-name = "burn_dragon_wgpu"
-description = "Fused WGPU kernels for burn_dragon recurrent paths"
-version = "0.4.0"
+name = "burn_dragon_kernel"
+description = "Fused GPU kernel crate for burn_dragon execution paths"
+version = "0.5.0"
 edition = "2024"
+rust-version = "1.85"
 authors = ["mosure <mitchell@mosure.me>"]
 license = "MIT OR Apache-2.0"
-keywords = ["burn", "wgpu", "kernel", "recurrent"]
+keywords = ["burn", "cuda", "kernel", "recurrent"]
 categories = ["science", "science::neuroscience"]
+homepage = "https://github.com/mosure/burn_bdh"
+repository = "https://github.com/mosure/burn_bdh"
 readme = "../../README.md"
 
 [features]
 default = []
+cuda = ["dep:burn-cuda"]
 
 [dependencies]
 burn = { version = "0.21.0-pre.2", default-features = false, features = ["fusion", "ndarray", "std", "wgpu"] }
 burn-autodiff = { version = "0.21.0-pre.2", default-features = false }
+burn-cuda = { version = "0.21.0-pre.2", default-features = false, features = ["std"], optional = true }
 burn-wgpu = { version = "0.21.0-pre.2", default-features = false, features = ["fusion", "std", "template"] }
 burn-cubecl = { version = "0.21.0-pre.2", default-features = false, features = ["std", "fusion"] }
 burn-fusion = { version = "0.21.0-pre.2", default-features = false, features = ["std"] }
+burn-std = "0.21.0-pre.2"
 burn-ir = "0.21.0-pre.2"
 pollster = "0.3"
 serde = { version = "1", features = ["derive"] }

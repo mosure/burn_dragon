@@ -1,6 +1,13 @@
 use crate::train::prelude::*;
 use burn_train::metric::{Adaptor, ItemLazy, LossInput};
 
+fn serialized_entry(
+    formatted: impl Into<String>,
+    serialized: impl Into<String>,
+) -> burn_train::metric::SerializedEntry {
+    burn_train::metric::SerializedEntry::new(formatted.into(), serialized.into())
+}
+
 #[derive(Clone)]
 pub struct SudokuOutput<B: BackendTrait> {
     loss: Tensor<B, 1>,
@@ -301,7 +308,7 @@ impl<B: AutodiffBackend> ItemLazy for SudokuTrainItem<B> {
 #[cfg(feature = "integration_test")]
 mod loss_trace {
     use super::*;
-    use burn_train::metric::{Metric, MetricEntry, MetricMetadata, format_float};
+    use burn_train::metric::{Metric, MetricMetadata, format_float};
     use std::sync::{Mutex, OnceLock};
 
     fn storage() -> &'static Mutex<Vec<f32>> {
@@ -361,14 +368,18 @@ mod loss_trace {
             Arc::clone(&self.name)
         }
 
-        fn update(&mut self, item: &Self::Input, metadata: &MetricMetadata) -> MetricEntry {
-            if self.every > 1 && !metadata.iteration.is_multiple_of(self.every) && self.initialized
+        fn update(
+            &mut self,
+            item: &Self::Input,
+            metadata: &MetricMetadata,
+        ) -> burn_train::metric::SerializedEntry {
+            if self.every > 1
+                && self.initialized
+                && metadata
+                    .iteration
+                    .is_none_or(|iteration| iteration % self.every != 0)
             {
-                return MetricEntry::new(
-                    Arc::clone(&self.name),
-                    format_float(self.last, 4),
-                    self.last.to_string(),
-                );
+                return serialized_entry(format_float(self.last, 4), self.last.to_string());
             }
             let value = item
                 .value()
@@ -382,11 +393,7 @@ mod loss_trace {
             if let Ok(mut trace) = storage().lock() {
                 trace.push(value as f32);
             }
-            MetricEntry::new(
-                Arc::clone(&self.name),
-                format_float(value, 4),
-                value.to_string(),
-            )
+            serialized_entry(format_float(value, 4), value.to_string())
         }
 
         fn clear(&mut self) {
@@ -404,7 +411,7 @@ pub use loss_trace::{len as loss_trace_len, reset as loss_trace_reset, take as l
 #[cfg(feature = "integration_test")]
 mod solve_rate_trace {
     use super::*;
-    use burn_train::metric::{Metric, MetricEntry, MetricMetadata, format_float};
+    use burn_train::metric::{Metric, MetricMetadata, format_float};
     use std::sync::{Mutex, OnceLock};
 
     fn storage() -> &'static Mutex<Vec<f32>> {
@@ -464,14 +471,18 @@ mod solve_rate_trace {
             Arc::clone(&self.name)
         }
 
-        fn update(&mut self, item: &Self::Input, metadata: &MetricMetadata) -> MetricEntry {
-            if self.every > 1 && !metadata.iteration.is_multiple_of(self.every) && self.initialized
+        fn update(
+            &mut self,
+            item: &Self::Input,
+            metadata: &MetricMetadata,
+        ) -> burn_train::metric::SerializedEntry {
+            if self.every > 1
+                && self.initialized
+                && metadata
+                    .iteration
+                    .is_none_or(|iteration| iteration % self.every != 0)
             {
-                return MetricEntry::new(
-                    Arc::clone(&self.name),
-                    format_float(self.last, 4),
-                    self.last.to_string(),
-                );
+                return serialized_entry(format_float(self.last, 4), self.last.to_string());
             }
             let value = item
                 .value()
@@ -485,11 +496,7 @@ mod solve_rate_trace {
             if let Ok(mut trace) = storage().lock() {
                 trace.push(value as f32);
             }
-            MetricEntry::new(
-                Arc::clone(&self.name),
-                format_float(value, 4),
-                value.to_string(),
-            )
+            serialized_entry(format_float(value, 4), value.to_string())
         }
 
         fn clear(&mut self) {
@@ -509,7 +516,7 @@ pub use solve_rate_trace::{
 #[cfg(feature = "integration_test")]
 mod halt_prob_trace {
     use super::*;
-    use burn_train::metric::{Metric, MetricEntry, MetricMetadata, format_float};
+    use burn_train::metric::{Metric, MetricMetadata, format_float};
     use std::sync::{Mutex, OnceLock};
 
     fn storage() -> &'static Mutex<Vec<f32>> {
@@ -569,14 +576,18 @@ mod halt_prob_trace {
             Arc::clone(&self.name)
         }
 
-        fn update(&mut self, item: &Self::Input, metadata: &MetricMetadata) -> MetricEntry {
-            if self.every > 1 && !metadata.iteration.is_multiple_of(self.every) && self.initialized
+        fn update(
+            &mut self,
+            item: &Self::Input,
+            metadata: &MetricMetadata,
+        ) -> burn_train::metric::SerializedEntry {
+            if self.every > 1
+                && self.initialized
+                && metadata
+                    .iteration
+                    .is_none_or(|iteration| iteration % self.every != 0)
             {
-                return MetricEntry::new(
-                    Arc::clone(&self.name),
-                    format_float(self.last, 4),
-                    self.last.to_string(),
-                );
+                return serialized_entry(format_float(self.last, 4), self.last.to_string());
             }
             let value = item
                 .value()
@@ -590,11 +601,7 @@ mod halt_prob_trace {
             if let Ok(mut trace) = storage().lock() {
                 trace.push(value as f32);
             }
-            MetricEntry::new(
-                Arc::clone(&self.name),
-                format_float(value, 4),
-                value.to_string(),
-            )
+            serialized_entry(format_float(value, 4), value.to_string())
         }
 
         fn clear(&mut self) {

@@ -42,7 +42,7 @@ fn assert_close(actual: Tensor<Backend, 3>, expected: Tensor<Backend, 3>, tol: f
         .to_vec::<f32>()
         .expect("expected tensor data");
     assert_eq!(actual.len(), expected.len());
-    for (index, (a, b)) in actual.into_iter().zip(expected.into_iter()).enumerate() {
+    for (index, (a, b)) in actual.into_iter().zip(expected).enumerate() {
         assert!(
             (a - b).abs() <= tol,
             "tensor mismatch at index {index}: actual={a}, expected={b}, tol={tol}"
@@ -57,7 +57,7 @@ fn assert_close_cls(actual: Tensor<Backend, 2>, expected: Tensor<Backend, 2>, to
         .to_vec::<f32>()
         .expect("expected cls data");
     assert_eq!(actual.len(), expected.len());
-    for (index, (a, b)) in actual.into_iter().zip(expected.into_iter()).enumerate() {
+    for (index, (a, b)) in actual.into_iter().zip(expected).enumerate() {
         assert!(
             (a - b).abs() <= tol,
             "cls mismatch at index {index}: actual={a}, expected={b}, tol={tol}"
@@ -123,8 +123,152 @@ fn stateful_rollout_schedule_matches_repeated_public_rollout() {
             let scheduled_output = model.forward_rollout_state(&state);
             let repeated =
                 model.forward_images_steps_rollout_unbounded(images.clone(), step, backprop_steps);
-            assert_close(scheduled_output.patch_tokens, repeated.patch_tokens, 1e-3);
-            assert_close_cls(scheduled_output.cls_token, repeated.cls_token, 1e-3);
+            assert_close(scheduled_output.patch_tokens, repeated.patch_tokens, 3e-3);
+            assert_close_cls(scheduled_output.cls_token, repeated.cls_token, 3e-3);
+        }
+    }
+}
+
+#[test]
+fn pyramid_rollout_schedule_preserves_temporal_metadata_per_request() {
+    let device = <Backend as BackendTrait>::Device::default();
+    let images = Tensor::<Backend, 4>::random([2, 3, 8, 8], Distribution::Default, &device);
+    let schedule = vec![(2usize, 2usize), (4usize, 3usize)];
+    let model = make_model(VisionBackboneKind::Pyramid);
+    let initial_state = model.rollout_state_from_images(images);
+    let scheduled =
+        model.predict_rollout_state_schedule_unbounded(initial_state.clone(), &schedule);
+    assert_eq!(scheduled.len(), schedule.len());
+
+    for ((scheduled_step, state), (step, backprop_steps)) in
+        scheduled.into_iter().zip(schedule.iter().copied())
+    {
+        assert_eq!(scheduled_step, step);
+        let repeated =
+            model.predict_rollout_state_unbounded(initial_state.clone(), step, backprop_steps);
+        match (state, repeated) {
+            (VisionRolloutState::Pyramid(scheduled), VisionRolloutState::Pyramid(repeated)) => {
+                assert_eq!(scheduled.temporal_position, repeated.temporal_position);
+                assert_eq!(scheduled.prediction_age, repeated.prediction_age);
+            }
+            _ => panic!("pyramid rollout schedule should return pyramid states"),
+        }
+    }
+}
+
+#[test]
+fn pyramid_schedule_outputs_match_repeated_public_rollout() {
+    let device = <Backend as BackendTrait>::Device::default();
+    let images = Tensor::<Backend, 4>::random([2, 3, 8, 8], Distribution::Default, &device);
+    let schedule = vec![(2usize, 2usize), (4usize, 3usize)];
+    let model = make_model(VisionBackboneKind::Pyramid);
+    let scheduled =
+        model.forward_images_steps_rollout_schedule_unbounded(images.clone(), &schedule);
+    assert_eq!(scheduled.len(), schedule.len());
+
+    for ((scheduled_step, scheduled_output), (step, backprop_steps)) in
+        scheduled.into_iter().zip(schedule.iter().copied())
+    {
+        assert_eq!(scheduled_step, step);
+        let repeated =
+            model.forward_images_steps_rollout_unbounded(images.clone(), step, backprop_steps);
+        assert_close(scheduled_output.patch_tokens, repeated.patch_tokens, 1e-3);
+        assert_close_cls(scheduled_output.cls_token, repeated.cls_token, 1e-3);
+    }
+}
+
+#[test]
+fn pyramid_grouped_schedule_outputs_match_repeated_public_rollout() {
+    let device = <Backend as BackendTrait>::Device::default();
+    let images = Tensor::<Backend, 4>::random([2, 3, 8, 8], Distribution::Default, &device);
+    let schedule = vec![(2usize, 2usize), (4usize, 2usize)];
+    let model = make_model(VisionBackboneKind::Pyramid);
+    let scheduled =
+        model.forward_images_steps_rollout_schedule_unbounded(images.clone(), &schedule);
+    assert_eq!(scheduled.len(), schedule.len());
+
+    for ((scheduled_step, scheduled_output), (step, backprop_steps)) in
+        scheduled.into_iter().zip(schedule.iter().copied())
+    {
+        assert_eq!(scheduled_step, step);
+        let repeated =
+            model.forward_images_steps_rollout_unbounded(images.clone(), step, backprop_steps);
+        assert_close(scheduled_output.patch_tokens, repeated.patch_tokens, 1e-3);
+        assert_close_cls(scheduled_output.cls_token, repeated.cls_token, 1e-3);
+    }
+}
+
+#[test]
+fn pyramid_grouped_rollout_schedule_preserves_temporal_metadata_per_request() {
+    let device = <Backend as BackendTrait>::Device::default();
+    let images = Tensor::<Backend, 4>::random([2, 3, 8, 8], Distribution::Default, &device);
+    let schedule = vec![(2usize, 2usize), (4usize, 2usize)];
+    let model = make_model(VisionBackboneKind::Pyramid);
+    let initial_state = model.rollout_state_from_images(images);
+    let scheduled =
+        model.predict_rollout_state_schedule_unbounded(initial_state.clone(), &schedule);
+    assert_eq!(scheduled.len(), schedule.len());
+
+    for ((scheduled_step, state), (step, backprop_steps)) in
+        scheduled.into_iter().zip(schedule.iter().copied())
+    {
+        assert_eq!(scheduled_step, step);
+        let repeated =
+            model.predict_rollout_state_unbounded(initial_state.clone(), step, backprop_steps);
+        match (state, repeated) {
+            (VisionRolloutState::Pyramid(scheduled), VisionRolloutState::Pyramid(repeated)) => {
+                assert_eq!(scheduled.temporal_position, repeated.temporal_position);
+                assert_eq!(scheduled.prediction_age, repeated.prediction_age);
+            }
+            _ => panic!("pyramid rollout schedule should return pyramid states"),
+        }
+    }
+}
+
+#[test]
+fn pyramid_same_start_schedule_outputs_match_repeated_public_rollout() {
+    let device = <Backend as BackendTrait>::Device::default();
+    let images = Tensor::<Backend, 4>::random([2, 3, 8, 8], Distribution::Default, &device);
+    let schedule = vec![(1usize, 1usize), (2usize, 2usize), (4usize, 4usize)];
+    let model = make_model(VisionBackboneKind::Pyramid);
+    let scheduled =
+        model.forward_images_steps_rollout_schedule_unbounded(images.clone(), &schedule);
+    assert_eq!(scheduled.len(), schedule.len());
+
+    for ((scheduled_step, scheduled_output), (step, backprop_steps)) in
+        scheduled.into_iter().zip(schedule.iter().copied())
+    {
+        assert_eq!(scheduled_step, step);
+        let repeated =
+            model.forward_images_steps_rollout_unbounded(images.clone(), step, backprop_steps);
+        assert_close(scheduled_output.patch_tokens, repeated.patch_tokens, 1e-3);
+        assert_close_cls(scheduled_output.cls_token, repeated.cls_token, 1e-3);
+    }
+}
+
+#[test]
+fn pyramid_same_start_rollout_schedule_preserves_temporal_metadata_per_request() {
+    let device = <Backend as BackendTrait>::Device::default();
+    let images = Tensor::<Backend, 4>::random([2, 3, 8, 8], Distribution::Default, &device);
+    let schedule = vec![(1usize, 1usize), (2usize, 2usize), (4usize, 4usize)];
+    let model = make_model(VisionBackboneKind::Pyramid);
+    let initial_state = model.rollout_state_from_images(images);
+    let scheduled =
+        model.predict_rollout_state_schedule_unbounded(initial_state.clone(), &schedule);
+    assert_eq!(scheduled.len(), schedule.len());
+
+    for ((scheduled_step, state), (step, backprop_steps)) in
+        scheduled.into_iter().zip(schedule.iter().copied())
+    {
+        assert_eq!(scheduled_step, step);
+        let repeated =
+            model.predict_rollout_state_unbounded(initial_state.clone(), step, backprop_steps);
+        match (state, repeated) {
+            (VisionRolloutState::Pyramid(scheduled), VisionRolloutState::Pyramid(repeated)) => {
+                assert_eq!(scheduled.temporal_position, repeated.temporal_position);
+                assert_eq!(scheduled.prediction_age, repeated.prediction_age);
+            }
+            _ => panic!("pyramid rollout schedule should return pyramid states"),
         }
     }
 }

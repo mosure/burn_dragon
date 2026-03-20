@@ -1,12 +1,15 @@
 [package]
 name = "burn_dragon_vision"
 description = "Foveation and vision sampling utilities for burn dragon"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
+rust-version = "1.85"
 authors = ["mosure <mitchell@mosure.me>"]
 license = "MIT OR Apache-2.0"
 keywords = ["vision", "foveation", "sampling", "burn"]
 categories = ["science", "science::neuroscience"]
+homepage = "https://github.com/mosure/burn_bdh"
+repository = "https://github.com/mosure/burn_bdh"
 readme = "../../README.md"
 
 [features]
@@ -47,10 +50,10 @@ cuda = ["dep:burn-cuda", "burn_dragon_core/cuda", "burn_dragon_train/cuda"]
 integration_test = ["train", "burn_dragon_train/integration_test"]
 
 [dependencies]
-burn_dragon_checkpoint = { path = "../burn_dragon_checkpoint", version = "0.4.0", default-features = false, optional = true }
-burn_dragon_core = { path = "../burn_dragon_core", version = "0.4.0", default-features = false }
-burn_dragon_wgpu = { path = "../burn_dragon_wgpu", version = "0.4.0", default-features = false }
-burn_dragon_train = { path = "../burn_dragon_train", version = "0.4.0", default-features = false, optional = true }
+burn_dragon_checkpoint = { path = "../burn_dragon_checkpoint", version = "0.5.0", default-features = false, optional = true }
+burn_dragon_core = { path = "../burn_dragon_core", version = "0.5.0", default-features = false }
+burn_dragon_kernel = { path = "../burn_dragon_kernel", version = "0.5.0", default-features = false }
+burn_dragon_train = { path = "../burn_dragon_train", version = "0.5.0", default-features = false, optional = true }
 anyhow = { version = "1", optional = true }
 burn = { version = "0.21.0-pre.2", default-features = false, features = ["fusion", "ndarray", "std", "wgpu"] }
 burn-autodiff = { version = "0.21.0-pre.2", optional = true }
@@ -80,6 +83,7 @@ serde_yaml = { version = "0.9", optional = true }
 rand = { version = "0.8", optional = true }
 clap = { version = "4.5", features = ["derive"], optional = true }
 ctrlc = { version = "3.4", optional = true }
+half = "2"
 
 [[bin]]
 name = "train"
@@ -87,6 +91,6 @@ path = "src/bin/train.rs"
 required-features = ["cli"]
 
 [dev-dependencies]
-burn_dragon_language = { path = "../burn_dragon_language", version = "0.4.0", default-features = false, features = ["train"] }
+burn_dragon_language = { path = "../burn_dragon_language", version = "0.5.0", default-features = false, features = ["train"] }
 burn-ndarray = { version = "0.21.0-pre.2" }
 tempfile = "3"

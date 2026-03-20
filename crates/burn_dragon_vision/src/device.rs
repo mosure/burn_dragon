@@ -1,5 +1,7 @@
+#[cfg(feature = "train")]
 use std::sync::{Mutex, OnceLock};
 
+#[cfg(feature = "train")]
 pub(crate) fn device_allocation_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
@@ -13,6 +15,3 @@ pub(crate) fn pin_stream_zero() {
         burn_fusion::stream::StreamId::swap(burn_fusion::stream::StreamId { value: 0 });
     }
 }
-
-#[cfg(not(feature = "train"))]
-pub(crate) fn pin_stream_zero() {}

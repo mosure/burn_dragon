@@ -1,8 +1,9 @@
 [package]
 name = "burn_dragon_graph"
 description = "graph/topology adapters for burn dragon structured recurrent state"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
+rust-version = "1.85"
 authors = ["mosure <mitchell@mosure.me>"]
 license = "MIT OR Apache-2.0"
 keywords = [
@@ -24,9 +25,9 @@ default = []
 benchmark = ["dep:burn-autodiff", "dep:burn-wgpu", "dep:pollster", "dep:wgpu"]
 
 [dependencies]
-burn_dragon_core = { path = "../burn_dragon_core", version = "0.4.0" }
-burn_dragon_wgpu = { path = "../burn_dragon_wgpu", version = "0.4.0" }
-burn_dragon_checkpoint = { path = "../burn_dragon_checkpoint", version = "0.4.0", default-features = false }
+burn_dragon_core = { path = "../burn_dragon_core", version = "0.5.0" }
+burn_dragon_kernel = { path = "../burn_dragon_kernel", version = "0.5.0" }
+burn_dragon_checkpoint = { path = "../burn_dragon_checkpoint", version = "0.5.0", default-features = false }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 toml = "0.9"

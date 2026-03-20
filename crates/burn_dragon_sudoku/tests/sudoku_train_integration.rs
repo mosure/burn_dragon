@@ -55,8 +55,8 @@ fn write_dataset(root: &Path) {
 }
 
 fn write_trivial_dataset(root: &Path) {
-    let puzzle: String = std::iter::repeat('0').take(GRID_LEN).collect();
-    let solution: String = std::iter::repeat('1').take(GRID_LEN).collect();
+    let puzzle = "0".repeat(GRID_LEN);
+    let solution = "1".repeat(GRID_LEN);
     let line = format!(r#"{{"puzzle":"{puzzle}","solution":"{solution}"}}"#);
     let train_payload = [line.as_str(), line.as_str()].join("\n");
     let valid_payload = line;
@@ -106,7 +106,6 @@ fn cpu_sudoku_training_loss_decreases() {
             weight: 0.1,
             exploration_prob: 0.0,
             min_steps: 1,
-            ..SudokuHaltConfig::default()
         },
         policy: SudokuPolicyConfig {
             noise: 0.2,
@@ -135,7 +134,6 @@ fn cpu_sudoku_training_loss_decreases() {
             min_filled_frac: 0.0,
             min_filled_final: 0.0,
             min_filled_anneal_steps: 0,
-            ..SudokuRevisitConfig::default()
         },
         reward: SudokuRewardConfig {
             unknown_power: 0.0,
@@ -254,7 +252,6 @@ fn cpu_sudoku_validation_solve_rate_gate() {
             weight: 0.2,
             exploration_prob: 0.0,
             min_steps: 1,
-            ..SudokuHaltConfig::default()
         },
         policy: SudokuPolicyConfig {
             noise: 0.0,
@@ -283,7 +280,6 @@ fn cpu_sudoku_validation_solve_rate_gate() {
             min_filled_frac: 1.0,
             min_filled_final: 1.0,
             min_filled_anneal_steps: 0,
-            ..SudokuRevisitConfig::default()
         },
         reward: SudokuRewardConfig {
             unknown_power: 1.0,
@@ -429,7 +425,6 @@ fn run_single_cuda_step(device: &CudaDevice, rollout_steps: usize) -> Option<Mem
             weight: 0.1,
             exploration_prob: 0.0,
             min_steps: 1,
-            ..SudokuHaltConfig::default()
         },
         policy: SudokuPolicyConfig {
             noise: 0.0,
@@ -458,7 +453,6 @@ fn run_single_cuda_step(device: &CudaDevice, rollout_steps: usize) -> Option<Mem
             min_filled_frac: 0.0,
             min_filled_final: 0.0,
             min_filled_anneal_steps: 0,
-            ..SudokuRevisitConfig::default()
         },
         reward: SudokuRewardConfig {
             unknown_power: 0.0,
@@ -491,7 +485,7 @@ fn run_single_cuda_step(device: &CudaDevice, rollout_steps: usize) -> Option<Mem
 
     let output = trainer.step(batch);
     drop(output);
-    Cuda::<f32>::sync(device);
+    let _ = Cuda::<f32>::sync(device);
 
     cuda_snapshot(device)
 }

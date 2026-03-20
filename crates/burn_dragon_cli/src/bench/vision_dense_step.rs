@@ -19,8 +19,7 @@ use burn_wgpu::{CubeBackend, RuntimeOptions, WgpuRuntime, graphics};
 use serde::Serialize;
 
 pub type VisionDenseStepBenchBackend = CubeBackend<WgpuRuntime, f32, i32, u32>;
-pub type VisionDenseStepBenchDevice =
-    <VisionDenseStepBenchBackend as BackendTrait>::Device;
+pub type VisionDenseStepBenchDevice = <VisionDenseStepBenchBackend as BackendTrait>::Device;
 
 #[derive(Clone, Debug)]
 pub struct VisionDenseStepBenchConfig {
@@ -208,7 +207,10 @@ pub fn run_vision_dense_step_bench(
     );
 
     let model = VisionDragon::<VisionDenseStepBenchBackend>::new(vision_config.clone(), &device);
-    let batch_size = bench.batch_size.unwrap_or(config.training.batch_size).max(1);
+    let batch_size = bench
+        .batch_size
+        .unwrap_or(config.training.batch_size)
+        .max(1);
     let patch_grid = vision_config
         .image_size
         .div_ceil(vision_config.patch_size.max(1))

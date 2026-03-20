@@ -139,6 +139,235 @@ impl<B: Backend> CompiledStageAwarePyramidLocalPlan<B> {
     }
 }
 
+#[derive(Clone)]
+pub(super) struct CompiledSpatialProjectionPlan<B: Backend> {
+    fused_weight: Tensor<B, 2>,
+    fused_bias: Option<Tensor<B, 1>>,
+    out_dims: Vec<usize>,
+}
+
+impl<B: Backend> CompiledSpatialProjectionPlan<B> {
+    pub(super) fn new(layers: &[&Linear<B>]) -> Option<Self> {
+        if layers.len() <= 1 {
+            return None;
+        }
+        let out_dims = layers
+            .iter()
+            .map(|layer| layer.weight.val().shape().dims::<2>()[1])
+            .collect::<Vec<_>>();
+        let fused_weight = Tensor::cat(
+            layers
+                .iter()
+                .map(|layer| layer.weight.val())
+                .collect::<Vec<_>>(),
+            1,
+        );
+        let fused_bias = if layers.iter().any(|layer| layer.bias.is_some()) {
+            Some(Tensor::cat(
+                layers
+                    .iter()
+                    .zip(out_dims.iter())
+                    .map(|(layer, &out_dim)| {
+                        layer
+                            .bias
+                            .as_ref()
+                            .map(|bias| bias.val())
+                            .unwrap_or_else(|| {
+                                Tensor::<B, 1>::zeros([out_dim], &fused_weight.device())
+                            })
+                    })
+                    .collect::<Vec<_>>(),
+                0,
+            ))
+        } else {
+            None
+        };
+        Some(Self {
+            fused_weight,
+            fused_bias,
+            out_dims,
+        })
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct CompiledLocalBridgeProjectionPairPlan<B: Backend> {
+    fused_weight: Tensor<B, 2>,
+    fused_bias: Option<Tensor<B, 1>>,
+    patch_x_dim: usize,
+    coarse_x_dim: usize,
+    value_dim: usize,
+}
+
+impl<B: Backend> CompiledLocalBridgeProjectionPairPlan<B> {
+    pub(super) fn new(
+        patch_x_proj: &Linear<B>,
+        coarse_x_proj: &Linear<B>,
+        value_proj: &Linear<B>,
+    ) -> Option<Self> {
+        let [patch_in, patch_out] = patch_x_proj.weight.val().shape().dims::<2>();
+        let [coarse_in, coarse_out] = coarse_x_proj.weight.val().shape().dims::<2>();
+        let [value_in, value_out] = value_proj.weight.val().shape().dims::<2>();
+        if patch_in != coarse_in || patch_in != value_in {
+            return None;
+        }
+        let fused_weight = Tensor::cat(
+            vec![
+                patch_x_proj.weight.val(),
+                coarse_x_proj.weight.val(),
+                value_proj.weight.val(),
+            ],
+            1,
+        );
+        let fused_bias = if patch_x_proj.bias.is_some()
+            || coarse_x_proj.bias.is_some()
+            || value_proj.bias.is_some()
+        {
+            Some(Tensor::cat(
+                vec![
+                    patch_x_proj
+                        .bias
+                        .as_ref()
+                        .map(|bias| bias.val())
+                        .unwrap_or_else(|| {
+                            Tensor::<B, 1>::zeros([patch_out], &fused_weight.device())
+                        }),
+                    coarse_x_proj
+                        .bias
+                        .as_ref()
+                        .map(|bias| bias.val())
+                        .unwrap_or_else(|| {
+                            Tensor::<B, 1>::zeros([coarse_out], &fused_weight.device())
+                        }),
+                    value_proj
+                        .bias
+                        .as_ref()
+                        .map(|bias| bias.val())
+                        .unwrap_or_else(|| {
+                            Tensor::<B, 1>::zeros([value_out], &fused_weight.device())
+                        }),
+                ],
+                0,
+            ))
+        } else {
+            None
+        };
+        Some(Self {
+            fused_weight,
+            fused_bias,
+            patch_x_dim: patch_out,
+            coarse_x_dim: coarse_out,
+            value_dim: value_out,
+        })
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct CompiledStructuredDenseUpdatePairPlan<B: Backend> {
+    fused_y_gate_weight: Tensor<B, 2>,
+    fused_y_gate_bias: Option<Tensor<B, 1>>,
+    fused_delta_weight: Tensor<B, 2>,
+    fused_delta_bias: Option<Tensor<B, 1>>,
+    gate_dim: usize,
+    patch_delta_dim: usize,
+    coarse_delta_dim: usize,
+}
+
+impl<B: Backend> CompiledStructuredDenseUpdatePairPlan<B> {
+    pub(super) fn new(
+        patch_y_gate_proj: &Linear<B>,
+        patch_delta_proj: &Linear<B>,
+        coarse_y_gate_proj: &Linear<B>,
+        coarse_delta_proj: &Linear<B>,
+    ) -> Option<Self> {
+        let [patch_gate_in, patch_gate_out] = patch_y_gate_proj.weight.val().shape().dims::<2>();
+        let [coarse_gate_in, coarse_gate_out] = coarse_y_gate_proj.weight.val().shape().dims::<2>();
+        let [patch_delta_in, patch_delta_out] = patch_delta_proj.weight.val().shape().dims::<2>();
+        let [coarse_delta_in, coarse_delta_out] =
+            coarse_delta_proj.weight.val().shape().dims::<2>();
+        if patch_gate_in != coarse_gate_in
+            || patch_gate_out != patch_delta_in
+            || coarse_gate_out != coarse_delta_in
+            || patch_delta_in != coarse_delta_in
+        {
+            return None;
+        }
+        let fused_y_gate_weight = Tensor::cat(
+            vec![
+                patch_y_gate_proj.weight.val(),
+                coarse_y_gate_proj.weight.val(),
+            ],
+            1,
+        );
+        let fused_y_gate_bias = if patch_y_gate_proj.bias.is_some()
+            || coarse_y_gate_proj.bias.is_some()
+        {
+            Some(Tensor::cat(
+                vec![
+                    patch_y_gate_proj
+                        .bias
+                        .as_ref()
+                        .map(|bias| bias.val())
+                        .unwrap_or_else(|| {
+                            Tensor::<B, 1>::zeros([patch_gate_out], &fused_y_gate_weight.device())
+                        }),
+                    coarse_y_gate_proj
+                        .bias
+                        .as_ref()
+                        .map(|bias| bias.val())
+                        .unwrap_or_else(|| {
+                            Tensor::<B, 1>::zeros([coarse_gate_out], &fused_y_gate_weight.device())
+                        }),
+                ],
+                0,
+            ))
+        } else {
+            None
+        };
+        let fused_delta_weight = Tensor::cat(
+            vec![
+                patch_delta_proj.weight.val(),
+                coarse_delta_proj.weight.val(),
+            ],
+            1,
+        );
+        let fused_delta_bias = if patch_delta_proj.bias.is_some()
+            || coarse_delta_proj.bias.is_some()
+        {
+            Some(Tensor::cat(
+                vec![
+                    patch_delta_proj
+                        .bias
+                        .as_ref()
+                        .map(|bias| bias.val())
+                        .unwrap_or_else(|| {
+                            Tensor::<B, 1>::zeros([patch_delta_out], &fused_delta_weight.device())
+                        }),
+                    coarse_delta_proj
+                        .bias
+                        .as_ref()
+                        .map(|bias| bias.val())
+                        .unwrap_or_else(|| {
+                            Tensor::<B, 1>::zeros([coarse_delta_out], &fused_delta_weight.device())
+                        }),
+                ],
+                0,
+            ))
+        } else {
+            None
+        };
+        Some(Self {
+            fused_y_gate_weight,
+            fused_y_gate_bias,
+            fused_delta_weight,
+            fused_delta_bias,
+            gate_dim: patch_gate_out,
+            patch_delta_dim: patch_delta_out,
+            coarse_delta_dim: coarse_delta_out,
+        })
+    }
+}
+
 // Retain the older pyramid helper surface for debug/reference use while the
 // active recurrent path migrates onto the shared structured-pyramid executor.
 #[allow(dead_code)]
@@ -357,6 +586,42 @@ impl<B: Backend> VisionDragon<B> {
         outputs
     }
 
+    pub(super) fn project_spatial_many_with_plan(
+        &self,
+        input: Tensor<B, 4>,
+        plan: &CompiledSpatialProjectionPlan<B>,
+    ) -> Vec<Tensor<B, 4>> {
+        let [batch, dim, height, width] = input.shape().dims::<4>();
+        if batch == 0 || dim == 0 || height == 0 || width == 0 {
+            return plan
+                .out_dims
+                .iter()
+                .map(|&out_dim| {
+                    Tensor::<B, 4>::zeros([batch, out_dim, height, width], &input.device())
+                })
+                .collect();
+        }
+        let flat = input
+            .swap_dims(1, 3)
+            .swap_dims(1, 2)
+            .reshape([batch * height * width, dim]);
+        let fused =
+            burn::tensor::module::linear(flat, plan.fused_weight.clone(), plan.fused_bias.clone());
+        let mut outputs = Vec::with_capacity(plan.out_dims.len());
+        let mut start = 0;
+        for &out_dim in &plan.out_dims {
+            let projected = fused.clone().slice_dim(1, start..start + out_dim);
+            outputs.push(
+                projected
+                    .reshape([batch, height, width, out_dim])
+                    .swap_dims(1, 3)
+                    .swap_dims(2, 3),
+            );
+            start += out_dim;
+        }
+        outputs
+    }
+
     pub(super) fn project_spatial_pair(
         &self,
         left: Tensor<B, 4>,
@@ -415,6 +680,127 @@ impl<B: Backend> VisionDragon<B> {
             .swap_dims(1, 3)
             .swap_dims(2, 3);
         (left, right)
+    }
+
+    pub(super) fn project_local_bridge_pair_with_plan(
+        &self,
+        patch_state: Tensor<B, 4>,
+        coarse_state: Tensor<B, 4>,
+        plan: &CompiledLocalBridgeProjectionPairPlan<B>,
+    ) -> (Tensor<B, 4>, Tensor<B, 4>, Tensor<B, 4>, Tensor<B, 4>) {
+        let [patch_batch, patch_dim, patch_height, patch_width] = patch_state.shape().dims::<4>();
+        let [coarse_batch, coarse_dim, coarse_height, coarse_width] =
+            coarse_state.shape().dims::<4>();
+        if patch_batch == 0
+            || patch_dim == 0
+            || patch_height == 0
+            || patch_width == 0
+            || coarse_batch == 0
+            || coarse_dim == 0
+            || coarse_height == 0
+            || coarse_width == 0
+        {
+            return (
+                Tensor::<B, 4>::zeros(
+                    [
+                        patch_batch.max(1),
+                        plan.patch_x_dim.max(1),
+                        patch_height.max(1),
+                        patch_width.max(1),
+                    ],
+                    &patch_state.device(),
+                ),
+                Tensor::<B, 4>::zeros(
+                    [
+                        patch_batch.max(1),
+                        plan.value_dim.max(1),
+                        patch_height.max(1),
+                        patch_width.max(1),
+                    ],
+                    &patch_state.device(),
+                ),
+                Tensor::<B, 4>::zeros(
+                    [
+                        coarse_batch.max(1),
+                        plan.coarse_x_dim.max(1),
+                        coarse_height.max(1),
+                        coarse_width.max(1),
+                    ],
+                    &coarse_state.device(),
+                ),
+                Tensor::<B, 4>::zeros(
+                    [
+                        coarse_batch.max(1),
+                        plan.value_dim.max(1),
+                        coarse_height.max(1),
+                        coarse_width.max(1),
+                    ],
+                    &coarse_state.device(),
+                ),
+            );
+        }
+        assert_eq!(
+            patch_batch, coarse_batch,
+            "bridge pair projection requires matching batch dimensions"
+        );
+        assert_eq!(
+            patch_dim, coarse_dim,
+            "bridge pair projection requires matching channel dimensions"
+        );
+        let patch_tokens = patch_height * patch_width;
+        let coarse_tokens = coarse_height * coarse_width;
+        let patch = patch_state.swap_dims(1, 3).swap_dims(1, 2).reshape([
+            patch_batch,
+            patch_tokens,
+            patch_dim,
+        ]);
+        let coarse = coarse_state.swap_dims(1, 3).swap_dims(1, 2).reshape([
+            coarse_batch,
+            coarse_tokens,
+            coarse_dim,
+        ]);
+        let tokens = Tensor::cat(vec![patch, coarse], 1);
+        let flat = tokens.reshape([patch_batch * (patch_tokens + coarse_tokens), patch_dim]);
+        let fused =
+            burn::tensor::module::linear(flat, plan.fused_weight.clone(), plan.fused_bias.clone())
+                .reshape([
+                    patch_batch,
+                    patch_tokens + coarse_tokens,
+                    plan.patch_x_dim + plan.coarse_x_dim + plan.value_dim,
+                ]);
+        let patch_all = fused.clone().slice_dim(1, 0..patch_tokens);
+        let coarse_all = fused.slice_dim(1, patch_tokens..patch_tokens + coarse_tokens);
+        let patch_x = patch_all
+            .clone()
+            .slice_dim(2, 0..plan.patch_x_dim)
+            .reshape([patch_batch, patch_height, patch_width, plan.patch_x_dim])
+            .swap_dims(1, 3)
+            .swap_dims(2, 3);
+        let patch_value = patch_all
+            .slice_dim(
+                2,
+                plan.patch_x_dim + plan.coarse_x_dim
+                    ..plan.patch_x_dim + plan.coarse_x_dim + plan.value_dim,
+            )
+            .reshape([patch_batch, patch_height, patch_width, plan.value_dim])
+            .swap_dims(1, 3)
+            .swap_dims(2, 3);
+        let coarse_x = coarse_all
+            .clone()
+            .slice_dim(2, plan.patch_x_dim..plan.patch_x_dim + plan.coarse_x_dim)
+            .reshape([coarse_batch, coarse_height, coarse_width, plan.coarse_x_dim])
+            .swap_dims(1, 3)
+            .swap_dims(2, 3);
+        let coarse_value = coarse_all
+            .slice_dim(
+                2,
+                plan.patch_x_dim + plan.coarse_x_dim
+                    ..plan.patch_x_dim + plan.coarse_x_dim + plan.value_dim,
+            )
+            .reshape([coarse_batch, coarse_height, coarse_width, plan.value_dim])
+            .swap_dims(1, 3)
+            .swap_dims(2, 3);
+        (patch_x, patch_value, coarse_x, coarse_value)
     }
 
     pub(super) fn pyramid_patch_tokens_to_spatial(
@@ -851,6 +1237,171 @@ impl<B: Backend> VisionDragon<B> {
         .swap_dims(2, 3);
         let next = state + delta;
         self.apply_embed_norm_spatial(next)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn pyramid_update_states_separate_with_plan(
+        &self,
+        patch_state: Tensor<B, 4>,
+        patch_x: Tensor<B, 4>,
+        patch_msg: Tensor<B, 4>,
+        coarse_state: Tensor<B, 4>,
+        coarse_x: Tensor<B, 4>,
+        coarse_msg: Tensor<B, 4>,
+        pyramid_value_norm: &DragonNorm<B>,
+        plan: &CompiledStructuredDenseUpdatePairPlan<B>,
+    ) -> (Tensor<B, 4>, Tensor<B, 4>) {
+        let [batch, patch_dense_dim, patch_height, patch_width] = patch_state.shape().dims::<4>();
+        let [coarse_batch, coarse_dense_dim, coarse_height, coarse_width] =
+            coarse_state.shape().dims::<4>();
+        let [patch_x_batch, patch_rank, patch_x_height, patch_x_width] =
+            patch_x.shape().dims::<4>();
+        let [coarse_x_batch, coarse_rank, coarse_x_height, coarse_x_width] =
+            coarse_x.shape().dims::<4>();
+        let [
+            patch_msg_batch,
+            value_dim,
+            patch_msg_height,
+            patch_msg_width,
+        ] = patch_msg.shape().dims::<4>();
+        let [
+            coarse_msg_batch,
+            coarse_value_dim,
+            coarse_msg_height,
+            coarse_msg_width,
+        ] = coarse_msg.shape().dims::<4>();
+        assert_eq!(coarse_batch, batch, "coarse batch must match patch batch");
+        assert_eq!(patch_x_batch, batch, "patch x batch must match state batch");
+        assert_eq!(
+            coarse_x_batch, batch,
+            "coarse x batch must match state batch"
+        );
+        assert_eq!(
+            patch_msg_batch, batch,
+            "patch msg batch must match state batch"
+        );
+        assert_eq!(
+            coarse_msg_batch, batch,
+            "coarse msg batch must match state batch"
+        );
+        assert_eq!(
+            patch_x_height, patch_height,
+            "patch x height must match patch state height"
+        );
+        assert_eq!(
+            patch_x_width, patch_width,
+            "patch x width must match patch state width"
+        );
+        assert_eq!(
+            coarse_x_height, coarse_height,
+            "coarse x height must match coarse state height"
+        );
+        assert_eq!(
+            coarse_x_width, coarse_width,
+            "coarse x width must match coarse state width"
+        );
+        assert_eq!(
+            patch_msg_height, patch_height,
+            "patch msg height must match patch state height"
+        );
+        assert_eq!(
+            patch_msg_width, patch_width,
+            "patch msg width must match patch state width"
+        );
+        assert_eq!(
+            coarse_msg_height, coarse_height,
+            "coarse msg height must match coarse state height"
+        );
+        assert_eq!(
+            coarse_msg_width, coarse_width,
+            "coarse msg width must match coarse state width"
+        );
+        assert_eq!(
+            coarse_value_dim, value_dim,
+            "coarse value dim must match patch value dim"
+        );
+        assert_eq!(
+            patch_rank, coarse_rank,
+            "paired fused update requires matching ranks"
+        );
+        assert_eq!(
+            patch_rank, plan.gate_dim,
+            "compiled update plan gate dim must match patch/coarse rank"
+        );
+
+        let patch_tokens = patch_height * patch_width;
+        let coarse_tokens = coarse_height * coarse_width;
+        let total_tokens = patch_tokens + coarse_tokens;
+
+        let patch_x_tokens =
+            patch_x
+                .swap_dims(1, 3)
+                .swap_dims(1, 2)
+                .reshape([batch, patch_tokens, patch_rank]);
+        let coarse_x_tokens =
+            coarse_x
+                .swap_dims(1, 3)
+                .swap_dims(1, 2)
+                .reshape([batch, coarse_tokens, coarse_rank]);
+        let patch_msg_tokens =
+            patch_msg
+                .swap_dims(1, 3)
+                .swap_dims(1, 2)
+                .reshape([batch, patch_tokens, value_dim]);
+        let coarse_msg_tokens =
+            coarse_msg
+                .swap_dims(1, 3)
+                .swap_dims(1, 2)
+                .reshape([batch, coarse_tokens, value_dim]);
+        let msg_tokens = Tensor::cat(vec![patch_msg_tokens, coarse_msg_tokens], 1);
+        let msg_tokens = pyramid_value_norm.forward(msg_tokens);
+        let fused_y_gate = burn::tensor::module::linear(
+            msg_tokens.reshape([batch * total_tokens, value_dim]),
+            plan.fused_y_gate_weight.clone(),
+            plan.fused_y_gate_bias.clone(),
+        )
+        .reshape([batch, total_tokens, patch_rank * 2]);
+        let patch_y_gate = activation::relu(
+            fused_y_gate
+                .clone()
+                .slice_dim(1, 0..patch_tokens)
+                .slice_dim(2, 0..patch_rank),
+        );
+        let coarse_y_gate = activation::relu(
+            fused_y_gate
+                .slice_dim(1, patch_tokens..patch_tokens + coarse_tokens)
+                .slice_dim(2, patch_rank..patch_rank * 2),
+        );
+        let patch_y_neuron = patch_y_gate.mul(patch_x_tokens);
+        let coarse_y_neuron = coarse_y_gate.mul(coarse_x_tokens);
+        let y_neuron = Tensor::cat(vec![patch_y_neuron, coarse_y_neuron], 1);
+        let fused_delta = burn::tensor::module::linear(
+            y_neuron.reshape([batch * total_tokens, patch_rank]),
+            plan.fused_delta_weight.clone(),
+            plan.fused_delta_bias.clone(),
+        )
+        .reshape([
+            batch,
+            total_tokens,
+            plan.patch_delta_dim + plan.coarse_delta_dim,
+        ]);
+        let patch_delta = fused_delta
+            .clone()
+            .slice_dim(1, 0..patch_tokens)
+            .slice_dim(2, 0..plan.patch_delta_dim)
+            .reshape([batch, patch_height, patch_width, patch_dense_dim])
+            .swap_dims(1, 3)
+            .swap_dims(2, 3);
+        let coarse_delta = fused_delta
+            .slice_dim(1, patch_tokens..patch_tokens + coarse_tokens)
+            .slice_dim(
+                2,
+                plan.patch_delta_dim..plan.patch_delta_dim + plan.coarse_delta_dim,
+            )
+            .reshape([batch, coarse_height, coarse_width, coarse_dense_dim])
+            .swap_dims(1, 3)
+            .swap_dims(2, 3);
+        self.apply_embed_norm_spatial_pair(patch_state + patch_delta, coarse_state + coarse_delta)
     }
 
     #[allow(clippy::too_many_arguments, dead_code)]

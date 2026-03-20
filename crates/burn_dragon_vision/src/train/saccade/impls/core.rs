@@ -697,7 +697,7 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
     {
         let gdpo_group = inputs.gdpo_group;
         let batch = inputs.hard_reward.shape().dims::<1>()[0];
-        if gdpo_group == 0 || batch == 0 || !batch.is_multiple_of(gdpo_group) {
+        if gdpo_group == 0 || batch == 0 || batch % gdpo_group != 0 {
             return None;
         }
         let scene_batch = batch / gdpo_group;

@@ -83,7 +83,7 @@ pub(crate) fn rollout_losses_train_trm_constraint_ca<B: AutodiffBackend>(
 
         for _ in 0..chunk_len {
             let step_idx = steps_done + 1;
-            if recon_interval > 0 && step_idx.is_multiple_of(recon_interval) {
+            if recon_interval > 0 && step_idx % recon_interval == 0 {
                 let logits = trainer.model.value_logits_from_cache(cell_state.clone());
                 final_logits = logits.clone();
                 let mut loss_mask = ones_grid.clone();
@@ -278,7 +278,7 @@ pub(crate) fn rollout_losses_valid_trm_constraint_ca<B: BackendTrait>(
 
     while steps_done < rollout_steps {
         let step_idx = steps_done + 1;
-        if recon_interval > 0 && step_idx.is_multiple_of(recon_interval) {
+        if recon_interval > 0 && step_idx % recon_interval == 0 {
             let logits = model.value_logits_from_cache(cell_state.clone());
             final_logits = logits.clone();
             let mut loss_mask = ones_grid.clone();
@@ -658,7 +658,7 @@ pub(crate) fn rollout_losses_valid_trm_chunk<B: BackendTrait>(
 
         if recon_interval > 0 && global_samples > 0 {
             let chunk_idx = steps_done / trm_chunk_size;
-            if (chunk_idx + 1).is_multiple_of(recon_interval) {
+            if (chunk_idx + 1) % recon_interval == 0 {
                 let cache_read =
                     cache
                         .clone()

@@ -1,5 +1,7 @@
 pub mod byte;
 pub mod char_vocab;
+pub mod pretokenized;
+pub mod rust_bpe;
 
 use std::sync::Arc;
 
@@ -12,6 +14,10 @@ use anyhow::{Result, anyhow};
 use byte::ByteTokenizer;
 #[cfg(feature = "train")]
 use char_vocab::CharVocab;
+#[cfg(feature = "train")]
+use pretokenized::PretokenizedTokenizer;
+#[cfg(feature = "train")]
+use rust_bpe::RustBpeTokenizer;
 #[cfg(feature = "train")]
 use serde::{Deserialize, Serialize};
 
@@ -54,6 +60,8 @@ impl Default for TokenizerConfig {
 pub enum TokenizerKind {
     Char(CharTokenizerConfig),
     Byte(ByteTokenizerConfig),
+    Pretokenized(PretokenizedTokenizerConfig),
+    RustBpe(RustBpeTokenizerConfig),
 }
 
 #[cfg(feature = "train")]
@@ -89,6 +97,36 @@ impl Default for ByteTokenizerConfig {
 }
 
 #[cfg(feature = "train")]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct PretokenizedTokenizerConfig {
+    pub vocab_size: usize,
+    #[serde(default)]
+    pub bos_id: Option<u32>,
+    #[serde(default)]
+    pub eos_id: Option<u32>,
+    #[serde(default)]
+    pub pad_id: Option<u32>,
+    #[serde(default)]
+    pub unk_id: Option<u32>,
+}
+
+#[cfg(feature = "train")]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct RustBpeTokenizerConfig {
+    pub mergeable_vocab_size: usize,
+    #[serde(default)]
+    pub pattern: Option<String>,
+    #[serde(default)]
+    pub bos_id: Option<u32>,
+    #[serde(default)]
+    pub eos_id: Option<u32>,
+    #[serde(default)]
+    pub pad_id: Option<u32>,
+    #[serde(default)]
+    pub unk_id: Option<u32>,
+}
+
+#[cfg(feature = "train")]
 impl TokenizerConfig {
     pub fn storage_path(&self, cache_dir: &Path) -> Option<PathBuf> {
         match &self.kind {
@@ -97,7 +135,12 @@ impl TokenizerConfig {
                 Some(path) => cache_dir.join(path),
                 None => cache_dir.join("vocab.json"),
             }),
-            TokenizerKind::Byte(_) => None,
+            TokenizerKind::RustBpe(_) => Some(match &self.vocab_path {
+                Some(path) if path.is_absolute() => path.clone(),
+                Some(path) => cache_dir.join(path),
+                None => cache_dir.join("tokenizer.rustbpe.json"),
+            }),
+            TokenizerKind::Byte(_) | TokenizerKind::Pretokenized(_) => None,
         }
     }
 
@@ -110,6 +153,21 @@ impl TokenizerConfig {
             TokenizerKind::Byte(config) => {
                 Ok(Arc::new(ByteTokenizer::new(config.add_special_tokens)) as SharedTokenizer)
             }
+            TokenizerKind::Pretokenized(config) => Ok(Arc::new(PretokenizedTokenizer::new(
+                config.vocab_size,
+                config.bos_id,
+                config.eos_id,
+                config.pad_id,
+                config.unk_id,
+            )) as SharedTokenizer),
+            TokenizerKind::RustBpe(config) => Ok(Arc::new(RustBpeTokenizer::load(
+                path,
+                config.mergeable_vocab_size,
+                config.bos_id,
+                config.eos_id,
+                config.pad_id,
+                config.unk_id,
+            )?) as SharedTokenizer),
         }
     }
 
@@ -125,6 +183,25 @@ impl TokenizerConfig {
             TokenizerKind::Byte(config) => {
                 Ok(Arc::new(ByteTokenizer::new(config.add_special_tokens)) as SharedTokenizer)
             }
+            TokenizerKind::Pretokenized(config) => Ok(Arc::new(PretokenizedTokenizer::new(
+                config.vocab_size,
+                config.bos_id,
+                config.eos_id,
+                config.pad_id,
+                config.unk_id,
+            )) as SharedTokenizer),
+            TokenizerKind::RustBpe(config) => {
+                let mut tokenizer = RustBpeTokenizer::new_untrained(
+                    config.mergeable_vocab_size,
+                    config.pattern.as_deref(),
+                    config.bos_id,
+                    config.eos_id,
+                    config.pad_id,
+                    config.unk_id,
+                )?;
+                tokenizer.train_from_texts(texts)?;
+                Ok(Arc::new(tokenizer) as SharedTokenizer)
+            }
         }
     }
 
@@ -137,7 +214,14 @@ impl TokenizerConfig {
                     .ok_or_else(|| anyhow!("expected char tokenizer"))?;
                 vocab.save(path)
             }
-            TokenizerKind::Byte(_) => Ok(()),
+            TokenizerKind::RustBpe(_) => {
+                let tokenizer = tokenizer
+                    .as_any()
+                    .downcast_ref::<RustBpeTokenizer>()
+                    .ok_or_else(|| anyhow!("expected rust_bpe tokenizer"))?;
+                tokenizer.save(path)
+            }
+            TokenizerKind::Byte(_) | TokenizerKind::Pretokenized(_) => Ok(()),
         }
     }
 
@@ -161,7 +245,7 @@ impl TokenizerConfig {
                 }
                 Ok(())
             }
-            TokenizerKind::Byte(_) => Ok(()),
+            TokenizerKind::Byte(_) | TokenizerKind::Pretokenized(_) => Ok(()),
             _ => Ok(()),
         }
     }
@@ -170,6 +254,8 @@ impl TokenizerConfig {
         match &self.kind {
             TokenizerKind::Char(_) => "char",
             TokenizerKind::Byte(_) => "byte",
+            TokenizerKind::Pretokenized(_) => "pretokenized",
+            TokenizerKind::RustBpe(_) => "rust_bpe",
         }
     }
 }

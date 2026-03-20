@@ -14,6 +14,8 @@ use burn_dragon_checkpoint::{
     resolve_checkpoint_run_dir as resolve_checkpoint_run_dir_shared, run_snapshot_path,
     write_json_snapshot,
 };
+use burn_dragon_train::train::metrics::MetricsSinkSpec;
+use burn_dragon_train::{KernelSpec, ModelSpec, ParallelSpec, StateLayout};
 use burn_ndarray::NdArray;
 use serde::{Deserialize, Serialize};
 
@@ -24,6 +26,9 @@ use crate::{BDH, ModelOverrides, TrainingConfig, build_model_config_with_tokeniz
 const RUN_CONFIG_FILE_NAME: &str = "config.json";
 const TRAINING_SNAPSHOT_FILE_NAME: &str = "training_config.json";
 const TOKENIZER_SNAPSHOT_FILE_NAME: &str = "tokenizer.json";
+pub const RUN_ROOT_ENV: &str = "BURN_DRAGON_RUN_ROOT";
+pub const RUN_DIR_ENV: &str = "BURN_DRAGON_RUN_DIR";
+pub const RUN_NAME_ENV: &str = "BURN_DRAGON_RUN_NAME";
 
 type ExportBackend = NdArray<f32>;
 
@@ -32,7 +37,23 @@ pub struct LanguageRunConfigSnapshot {
     #[serde(default)]
     pub block_size: Option<usize>,
     #[serde(default)]
+    pub seed: Option<u64>,
+    #[serde(default)]
+    pub arch_version: Option<String>,
+    #[serde(default)]
+    pub shard_layout_version: Option<u32>,
+    #[serde(default)]
     pub overrides: ModelOverrides,
+    #[serde(default)]
+    pub model_spec: Option<ModelSpec>,
+    #[serde(default)]
+    pub parallel_spec: Option<ParallelSpec>,
+    #[serde(default)]
+    pub kernel_spec: Option<KernelSpec>,
+    #[serde(default)]
+    pub state_layout: Option<StateLayout>,
+    #[serde(default)]
+    pub metrics_sink: Option<MetricsSinkSpec>,
 }
 
 #[derive(Debug, Clone)]
@@ -254,6 +275,18 @@ pub fn merge_model_overrides(base: &mut ModelOverrides, incoming: &ModelOverride
     if let Some(value) = incoming.mlp_internal_dim_multiplier {
         base.mlp_internal_dim_multiplier = Some(value);
     }
+    if let Some(value) = incoming.latent_total {
+        base.latent_total = Some(value);
+    }
+    if let Some(value) = incoming.sequence_kernel {
+        base.sequence_kernel = Some(value);
+    }
+    if let Some(value) = &incoming.mamba {
+        base.mamba = Some(value.clone());
+    }
+    if let Some(value) = &incoming.latent_fanout_schedule {
+        base.latent_fanout_schedule = Some(value.clone());
+    }
     if let Some(value) = incoming.relu_threshold {
         base.relu_threshold = Some(value);
     }
@@ -312,15 +345,25 @@ pub(crate) fn resolve_checkpoint_run_dir(
 pub fn default_checkpoint_dir(backend_name: &str) -> PathBuf {
     resolve_latest_run_dir(backend_name)
         .map(|dir| dir.join("checkpoint"))
-        .unwrap_or_else(|| PathBuf::from("runs").join("checkpoint"))
+        .unwrap_or_else(|| resolve_run_root().join("checkpoint"))
 }
 
 pub fn resolve_latest_run_dir(backend_name: &str) -> Option<PathBuf> {
-    let run_root = PathBuf::from("runs");
+    let run_root = resolve_run_root();
     resolve_latest_run_dir_from(&run_root).or_else(|| {
         let device_root = run_root.join(backend_name);
         resolve_latest_run_dir_from(&device_root)
     })
+}
+
+pub fn resolve_latest_run_dir_in(run_root: &Path) -> Option<PathBuf> {
+    resolve_latest_run_dir_from(run_root)
+}
+
+pub fn resolve_run_root() -> PathBuf {
+    std::env::var_os(RUN_ROOT_ENV)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("runs"))
 }
 
 pub fn training_snapshot_path(run_dir: &Path) -> PathBuf {
@@ -348,7 +391,25 @@ fn apply_run_dir_tokenizer_snapshot(config: &mut TrainingConfig, run_dir: &Path)
 
 fn absolutize_snapshot_cache_dir(config: &mut TrainingConfig, run_dir: &Path) {
     if !config.dataset.cache_dir.is_absolute() {
-        config.dataset.cache_dir = run_dir.join(&config.dataset.cache_dir);
+        let cwd_relative = std::env::current_dir()
+            .ok()
+            .map(|cwd| cwd.join(&config.dataset.cache_dir));
+        config.dataset.cache_dir = match cwd_relative {
+            Some(path) if path.exists() => path,
+            _ => run_dir.join(&config.dataset.cache_dir),
+        };
+    }
+    if let Some(validation) = &mut config.dataset.validation
+        && let Some(cache_dir) = &mut validation.cache_dir
+        && !cache_dir.is_absolute()
+    {
+        let cwd_relative = std::env::current_dir()
+            .ok()
+            .map(|cwd| cwd.join(&*cache_dir));
+        *cache_dir = match cwd_relative {
+            Some(path) if path.exists() => path,
+            _ => run_dir.join(&*cache_dir),
+        };
     }
 }
 
@@ -365,9 +426,10 @@ fn resolve_latest_run_dir_from(run_root: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BurnpackBundleExportOptions, ExportBackend, export_language_checkpoint_to_burnpack,
-        load_training_config_for_checkpoint, resolve_checkpoint_base, tokenizer_snapshot_path,
-        training_snapshot_path, write_training_snapshot,
+        BurnpackBundleExportOptions, ExportBackend, LanguageRunConfigSnapshot, apply_run_config,
+        export_language_checkpoint_to_burnpack, load_training_config_for_checkpoint,
+        resolve_checkpoint_base, tokenizer_snapshot_path, training_snapshot_path,
+        write_training_snapshot,
     };
     use crate::BDH;
     use crate::config::{
@@ -475,19 +537,30 @@ mod tests {
             dataset: DatasetConfig {
                 cache_dir,
                 train_split_ratio: 0.9,
+                validation: None,
                 source: DatasetSourceConfig::Shakespeare { url: None },
                 tokenizer: TokenizerConfig::default(),
             },
             training: TrainingHyperparameters {
                 block_size: 8,
+                tbptt_chunk_size: None,
+                tbptt_persist_across_steps: false,
+                min_logical_block_size: None,
                 batch_size: 2,
+                seed: 1337,
                 gradient_accumulation_steps: 1,
                 target_effective_batch_size: None,
                 epochs: Some(1),
                 max_iters: 1,
+                checkpoint_interval_iters: 2000,
                 log_frequency: 1,
                 fast_train: true,
+                resume_run_dir: None,
+                resume_checkpoint_epoch: None,
+                init_checkpoint_path: None,
+                init_checkpoint_epoch: None,
                 context_strategy: ContextStrategyConfig::Infinite,
+                sequence_kernel_override: None,
                 gdpo: None,
             },
             optimizer: OptimizerConfig {
@@ -497,6 +570,7 @@ mod tests {
                 grad_clip_norm: None,
                 grad_clip_value: None,
             },
+            parallel: Default::default(),
             generation: GenerationConfig {
                 prompt: "To be".to_string(),
                 max_tokens: Some(4),
@@ -507,5 +581,130 @@ mod tests {
             wgpu: WgpuRuntimeConfig::default(),
             model: ModelOverrides::default(),
         }
+    }
+
+    #[test]
+    fn parse_run_config_snapshot_accepts_phase0_metadata() {
+        let snapshot: super::LanguageRunConfigSnapshot = serde_json::from_str(
+            r#"{
+                "block_size": 128,
+                "seed": 4242,
+                "arch_version": "dragon_bdh_v1",
+                "shard_layout_version": 1,
+                "overrides": {
+                    "n_embd": 256,
+                    "latent_total": 32768
+                },
+                "model_spec": {
+                    "arch": "dragon_bdh",
+                    "n_embd": 256,
+                    "n_head": 4,
+                    "n_layer": 8,
+                    "latent_total": 32768,
+                    "latent_per_head": 8192,
+                    "shared_layer_weights": true,
+                    "sequence_kernel": "bdh_linear_attention"
+                },
+                "parallel_spec": {
+                    "mode": "single",
+                    "world_size": 1,
+                    "data_parallel_size": 1,
+                    "tensor_parallel_size": 1,
+                    "tensor_parallel_axis": "neuron",
+                    "tensor_parallel_partition": "contiguous",
+                    "fsdp_enabled": false,
+                    "checkpoint_format": "unsharded_v1"
+                },
+                "kernel_spec": {
+                    "sequence_kernel": "bdh_linear_attention",
+                    "fused_kernels_enabled": true,
+                    "rollout_fast_steps_per_slow_step": 1,
+                    "wgpu_fused_core_recurrent": true,
+                    "wgpu_fused_core_rollout": false
+                },
+                "state_layout": {
+                    "state_family": "bdh_model_state",
+                    "position_tracked": true,
+                    "layers": [
+                        {
+                            "layer_index": 0,
+                            "latent_total": 32768,
+                            "latent_per_head": 8192,
+                            "tensors": [
+                                {
+                                    "name": "rho",
+                                    "axes": [
+                                        {"name": "batch_views", "size": null},
+                                        {"name": "heads", "size": 4},
+                                        {"name": "latent_per_head", "size": 8192},
+                                        {"name": "dense_dim", "size": 256}
+                                    ]
+                                }
+                            ]
+                        }
+                    ]
+                },
+                "metrics_sink": {
+                    "family": "language_bdh_burn_train_v1",
+                    "entries": [
+                        {
+                            "name": "Loss",
+                            "split": "train",
+                            "value_kind": "numeric",
+                            "every_steps": 1
+                        },
+                        {
+                            "name": "Loss",
+                            "split": "valid",
+                            "value_kind": "numeric",
+                            "every_steps": 1
+                        }
+                    ]
+                }
+            }"#,
+        )
+        .expect("parse snapshot");
+
+        assert_eq!(snapshot.seed, Some(4242));
+        assert_eq!(snapshot.arch_version.as_deref(), Some("dragon_bdh_v1"));
+        assert_eq!(snapshot.shard_layout_version, Some(1));
+        assert_eq!(snapshot.overrides.latent_total, Some(32768));
+        assert_eq!(
+            snapshot
+                .model_spec
+                .as_ref()
+                .expect("model spec")
+                .latent_per_head,
+            8192
+        );
+        assert_eq!(
+            snapshot.state_layout.as_ref().expect("state layout").layers[0].tensors[0].name,
+            "rho"
+        );
+        assert_eq!(
+            snapshot.metrics_sink.as_ref().expect("metrics sink").family,
+            "language_bdh_burn_train_v1"
+        );
+    }
+
+    #[test]
+    fn apply_run_config_merges_sequence_kernel_override() {
+        let mut config = test_config(PathBuf::from("data"));
+        let snapshot = LanguageRunConfigSnapshot {
+            overrides: ModelOverrides {
+                sequence_kernel: Some(
+                    burn_dragon_core::SequenceKernelKind::BdhLinearDenseScoreExperimental,
+                ),
+                ..ModelOverrides::default()
+            },
+            ..LanguageRunConfigSnapshot::default()
+        };
+
+        apply_run_config(&mut config, &snapshot);
+
+        assert_eq!(
+            config.model.sequence_kernel,
+            Some(burn_dragon_core::SequenceKernelKind::BdhLinearDenseScoreExperimental)
+        );
     }
 }

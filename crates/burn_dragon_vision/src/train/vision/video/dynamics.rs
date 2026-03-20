@@ -267,22 +267,18 @@ pub(crate) fn split_clip_observation_and_target_projections_train<B: BackendTrai
     model: &VisionDragon<B>,
     teacher_model: Option<&VisionDragon<B>>,
     clip_frames: Tensor<B, 5>,
-    context_len: usize,
-    future_len_all: usize,
-    steps: usize,
-    projection_dim: usize,
-    include_context_target_proj: bool,
+    config: SplitClipProjectionTrainConfig,
 ) -> (Tensor<B, 4>, Option<Tensor<B, 3>>, Tensor<B, 3>) {
-    if include_context_target_proj {
+    if config.include_context_target_proj {
         let (context_observation_patch_tokens, context_target_proj, target_proj_all) =
             split_clip_observation_and_target_projections(
                 model,
                 teacher_model,
                 clip_frames,
-                context_len,
-                future_len_all,
-                steps,
-                projection_dim,
+                config.context_len,
+                config.future_len_all,
+                config.steps,
+                config.projection_dim,
             );
         return (
             context_observation_patch_tokens,
@@ -291,16 +287,39 @@ pub(crate) fn split_clip_observation_and_target_projections_train<B: BackendTrai
         );
     }
 
-    let context_clip_frames = clip_frames.clone().slice_dim(1, 0..context_len);
+    let context_clip_frames = clip_frames.clone().slice_dim(1, 0..config.context_len);
     let context_observation_patch_tokens =
         embed_clip_frames_raw_with_model(model, context_clip_frames);
-    let target_clip_frames = clip_frames.slice_dim(1, context_len..context_len + future_len_all);
+    let target_clip_frames = clip_frames.slice_dim(
+        1,
+        config.context_len..config.context_len + config.future_len_all,
+    );
     let target_proj_all = if let Some(teacher) = teacher_model {
-        project_clip_frames_with_model(teacher, target_clip_frames, steps, projection_dim).detach()
+        project_clip_frames_with_model(
+            teacher,
+            target_clip_frames,
+            config.steps,
+            config.projection_dim,
+        )
+        .detach()
     } else {
-        project_clip_frames_with_model(model, target_clip_frames, steps, projection_dim).detach()
+        project_clip_frames_with_model(
+            model,
+            target_clip_frames,
+            config.steps,
+            config.projection_dim,
+        )
+        .detach()
     };
     (context_observation_patch_tokens, None, target_proj_all)
+}
+
+pub(crate) struct SplitClipProjectionTrainConfig {
+    pub(crate) context_len: usize,
+    pub(crate) future_len_all: usize,
+    pub(crate) steps: usize,
+    pub(crate) projection_dim: usize,
+    pub(crate) include_context_target_proj: bool,
 }
 
 pub(crate) fn repeat_last_future_query<B: BackendTrait>(

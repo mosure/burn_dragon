@@ -4,10 +4,8 @@ use std::time::Instant;
 use anyhow::Result;
 use burn::tensor::backend::Backend as BackendTrait;
 use burn::tensor::{Distribution, Tensor, TensorData};
-use burn_dragon::vision::{
-    VisionArtifactHeader, push_vision_artifact_markdown_prelude,
-};
-use burn_dragon_wgpu::api::spatial::{
+use burn_dragon::vision::{VisionArtifactHeader, push_vision_artifact_markdown_prelude};
+use burn_dragon_kernel::api::spatial::{
     CompiledStructuredPyramidRhoPlan, LocalGridNeighborhood, LocalGridShape2d,
     StructuredPyramidRhoStepInput, StructuredPyramidShape, reference_structured_pyramid_rho_step,
     structured_pyramid_profile_reset, structured_pyramid_profile_snapshot,
@@ -441,7 +439,7 @@ fn measurement(
     reference_ns: u128,
     fused_ns: u128,
     work_items: f64,
-    profile: &burn_dragon_wgpu::api::spatial::StructuredPyramidProfileSnapshot,
+    profile: &burn_dragon_kernel::api::spatial::StructuredPyramidProfileSnapshot,
 ) -> VisionPyramidBenchMeasurementResult {
     let reference_ms = nanos_to_ms(reference_ns);
     let fused_ms = nanos_to_ms(fused_ns);

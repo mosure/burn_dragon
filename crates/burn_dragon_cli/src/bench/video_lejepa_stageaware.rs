@@ -13,16 +13,16 @@ pub mod real {
     };
     use burn_dragon::vision::{
         MovingMnistSplit, MovingMnistVideoDataset, MovingMnistVideoDatasetConfig,
-        StageAwareHostProfileSnapshot, VideoClipBatch, VisionDatasetSource, VisionNormalize,
-        VisionArtifactHeader, VisionTrainingConfig, VisionTrainingModeConfig,
+        StageAwareHostProfileSnapshot, VideoClipBatch, VisionArtifactHeader, VisionDatasetSource,
+        VisionNormalize, VisionTrainingConfig, VisionTrainingModeConfig,
         VisionVideoTrainProfileSnapshot, push_vision_artifact_markdown_prelude,
         stage_aware_host_profile_reset, stage_aware_host_profile_snapshot,
         video_train_profile_reset, video_train_profile_snapshot,
     };
-    use burn_dragon_wgpu::api::recurrent::{
+    use burn_dragon_kernel::api::recurrent::{
         RecurrentProfileSnapshot, recurrent_profile_reset, recurrent_profile_snapshot,
     };
-    use burn_dragon_wgpu::api::spatial::{
+    use burn_dragon_kernel::api::spatial::{
         LocalGridRhoProfileSnapshot, StructuredPyramidProfileSnapshot,
         local_grid_rho_profile_reset, local_grid_rho_profile_snapshot,
         structured_pyramid_profile_reset, structured_pyramid_profile_snapshot,

@@ -1,6 +1,6 @@
 use burn::tensor::backend::Backend;
 use burn::tensor::{Int, Tensor, TensorData};
-use burn_dragon_core::{BDH, BDHConfig, FusedKernelConfig};
+use burn_dragon_core::{BDH, BDHConfig, FusedKernelConfig, SequenceKernelKind};
 use burn_wgpu::{CubeBackend, RuntimeOptions, WgpuRuntime, graphics};
 
 type TestBackend = CubeBackend<WgpuRuntime, f32, i32, u32>;
@@ -64,6 +64,28 @@ fn build_config(
         .fused_kernels
         .set_block_sizes(8.min(case.n_embd), 8.min(case.n_embd));
     config.set_rollout_fast_steps_per_slow_step(rollout_fast_steps);
+    config
+}
+
+fn build_dense_score_config(case: &ParityCase, wgpu_rollout_fused: bool) -> BDHConfig {
+    let mut config = BDHConfig {
+        n_layer: case.n_layer,
+        n_embd: case.n_embd,
+        n_head: case.n_head,
+        mlp_internal_dim_multiplier: case.mlp_internal_dim_multiplier,
+        vocab_size: case.vocab_size,
+        dropout: 0.0,
+        fused_kernels: FusedKernelConfig {
+            enabled: true,
+            wgpu_rollout_fused,
+            ..Default::default()
+        },
+        sequence_kernel: SequenceKernelKind::BdhLinearDenseScoreExperimental,
+        ..Default::default()
+    };
+    config
+        .fused_kernels
+        .set_block_sizes(8.min(case.n_embd), 8.min(case.n_embd));
     config
 }
 
@@ -280,5 +302,57 @@ fn recurrent_wgpu_kernel_matches_baseline_across_config_matrix() {
         for rollout_fast_steps in BDHConfig::SUPPORTED_ROLLOUT_FAST_STEPS {
             run_case(case, &device, 3_000 + idx as u64, rollout_fast_steps);
         }
+    }
+}
+
+#[test]
+fn dense_score_wgpu_kernel_matches_baseline_across_state_steps() {
+    let device = <TestBackend as Backend>::Device::default();
+    init_runtime(&device);
+    const TOKENS_A: &[i64] = &[1, 2, 3, 4, 5, 6];
+    const TOKENS_B: &[i64] = &[7, 8, 9, 10];
+    const TOKENS_C: &[i64] = &[11, 12, 13];
+    const TOKENS: &[&[i64]] = &[TOKENS_A, TOKENS_B, TOKENS_C];
+
+    let case = ParityCase {
+        name: "dense_score_small",
+        n_layer: 2,
+        n_embd: 16,
+        n_head: 2,
+        mlp_internal_dim_multiplier: 2,
+        vocab_size: 128,
+        token_sequences: TOKENS,
+        logits_atol: 4e-1,
+        logits_rtol: 4e-1,
+        state_atol: 4e-1,
+        state_rtol: 4e-1,
+    };
+
+    <TestBackend as Backend>::seed(&device, 3030);
+    let baseline_model = BDH::<TestBackend>::new(build_dense_score_config(&case, false), &device);
+    <TestBackend as Backend>::seed(&device, 3030);
+    let fused_model = BDH::<TestBackend>::new(build_dense_score_config(&case, true), &device);
+
+    let mut baseline_state = baseline_model.init_state();
+    let mut fused_state = fused_model.init_state();
+
+    for token_ids in case.token_sequences {
+        let tokens = make_tokens(&device, token_ids);
+        let baseline_logits =
+            baseline_model.forward_with_state(tokens.clone(), &mut baseline_state);
+        let fused_logits = fused_model.forward_with_state(tokens, &mut fused_state);
+        let _ = assert_close(
+            baseline_logits,
+            fused_logits,
+            case.logits_atol,
+            case.logits_rtol,
+        );
+    }
+
+    for (baseline_layer, fused_layer) in baseline_state.layers.iter().zip(fused_state.layers.iter())
+    {
+        let baseline_rho = baseline_layer.rho.as_ref().expect("baseline rho").clone();
+        let fused_rho = fused_layer.rho.as_ref().expect("fused rho").clone();
+        let _ = assert_close(baseline_rho, fused_rho, case.state_atol, case.state_rtol);
     }
 }

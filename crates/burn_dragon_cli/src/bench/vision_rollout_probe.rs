@@ -7,9 +7,9 @@ use anyhow::{Context, Result, anyhow};
 use burn::tensor::Tensor;
 use burn::tensor::backend::Backend as BackendTrait;
 use burn_dragon::vision::{
-    DinoFeatureStore, ImageNetAugmentations, ImageNetBatch, ImageNetDataset,
-    ImageNetDatasetConfig, ImageNetSplit, VisionArtifactHeader, VisionBackboneKind, VisionDragon,
-    VisionNormalize, VisionTeacherConfig, VisionTrainingConfig, VisionTrainingModeConfig,
+    DinoFeatureStore, ImageNetAugmentations, ImageNetBatch, ImageNetDataset, ImageNetDatasetConfig,
+    ImageNetSplit, VisionArtifactHeader, VisionBackboneKind, VisionDragon, VisionNormalize,
+    VisionTeacherConfig, VisionTrainingConfig, VisionTrainingModeConfig,
     load_vision_encoder_from_checkpoint, push_vision_artifact_markdown_prelude,
     vision_distillation_loss_terms,
 };
@@ -224,7 +224,10 @@ pub fn run_vision_rollout_probe(
 ) -> Result<VisionRolloutProbeReport> {
     let device = VisionRolloutProbeDevice::default();
     init_vision_rollout_probe_runtime(&device);
-    let batch_size = probe.batch_size.unwrap_or(config.training.batch_size).max(1);
+    let batch_size = probe
+        .batch_size
+        .unwrap_or(config.training.batch_size)
+        .max(1);
     let (batch, distill_loss) = build_validation_probe_batch(config, batch_size, &device)?;
     let vision = config.vision.build();
     let patch_grid = vision.image_size.div_ceil(vision.patch_size.max(1)).max(1);
@@ -291,6 +294,9 @@ fn build_validation_probe_batch(
             ));
         }
     };
+    let teacher_patch_path = teacher.val_patch_path.as_deref().ok_or_else(|| {
+        anyhow!("vision_distill_rollout_probe requires mode.teacher.val_patch_path")
+    })?;
 
     let student_patch_tokens = vision.image_size.div_ceil(vision.patch_size.max(1)).pow(2);
     let teacher_patch_tokens = teacher.patch_tokens.unwrap_or(student_patch_tokens);
@@ -300,7 +306,8 @@ fn build_validation_probe_batch(
         ));
     }
 
-    let normalize = VisionNormalize::new(config.augment.normalize_mean, config.augment.normalize_std);
+    let normalize =
+        VisionNormalize::new(config.augment.normalize_mean, config.augment.normalize_std);
     let val_aug = ImageNetAugmentations::new(
         ImageNetSplit::Val,
         config.augment.image_size,
@@ -331,6 +338,7 @@ fn build_validation_probe_batch(
         local_augmentations: None,
         normalize,
         teacher: None,
+        teacher_targets: Vec::new(),
         views: 1,
         local_views: 0,
         min_view_overlap: 0.0,
@@ -342,13 +350,16 @@ fn build_validation_probe_batch(
     let record_count = dataset.len();
     let teacher_store = Arc::new(DinoFeatureStore::new(
         &teacher.val_cls_path,
-        &teacher.val_patch_path,
+        teacher_patch_path,
         teacher.feature_dim,
         teacher_patch_tokens,
         Some(record_count),
     )?);
     dataset = dataset.with_teacher(teacher_store);
-    Ok((dataset.sample_batch::<VisionRolloutProbeBackend>(batch_size, device), distill.loss))
+    Ok((
+        dataset.sample_batch::<VisionRolloutProbeBackend>(batch_size, device),
+        distill.loss,
+    ))
 }
 
 fn load_or_init_model(
@@ -366,7 +377,10 @@ fn load_or_init_model(
         )
         .with_context(|| format!("load encoder checkpoint {}", checkpoint.display()))
     } else {
-        Ok(VisionDragon::<VisionRolloutProbeBackend>::new(config.vision.build(), device))
+        Ok(VisionDragon::<VisionRolloutProbeBackend>::new(
+            config.vision.build(),
+            device,
+        ))
     }
 }
 
@@ -401,11 +415,8 @@ fn run_probe_cases(
     for step in steps {
         let backprop_steps = configured_backprop.unwrap_or(*step).min(*step).max(1);
         for _ in 0..probe.warmup {
-            let output = model.forward_images_steps_rollout_unbounded(
-                images.clone(),
-                *step,
-                backprop_steps,
-            );
+            let output =
+                model.forward_images_steps_rollout_unbounded(images.clone(), *step, backprop_steps);
             sync_tensor(output.patch_tokens.sum() + output.cls_token.sum());
         }
         let forward_ns = measure_avg(probe.iterations, || {
@@ -424,22 +435,30 @@ fn run_probe_cases(
             loss,
         );
 
-        let patch_delta_vs_prev = prev_patch
-            .as_ref()
-            .map(|prev: &Tensor<VisionRolloutProbeBackend, 3>| {
-                mse(output.patch_tokens.clone(), prev.clone())
-            });
-        let cls_delta_vs_prev = prev_cls
-            .as_ref()
-            .map(|prev: &Tensor<VisionRolloutProbeBackend, 2>| mse(output.cls_token.clone(), prev.clone()));
-        let patch_delta_vs_step1 = baseline_patch
-            .as_ref()
-            .map(|base: &Tensor<VisionRolloutProbeBackend, 3>| {
-                mse(output.patch_tokens.clone(), base.clone())
-            });
-        let cls_delta_vs_step1 = baseline_cls
-            .as_ref()
-            .map(|base: &Tensor<VisionRolloutProbeBackend, 2>| mse(output.cls_token.clone(), base.clone()));
+        let patch_delta_vs_prev =
+            prev_patch
+                .as_ref()
+                .map(|prev: &Tensor<VisionRolloutProbeBackend, 3>| {
+                    mse(output.patch_tokens.clone(), prev.clone())
+                });
+        let cls_delta_vs_prev =
+            prev_cls
+                .as_ref()
+                .map(|prev: &Tensor<VisionRolloutProbeBackend, 2>| {
+                    mse(output.cls_token.clone(), prev.clone())
+                });
+        let patch_delta_vs_step1 =
+            baseline_patch
+                .as_ref()
+                .map(|base: &Tensor<VisionRolloutProbeBackend, 3>| {
+                    mse(output.patch_tokens.clone(), base.clone())
+                });
+        let cls_delta_vs_step1 =
+            baseline_cls
+                .as_ref()
+                .map(|base: &Tensor<VisionRolloutProbeBackend, 2>| {
+                    mse(output.cls_token.clone(), base.clone())
+                });
 
         if baseline_patch.is_none() {
             baseline_patch = Some(output.patch_tokens.clone());
@@ -493,8 +512,7 @@ fn annotate_step_scaling(cases: &mut [VisionRolloutProbeStepCase]) {
 
         let step_ratio = case.step as f64 / base_step;
         if step_ratio > 1.0 {
-            case.forward_alpha_vs_step1 =
-                Some(case.forward_scale_vs_step1.ln() / step_ratio.ln());
+            case.forward_alpha_vs_step1 = Some(case.forward_scale_vs_step1.ln() / step_ratio.ln());
             let extra_ms = case.forward_ms - base_forward;
             if extra_ms > 0.0 {
                 case.total_gain_per_extra_ms = Some(case.gain_vs_step1_total / extra_ms);

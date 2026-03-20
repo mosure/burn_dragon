@@ -1,8 +1,9 @@
 [package]
 name = "burn_dragon_language"
 description = "Language modeling components for burn_dragon"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
+rust-version = "1.85"
 authors = ["mosure <mitchell@mosure.me>"]
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/mosure/burn_bdh"
@@ -12,6 +13,7 @@ readme = "../../README.md"
 [features]
 default = []
 cli = []
+ddp = ["train", "burn_dragon_train/ddp", "burn-train/ddp", "dep:burn-collective"]
 train = [
   "burn/dataset",
   "dep:burn_dragon_checkpoint",
@@ -28,15 +30,22 @@ train = [
   "dep:tracing",
   "dep:flate2",
   "dep:tar",
+  "dep:rayon",
+  "dep:sha2",
+  "dep:memmap2",
+  "dep:burn_dragon_universality",
 ]
+rerun = ["train", "dep:rerun", "dep:urlencoding"]
 cuda = ["burn-cuda", "burn_dragon_core/cuda", "burn_dragon_train/cuda"]
 viz = ["burn_dragon_core/viz"]
 web = ["burn_dragon_core/web"]
 
 [dependencies]
-burn_dragon_checkpoint = { path = "../burn_dragon_checkpoint", version = "0.4.0", default-features = false, optional = true }
-burn_dragon_core = { path = "../burn_dragon_core", version = "0.4.0", default-features = false }
-burn_dragon_train = { path = "../burn_dragon_train", version = "0.4.0", default-features = false, optional = true }
+burn_dragon_checkpoint = { path = "../burn_dragon_checkpoint", version = "0.5.0", default-features = false, optional = true }
+burn_dragon_core = { path = "../burn_dragon_core", version = "0.5.0", default-features = false }
+burn_dragon_train = { path = "../burn_dragon_train", version = "0.5.0", default-features = false, optional = true }
+burn_dragon_universality = { path = "../burn_dragon_universality", version = "0.5.0", default-features = false, optional = true }
+rustbpe = { path = "../../vendor/rustbpe" }
 
 anyhow = "1"
 rand = "0.8"
@@ -51,11 +60,17 @@ parquet = { version = "53", optional = true }
 tracing = { version = "0.1", optional = true }
 flate2 = { version = "1.1", optional = true }
 tar = { version = "0.4", optional = true }
+rayon = { version = "1.11", optional = true }
+sha2 = { version = "0.10", optional = true }
+memmap2 = { version = "0.9", optional = true }
+rerun = { version = "0.30.2", default-features = false, features = ["sdk", "server"], optional = true }
+urlencoding = { version = "2.1", optional = true }
 
 burn = { version = "0.21.0-pre.2", default-features = false, features = ["fusion", "ndarray", "std", "wgpu"] }
 burn-autodiff = { version = "0.21.0-pre.2", optional = true }
 burn-ndarray = { version = "0.21.0-pre.2", optional = true }
 burn-train = { version = "0.21.0-pre.2", optional = true, default-features = false, features = ["tui"] }
+burn-collective = { version = "0.21.0-pre.2", optional = true }
 burn-cuda = { version = "0.21.0-pre.2", optional = true, default-features = false, features = ["std"] }
 
 [dev-dependencies]

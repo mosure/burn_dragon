@@ -12,7 +12,7 @@ use burn_dragon_core::{
     structured_dense_update_tokens, target_major_identity_read, target_major_identity_write,
     target_major_outer_product,
 };
-use burn_dragon_wgpu::api::graph::fused_sparse_graph_rho_attention_wgpu;
+use burn_dragon_kernel::api::graph::fused_sparse_graph_rho_attention_wgpu;
 use serde::{Deserialize, Serialize};
 
 use crate::compiled_routing::CompiledGraphRouting;

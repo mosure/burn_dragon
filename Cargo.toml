@@ -1,8 +1,9 @@
 [package]
 name = "burn_dragon"
 description = "burn dragon inference and training"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
+rust-version = "1.85"
 authors = ["mosure <mitchell@mosure.me>"]
 license = "MIT OR Apache-2.0"
 keywords = [
@@ -41,7 +42,8 @@ members = [
   "crates/burn_dragon_sudoku",
   "crates/burn_dragon_stream",
   "crates/burn_dragon_train",
-  "crates/burn_dragon_wgpu",
+  "crates/burn_dragon_kernel",
+  "crates/burn_dragon_universality",
   "crates/burn_dragon_vision",
   "crates/burn_dragon_web",
   "crates/burn_dragon_fovea_viewer",
@@ -64,6 +66,7 @@ cli = [
   "burn_dragon_train/cli",
   "burn_dragon_vision/cli",
 ]
+ddp = ["train", "burn_dragon_train/ddp", "burn_dragon_language/ddp"]
 train = [
   "burn_dragon_core/train",
   "burn_dragon_language/train",
@@ -89,18 +92,19 @@ viz = ["burn_dragon_core/viz", "burn_dragon_language/viz", "bevy_dragon/viz", "b
 
 
 [dependencies]
-burn_dragon_core = { path = "crates/burn_dragon_core", version = "0.4.0", default-features = false }
-burn_dragon_checkpoint = { path = "crates/burn_dragon_checkpoint", version = "0.4.0", default-features = false }
-burn_dragon_graph = { path = "crates/burn_dragon_graph", version = "0.4.0", default-features = false }
-burn_dragon_language = { path = "crates/burn_dragon_language", version = "0.4.0", default-features = false }
-burn_dragon_multimodal = { path = "crates/burn_dragon_multimodal", version = "0.4.0", default-features = false }
-burn_dragon_sudoku = { path = "crates/burn_dragon_sudoku", version = "0.4.0", default-features = false }
-burn_dragon_stream = { path = "crates/burn_dragon_stream", version = "0.4.0", default-features = false }
-burn_dragon_train = { path = "crates/burn_dragon_train", version = "0.4.0", default-features = false, optional = true }
-burn_dragon_vision = { path = "crates/burn_dragon_vision", version = "0.4.0", default-features = false }
-burn_dragon_wgpu = { path = "crates/burn_dragon_wgpu", version = "0.4.0", default-features = false }
-bevy_dragon = { path = "crates/bevy_dragon", version = "0.4.0", default-features = false, optional = true }
-burn_dragon_web = { path = "crates/burn_dragon_web", version = "0.4.0", default-features = false, optional = true }
+burn_dragon_core = { path = "crates/burn_dragon_core", version = "0.5.0", default-features = false }
+burn_dragon_checkpoint = { path = "crates/burn_dragon_checkpoint", version = "0.5.0", default-features = false }
+burn_dragon_graph = { path = "crates/burn_dragon_graph", version = "0.5.0", default-features = false }
+burn_dragon_language = { path = "crates/burn_dragon_language", version = "0.5.0", default-features = false }
+burn_dragon_multimodal = { path = "crates/burn_dragon_multimodal", version = "0.5.0", default-features = false }
+burn_dragon_sudoku = { path = "crates/burn_dragon_sudoku", version = "0.5.0", default-features = false }
+burn_dragon_stream = { path = "crates/burn_dragon_stream", version = "0.5.0", default-features = false }
+burn_dragon_train = { path = "crates/burn_dragon_train", version = "0.5.0", default-features = false, optional = true }
+burn_dragon_vision = { path = "crates/burn_dragon_vision", version = "0.5.0", default-features = false }
+burn_dragon_kernel = { path = "crates/burn_dragon_kernel", version = "0.5.0", default-features = false }
+burn_dragon_universality = { path = "crates/burn_dragon_universality", version = "0.5.0", default-features = false }
+bevy_dragon = { path = "crates/bevy_dragon", version = "0.5.0", default-features = false, optional = true }
+burn_dragon_web = { path = "crates/burn_dragon_web", version = "0.5.0", default-features = false, optional = true }
 
 
 [dev-dependencies]
@@ -150,6 +154,7 @@ panic = "abort"
 
 [patch.crates-io]
 cubecl-cuda = { path = "vendor/cubecl-cuda-0.10.0-pre.2" }
+burn-collective = { path = "vendor/burn-collective-0.21.0-pre.2" }
 
 
 [lib]

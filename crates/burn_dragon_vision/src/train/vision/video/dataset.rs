@@ -845,7 +845,7 @@ impl<B: BackendTrait> Iterator for MovingMnistVideoIterator<B> {
 
         let capture_artifacts = self.artifact_capture_every > 0
             && self.artifact_capture_images > self.artifact_images_emitted
-            && self.step.is_multiple_of(self.artifact_capture_every);
+            && self.step % self.artifact_capture_every == 0;
         let artifact_extra_future_frames = if capture_artifacts {
             self.artifact_extra_future_frames
         } else {

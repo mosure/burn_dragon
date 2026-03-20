@@ -305,11 +305,7 @@ fn make_checkerboard_image(
             let cy = y / cell;
             for x in 0..width {
                 let cx = x / cell;
-                let value = if (cx + cy).is_multiple_of(2) {
-                    0.0
-                } else {
-                    1.0
-                };
+                let value = if (cx + cy) % 2 == 0 { 0.0 } else { 1.0 };
                 data.push(value);
             }
         }

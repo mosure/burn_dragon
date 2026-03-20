@@ -4,6 +4,8 @@ use std::sync::Mutex;
 #[cfg(feature = "integration_test")]
 use std::sync::OnceLock;
 
+use serde::{Deserialize, Serialize};
+
 use crate::train::runtime::{
     DeviceMemoryUsage, bytes_to_mb, cleanup_device_memory, cleanup_device_memory_allowed,
     device_memory_usage_safe,
@@ -25,7 +27,7 @@ fn should_emit_metric(metadata: &burn_train::metric::MetricMetadata, every: usiz
     every <= 1
         || metadata
             .iteration
-            .is_some_and(|iteration| iteration.is_multiple_of(every))
+            .is_some_and(|iteration| iteration % every == 0)
 }
 
 fn metric_epoch(metadata: &burn_train::metric::MetricMetadata) -> usize {
@@ -35,6 +37,60 @@ fn metric_epoch(metadata: &burn_train::metric::MetricMetadata) -> usize {
 mod language;
 
 pub use language::{LanguageModelOutput, LanguageModelTrainItem, LossValue};
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MetricSinkSplit {
+    Train,
+    Valid,
+    System,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MetricSinkValueKind {
+    Numeric,
+    Text,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct MetricSinkEntry {
+    pub name: String,
+    pub split: MetricSinkSplit,
+    pub value_kind: MetricSinkValueKind,
+    pub every_steps: usize,
+}
+
+impl MetricSinkEntry {
+    pub fn new(
+        name: impl Into<String>,
+        split: MetricSinkSplit,
+        value_kind: MetricSinkValueKind,
+        every_steps: usize,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            split,
+            value_kind,
+            every_steps: every_steps.max(1),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct MetricsSinkSpec {
+    pub family: String,
+    pub entries: Vec<MetricSinkEntry>,
+}
+
+impl MetricsSinkSpec {
+    pub fn new(family: impl Into<String>, entries: Vec<MetricSinkEntry>) -> Self {
+        Self {
+            family: family.into(),
+            entries,
+        }
+    }
+}
 
 pub trait ScalarValue<B: BackendTrait> {
     fn value(&self) -> Tensor<B, 1>;
@@ -402,7 +458,7 @@ where
             && self.every_iters > 0
             && metadata
                 .iteration
-                .is_some_and(|iteration| iteration.is_multiple_of(self.every_iters))
+                .is_some_and(|iteration| iteration % self.every_iters == 0)
         {
             cleaned = cleanup_device_memory::<B>(&self.device, self.allow_cuda_cleanup);
         }
@@ -410,7 +466,7 @@ where
             && allow_cleanup
             && self.every_epochs > 0
             && epoch != last_epoch
-            && epoch.is_multiple_of(self.every_epochs)
+            && epoch % self.every_epochs == 0
         {
             cleaned |= cleanup_device_memory::<B>(&self.device, self.allow_cuda_cleanup);
         }

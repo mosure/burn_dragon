@@ -71,16 +71,17 @@ where
     let mut best_fit = None;
 
     for candidate in startup_candidate_sequence(min_batch_size, max_batch_size) {
-        let probe = probe_batch_size::<B>(
+        let probe = probe_batch_size::<B>(ProbeBatchRequest {
             dataset,
-            &model_config,
-            config.training.block_size,
-            candidate,
-            autotune.probe_steps.max(1),
+            model_config: &model_config,
+            block_size: config.training.block_size,
+            tbptt_chunk_size: config.training.tbptt_chunk_size,
+            batch_size: candidate,
+            probe_steps: autotune.probe_steps.max(1),
             target_bytes,
-            summary_event_token_ids.as_deref(),
+            summary_event_token_ids: summary_event_token_ids.as_deref(),
             device,
-        );
+        });
         let fit_target = probe.fit_target;
         probes.push(probe);
         if fit_target {
@@ -98,16 +99,17 @@ where
     if autotune.binary_search && best_fit.is_some() && high > low + 1 {
         while high > low + 1 {
             let candidate = low + ((high - low) / 2);
-            let probe = probe_batch_size::<B>(
+            let probe = probe_batch_size::<B>(ProbeBatchRequest {
                 dataset,
-                &model_config,
-                config.training.block_size,
-                candidate,
-                autotune.probe_steps.max(1),
+                model_config: &model_config,
+                block_size: config.training.block_size,
+                tbptt_chunk_size: config.training.tbptt_chunk_size,
+                batch_size: candidate,
+                probe_steps: autotune.probe_steps.max(1),
                 target_bytes,
-                summary_event_token_ids.as_deref(),
+                summary_event_token_ids: summary_event_token_ids.as_deref(),
                 device,
-            );
+            });
             let fit_target = probe.fit_target;
             probes.push(probe);
             if fit_target {
@@ -168,24 +170,27 @@ where
     }))
 }
 
-fn probe_batch_size<B>(
-    dataset: &Arc<Dataset>,
-    model_config: &BDHConfig,
-    block_size: usize,
-    batch_size: usize,
-    probe_steps: usize,
-    target_bytes: u64,
-    summary_event_token_ids: Option<&[u32]>,
-    device: &B::Device,
-) -> StartupAutotuneProbe
+fn probe_batch_size<B>(request: ProbeBatchRequest<'_, B>) -> StartupAutotuneProbe
 where
     B: AutodiffBackend + Clone + 'static,
     B::Device: Clone + 'static,
 {
+    let ProbeBatchRequest {
+        dataset,
+        model_config,
+        block_size,
+        tbptt_chunk_size,
+        batch_size,
+        probe_steps,
+        target_bytes,
+        summary_event_token_ids,
+        device,
+    } = request;
     cleanup_device_memory::<B>(device, false);
 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let model = LanguageTrainModel::new(BDH::<B>::new(model_config.clone(), device));
+        let model = LanguageTrainModel::new(BDH::<B>::new(model_config.clone(), device))
+            .with_tbptt_chunk_size(tbptt_chunk_size);
         let mut peak_usage: Option<DeviceMemoryUsage> = None;
 
         for _ in 0..probe_steps {
@@ -246,6 +251,18 @@ where
             }
         }
     }
+}
+
+struct ProbeBatchRequest<'a, B: AutodiffBackend> {
+    dataset: &'a Arc<Dataset>,
+    model_config: &'a BDHConfig,
+    block_size: usize,
+    tbptt_chunk_size: Option<usize>,
+    batch_size: usize,
+    probe_steps: usize,
+    target_bytes: u64,
+    summary_event_token_ids: Option<&'a [u32]>,
+    device: &'a B::Device,
 }
 
 fn startup_candidate_sequence(min_batch_size: usize, max_batch_size: usize) -> Vec<usize> {

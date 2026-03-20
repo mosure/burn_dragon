@@ -1,5 +1,7 @@
 use super::*;
+use crate::model::vision::VisionTrmPredictSubstepKind;
 use burn_dragon_train::LearningRateScheduleConfig;
+use std::path::PathBuf;
 
 #[test]
 fn distill_mode_parses() {
@@ -71,6 +73,284 @@ fn distill_mode_parses() {
             }
             other => panic!("unexpected teacher config: {other:?}"),
         },
+        other => panic!("unexpected mode: {other:?}"),
+    }
+}
+
+#[test]
+fn distill_mode_parses_auxiliary_teacher_targets() {
+    let text = r#"
+            [dataset]
+            imagenet_root = "data/imagenet1k"
+            train_dir = "train"
+            val_dir = "val"
+
+            [training]
+            batch_size = 8
+            max_iters = 10
+            log_frequency = 2
+
+            [optimizer]
+            learning_rate = 0.001
+            weight_decay = 0.1
+
+            [vision]
+            image_size = 280
+            patch_size = 14
+            in_channels = 3
+            embed_dim = 320
+            steps = 4
+            n_head = 8
+            mlp_internal_dim_multiplier = 4
+            dropout = 0.0
+            projection_dim = 768
+            projection_hidden_dim = 1536
+            use_cls_token = true
+            pos_encoding = "learned2d"
+            attention_mode = "row_l1"
+            fused_kernels = false
+            relu_threshold = 0.0
+
+            [mode]
+            type = "distill"
+
+            [mode.teacher]
+            type = "features"
+            train_cls_path = "dinov2/train_cls.bin"
+            train_patch_path = "dinov2/train_patch.bin"
+            val_cls_path = "dinov2/val_cls.bin"
+            val_patch_path = "dinov2/val_patch.bin"
+            feature_dim = 768
+            patch_tokens = 400
+
+            [[mode.teacher_targets]]
+            name = "siglip2_global"
+            weight = 0.35
+            target_kind = "global_only"
+
+            [mode.teacher_targets.teacher]
+            type = "features"
+            train_cls_path = "siglip2/train_cls.bin"
+            val_cls_path = "siglip2/val_cls.bin"
+            feature_dim = 768
+
+            [augment]
+            image_size = 280
+            resize_short = 320
+            min_scale = 1.0
+            max_scale = 1.0
+            min_aspect_ratio = 1.0
+            max_aspect_ratio = 1.0
+            flip_prob = 0.0
+            color_jitter_prob = 0.0
+            brightness = 0.0
+            contrast = 0.0
+            saturation = 0.0
+            hue = 0.0
+            grayscale_prob = 0.0
+            blur_prob = 0.0
+            blur_sigma_min = 0.1
+            blur_sigma_max = 2.0
+            solarize_prob = 0.0
+            solarize_threshold = 128
+        "#;
+
+    let config: VisionTrainingConfig = toml::from_str(text).expect("parse distill config");
+    config
+        .validate()
+        .expect("multi-teacher distill config should validate");
+
+    match config.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            assert_eq!(distill.teacher_targets.len(), 1);
+            let target = &distill.teacher_targets[0];
+            assert_eq!(target.name, "siglip2_global");
+            assert_eq!(target.target_kind, VisionTeacherTargetKind::GlobalOnly);
+            assert_eq!(
+                target.decoder_mode,
+                VisionTeacherDecoderMode::SharedProjection
+            );
+            assert_eq!(target.decoder_hidden_dim, None);
+            match &target.teacher {
+                VisionTeacherConfig::Features(teacher) => {
+                    assert_eq!(teacher.feature_dim, 768);
+                    assert!(teacher.train_patch_path.is_none());
+                    assert!(teacher.val_patch_path.is_none());
+                }
+                other => panic!("unexpected teacher target config: {other:?}"),
+            }
+        }
+        other => panic!("unexpected mode: {other:?}"),
+    }
+}
+
+#[test]
+fn distill_mode_validates_dedicated_spatial_auxiliary_teacher_targets() {
+    let text = r#"
+            [dataset]
+            imagenet_root = "data/imagenet1k"
+            train_dir = "train"
+            val_dir = "val"
+
+            [training]
+            batch_size = 8
+            max_iters = 10
+            log_frequency = 2
+
+            [optimizer]
+            learning_rate = 0.001
+            weight_decay = 0.1
+
+            [vision]
+            image_size = 280
+            patch_size = 14
+            in_channels = 3
+            embed_dim = 320
+            steps = 4
+            n_head = 8
+            mlp_internal_dim_multiplier = 4
+            dropout = 0.0
+            projection_dim = 768
+            projection_hidden_dim = 1536
+            use_cls_token = true
+            pos_encoding = "learned2d"
+            attention_mode = "row_l1"
+            fused_kernels = false
+            relu_threshold = 0.0
+
+            [mode]
+            type = "distill"
+
+            [mode.teacher]
+            type = "features"
+            train_cls_path = "dinov2/train_cls.bin"
+            train_patch_path = "dinov2/train_patch.bin"
+            val_cls_path = "dinov2/val_cls.bin"
+            val_patch_path = "dinov2/val_patch.bin"
+            feature_dim = 768
+            patch_tokens = 400
+
+            [[mode.teacher_targets]]
+            name = "siglip2_spatial"
+            weight = 0.25
+            target_kind = "patch_and_cls"
+            decoder_mode = "dedicated_spatial_projection"
+            decoder_hidden_dim = 1024
+
+            [mode.teacher_targets.teacher]
+            type = "features"
+            train_cls_path = "siglip2/train_cls.bin"
+            train_patch_path = "siglip2/train_patch.bin"
+            val_cls_path = "siglip2/val_cls.bin"
+            val_patch_path = "siglip2/val_patch.bin"
+            feature_dim = 1152
+            patch_tokens = 196
+
+            [augment]
+            image_size = 280
+            resize_short = 320
+            min_scale = 1.0
+            max_scale = 1.0
+            min_aspect_ratio = 1.0
+            max_aspect_ratio = 1.0
+            flip_prob = 0.0
+            color_jitter_prob = 0.0
+            brightness = 0.0
+            contrast = 0.0
+            saturation = 0.0
+            hue = 0.0
+            grayscale_prob = 0.0
+            blur_prob = 0.0
+            blur_sigma_min = 0.1
+            blur_sigma_max = 2.0
+            solarize_prob = 0.0
+            solarize_threshold = 128
+        "#;
+
+    let config: VisionTrainingConfig =
+        toml::from_str(text).expect("parse distill config with dedicated spatial teacher");
+    config
+        .validate()
+        .expect("dedicated spatial auxiliary teacher target should validate");
+
+    match config.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            assert_eq!(distill.teacher_targets.len(), 1);
+            let target = &distill.teacher_targets[0];
+            assert_eq!(target.name, "siglip2_spatial");
+            assert_eq!(target.target_kind, VisionTeacherTargetKind::PatchAndCls);
+            assert_eq!(
+                target.decoder_mode,
+                VisionTeacherDecoderMode::DedicatedSpatialProjection
+            );
+            assert_eq!(target.decoder_hidden_dim, Some(1024));
+            match &target.teacher {
+                VisionTeacherConfig::Features(teacher) => {
+                    assert_eq!(teacher.feature_dim, 1152);
+                    assert_eq!(teacher.patch_tokens, Some(196));
+                }
+                other => panic!("unexpected teacher target config: {other:?}"),
+            }
+        }
+        other => panic!("unexpected mode: {other:?}"),
+    }
+}
+
+#[test]
+fn distill_mode_parses_student_checkpoint() {
+    let text = r#"
+            [dataset]
+            imagenet_root = "data/imagenet1k"
+            train_dir = "train"
+            val_dir = "val"
+
+            [training]
+            batch_size = 8
+            max_iters = 10
+            log_frequency = 2
+
+            [optimizer]
+            learning_rate = 0.001
+            weight_decay = 0.1
+
+            [vision]
+            image_size = 224
+            patch_size = 14
+            in_channels = 3
+            embed_dim = 256
+            steps = 4
+            n_head = 4
+            mlp_internal_dim_multiplier = 4
+            dropout = 0.1
+            projection_dim = 384
+            projection_hidden_dim = 512
+            use_cls_token = true
+            pos_encoding = "learned2d"
+            attention_mode = "row_l1"
+            fused_kernels = false
+            relu_threshold = 0.0
+
+            [mode]
+            type = "distill"
+            student_checkpoint = "runs/vision/example/checkpoint/model-1.bin"
+
+            [mode.teacher]
+            type = "features"
+            train_cls_path = "train_cls.bin"
+            train_patch_path = "train_patch.bin"
+            val_cls_path = "val_cls.bin"
+            val_patch_path = "val_patch.bin"
+            feature_dim = 384
+        "#;
+
+    let config: VisionTrainingConfig = toml::from_str(text).expect("parse distill config");
+    match config.mode {
+        VisionTrainingModeConfig::Distill(distill) => {
+            assert_eq!(
+                distill.student_checkpoint,
+                Some(PathBuf::from("runs/vision/example/checkpoint/model-1.bin"))
+            );
+        }
         other => panic!("unexpected mode: {other:?}"),
     }
 }
@@ -1208,6 +1488,126 @@ fn pyramid_backbone_parses_without_legacy_enabled_flag() {
         VisionBackboneKind::Pyramid
     );
     config.validate().expect("pyramid backbone should validate");
+}
+
+#[test]
+fn scene_slot_graph_bridge_preset_applies_to_training_config() {
+    let mut config = VisionModelConfig::default();
+    config.steps = 2;
+    config.backbone = Some(VisionBackboneKind::Dense);
+    config.rho_stream.enabled = true;
+
+    config.apply_scene_slot_graph_bridge_preset();
+
+    assert_eq!(config.backbone, Some(VisionBackboneKind::Pyramid));
+    assert_eq!(config.steps, 4);
+    assert_eq!(
+        config.trm_graph,
+        VisionTrmGraphConfig::scene_slot_graph_bridge_preset()
+    );
+    assert_eq!(
+        config.resolved_backbone_kind().expect("resolved backbone"),
+        VisionBackboneKind::Pyramid
+    );
+    assert!(!config.rho_stream.enabled);
+}
+
+#[test]
+fn scene_slot_graph_preset_applies_to_runtime_config() {
+    let mut config = VisionDragonConfig::default();
+    config.steps = 1;
+    config.backbone = VisionBackboneKind::Dense;
+    config.rho_stream.enabled = true;
+
+    config.apply_scene_slot_graph_preset();
+
+    assert_eq!(config.backbone, VisionBackboneKind::Pyramid);
+    assert_eq!(config.steps, 3);
+    assert_eq!(
+        config.trm_graph,
+        VisionTrmGraphConfig::scene_slot_graph_preset()
+    );
+    assert!(!config.rho_stream.enabled);
+}
+
+#[test]
+fn scene_slot_graph_bridge_baseline_224_sets_promoted_image_recipe() {
+    let config = VisionModelConfig::scene_slot_graph_bridge_baseline_224();
+
+    assert_eq!(config.image_size, 224);
+    assert_eq!(config.patch_size, 16);
+    assert_eq!(config.backbone, Some(VisionBackboneKind::Pyramid));
+    assert_eq!(config.embed_dim, 160);
+    assert_eq!(config.steps, 4);
+    assert_eq!(config.n_head, 5);
+    assert_eq!(config.pos_max_height, Some(14));
+    assert_eq!(config.pos_max_width, Some(14));
+    assert_eq!(
+        config.trm_graph.predict_substep_kind,
+        VisionTrmPredictSubstepKind::LocalBridge
+    );
+    assert_eq!(config.trm_graph.predict_coarse_substeps, 2);
+    assert!(!config.rho_stream.enabled);
+}
+
+#[test]
+fn scene_slot_graph_baseline_224_sets_control_image_recipe() {
+    let config = VisionModelConfig::scene_slot_graph_baseline_224();
+
+    assert_eq!(config.image_size, 224);
+    assert_eq!(config.patch_size, 16);
+    assert_eq!(config.backbone, Some(VisionBackboneKind::Pyramid));
+    assert_eq!(config.embed_dim, 160);
+    assert_eq!(config.steps, 3);
+    assert_eq!(config.n_head, 5);
+    assert_eq!(config.pos_max_height, Some(14));
+    assert_eq!(config.pos_max_width, Some(14));
+    assert_eq!(
+        config.trm_graph.predict_substep_kind,
+        VisionTrmPredictSubstepKind::CoarseOnly
+    );
+    assert_eq!(config.trm_graph.predict_coarse_substeps, 1);
+    assert!(!config.rho_stream.enabled);
+}
+
+#[test]
+fn scene_slot_graph_bridge_runtime_baseline_224_sets_promoted_image_recipe() {
+    let config = VisionDragonConfig::scene_slot_graph_bridge_baseline_224();
+
+    assert_eq!(config.image_size, 224);
+    assert_eq!(config.patch_size, 16);
+    assert_eq!(config.backbone, VisionBackboneKind::Pyramid);
+    assert_eq!(config.embed_dim, 160);
+    assert_eq!(config.steps, 4);
+    assert_eq!(config.n_head, 5);
+    assert_eq!(config.pos_max_height, 14);
+    assert_eq!(config.pos_max_width, 14);
+    assert_eq!(
+        config.trm_graph.predict_substep_kind,
+        VisionTrmPredictSubstepKind::LocalBridge
+    );
+    assert_eq!(config.trm_graph.predict_coarse_substeps, 2);
+    assert!(!config.rho_stream.enabled);
+}
+
+#[test]
+fn scene_slot_graph_runtime_baseline_224_sets_control_image_recipe() {
+    let config = VisionDragonConfig::scene_slot_graph_baseline_224();
+
+    assert_eq!(config.image_size, 224);
+    assert_eq!(config.patch_size, 16);
+    assert_eq!(config.backbone, VisionBackboneKind::Pyramid);
+    assert_eq!(config.embed_dim, 160);
+    assert_eq!(config.steps, 3);
+    assert_eq!(config.n_head, 5);
+    assert_eq!(config.pos_max_height, 14);
+    assert_eq!(config.pos_max_width, 14);
+    assert_eq!(
+        config.trm_graph.predict_substep_kind,
+        VisionTrmPredictSubstepKind::CoarseOnly
+    );
+    assert_eq!(config.trm_graph.predict_coarse_substeps, 1);
+    assert!(!config.rho_stream.enabled);
 }
 
 #[test]
@@ -3523,17 +3923,21 @@ fn imagenette_dinov2_dense_h10_deepbias_224_short_loads() {
     assert_eq!(config.augment.resize_short, 256);
     assert_eq!(config.training.batch_size, 64);
     match config.mode {
-        VisionTrainingModeConfig::Distill(distill) => {
-            match distill.teacher {
-                VisionTeacherConfig::Features(teacher) => {
-                    assert_eq!(teacher.patch_tokens, Some(256));
-                    assert!(teacher.train_patch_path.to_string_lossy().ends_with(
-                        "data/imagenette2-160/features/dinov2_vits14_224/train_patch.bin"
-                    ));
-                }
-                other => panic!("expected feature teacher, got {other:?}"),
+        VisionTrainingModeConfig::Distill(distill) => match distill.teacher {
+            VisionTeacherConfig::Features(teacher) => {
+                assert_eq!(teacher.patch_tokens, Some(256));
+                assert!(
+                    teacher
+                        .train_patch_path
+                        .expect("teacher patch path")
+                        .to_string_lossy()
+                        .ends_with(
+                            "data/imagenette2-160/features/dinov2_vits14_224/train_patch.bin"
+                        )
+                );
             }
-        }
+            other => panic!("expected feature teacher, got {other:?}"),
+        },
         other => panic!("expected distill mode, got {other:?}"),
     }
 }
@@ -3690,17 +4094,21 @@ fn imagenette_dinov2_dense_h10_deepbias_ff6_280_fixedtime120_loads() {
     assert_eq!(config.vision.image_size, 280);
     assert_eq!(config.vision.mlp_internal_dim_multiplier, 6);
     match &config.mode {
-        VisionTrainingModeConfig::Distill(distill) => {
-            match &distill.teacher {
-                VisionTeacherConfig::Features(teacher) => {
-                    assert!(teacher.train_patch_path.ends_with(
-                        "data/imagenette2-160/features/dinov2_vits14_280/train_patch.bin"
-                    ));
-                    assert_eq!(teacher.patch_tokens, Some(400));
-                }
-                other => panic!("expected feature teacher, got {other:?}"),
+        VisionTrainingModeConfig::Distill(distill) => match &distill.teacher {
+            VisionTeacherConfig::Features(teacher) => {
+                assert!(
+                    teacher
+                        .train_patch_path
+                        .as_ref()
+                        .expect("teacher patch path")
+                        .ends_with(
+                            "data/imagenette2-160/features/dinov2_vits14_280/train_patch.bin"
+                        )
+                );
+                assert_eq!(teacher.patch_tokens, Some(400));
             }
-        }
+            other => panic!("expected feature teacher, got {other:?}"),
+        },
         other => panic!("expected distill mode, got {other:?}"),
     }
     assert_eq!(config.training.max_iters, 256);
@@ -4263,12 +4671,15 @@ fn canonical_archive_convnext_short_experiment_loads() {
     let loaded =
         load_vision_training_config(&[config]).expect("load canonical archive convnext short");
     assert_eq!(loaded.training.batch_size, 40);
-    assert_eq!(loaded.vision.patch_embed_mode, VisionPatchEmbedMode::ConvNext);
+    assert_eq!(
+        loaded.vision.patch_embed_mode,
+        VisionPatchEmbedMode::ConvNext
+    );
 }
 
 #[test]
 fn imagenette_dinov2_dense_h8_deepbias0p5_ff6_280_efficiency_bs64_fused_scores_sparse248_metriclight_experiment_loads()
-{
+ {
     let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(|p| p.parent())
@@ -4383,6 +4794,8 @@ fn vision_smoke_dinov2_dense_h10_deepbias_ff6_224_eval_loads() {
     assert!(
         teacher
             .val_patch_path
+            .as_ref()
+            .expect("teacher patch path")
             .ends_with("data/vision_smoke/features/dinov2_vits14_224/val_patch.bin")
     );
 }
@@ -4413,6 +4826,8 @@ fn vision_smoke_dinov2_dense_h8_deepbias0p5_ff6_280_eval_loads() {
     assert!(
         teacher
             .val_patch_path
+            .as_ref()
+            .expect("teacher patch path")
             .ends_with("data/vision_smoke/features/dinov2_vits14_280/val_patch.bin")
     );
 }
@@ -4729,6 +5144,7 @@ fn trm_predict_coarse_substeps_parse_from_config() {
         [vision.trm_graph]
         enabled = true
         predict_coarse_substeps = 3
+        predict_substep_kind = "local_bridge"
 
         [mode]
         type = "video_lejepa"
@@ -4740,6 +5156,10 @@ fn trm_predict_coarse_substeps_parse_from_config() {
     let config: VisionTrainingConfig = toml::from_str(text).expect("parse config");
     config.validate().expect("vision config should validate");
     assert_eq!(config.vision.trm_graph.predict_coarse_substeps, 3);
+    assert_eq!(
+        config.vision.trm_graph.predict_substep_kind,
+        VisionTrmPredictSubstepKind::LocalBridge
+    );
 }
 
 #[test]
@@ -4848,8 +5268,7 @@ fn active_docs_and_program_reference_existing_vision_configs() {
             let mut end = path_start;
             while end < bytes.len() {
                 let ch = bytes[end] as char;
-                let valid = ch.is_ascii_alphanumeric()
-                    || matches!(ch, '/' | '_' | '-' | '.');
+                let valid = ch.is_ascii_alphanumeric() || matches!(ch, '/' | '_' | '-' | '.');
                 if !valid {
                     break;
                 }
@@ -4882,8 +5301,8 @@ fn active_docs_and_program_reference_existing_vision_configs() {
 
     let mut missing = Vec::new();
     for file in files {
-        let text = std::fs::read_to_string(&file)
-            .unwrap_or_else(|err| panic!("read {:?}: {err}", file));
+        let text =
+            std::fs::read_to_string(&file).unwrap_or_else(|err| panic!("read {:?}: {err}", file));
         for rel_path in extract_config_paths(&text) {
             let abs_path = repo_root.join(&rel_path);
             if !abs_path.exists() {

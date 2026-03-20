@@ -717,7 +717,7 @@ mod tests {
             .convert::<f32>()
             .into_vec::<f32>()
             .expect("rhs vec");
-        for (index, (a, b)) in lhs.into_iter().zip(rhs.into_iter()).enumerate() {
+        for (index, (a, b)) in lhs.into_iter().zip(rhs).enumerate() {
             let diff = (a - b).abs();
             let tol = atol + rtol * b.abs();
             assert!(
@@ -818,7 +818,7 @@ mod tests {
         assert_eq!(fused_value_grad.len(), reference_value_grad.len());
         for (index, (lhs, rhs)) in fused_query_grad
             .into_iter()
-            .zip(reference_query_grad.into_iter())
+            .zip(reference_query_grad)
             .enumerate()
         {
             assert!(
@@ -828,7 +828,7 @@ mod tests {
         }
         for (index, (lhs, rhs)) in fused_value_grad
             .into_iter()
-            .zip(reference_value_grad.into_iter())
+            .zip(reference_value_grad)
             .enumerate()
         {
             assert!(
@@ -907,16 +907,10 @@ mod tests {
 
         let mut max_query_diff = 0.0_f32;
         let mut max_value_diff = 0.0_f32;
-        for (lhs, rhs) in fused_query_grad
-            .into_iter()
-            .zip(reference_query_grad.into_iter())
-        {
+        for (lhs, rhs) in fused_query_grad.into_iter().zip(reference_query_grad) {
             max_query_diff = max_query_diff.max((lhs - rhs).abs());
         }
-        for (lhs, rhs) in fused_value_grad
-            .into_iter()
-            .zip(reference_value_grad.into_iter())
-        {
+        for (lhs, rhs) in fused_value_grad.into_iter().zip(reference_value_grad) {
             max_value_diff = max_value_diff.max((lhs - rhs).abs());
         }
 
@@ -996,16 +990,10 @@ mod tests {
 
         let mut max_query_diff = 0.0_f32;
         let mut max_value_diff = 0.0_f32;
-        for (lhs, rhs) in fused_query_grad
-            .into_iter()
-            .zip(reference_query_grad.into_iter())
-        {
+        for (lhs, rhs) in fused_query_grad.into_iter().zip(reference_query_grad) {
             max_query_diff = max_query_diff.max((lhs - rhs).abs());
         }
-        for (lhs, rhs) in fused_value_grad
-            .into_iter()
-            .zip(reference_value_grad.into_iter())
-        {
+        for (lhs, rhs) in fused_value_grad.into_iter().zip(reference_value_grad) {
             max_value_diff = max_value_diff.max((lhs - rhs).abs());
         }
 

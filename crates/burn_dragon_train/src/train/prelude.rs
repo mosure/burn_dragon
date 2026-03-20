@@ -47,8 +47,8 @@ pub(crate) use burn_autodiff::Autodiff;
 pub(crate) use burn_ndarray::NdArrayDevice;
 pub(crate) use burn_train::metric::{LearningRateMetric, LossMetric};
 pub(crate) use burn_train::{
-    InferenceStep as ValidStep, LearningResult as TrainingResult, SupervisedTraining, TrainOutput,
-    TrainStep, TrainingStrategy as LearningStrategy,
+    InferenceStep as ValidStep, LearningResult as TrainingResult, MultiDeviceOptim,
+    SupervisedTraining, TrainOutput, TrainStep, TrainingStrategy as LearningStrategy,
 };
 #[cfg(feature = "cli")]
 pub(crate) use burn_wgpu::Wgpu;

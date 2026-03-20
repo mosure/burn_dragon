@@ -7,6 +7,21 @@
 //! - `Cellular` exposes token-local persistent `rho`
 //! - `Pyramid` exposes structured primary/context/global recurrent banks built on shared core
 //!   `BankedRhoState`
+//!
+//! Current image-side recommendation from the broader validation sweeps:
+//! - start graph-backed work from
+//!   `VisionDragonConfig::scene_slot_graph_bridge_baseline_224()` or
+//!   `VisionTrainingConfig::scene_slot_graph_bridge_imagenette_baseline()`
+//! - use `VisionDragonConfig::scene_slot_graph_baseline_224()` or the checked-in
+//!   `config/vision/trm/baselines/graph_scene_slots_imagenette.toml` file as the matched control
+//! - use `config/vision/trm/baselines/graph_bridge_imagenette.toml` as the promoted training
+//!   baseline
+//! - for ImageNet-1k distill, treat
+//!   `VisionTrainingConfig::scene_slot_graph_bridge_multimode_spatial_imagenet1k_medium_launch()`
+//!   as the promoted multi-mode recipe when full SigLIP2 spatial features are available
+//! - use
+//!   `VisionTrainingConfig::scene_slot_graph_bridge_multiteacher_imagenet1k_medium_launch()`
+//!   as the lower-storage fallback when only SigLIP2 global features are available
 
 #[cfg(feature = "train")]
 pub mod checkpoint;
@@ -43,8 +58,9 @@ pub mod api {
             VisionCellularConfig, VisionCellularState, VisionDragon, VisionDragonConfig,
             VisionDragonMultiOutput, VisionDragonOutput, VisionLatentActivation,
             VisionPatchEmbedMode, VisionPyramidConfig, VisionRhoStreamConfig, VisionRolloutState,
-            VisionTrmGraphConfig, VisionTrmGridMismatchPolicy, patchify, pool_patch_tokens,
-            stage_aware_host_profile_reset, stage_aware_host_profile_snapshot, unpatchify,
+            VisionTrmGraphConfig, VisionTrmGridMismatchPolicy, VisionTrmPredictSubstepKind,
+            patchify, pool_patch_tokens, stage_aware_host_profile_reset,
+            stage_aware_host_profile_snapshot, unpatchify,
         };
     }
 
@@ -55,15 +71,19 @@ pub mod api {
             VisionRolloutScheduleBenchAdapter,
         };
         pub use crate::train::{
-            VISION_ARTIFACT_SCHEMA_VERSION, VisionArtifactHeader,
+            VISION_ARTIFACT_SCHEMA_VERSION, VISION_DISTILL_FEATURE_PROBE_HARNESS_VERSION,
+            VISION_DISTILL_LINEAR_PROBE_HARNESS_VERSION, VisionArtifactHeader,
             VisionDistillDeploySmokePrecision, VisionDistillDeploySmokeReport,
-            VisionDistillFeatureProbeAccuracyReport, VisionDistillFeatureProbeBackend,
-            VisionDistillFeatureProbeDevice, VisionDistillFeatureProbeReport,
-            VisionDistillFeatureProbeStepAccuracy,
-            VisionDistillServingBenchmarkBackend, VisionDistillServingBenchmarkDevice,
-            VisionDistillServingBenchmarkReport, VisionDistillServingStepMetrics,
-            push_vision_artifact_markdown_prelude,
-            run_vision_distill_deploy_smoke, run_vision_distill_feature_probe,
+            VisionDistillFeatureExportReport, VisionDistillFeatureProbeAccuracyReport,
+            VisionDistillFeatureProbeBackend, VisionDistillFeatureProbeDevice,
+            VisionDistillFeatureProbeReport, VisionDistillFeatureProbeStepAccuracy,
+            VisionDistillLinearProbeAccuracyReport, VisionDistillLinearProbeReport,
+            VisionDistillLinearProbeStepAccuracy, VisionDistillServingBenchmarkBackend,
+            VisionDistillServingBenchmarkDevice, VisionDistillServingBenchmarkReport,
+            VisionDistillServingStepMetrics, export_vision_distill_feature_embeddings,
+            push_vision_artifact_markdown_prelude, run_vision_distill_deploy_smoke,
+            run_vision_distill_feature_probe, run_vision_distill_feature_probe_with_seed,
+            run_vision_distill_linear_probe, run_vision_distill_linear_probe_with_seed,
             run_vision_distill_serving_benchmark,
         };
     }
@@ -98,7 +118,8 @@ pub mod api {
         pub use crate::train::{
             CifarBatch, CifarDataLoader, CifarDataset, CifarSplit, CifarType, DinoFeatureStore,
             ImageNetAugmentations, ImageNetBatch, ImageNetDataLoader, ImageNetDataset,
-            ImageNetDatasetConfig, ImageNetSplit, MovingMnistRenderedClip, MovingMnistSplit,
+            ImageNetDatasetConfig, ImageNetSplit, ImageNetTeacherTargetBatch,
+            ImageTeacherTargetStore, MovingMnistRenderedClip, MovingMnistSplit,
             MovingMnistVideoDataLoader, MovingMnistVideoDataset, MovingMnistVideoDatasetConfig,
             VideoClipBatch, VisionNormalize, VisionVideoTrainProfileSnapshot,
             video_train_profile_reset, video_train_profile_snapshot,
@@ -128,35 +149,44 @@ pub use model::{
     StageAwareHostProfileSnapshot, VisionAttentionMode, VisionBackboneKind, VisionCellularConfig,
     VisionCellularState, VisionDragon, VisionDragonConfig, VisionDragonMultiOutput,
     VisionDragonOutput, VisionLatentActivation, VisionPatchEmbedMode, VisionPyramidConfig,
-    VisionRhoStreamConfig, VisionTrmGraphConfig, VisionTrmGridMismatchPolicy, patchify,
-    pool_patch_tokens, stage_aware_host_profile_reset, stage_aware_host_profile_snapshot,
-    unpatchify,
+    VisionRhoStreamConfig, VisionTrmGraphConfig, VisionTrmGridMismatchPolicy,
+    VisionTrmPredictSubstepKind, patchify, pool_patch_tokens, stage_aware_host_profile_reset,
+    stage_aware_host_profile_snapshot, unpatchify,
 };
 #[cfg(feature = "benchmark")]
 pub use model::{
     VisionDenseAttentionBenchAdapter, VisionDenseBenchAdapter, VisionRolloutScheduleBenchAdapter,
 };
-#[cfg(feature = "benchmark")]
-pub use train::{
-    VISION_ARTIFACT_SCHEMA_VERSION, VisionArtifactHeader,
-    VisionDistillDeploySmokePrecision, VisionDistillDeploySmokeReport,
-    VisionDistillFeatureProbeAccuracyReport, VisionDistillFeatureProbeBackend,
-    VisionDistillFeatureProbeDevice, VisionDistillFeatureProbeReport,
-    VisionDistillFeatureProbeStepAccuracy,
-    VisionDistillServingBenchmarkBackend, VisionDistillServingBenchmarkDevice,
-    VisionDistillServingBenchmarkReport, VisionDistillServingStepMetrics,
-    push_vision_artifact_markdown_prelude,
-    run_vision_distill_deploy_smoke, run_vision_distill_feature_probe,
-    run_vision_distill_serving_benchmark,
-};
+#[cfg(all(feature = "benchmark", feature = "cuda"))]
+pub use train::run_vision_distill_decode_probe_cuda_with_seed;
 #[cfg(feature = "train")]
 pub use train::{
     CifarBatch, CifarDataLoader, CifarDataset, CifarSplit, CifarType, DinoFeatureStore,
     ImageNetAugmentations, ImageNetBatch, ImageNetDataLoader, ImageNetDataset,
-    ImageNetDatasetConfig, ImageNetSplit, MovingMnistRenderedClip, MovingMnistSplit,
-    MovingMnistVideoDataLoader, MovingMnistVideoDataset, MovingMnistVideoDatasetConfig,
-    VideoClipBatch, VisionNormalize, VisionVideoTrainProfileSnapshot, video_train_profile_reset,
-    video_train_profile_snapshot,
+    ImageNetDatasetConfig, ImageNetSplit, ImageNetTeacherTargetBatch, ImageTeacherTargetStore,
+    MovingMnistRenderedClip, MovingMnistSplit, MovingMnistVideoDataLoader, MovingMnistVideoDataset,
+    MovingMnistVideoDatasetConfig, VideoClipBatch, VisionNormalize,
+    VisionVideoTrainProfileSnapshot, video_train_profile_reset, video_train_profile_snapshot,
+};
+#[cfg(feature = "benchmark")]
+pub use train::{
+    VISION_ARTIFACT_SCHEMA_VERSION, VISION_DISTILL_DECODE_PROBE_HARNESS_VERSION,
+    VISION_DISTILL_FEATURE_PROBE_HARNESS_VERSION, VISION_DISTILL_LINEAR_PROBE_HARNESS_VERSION,
+    VisionArtifactHeader, VisionDistillDecodeProbeReport, VisionDistillDecodeProbeStepMetrics,
+    VisionDistillDeploySmokePrecision, VisionDistillDeploySmokeReport,
+    VisionDistillFeatureExportReport, VisionDistillFeatureProbeAccuracyReport,
+    VisionDistillFeatureProbeBackend, VisionDistillFeatureProbeDevice,
+    VisionDistillFeatureProbeReport, VisionDistillFeatureProbeStepAccuracy,
+    VisionDistillLinearProbeAccuracyReport, VisionDistillLinearProbeReport,
+    VisionDistillLinearProbeStepAccuracy, VisionDistillServingBenchmarkBackend,
+    VisionDistillServingBenchmarkDevice, VisionDistillServingBenchmarkReport,
+    VisionDistillServingStepMetrics, export_vision_distill_feature_embeddings,
+    push_vision_artifact_markdown_prelude, run_vision_distill_decode_probe_with_seed,
+    run_vision_distill_deploy_smoke, run_vision_distill_feature_probe,
+    run_vision_distill_feature_probe_for_teacher_with_seed,
+    run_vision_distill_feature_probe_with_seed, run_vision_distill_linear_probe,
+    run_vision_distill_linear_probe_for_teacher_with_seed,
+    run_vision_distill_linear_probe_with_seed, run_vision_distill_serving_benchmark,
 };
 
 #[cfg(feature = "train")]

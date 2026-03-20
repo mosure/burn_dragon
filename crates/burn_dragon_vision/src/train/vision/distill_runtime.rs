@@ -37,6 +37,118 @@ pub struct VisionDistillCheckpointEvalSummary {
     pub distill_cls_to_horizon: [f64; VISION_ROLLOUT_HORIZON_COUNT],
 }
 
+fn required_teacher_patch_path<'a>(path: &'a Option<PathBuf>, field: &str) -> Result<&'a Path> {
+    path.as_deref()
+        .ok_or_else(|| anyhow!("{field} is required for patch-and-cls teacher targets"))
+}
+
+fn teacher_target_patch_tokens(
+    target: &VisionTeacherTargetConfig,
+    teacher: &VisionTeacherFeatureConfig,
+    student_patch_tokens: usize,
+) -> Result<Option<usize>> {
+    match target.target_kind {
+        VisionTeacherTargetKind::PatchAndCls => match target.decoder_mode {
+            VisionTeacherDecoderMode::SharedProjection
+            | VisionTeacherDecoderMode::DedicatedProjection => {
+                if let Some(tokens) = teacher
+                    .patch_tokens
+                    .filter(|tokens| *tokens != student_patch_tokens)
+                {
+                    return Err(anyhow!(
+                        "teacher target `{}` patch_tokens ({}) must match student tokens ({}) for {:?} patch-and-cls supervision",
+                        target.name,
+                        tokens,
+                        student_patch_tokens,
+                        target.decoder_mode
+                    ));
+                }
+                Ok(Some(teacher.patch_tokens.unwrap_or(student_patch_tokens)))
+            }
+            VisionTeacherDecoderMode::DedicatedSpatialProjection => {
+                let patch_tokens = teacher.patch_tokens.ok_or_else(|| {
+                        anyhow!(
+                            "teacher target `{}` requires teacher.patch_tokens for dedicated spatial patch-and-cls supervision",
+                            target.name
+                        )
+                    })?;
+                Ok(Some(patch_tokens))
+            }
+        },
+        VisionTeacherTargetKind::ClsOnly | VisionTeacherTargetKind::GlobalOnly => Ok(None),
+    }
+}
+
+fn build_auxiliary_teacher_targets(
+    targets: &[VisionTeacherTargetConfig],
+    train_records: usize,
+    val_records: usize,
+    student_patch_tokens: usize,
+    cache_in_memory: bool,
+) -> Result<(Vec<ImageTeacherTargetStore>, Vec<ImageTeacherTargetStore>)> {
+    let mut train_targets = Vec::with_capacity(targets.len());
+    let mut val_targets = Vec::with_capacity(targets.len());
+    for target in targets {
+        let teacher = match &target.teacher {
+            VisionTeacherConfig::Features(teacher) => teacher,
+            VisionTeacherConfig::Model(_) => {
+                return Err(anyhow!(
+                    "auxiliary teacher target `{}` currently requires precomputed feature files",
+                    target.name
+                ));
+            }
+        };
+        let patch_tokens = teacher_target_patch_tokens(target, teacher, student_patch_tokens)?;
+        let train_store = Arc::new(DinoFeatureStore::new_optional_patch_with_options(
+            &teacher.train_cls_path,
+            match target.target_kind {
+                VisionTeacherTargetKind::PatchAndCls => Some(required_teacher_patch_path(
+                    &teacher.train_patch_path,
+                    &format!(
+                        "mode.teacher_targets[name={}].teacher.train_patch_path",
+                        target.name
+                    ),
+                )?),
+                VisionTeacherTargetKind::ClsOnly | VisionTeacherTargetKind::GlobalOnly => None,
+            },
+            teacher.feature_dim,
+            patch_tokens,
+            Some(train_records),
+            cache_in_memory,
+        )?);
+        train_targets.push(ImageTeacherTargetStore {
+            name: target.name.clone(),
+            weight: target.weight,
+            target_kind: target.target_kind,
+            store: train_store,
+        });
+        let val_store = Arc::new(DinoFeatureStore::new_optional_patch_with_options(
+            &teacher.val_cls_path,
+            match target.target_kind {
+                VisionTeacherTargetKind::PatchAndCls => Some(required_teacher_patch_path(
+                    &teacher.val_patch_path,
+                    &format!(
+                        "mode.teacher_targets[name={}].teacher.val_patch_path",
+                        target.name
+                    ),
+                )?),
+                VisionTeacherTargetKind::ClsOnly | VisionTeacherTargetKind::GlobalOnly => None,
+            },
+            teacher.feature_dim,
+            patch_tokens,
+            Some(val_records),
+            cache_in_memory,
+        )?);
+        val_targets.push(ImageTeacherTargetStore {
+            name: target.name.clone(),
+            weight: target.weight,
+            target_kind: target.target_kind,
+            store: val_store,
+        });
+    }
+    Ok((train_targets, val_targets))
+}
+
 pub(super) fn build_distill_datasets_and_teacher<B: BackendTrait>(
     request: DistillDatasetRequest<'_, B>,
 ) -> Result<PreparedDistillData<B>> {
@@ -81,6 +193,14 @@ pub(super) fn build_distill_datasets_and_teacher<B: BackendTrait>(
                 ));
             }
             let teacher_tokens = teacher.patch_tokens.unwrap_or(student_patch_tokens);
+            let train_patch_path = required_teacher_patch_path(
+                &teacher.train_patch_path,
+                "mode.teacher.train_patch_path",
+            )?;
+            let val_patch_path = required_teacher_patch_path(
+                &teacher.val_patch_path,
+                "mode.teacher.val_patch_path",
+            )?;
 
             let mut train_dataset = ImageNetDataset::new(ImageNetDatasetConfig {
                 root: train_root.to_path_buf(),
@@ -90,6 +210,7 @@ pub(super) fn build_distill_datasets_and_teacher<B: BackendTrait>(
                 local_augmentations: None,
                 normalize,
                 teacher: None,
+                teacher_targets: Vec::new(),
                 views: 1,
                 local_views: 0,
                 min_view_overlap: 0.0,
@@ -101,15 +222,12 @@ pub(super) fn build_distill_datasets_and_teacher<B: BackendTrait>(
             let train_records = train_dataset.len();
             let train_teacher = Arc::new(DinoFeatureStore::new_with_options(
                 &teacher.train_cls_path,
-                &teacher.train_patch_path,
+                train_patch_path,
                 teacher.feature_dim,
                 teacher_tokens,
                 Some(train_records),
                 config.dataset.cache_teacher_features_in_memory,
             )?);
-            train_dataset = train_dataset.with_teacher(Arc::clone(&train_teacher));
-            let train_dataset = Arc::new(train_dataset);
-
             let mut val_dataset = ImageNetDataset::new(ImageNetDatasetConfig {
                 root: val_root.to_path_buf(),
                 split: ImageNetSplit::Val,
@@ -118,6 +236,7 @@ pub(super) fn build_distill_datasets_and_teacher<B: BackendTrait>(
                 local_augmentations: None,
                 normalize,
                 teacher: None,
+                teacher_targets: Vec::new(),
                 views: 1,
                 local_views: 0,
                 min_view_overlap: 0.0,
@@ -127,15 +246,28 @@ pub(super) fn build_distill_datasets_and_teacher<B: BackendTrait>(
                 cache_preprocessed: config.dataset.cache_preprocessed,
             })?;
             let val_records = val_dataset.len();
+            let (train_targets, val_targets) = build_auxiliary_teacher_targets(
+                distill.auxiliary_teacher_targets(),
+                train_records,
+                val_records,
+                student_patch_tokens,
+                config.dataset.cache_teacher_features_in_memory,
+            )?;
+            train_dataset = train_dataset
+                .with_teacher(Arc::clone(&train_teacher))
+                .with_teacher_targets(train_targets);
+            let train_dataset = Arc::new(train_dataset);
             let val_teacher = Arc::new(DinoFeatureStore::new_with_options(
                 &teacher.val_cls_path,
-                &teacher.val_patch_path,
+                val_patch_path,
                 teacher.feature_dim,
                 teacher_tokens,
                 Some(val_records),
                 config.dataset.cache_teacher_features_in_memory,
             )?);
-            val_dataset = val_dataset.with_teacher(Arc::clone(&val_teacher));
+            val_dataset = val_dataset
+                .with_teacher(Arc::clone(&val_teacher))
+                .with_teacher_targets(val_targets);
             Ok((train_dataset, Arc::new(val_dataset), None))
         }
         VisionTeacherConfig::Model(teacher) => {
@@ -155,7 +287,7 @@ pub(super) fn build_distill_datasets_and_teacher<B: BackendTrait>(
                 if patch_size == 0 {
                     return Err(anyhow!("teacher.patch_size must be > 0"));
                 }
-                if !image_size.is_multiple_of(patch_size) {
+                if image_size % patch_size != 0 {
                     return Err(anyhow!(
                         "teacher image_size must be divisible by patch_size ({} % {} != 0)",
                         image_size,
@@ -214,7 +346,7 @@ pub(super) fn build_distill_datasets_and_teacher<B: BackendTrait>(
                             )
                         })?;
 
-                let train_dataset = Arc::new(ImageNetDataset::new(ImageNetDatasetConfig {
+                let mut train_dataset = ImageNetDataset::new(ImageNetDatasetConfig {
                     root: train_root.to_path_buf(),
                     split: ImageNetSplit::Train,
                     max_records: config.dataset.max_records,
@@ -222,6 +354,7 @@ pub(super) fn build_distill_datasets_and_teacher<B: BackendTrait>(
                     local_augmentations: None,
                     normalize,
                     teacher: None,
+                    teacher_targets: Vec::new(),
                     views: 1,
                     local_views: 0,
                     min_view_overlap: 0.0,
@@ -229,8 +362,8 @@ pub(super) fn build_distill_datasets_and_teacher<B: BackendTrait>(
                     cache_decoded: config.dataset.cache_decoded,
                     cache_capacity: config.dataset.cache_capacity,
                     cache_preprocessed: config.dataset.cache_preprocessed,
-                })?);
-                let val_dataset = Arc::new(ImageNetDataset::new(ImageNetDatasetConfig {
+                })?;
+                let mut val_dataset = ImageNetDataset::new(ImageNetDatasetConfig {
                     root: val_root.to_path_buf(),
                     split: ImageNetSplit::Val,
                     max_records: config.dataset.max_records,
@@ -238,6 +371,7 @@ pub(super) fn build_distill_datasets_and_teacher<B: BackendTrait>(
                     local_augmentations: None,
                     normalize,
                     teacher: None,
+                    teacher_targets: Vec::new(),
                     views: 1,
                     local_views: 0,
                     min_view_overlap: 0.0,
@@ -245,9 +379,22 @@ pub(super) fn build_distill_datasets_and_teacher<B: BackendTrait>(
                     cache_decoded: config.dataset.cache_decoded,
                     cache_capacity: config.dataset.cache_capacity,
                     cache_preprocessed: config.dataset.cache_preprocessed,
-                })?);
+                })?;
+                let (train_targets, val_targets) = build_auxiliary_teacher_targets(
+                    distill.auxiliary_teacher_targets(),
+                    train_dataset.len(),
+                    val_dataset.len(),
+                    student_patch_tokens,
+                    config.dataset.cache_teacher_features_in_memory,
+                )?;
+                train_dataset = train_dataset.with_teacher_targets(train_targets);
+                val_dataset = val_dataset.with_teacher_targets(val_targets);
 
-                Ok((train_dataset, val_dataset, Some(teacher_model)))
+                Ok((
+                    Arc::new(train_dataset),
+                    Arc::new(val_dataset),
+                    Some(teacher_model),
+                ))
             }
         }
     }
@@ -435,7 +582,8 @@ where
         ));
 
     let model = VisionDragon::<B>::new(vision_config, &device);
-    let mut valid_model = VisionDistillModel::new(model, distill, teacher, rollout).valid();
+    let mut valid_model =
+        VisionDistillModel::new(model, distill, teacher, rollout, &device).valid();
     let checkpoint_base = checkpoint_base(checkpoint);
     let checkpoint_path = checkpoint_base.with_extension("bin");
     if !checkpoint_path.exists() {

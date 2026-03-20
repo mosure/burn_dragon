@@ -9,7 +9,7 @@ mod validate;
 pub use load::load_training_config;
 pub use schema::{
     DatasetConfig, DatasetSourceConfig, HuggingFaceDatasetConfig, HuggingFaceRecordFormat,
-    TrainingConfig, TrainingHyperparameters,
+    TrainingConfig, TrainingHyperparameters, ValidationDatasetConfig,
 };
 
 use crate::tokenizer::TokenizerConfig;

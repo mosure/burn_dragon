@@ -16,6 +16,10 @@ var<storage, read_write> context: array<f32>;
 @group(0) @binding(5)
 var<storage, read_write> params: array<f32>;
 
+const LATENT_TILE: u32 = 32u;
+
+var<workgroup> query_tile: array<f32, LATENT_TILE>;
+
 fn to_u32(v: f32) -> u32 {
   return u32(v + 0.5);
 }
@@ -45,7 +49,10 @@ fn idx_context(b: u32, h: u32, t: u32, e: u32, heads: u32, time: u32, embd: u32)
 }
 
 @compute @workgroup_size(64, 1, 1)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+fn main(
+  @builtin(global_invocation_id) gid: vec3<u32>,
+  @builtin(local_invocation_id) lid: vec3<u32>,
+) {
   let batch = to_u32(params[0]);
   let heads = to_u32(params[1]);
   let value_heads = to_u32(params[2]);
@@ -56,6 +63,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let e = gid.x;
   let h = gid.y;
   let b = gid.z;
+  let lane = lid.x;
 
   if b >= batch || h >= heads || e >= embd {
     return;
@@ -70,15 +78,27 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let value_t = value[value_index];
 
     var acc = 0.0;
-    var l = 0u;
-    while l < latent {
-      let query_index = idx_query(b, h, t, l, heads, time, latent);
-      let rho_index = idx_rho(b, h, l, e, heads, latent, embd);
-      let q = query[query_index];
-      let rho_prev = rho_state[rho_index];
-      acc += rho_prev * q;
-      rho_state[rho_index] = (rho_prev + q * value_t) * decay_value;
-      l += 1u;
+    var latent_base = 0u;
+    while latent_base < latent {
+      let tile_len = min(LATENT_TILE, latent - latent_base);
+      if lane < tile_len {
+        let query_index = idx_query(b, h, t, latent_base + lane, heads, time, latent);
+        query_tile[lane] = query[query_index];
+      }
+      workgroupBarrier();
+
+      var tile_offset = 0u;
+      while tile_offset < tile_len {
+        let l = latent_base + tile_offset;
+        let rho_index = idx_rho(b, h, l, e, heads, latent, embd);
+        let q = query_tile[tile_offset];
+        let rho_prev = rho_state[rho_index];
+        acc += rho_prev * q;
+        rho_state[rho_index] = (rho_prev + q * value_t) * decay_value;
+        tile_offset += 1u;
+      }
+      workgroupBarrier();
+      latent_base += LATENT_TILE;
     }
 
     let out_index = idx_context(b, h, t, e, heads, time, embd);

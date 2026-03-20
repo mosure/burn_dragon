@@ -2,9 +2,11 @@ use anyhow::{Result, anyhow};
 use burn::data::dataloader::{DataLoader, DataLoaderIterator, Progress};
 use burn::tensor::backend::Backend;
 use burn::tensor::{Int, Tensor, TensorData};
+use half::f16;
 use image::imageops::FilterType;
 use image::{DynamicImage, GenericImageView, RgbImage};
 use rand::prelude::*;
+use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom};
@@ -16,8 +18,11 @@ use std::sync::{Mutex, mpsc};
 use std::thread;
 use std::time::Instant;
 
+use crate::config::VisionTeacherTargetKind;
+
 const IMAGE_CHANNELS: usize = 3;
 const BYTES_PER_F32: u64 = 4;
+const BYTES_PER_F16: u64 = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ImageNetSplit {
@@ -391,22 +396,41 @@ impl VisionNormalize {
 #[derive(Debug)]
 pub struct DinoFeatureStore {
     cls_backing: DinoFeatureBacking,
-    patch_backing: DinoFeatureBacking,
+    patch_backing: Option<DinoFeatureBacking>,
     feature_dim: usize,
-    patch_tokens: usize,
+    patch_tokens: Option<usize>,
     records: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DinoFeatureDType {
+    F32,
+    F16,
+}
+
+impl DinoFeatureDType {
+    fn bytes_per_scalar(self) -> u64 {
+        match self {
+            Self::F32 => BYTES_PER_F32,
+            Self::F16 => BYTES_PER_F16,
+        }
+    }
 }
 
 #[derive(Debug)]
 enum DinoFeatureBacking {
-    File(Mutex<File>),
-    Memory(Arc<Vec<f32>>),
+    File {
+        file: Mutex<File>,
+        dtype: DinoFeatureDType,
+    },
+    MemoryF32(Arc<Vec<f32>>),
+    MemoryF16(Arc<Vec<f16>>),
 }
 
 #[derive(Debug)]
 struct TeacherBatchData {
     cls: Vec<f32>,
-    patch: Vec<f32>,
+    patch: Option<Vec<f32>>,
 }
 
 impl DinoFeatureStore {
@@ -435,26 +459,44 @@ impl DinoFeatureStore {
         expected_records: Option<usize>,
         cache_in_memory: bool,
     ) -> Result<Self> {
-        if feature_dim == 0 || patch_tokens == 0 {
+        Self::new_optional_patch_with_options(
+            cls_path,
+            Some(patch_path),
+            feature_dim,
+            Some(patch_tokens),
+            expected_records,
+            cache_in_memory,
+        )
+    }
+
+    pub fn new_optional_patch_with_options(
+        cls_path: &Path,
+        patch_path: Option<&Path>,
+        feature_dim: usize,
+        patch_tokens: Option<usize>,
+        expected_records: Option<usize>,
+        cache_in_memory: bool,
+    ) -> Result<Self> {
+        if feature_dim == 0 {
             return Err(anyhow!("feature dimensions must be non-zero"));
         }
+        if matches!(patch_tokens, Some(0)) {
+            return Err(anyhow!("patch token count must be non-zero when provided"));
+        }
+        if patch_path.is_some() != patch_tokens.is_some() {
+            return Err(anyhow!(
+                "patch_path and patch_tokens must either both be set or both be omitted"
+            ));
+        }
+        let storage_dtype = infer_feature_storage_dtype(cls_path)?;
 
         let cls_file = File::open(cls_path)
             .map_err(|err| anyhow!("failed to open {}: {err}", cls_path.display()))?;
-        let patch_file = File::open(patch_path)
-            .map_err(|err| anyhow!("failed to open {}: {err}", patch_path.display()))?;
-
         let cls_len = cls_file
             .metadata()
             .map_err(|err| anyhow!("failed to read {} metadata: {err}", cls_path.display()))?
             .len();
-        let patch_len = patch_file
-            .metadata()
-            .map_err(|err| anyhow!("failed to read {} metadata: {err}", patch_path.display()))?
-            .len();
-
-        let cls_stride = feature_dim as u64 * BYTES_PER_F32;
-        let patch_stride = feature_dim as u64 * patch_tokens as u64 * BYTES_PER_F32;
+        let cls_stride = feature_dim as u64 * storage_dtype.bytes_per_scalar();
         if cls_len % cls_stride != 0 {
             return Err(anyhow!(
                 "cls feature file size mismatch: {} bytes not divisible by {}",
@@ -462,17 +504,52 @@ impl DinoFeatureStore {
                 cls_stride
             ));
         }
-        if patch_len % patch_stride != 0 {
-            return Err(anyhow!(
-                "patch feature file size mismatch: {} bytes not divisible by {}",
-                patch_len,
-                patch_stride
-            ));
-        }
-
         let cls_records = (cls_len / cls_stride) as usize;
-        let patch_records = (patch_len / patch_stride) as usize;
-        if cls_records != patch_records {
+
+        let (patch_backing, patch_records) =
+            if let (Some(path), Some(tokens)) = (patch_path, patch_tokens) {
+                let patch_file = File::open(path)
+                    .map_err(|err| anyhow!("failed to open {}: {err}", path.display()))?;
+                let patch_len = patch_file
+                    .metadata()
+                    .map_err(|err| anyhow!("failed to read {} metadata: {err}", path.display()))?
+                    .len();
+                let patch_stride =
+                    feature_dim as u64 * tokens as u64 * storage_dtype.bytes_per_scalar();
+                if patch_len % patch_stride != 0 {
+                    return Err(anyhow!(
+                        "patch feature file size mismatch: {} bytes not divisible by {}",
+                        patch_len,
+                        patch_stride
+                    ));
+                }
+                let patch_records = (patch_len / patch_stride) as usize;
+                let patch_backing = if cache_in_memory {
+                    let patch_scalars = patch_records
+                        .saturating_mul(feature_dim)
+                        .saturating_mul(tokens);
+                    Some(match storage_dtype {
+                        DinoFeatureDType::F32 => DinoFeatureBacking::MemoryF32(
+                            load_f32_file_into_memory(path, patch_scalars)?,
+                        ),
+                        DinoFeatureDType::F16 => DinoFeatureBacking::MemoryF16(
+                            load_f16_file_into_memory(path, patch_scalars)?,
+                        ),
+                    })
+                } else {
+                    Some(DinoFeatureBacking::File {
+                        file: Mutex::new(patch_file),
+                        dtype: storage_dtype,
+                    })
+                };
+                (patch_backing, Some(patch_records))
+            } else {
+                (None, None)
+            };
+
+        if let Some(patch_records) = patch_records
+            && cls_records != patch_records
+        {
             return Err(anyhow!(
                 "teacher records mismatch: cls={}, patch={}",
                 cls_records,
@@ -488,22 +565,21 @@ impl DinoFeatureStore {
         }
 
         let cls_backing = if cache_in_memory {
-            DinoFeatureBacking::Memory(load_f32_file_into_memory(
-                cls_path,
-                cls_records.saturating_mul(feature_dim),
-            )?)
+            match storage_dtype {
+                DinoFeatureDType::F32 => DinoFeatureBacking::MemoryF32(load_f32_file_into_memory(
+                    cls_path,
+                    cls_records.saturating_mul(feature_dim),
+                )?),
+                DinoFeatureDType::F16 => DinoFeatureBacking::MemoryF16(load_f16_file_into_memory(
+                    cls_path,
+                    cls_records.saturating_mul(feature_dim),
+                )?),
+            }
         } else {
-            DinoFeatureBacking::File(Mutex::new(cls_file))
-        };
-        let patch_backing = if cache_in_memory {
-            DinoFeatureBacking::Memory(load_f32_file_into_memory(
-                patch_path,
-                patch_records
-                    .saturating_mul(feature_dim)
-                    .saturating_mul(patch_tokens),
-            )?)
-        } else {
-            DinoFeatureBacking::File(Mutex::new(patch_file))
+            DinoFeatureBacking::File {
+                file: Mutex::new(cls_file),
+                dtype: storage_dtype,
+            }
         };
 
         Ok(Self {
@@ -523,7 +599,7 @@ impl DinoFeatureStore {
         self.feature_dim
     }
 
-    pub fn patch_tokens(&self) -> usize {
+    pub fn patch_tokens(&self) -> Option<usize> {
         self.patch_tokens
     }
 
@@ -536,16 +612,22 @@ impl DinoFeatureStore {
         ordered.sort_unstable_by_key(|(_, index)| *index);
 
         let cls_stride = self.feature_dim;
-        let patch_stride = self.feature_dim * self.patch_tokens;
         let mut cls_data = vec![0.0; batch * cls_stride];
-        let mut patch_data = vec![0.0; batch * patch_stride];
 
         load_backing_batch(&self.cls_backing, &ordered, cls_stride, &mut cls_data)?;
-        load_backing_batch(&self.patch_backing, &ordered, patch_stride, &mut patch_data)?;
+        let patch = if let (Some(backing), Some(tokens)) = (&self.patch_backing, self.patch_tokens)
+        {
+            let patch_stride = self.feature_dim * tokens;
+            let mut patch_data = vec![0.0; batch * patch_stride];
+            load_backing_batch(backing, &ordered, patch_stride, &mut patch_data)?;
+            Some(patch_data)
+        } else {
+            None
+        };
 
         Ok(TeacherBatchData {
             cls: cls_data,
-            patch: patch_data,
+            patch,
         })
     }
 
@@ -553,17 +635,35 @@ impl DinoFeatureStore {
         &self,
         indices: &[usize],
         device: &B::Device,
-    ) -> Result<(Tensor<B, 2>, Tensor<B, 3>)> {
+    ) -> Result<(Tensor<B, 2>, Option<Tensor<B, 3>>)> {
         let batch = indices.len();
         let data = self.load_batch_data(indices)?;
         let cls_tensor =
             Tensor::<B, 2>::from_data(TensorData::new(data.cls, [batch, self.feature_dim]), device);
-        let patch_tensor = Tensor::<B, 3>::from_data(
-            TensorData::new(data.patch, [batch, self.patch_tokens, self.feature_dim]),
-            device,
-        );
+        let patch_tensor = data.patch.map(|patch| {
+            Tensor::<B, 3>::from_data(
+                TensorData::new(
+                    patch,
+                    [
+                        batch,
+                        self.patch_tokens
+                            .expect("patch tokens required for patch tensor"),
+                        self.feature_dim,
+                    ],
+                ),
+                device,
+            )
+        });
         Ok((cls_tensor, patch_tensor))
     }
+}
+
+#[derive(Clone, Debug)]
+pub struct ImageTeacherTargetStore {
+    pub name: String,
+    pub weight: f32,
+    pub target_kind: VisionTeacherTargetKind,
+    pub store: Arc<DinoFeatureStore>,
 }
 
 #[derive(Clone, Debug)]
@@ -575,6 +675,7 @@ pub struct ImageNetDatasetConfig {
     pub local_augmentations: Option<ImageNetAugmentations>,
     pub normalize: VisionNormalize,
     pub teacher: Option<Arc<DinoFeatureStore>>,
+    pub teacher_targets: Vec<ImageTeacherTargetStore>,
     pub views: usize,
     pub local_views: usize,
     pub min_view_overlap: f32,
@@ -588,6 +689,7 @@ pub struct ImageNetDatasetConfig {
 struct ImageNetSample {
     path: PathBuf,
     label: usize,
+    teacher_index: usize,
 }
 
 #[derive(Clone)]
@@ -686,6 +788,7 @@ pub struct ImageNetDataset {
     local_augmentations: Option<ImageNetAugmentations>,
     normalize: VisionNormalize,
     teacher: Option<Arc<DinoFeatureStore>>,
+    teacher_targets: Vec<ImageTeacherTargetStore>,
     global_views: usize,
     local_views: usize,
     min_view_overlap: f32,
@@ -701,7 +804,7 @@ impl ImageNetDataset {
             .max_records
             .filter(|limit| *limit > 0 && *limit < samples.len())
         {
-            samples.truncate(limit);
+            samples = limit_samples_balanced(&samples, limit);
         }
         let global_views = config.views.max(1);
         let local_views = config.local_views;
@@ -729,6 +832,7 @@ impl ImageNetDataset {
             local_augmentations: config.local_augmentations,
             normalize: config.normalize,
             teacher: config.teacher,
+            teacher_targets: config.teacher_targets,
             global_views,
             local_views,
             min_view_overlap,
@@ -746,6 +850,11 @@ impl ImageNetDataset {
 
     pub fn with_teacher(mut self, teacher: Arc<DinoFeatureStore>) -> Self {
         self.teacher = Some(teacher);
+        self
+    }
+
+    pub fn with_teacher_targets(mut self, teacher_targets: Vec<ImageTeacherTargetStore>) -> Self {
+        self.teacher_targets = teacher_targets;
         self
     }
 
@@ -1039,10 +1148,15 @@ impl ImageNetDataset {
             );
         }
 
+        let teacher_indices = indices
+            .iter()
+            .map(|index| self.samples[*index].teacher_index)
+            .collect::<Vec<_>>();
+
         let (teacher_cls, teacher_patch, teacher_dim, teacher_tokens) = match &self.teacher {
             Some(store) => {
                 let teacher_load_start = profile_enabled.then(Instant::now);
-                let batch = store.load_batch_data(&indices)?;
+                let batch = store.load_batch_data(&teacher_indices)?;
                 profile.teacher_load_ns = profile.teacher_load_ns.saturating_add(
                     teacher_load_start
                         .map(|start| start.elapsed().as_nanos())
@@ -1050,12 +1164,36 @@ impl ImageNetDataset {
                 );
                 (
                     Some(batch.cls),
-                    Some(batch.patch),
+                    batch.patch,
                     Some(store.feature_dim()),
-                    Some(store.patch_tokens()),
+                    store.patch_tokens(),
                 )
             }
             None => (None, None, None, None),
+        };
+        let teacher_targets = if self.teacher_targets.is_empty() {
+            Vec::new()
+        } else {
+            let teacher_load_start = profile_enabled.then(Instant::now);
+            let mut targets = Vec::with_capacity(self.teacher_targets.len());
+            for target in &self.teacher_targets {
+                let batch = target.store.load_batch_data(&teacher_indices)?;
+                targets.push(ImageNetTeacherTargetBatchData {
+                    name: target.name.clone(),
+                    weight: target.weight,
+                    target_kind: target.target_kind,
+                    patch: batch.patch,
+                    cls: batch.cls,
+                    feature_dim: target.store.feature_dim(),
+                    patch_tokens: target.store.patch_tokens(),
+                });
+            }
+            profile.teacher_load_ns = profile.teacher_load_ns.saturating_add(
+                teacher_load_start
+                    .map(|start| start.elapsed().as_nanos())
+                    .unwrap_or_default(),
+            );
+            targets
         };
         Ok((
             ImageNetBatchData {
@@ -1068,6 +1206,7 @@ impl ImageNetDataset {
                 labels,
                 teacher_patch,
                 teacher_cls,
+                teacher_targets,
                 batch_size,
                 global_image_size,
                 local_image_size,
@@ -1081,6 +1220,46 @@ impl ImageNetDataset {
     }
 }
 
+fn limit_samples_balanced(samples: &[ImageNetSample], max_samples: usize) -> Vec<ImageNetSample> {
+    if max_samples >= samples.len() {
+        return samples.to_vec();
+    }
+    let num_classes = samples
+        .iter()
+        .map(|sample| sample.label)
+        .max()
+        .map(|value| value + 1)
+        .unwrap_or(0);
+    if num_classes == 0 || max_samples == 0 {
+        return Vec::new();
+    }
+
+    let mut buckets = vec![Vec::new(); num_classes];
+    for sample in samples {
+        buckets[sample.label].push(sample.clone());
+    }
+    let mut offsets = vec![0usize; num_classes];
+    let mut limited = Vec::with_capacity(max_samples);
+    while limited.len() < max_samples {
+        let mut made_progress = false;
+        for class in 0..num_classes {
+            let offset = &mut offsets[class];
+            if *offset < buckets[class].len() {
+                limited.push(buckets[class][*offset].clone());
+                *offset += 1;
+                made_progress = true;
+                if limited.len() >= max_samples {
+                    break;
+                }
+            }
+        }
+        if !made_progress {
+            break;
+        }
+    }
+    limited
+}
+
 struct ImageNetBatchData {
     images: Vec<f32>,
     target_images: Option<Vec<f32>>,
@@ -1091,6 +1270,7 @@ struct ImageNetBatchData {
     labels: Vec<i64>,
     teacher_patch: Option<Vec<f32>>,
     teacher_cls: Option<Vec<f32>>,
+    teacher_targets: Vec<ImageNetTeacherTargetBatchData>,
     batch_size: usize,
     global_image_size: usize,
     local_image_size: usize,
@@ -1098,6 +1278,16 @@ struct ImageNetBatchData {
     local_views: usize,
     teacher_feature_dim: Option<usize>,
     teacher_patch_tokens: Option<usize>,
+}
+
+struct ImageNetTeacherTargetBatchData {
+    name: String,
+    weight: f32,
+    target_kind: VisionTeacherTargetKind,
+    patch: Option<Vec<f32>>,
+    cls: Vec<f32>,
+    feature_dim: usize,
+    patch_tokens: Option<usize>,
 }
 
 impl ImageNetBatchData {
@@ -1125,6 +1315,12 @@ impl ImageNetBatchData {
         }
         if let Some(buffer) = self.teacher_cls.as_ref() {
             bytes = bytes.saturating_add(buffer.len().saturating_mul(size_of::<f32>()));
+        }
+        for target in &self.teacher_targets {
+            bytes = bytes.saturating_add(target.cls.len().saturating_mul(size_of::<f32>()));
+            if let Some(buffer) = target.patch.as_ref() {
+                bytes = bytes.saturating_add(buffer.len().saturating_mul(size_of::<f32>()));
+            }
         }
         bytes as u128
     }
@@ -1238,6 +1434,36 @@ impl ImageNetBatchData {
                 device,
             )
         });
+        let teacher_targets = self
+            .teacher_targets
+            .into_iter()
+            .map(|target| {
+                let patch = target.patch.map(|data| {
+                    Tensor::<B, 3>::from_data(
+                        TensorData::new(
+                            data,
+                            [
+                                self.batch_size,
+                                target.patch_tokens.expect("teacher patch tokens required"),
+                                target.feature_dim,
+                            ],
+                        ),
+                        device,
+                    )
+                });
+                let cls = Tensor::<B, 2>::from_data(
+                    TensorData::new(target.cls, [self.batch_size, target.feature_dim]),
+                    device,
+                );
+                ImageNetTeacherTargetBatch {
+                    name: target.name,
+                    weight: target.weight,
+                    target_kind: target.target_kind,
+                    patch,
+                    cls,
+                }
+            })
+            .collect();
 
         ImageNetBatch::new(
             images_tensor,
@@ -1250,6 +1476,7 @@ impl ImageNetBatchData {
             teacher_patch,
             teacher_cls,
         )
+        .with_teacher_targets(teacher_targets)
     }
 }
 
@@ -1264,6 +1491,16 @@ pub struct ImageNetBatch<B: Backend> {
     pub labels: Tensor<B, 1, Int>,
     pub teacher_patch: Option<Tensor<B, 3>>,
     pub teacher_cls: Option<Tensor<B, 2>>,
+    pub teacher_targets: Vec<ImageNetTeacherTargetBatch<B>>,
+}
+
+#[derive(Clone)]
+pub struct ImageNetTeacherTargetBatch<B: Backend> {
+    pub name: String,
+    pub weight: f32,
+    pub target_kind: VisionTeacherTargetKind,
+    pub patch: Option<Tensor<B, 3>>,
+    pub cls: Tensor<B, 2>,
 }
 
 impl<B: Backend> ImageNetBatch<B> {
@@ -1289,7 +1526,16 @@ impl<B: Backend> ImageNetBatch<B> {
             labels,
             teacher_patch,
             teacher_cls,
+            teacher_targets: Vec::new(),
         }
+    }
+
+    pub fn with_teacher_targets(
+        mut self,
+        teacher_targets: Vec<ImageNetTeacherTargetBatch<B>>,
+    ) -> Self {
+        self.teacher_targets = teacher_targets;
+        self
     }
 
     pub fn repeat_batch(&self, repeats: usize) -> Self {
@@ -1328,6 +1574,18 @@ impl<B: Backend> ImageNetBatch<B> {
                 .teacher_cls
                 .as_ref()
                 .map(|tensor| tensor.clone().repeat_dim(0, repeats)),
+            teacher_targets: self
+                .teacher_targets
+                .iter()
+                .cloned()
+                .map(|target| ImageNetTeacherTargetBatch {
+                    name: target.name,
+                    weight: target.weight,
+                    target_kind: target.target_kind,
+                    patch: target.patch.map(|tensor| tensor.repeat_dim(0, repeats)),
+                    cls: target.cls.repeat_dim(0, repeats),
+                })
+                .collect(),
         }
     }
 }
@@ -1557,7 +1815,6 @@ where
                 let tx = data_tx.clone();
                 let remaining = Arc::clone(&remaining);
                 let stop = Arc::clone(&stop);
-                let prof_enabled = prof_enabled;
                 let handle = thread::spawn(move || {
                     loop {
                         if stop.load(Ordering::Relaxed) {
@@ -1602,7 +1859,6 @@ where
 
             let device = device.clone();
             let stop = Arc::clone(&stop);
-            let prof_enabled = prof_enabled;
             let handle = thread::spawn(move || {
                 for data in data_rx {
                     if stop.load(Ordering::Relaxed) {
@@ -1613,6 +1869,11 @@ where
                             let tensor_copy_start = prof_enabled.then(Instant::now);
                             let _guard = crate::device::device_allocation_lock().lock().ok();
                             let batch = data.into_batch::<B>(&device);
+                            if crate::train::profile::sync_timing_enabled() {
+                                let _ = B::sync(&device);
+                                profile.host_sync_points =
+                                    profile.host_sync_points.saturating_add(1);
+                            }
                             profile.tensor_copy_ns = tensor_copy_start
                                 .map(|start| start.elapsed().as_nanos())
                                 .unwrap_or_default();
@@ -1632,7 +1893,6 @@ where
                 let tx = tx.clone();
                 let remaining = Arc::clone(&remaining);
                 let stop = Arc::clone(&stop);
-                let prof_enabled = prof_enabled;
                 let handle = thread::spawn(move || {
                     loop {
                         if stop.load(Ordering::Relaxed) {
@@ -1749,6 +2009,10 @@ impl<B: Backend> Iterator for ImageNetIterator<B> {
                 Some(Ok(ImageNetPrefetchItem::Data { data, mut profile })) => {
                     let tensor_copy_start = prof_enabled.then(Instant::now);
                     let batch = (*data).into_batch(&self.device);
+                    if crate::train::profile::sync_timing_enabled() {
+                        let _ = B::sync(&self.device);
+                        profile.host_sync_points = profile.host_sync_points.saturating_add(1);
+                    }
                     profile.tensor_copy_ns = tensor_copy_start
                         .map(|start| start.elapsed().as_nanos())
                         .unwrap_or_default();
@@ -1804,7 +2068,11 @@ fn collect_samples(root: &Path) -> Result<(Vec<ImageNetSample>, usize)> {
         let mut images = collect_images(class_dir)?;
         images.sort();
         for image in images {
-            samples.push(ImageNetSample { path: image, label });
+            samples.push(ImageNetSample {
+                path: image,
+                label,
+                teacher_index: samples.len(),
+            });
         }
     }
 
@@ -1844,13 +2112,86 @@ fn load_image(path: &Path) -> Result<DynamicImage> {
         .map_err(|err| anyhow!("failed to decode {}: {err}", path.display()))
 }
 
-fn read_f32_block_into(
+fn infer_feature_storage_dtype(cls_path: &Path) -> Result<DinoFeatureDType> {
+    let feature_dir = cls_path
+        .parent()
+        .ok_or_else(|| anyhow!("teacher cls path has no parent: {}", cls_path.display()))?;
+    let split_name = cls_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .and_then(|stem| stem.strip_suffix("_cls"));
+    if let Some(split_name) = split_name {
+        let split_meta_path = feature_dir.join(format!("{split_name}_meta.json"));
+        if split_meta_path.is_file() {
+            let meta = read_json_value(&split_meta_path)?;
+            if let Some(dtype) = feature_storage_dtype_from_meta(&meta)? {
+                return Ok(dtype);
+            }
+        }
+    }
+
+    let meta_path = feature_dir.join("meta.json");
+    if meta_path.is_file() {
+        let meta = read_json_value(&meta_path)?;
+        if let Some(split_name) = split_name
+            && let Some(dtype) = meta
+                .get("splits")
+                .and_then(|splits| splits.get(split_name))
+                .map(feature_storage_dtype_from_meta)
+                .transpose()?
+                .flatten()
+        {
+            return Ok(dtype);
+        }
+        if let Some(dtype) = feature_storage_dtype_from_meta(&meta)? {
+            return Ok(dtype);
+        }
+    }
+
+    Ok(DinoFeatureDType::F32)
+}
+
+fn read_json_value(path: &Path) -> Result<Value> {
+    let file =
+        File::open(path).map_err(|err| anyhow!("failed to open {}: {err}", path.display()))?;
+    serde_json::from_reader(file)
+        .map_err(|err| anyhow!("failed to parse {}: {err}", path.display()))
+}
+
+fn feature_storage_dtype_from_meta(meta: &Value) -> Result<Option<DinoFeatureDType>> {
+    if let Some(storage_dtype) = meta.get("storage_dtype").and_then(Value::as_str) {
+        return Ok(Some(match storage_dtype {
+            "f32" => DinoFeatureDType::F32,
+            "f16" => DinoFeatureDType::F16,
+            other => {
+                return Err(anyhow!(
+                    "unsupported teacher feature storage_dtype '{other}'"
+                ));
+            }
+        }));
+    }
+    if let Some(bytes_per_scalar) = meta.get("bytes_per_scalar").and_then(Value::as_u64) {
+        return Ok(Some(match bytes_per_scalar {
+            BYTES_PER_F32 => DinoFeatureDType::F32,
+            BYTES_PER_F16 => DinoFeatureDType::F16,
+            other => {
+                return Err(anyhow!(
+                    "unsupported teacher feature bytes_per_scalar '{other}'"
+                ));
+            }
+        }));
+    }
+    Ok(None)
+}
+
+fn read_feature_block_into(
     file: &mut File,
     offset: u64,
     scratch: &mut Vec<u8>,
     out: &mut [f32],
+    dtype: DinoFeatureDType,
 ) -> Result<()> {
-    let bytes = out.len() * BYTES_PER_F32 as usize;
+    let bytes = out.len() * dtype.bytes_per_scalar() as usize;
     if scratch.len() != bytes {
         scratch.resize(bytes, 0);
     }
@@ -1859,8 +2200,17 @@ fn read_f32_block_into(
     file.read_exact(scratch)
         .map_err(|err| anyhow!("failed to read teacher features: {err}"))?;
 
-    for (dst, chunk) in out.iter_mut().zip(scratch.chunks_exact(4)) {
-        *dst = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+    match dtype {
+        DinoFeatureDType::F32 => {
+            for (dst, chunk) in out.iter_mut().zip(scratch.chunks_exact(4)) {
+                *dst = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+            }
+        }
+        DinoFeatureDType::F16 => {
+            for (dst, chunk) in out.iter_mut().zip(scratch.chunks_exact(2)) {
+                *dst = f16::from_bits(u16::from_le_bytes([chunk[0], chunk[1]])).to_f32();
+            }
+        }
     }
     Ok(())
 }
@@ -1872,23 +2222,43 @@ fn load_backing_batch(
     out: &mut [f32],
 ) -> Result<()> {
     match backing {
-        DinoFeatureBacking::File(file) => {
+        DinoFeatureBacking::File { file, dtype } => {
             let mut file = file.lock().unwrap();
             let mut scratch = Vec::new();
             for (slot, index) in ordered {
-                let offset = *index as u64 * stride as u64 * BYTES_PER_F32;
+                let offset = *index as u64 * stride as u64 * dtype.bytes_per_scalar();
                 let start = *slot * stride;
                 let end = start + stride;
-                read_f32_block_into(&mut file, offset, &mut scratch, &mut out[start..end])?;
+                read_feature_block_into(
+                    &mut file,
+                    offset,
+                    &mut scratch,
+                    &mut out[start..end],
+                    *dtype,
+                )?;
             }
         }
-        DinoFeatureBacking::Memory(data) => {
+        DinoFeatureBacking::MemoryF32(data) => {
             for (slot, index) in ordered {
                 let src_start = *index * stride;
                 let src_end = src_start + stride;
                 let dst_start = *slot * stride;
                 let dst_end = dst_start + stride;
                 out[dst_start..dst_end].copy_from_slice(&data[src_start..src_end]);
+            }
+        }
+        DinoFeatureBacking::MemoryF16(data) => {
+            for (slot, index) in ordered {
+                let src_start = *index * stride;
+                let src_end = src_start + stride;
+                let dst_start = *slot * stride;
+                let dst_end = dst_start + stride;
+                for (dst, src) in out[dst_start..dst_end]
+                    .iter_mut()
+                    .zip(data[src_start..src_end].iter())
+                {
+                    *dst = src.to_f32();
+                }
             }
         }
     }
@@ -1909,9 +2279,24 @@ fn load_f32_file_into_memory(path: &Path, floats: usize) -> Result<Arc<Vec<f32>>
     Ok(Arc::new(data))
 }
 
+fn load_f16_file_into_memory(path: &Path, floats: usize) -> Result<Arc<Vec<f16>>> {
+    let bytes_len = floats.saturating_mul(BYTES_PER_F16 as usize);
+    let mut file =
+        File::open(path).map_err(|err| anyhow!("failed to open {}: {err}", path.display()))?;
+    let mut bytes = vec![0u8; bytes_len];
+    file.read_exact(&mut bytes)
+        .map_err(|err| anyhow!("failed to read {} into memory: {err}", path.display()))?;
+    let mut data = vec![f16::from_f32(0.0); floats];
+    for (dst, chunk) in data.iter_mut().zip(bytes.chunks_exact(2)) {
+        *dst = f16::from_bits(u16::from_le_bytes([chunk[0], chunk[1]]));
+    }
+    Ok(Arc::new(data))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
     #[test]
     fn image_cache_prunes_order_growth() {
@@ -1937,5 +2322,45 @@ mod tests {
         cache.insert(path_c, image);
         let entries = cache.inner.lock().unwrap().entries.len();
         assert!(entries <= cache.capacity);
+    }
+
+    #[test]
+    fn dino_feature_store_reads_f16_cls_features_from_metadata() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let cls_path = root.join("train_cls.bin");
+        let meta_path = root.join("train_meta.json");
+        fs::write(
+            &meta_path,
+            br#"{
+  "storage_dtype": "f16",
+  "bytes_per_scalar": 2
+}"#,
+        )
+        .unwrap();
+        let values = [1.0f32, -0.5, 0.25, 2.0];
+        let mut file = File::create(&cls_path).unwrap();
+        for value in values {
+            file.write_all(&f16::from_f32(value).to_bits().to_le_bytes())
+                .unwrap();
+        }
+        drop(file);
+
+        let store = DinoFeatureStore::new_optional_patch_with_options(
+            &cls_path,
+            None,
+            2,
+            None,
+            Some(2),
+            false,
+        )
+        .unwrap();
+        let batch = store.load_batch_data(&[1, 0]).unwrap();
+        assert!(batch.patch.is_none());
+        assert_eq!(batch.cls.len(), 4);
+        let expected = [0.25f32, 2.0, 1.0, -0.5];
+        for (got, want) in batch.cls.iter().zip(expected) {
+            assert!((got - want).abs() < 1e-3, "got {got}, want {want}");
+        }
     }
 }

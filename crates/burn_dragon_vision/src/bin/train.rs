@@ -9,6 +9,8 @@ use anyhow::{Result, anyhow};
 use clap::Parser;
 
 #[cfg(feature = "cli")]
+use burn_dragon_vision::VisionTrainingConfig;
+#[cfg(feature = "cli")]
 use burn_dragon_vision::config::load_vision_training_config;
 #[cfg(feature = "cli")]
 use burn_dragon_vision::train::train_vision_backend;
@@ -18,13 +20,18 @@ use burn_autodiff::Autodiff;
 #[cfg(feature = "cli")]
 use burn_ndarray::NdArray;
 #[cfg(feature = "cli")]
-use burn_wgpu::Wgpu;
+use burn_wgpu::{CubeBackend, WgpuRuntime};
 
 #[cfg(feature = "cli")]
 use burn_dragon_train::wgpu::init_runtime;
+#[cfg(feature = "cli")]
+use burn_dragon_train::wgpu::is_wgpu_backend_name;
 
 #[cfg(all(feature = "cuda", feature = "cli"))]
 use burn_cuda::Cuda;
+
+#[cfg(feature = "cli")]
+type WgpuNoFusion = CubeBackend<WgpuRuntime, f32, i32, u32>;
 
 #[cfg(feature = "cli")]
 #[derive(Parser, Debug)]
@@ -64,17 +71,24 @@ fn run(args: Args) -> Result<()> {
             train_vision_backend::<Autodiff<NdArray<f32>>, _>(&config, "cpu", |_| {})?;
         }
         "wgpu" => {
-            train_vision_backend::<Autodiff<Wgpu<f32>>, _>(&config, "wgpu", |device| {
-                init_runtime(device, &config.wgpu)
+            let mut resolved = config.clone();
+            apply_wgpu_vision_training_overrides(&mut resolved, "wgpu");
+            let backend_name = if resolved.vision.fused_kernels {
+                "wgpu-fused-core"
+            } else {
+                "wgpu-nofusion"
+            };
+            train_vision_backend::<Autodiff<WgpuNoFusion>, _>(&resolved, backend_name, |device| {
+                init_runtime(device, &resolved.wgpu)
             })?;
         }
-        "wgpu-nofusion" => {
-            use burn_wgpu::{CubeBackend, WgpuRuntime};
-            type WgpuNoFusion = CubeBackend<WgpuRuntime, f32, i32, u32>;
+        "wgpu-nofusion" | "wgpu-no-fusion" => {
+            let mut resolved = config.clone();
+            resolved.vision.fused_kernels = false;
             train_vision_backend::<Autodiff<WgpuNoFusion>, _>(
-                &config,
+                &resolved,
                 "wgpu-nofusion",
-                |device| init_runtime(device, &config.wgpu),
+                |device| init_runtime(device, &resolved.wgpu),
             )?;
         }
         "cuda" => {
@@ -91,12 +105,28 @@ fn run(args: Args) -> Result<()> {
         }
         other => {
             return Err(anyhow!(
-                "unknown backend `{other}` (expected cpu, wgpu, wgpu-nofusion, or cuda)"
+                "unknown backend `{other}` (expected cpu, wgpu, wgpu-nofusion/wgpu-no-fusion, or cuda)"
             ));
         }
     }
 
     Ok(())
+}
+
+#[cfg(feature = "cli")]
+fn apply_wgpu_vision_training_overrides(config: &mut VisionTrainingConfig, backend_name: &str) {
+    if !is_wgpu_backend_name(backend_name) {
+        return;
+    }
+
+    let fused_override = config
+        .wgpu
+        .training
+        .fused_core_rollout
+        .or(config.wgpu.training.fused_core_recurrent);
+    if let Some(enabled) = fused_override {
+        config.vision.fused_kernels = enabled;
+    }
 }
 
 #[cfg(not(feature = "cli"))]

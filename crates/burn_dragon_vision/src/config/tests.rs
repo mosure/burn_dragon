@@ -38,6 +38,13 @@ fn vision_configs_parse_serialize_validate() {
         "vision/distill/baselines/base.toml",
         "vision/distill/baselines/balanced_224.toml",
         "vision/distill/baselines/richer_280.toml",
+        "vision/distill/frontier/graph_bridge_multiteacher_medium_280.toml",
+        "vision/distill/frontier/graph_bridge_multimode_spatial_medium_280.toml",
+        "vision/distill/frontier/graph_bridge_multiteacher_medium_280_spatial_smoke.toml",
+        "vision/distill/frontier/graph_bridge_multiteacher_base_336.toml",
+        "vision/distill/frontier/graph_bridge_multimode_spatial_base_336.toml",
+        "vision/trm/baselines/graph_scene_slots_imagenette.toml",
+        "vision/trm/baselines/graph_bridge_imagenette.toml",
         "vision/video_lejepa/baselines/smoke.toml",
         "vision/video_lejepa/baselines/tiny.toml",
         "vision/video_lejepa/baselines/small.toml",
@@ -66,6 +73,96 @@ fn vision_configs_parse_serialize_validate() {
             )
         });
     }
+}
+
+#[test]
+fn scene_slot_graph_imagenette_programmatic_baseline_matches_checked_in_config() {
+    let root = config_root();
+    let path = root.join("vision/trm/baselines/graph_scene_slots_imagenette.toml");
+    let loaded: VisionTrainingConfig =
+        load_vision_training_config(std::slice::from_ref(&path)).expect("load checked-in config");
+    let programmatic = VisionTrainingConfig::scene_slot_graph_imagenette_baseline();
+
+    assert_eq!(programmatic, loaded);
+    programmatic
+        .validate()
+        .expect("programmatic graph scene-slot baseline should validate");
+}
+
+#[test]
+fn scene_slot_graph_bridge_imagenette_programmatic_baseline_matches_checked_in_config() {
+    let root = config_root();
+    let path = root.join("vision/trm/baselines/graph_bridge_imagenette.toml");
+    let loaded: VisionTrainingConfig =
+        load_vision_training_config(std::slice::from_ref(&path)).expect("load checked-in config");
+    let programmatic = VisionTrainingConfig::scene_slot_graph_bridge_imagenette_baseline();
+
+    assert_eq!(programmatic, loaded);
+    programmatic
+        .validate()
+        .expect("programmatic graph bridge baseline should validate");
+}
+
+#[test]
+fn scene_slot_graph_bridge_multiteacher_medium_programmatic_baseline_matches_checked_in_config() {
+    let root = config_root();
+    let path = root.join("vision/distill/frontier/graph_bridge_multiteacher_medium_280.toml");
+    let loaded: VisionTrainingConfig =
+        load_vision_training_config(std::slice::from_ref(&path)).expect("load checked-in config");
+    let programmatic =
+        VisionTrainingConfig::scene_slot_graph_bridge_multiteacher_imagenet1k_medium_launch();
+
+    assert_eq!(programmatic, loaded);
+    programmatic
+        .validate()
+        .expect("programmatic multiteacher medium baseline should validate");
+}
+
+#[test]
+fn scene_slot_graph_bridge_multiteacher_base_programmatic_baseline_matches_checked_in_config() {
+    let root = config_root();
+    let path = root.join("vision/distill/frontier/graph_bridge_multiteacher_base_336.toml");
+    let loaded: VisionTrainingConfig =
+        load_vision_training_config(std::slice::from_ref(&path)).expect("load checked-in config");
+    let programmatic =
+        VisionTrainingConfig::scene_slot_graph_bridge_multiteacher_imagenet1k_base_launch();
+
+    assert_eq!(programmatic, loaded);
+    programmatic
+        .validate()
+        .expect("programmatic multiteacher base baseline should validate");
+}
+
+#[test]
+fn scene_slot_graph_bridge_multimode_spatial_medium_programmatic_baseline_matches_checked_in_config()
+ {
+    let root = config_root();
+    let path = root.join("vision/distill/frontier/graph_bridge_multimode_spatial_medium_280.toml");
+    let loaded: VisionTrainingConfig =
+        load_vision_training_config(std::slice::from_ref(&path)).expect("load checked-in config");
+    let programmatic =
+        VisionTrainingConfig::scene_slot_graph_bridge_multimode_spatial_imagenet1k_medium_launch();
+
+    assert_eq!(programmatic, loaded);
+    programmatic
+        .validate()
+        .expect("programmatic multimode spatial medium baseline should validate");
+}
+
+#[test]
+fn scene_slot_graph_bridge_multimode_spatial_base_programmatic_baseline_matches_checked_in_config()
+{
+    let root = config_root();
+    let path = root.join("vision/distill/frontier/graph_bridge_multimode_spatial_base_336.toml");
+    let loaded: VisionTrainingConfig =
+        load_vision_training_config(std::slice::from_ref(&path)).expect("load checked-in config");
+    let programmatic =
+        VisionTrainingConfig::scene_slot_graph_bridge_multimode_spatial_imagenet1k_base_launch();
+
+    assert_eq!(programmatic, loaded);
+    programmatic
+        .validate()
+        .expect("programmatic multimode spatial base baseline should validate");
 }
 
 #[test]
@@ -211,7 +308,9 @@ fn all_vision_config_extends_targets_exist() {
                 .unwrap_or_else(|err| panic!("failed to read {}: {err}", dir.display()));
             for entry in entries {
                 let path = entry
-                    .unwrap_or_else(|err| panic!("failed to read dir entry in {}: {err}", dir.display()))
+                    .unwrap_or_else(|err| {
+                        panic!("failed to read dir entry in {}: {err}", dir.display())
+                    })
                     .path();
                 if path.is_dir() {
                     stack.push(path);
@@ -265,11 +364,7 @@ fn all_vision_config_extends_targets_exist() {
         for extend in extract_extends(&path) {
             let resolved = parent.join(&extend);
             if !resolved.exists() {
-                missing.push(format!(
-                    "{} -> {}",
-                    path.display(),
-                    resolved.display()
-                ));
+                missing.push(format!("{} -> {}", path.display(), resolved.display()));
             }
         }
     }

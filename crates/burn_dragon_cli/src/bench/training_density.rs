@@ -67,8 +67,40 @@ pub struct TrainingDensityBenchStageProfileSummary {
     pub dataloader_tensor_copy_ms_per_step: f64,
     pub forward_ms_per_step: f64,
     pub loss_backward_ms_per_step: f64,
+    pub optimizer_update_ms_per_step: f64,
     pub host_to_device_bytes_per_step: f64,
     pub host_sync_points_per_step: f64,
+    pub train_steps_profiled: usize,
+    pub optimizer_steps_profiled: usize,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct TrainingDensityBenchStructuredProfileSummary {
+    pub calls_per_step: f64,
+    pub launches_per_step: f64,
+    pub total_ms_per_step: f64,
+    pub setup_ms_per_step: f64,
+    pub copy_ms_per_step: f64,
+    pub dispatch_ms_per_step: f64,
+    pub transient_allocations_per_step: f64,
+    pub metadata_upload_bytes_per_step: f64,
+    pub metadata_reuse_hits_per_step: f64,
+    pub metadata_reuse_bytes_per_step: f64,
+    pub resident_rollout_steps_per_step: f64,
+    pub train_steps_profiled: usize,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct TrainingDensityBenchStageAwareProfileSummary {
+    pub step_calls_per_train_step: f64,
+    pub coarse_only_step_calls_per_train_step: f64,
+    pub patch_local_ms_per_step_call: f64,
+    pub coarse_local_ms_per_step_call: f64,
+    pub patch_from_coarse_ms_per_step_call: f64,
+    pub hub_read_ms_per_step_call: f64,
+    pub patch_to_coarse_ms_per_step_call: f64,
+    pub hub_update_ms_per_step_call: f64,
+    pub stage_step_calls_profiled: usize,
     pub train_steps_profiled: usize,
 }
 
@@ -99,6 +131,8 @@ pub struct TrainingDensityBenchCaseReport {
     pub locked_metric: Option<String>,
     pub locked_metric_min: Option<f64>,
     pub stage_profile: Option<TrainingDensityBenchStageProfileSummary>,
+    pub structured_profile: Option<TrainingDensityBenchStructuredProfileSummary>,
+    pub stage_aware_profile: Option<TrainingDensityBenchStageAwareProfileSummary>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -229,7 +263,7 @@ impl TrainingDensityBenchReport {
             if let Some(stage) = &case.stage_profile {
                 writeln!(
                     &mut markdown,
-                    "- total_ms_per_step: `{:.3}`\n- dataloader_cpu_ms_per_step: `{:.3}`\n- dataloader_image_load_ms_per_step: `{:.3}`\n- dataloader_image_transform_ms_per_step: `{:.3}`\n- dataloader_teacher_load_ms_per_step: `{:.3}`\n- dataloader_tensor_copy_ms_per_step: `{:.3}`\n- forward_ms_per_step: `{:.3}`\n- loss_backward_ms_per_step: `{:.3}`\n- host_to_device_bytes_per_step: `{:.0}`\n- host_sync_points_per_step: `{:.3}`",
+                    "- total_ms_per_step: `{:.3}`\n- dataloader_cpu_ms_per_step: `{:.3}`\n- dataloader_image_load_ms_per_step: `{:.3}`\n- dataloader_image_transform_ms_per_step: `{:.3}`\n- dataloader_teacher_load_ms_per_step: `{:.3}`\n- dataloader_tensor_copy_ms_per_step: `{:.3}`\n- forward_ms_per_step: `{:.3}`\n- loss_backward_ms_per_step: `{:.3}`\n- optimizer_update_ms_per_step: `{:.3}`\n- host_to_device_bytes_per_step: `{:.0}`\n- host_sync_points_per_step: `{:.3}`\n- optimizer_steps_profiled: `{}`",
                     stage.total_ms_per_step,
                     stage.dataloader_cpu_ms_per_step,
                     stage.dataloader_image_load_ms_per_step,
@@ -238,12 +272,47 @@ impl TrainingDensityBenchReport {
                     stage.dataloader_tensor_copy_ms_per_step,
                     stage.forward_ms_per_step,
                     stage.loss_backward_ms_per_step,
+                    stage.optimizer_update_ms_per_step,
                     stage.host_to_device_bytes_per_step,
                     stage.host_sync_points_per_step,
+                    stage.optimizer_steps_profiled,
                 )
                 .unwrap();
             } else {
                 writeln!(&mut markdown, "- no stage profile found").unwrap();
+            }
+            if let Some(structured) = &case.structured_profile {
+                writeln!(
+                    &mut markdown,
+                    "- structured launches_per_step: `{:.2}`\n- structured dispatch_ms_per_step: `{:.3}`\n- structured setup_ms_per_step: `{:.3}`\n- structured copy_ms_per_step: `{:.3}`\n- structured transient_allocations_per_step: `{:.2}`\n- structured metadata_upload_bytes_per_step: `{:.0}`\n- structured metadata_reuse_bytes_per_step: `{:.0}`",
+                    structured.launches_per_step,
+                    structured.dispatch_ms_per_step,
+                    structured.setup_ms_per_step,
+                    structured.copy_ms_per_step,
+                    structured.transient_allocations_per_step,
+                    structured.metadata_upload_bytes_per_step,
+                    structured.metadata_reuse_bytes_per_step,
+                )
+                .unwrap();
+            } else {
+                writeln!(&mut markdown, "- no structured kernel profile found").unwrap();
+            }
+            if let Some(stage_aware) = &case.stage_aware_profile {
+                writeln!(
+                    &mut markdown,
+                    "- stageaware step_calls_per_train_step: `{:.2}`\n- stageaware coarse_only_step_calls_per_train_step: `{:.2}`\n- stageaware patch_local_ms_per_step_call: `{:.3}`\n- stageaware coarse_local_ms_per_step_call: `{:.3}`\n- stageaware patch_from_coarse_ms_per_step_call: `{:.3}`\n- stageaware hub_read_ms_per_step_call: `{:.3}`\n- stageaware patch_to_coarse_ms_per_step_call: `{:.3}`\n- stageaware hub_update_ms_per_step_call: `{:.3}`",
+                    stage_aware.step_calls_per_train_step,
+                    stage_aware.coarse_only_step_calls_per_train_step,
+                    stage_aware.patch_local_ms_per_step_call,
+                    stage_aware.coarse_local_ms_per_step_call,
+                    stage_aware.patch_from_coarse_ms_per_step_call,
+                    stage_aware.hub_read_ms_per_step_call,
+                    stage_aware.patch_to_coarse_ms_per_step_call,
+                    stage_aware.hub_update_ms_per_step_call,
+                )
+                .unwrap();
+            } else {
+                writeln!(&mut markdown, "- no stage-aware host profile found").unwrap();
             }
         }
         markdown
@@ -332,6 +401,7 @@ fn run_case(
     command
         .env("RUST_LOG", "info")
         .env("BDH_STAGE_PROFILE", "1")
+        .env("BDH_STAGE_PROFILE_SYNC", "1")
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr));
     match case.kind {
@@ -391,8 +461,8 @@ fn run_case(
     let experiment_log = run_dir.join("experiment.log");
     let log_text = fs::read_to_string(&experiment_log)
         .with_context(|| format!("read {}", experiment_log.display()))?;
-    let stdout_log_text =
-        fs::read_to_string(&stdout_log).with_context(|| format!("read {}", stdout_log.display()))?;
+    let stdout_log_text = fs::read_to_string(&stdout_log)
+        .with_context(|| format!("read {}", stdout_log.display()))?;
     let metrics = parse_metric_table(&stdout_log_text);
     let kept_intervals = trimmed_steady_state_intervals(&log_text, config.warmup_iteration_deltas);
     let kept_step_deltas = kept_intervals
@@ -409,6 +479,8 @@ fn run_case(
     let mean_step_s = mean_f64(&kept_step_deltas);
     let std_step_s = stddev_f64(&kept_step_deltas, mean_step_s);
     let stage_profile = parse_stage_profile(&log_text, mean_step_s);
+    let structured_profile = parse_structured_profile(&log_text);
+    let stage_aware_profile = parse_stage_aware_profile(&log_text);
     let kept_gpu_samples = gpu_samples
         .iter()
         .skip(config.warmup_gpu_samples.min(gpu_samples.len()))
@@ -422,7 +494,8 @@ fn run_case(
                 .iter()
                 .filter(|sample| {
                     kept_intervals.iter().any(|interval| {
-                        sample.sample_ts_s >= interval.start_s && sample.sample_ts_s <= interval.end_s
+                        sample.sample_ts_s >= interval.start_s
+                            && sample.sample_ts_s <= interval.end_s
                     })
                 })
                 .cloned()
@@ -464,10 +537,12 @@ fn run_case(
 
     let resolved_training = load_resolved_training_config(case.kind, &run_dir)?;
     let batch_size = get_usize(&resolved_training, &["training", "batch_size"]).unwrap_or(0);
-    let gradient_accumulation_steps =
-        get_usize(&resolved_training, &["training", "gradient_accumulation_steps"])
-            .unwrap_or(1)
-            .max(1);
+    let gradient_accumulation_steps = get_usize(
+        &resolved_training,
+        &["training", "gradient_accumulation_steps"],
+    )
+    .unwrap_or(1)
+    .max(1);
     let effective_batch_size = batch_size.saturating_mul(gradient_accumulation_steps);
     let block_or_patch_tokens = match case.kind {
         TrainingDensityBenchCaseKind::Language => {
@@ -513,7 +588,11 @@ fn run_case(
         block_or_patch_tokens,
         mean_step_ms: mean_step_s * 1000.0,
         std_step_ms: std_step_s * 1000.0,
-        step_cv: if mean_step_s > 0.0 { std_step_s / mean_step_s } else { 0.0 },
+        step_cv: if mean_step_s > 0.0 {
+            std_step_s / mean_step_s
+        } else {
+            0.0
+        },
         measured_step_deltas: kept_step_deltas.len(),
         effective_samples_per_sec,
         work_items_per_sec,
@@ -526,6 +605,8 @@ fn run_case(
         locked_metric,
         locked_metric_min,
         stage_profile,
+        structured_profile,
+        stage_aware_profile,
     })
 }
 
@@ -579,7 +660,10 @@ fn tail_file(path: &Path, lines: usize) -> Result<String> {
     Ok(tail)
 }
 
-fn load_resolved_training_config(kind: TrainingDensityBenchCaseKind, run_dir: &Path) -> Result<Value> {
+fn load_resolved_training_config(
+    kind: TrainingDensityBenchCaseKind,
+    run_dir: &Path,
+) -> Result<Value> {
     let path = match kind {
         TrainingDensityBenchCaseKind::Language => run_dir.join("training_config.json"),
         TrainingDensityBenchCaseKind::Vision => run_dir.join("vision_training_config.json"),
@@ -755,21 +839,9 @@ fn parse_stage_profile(
     text: &str,
     mean_step_s: f64,
 ) -> Option<TrainingDensityBenchStageProfileSummary> {
-    let line = text
-        .lines()
-        .rev()
-        .find(|line| line.contains("[stage-profile][training]"))?;
-    let mut pairs = BTreeMap::new();
-    for token in line.split_whitespace() {
-        let Some((key, value)) = token.split_once('=') else {
-            continue;
-        };
-        let cleaned = value.trim_end_matches(',');
-        if let Ok(parsed) = cleaned.parse::<f64>() {
-            pairs.insert(key.to_string(), parsed);
-        }
-    }
+    let pairs = parse_numeric_profile_line(text, "[stage-profile][training]")?;
     let train_steps = pairs.get("train_steps").copied().unwrap_or(0.0).max(1.0);
+    let optimizer_steps = pairs.get("optimizer_steps").copied().unwrap_or(0.0);
     Some(TrainingDensityBenchStageProfileSummary {
         total_ms_per_step: mean_step_s * 1000.0,
         dataloader_cpu_ms_per_step: pairs.get("dataloader_cpu_ns").copied().unwrap_or(0.0)
@@ -805,6 +877,9 @@ fn parse_stage_profile(
         loss_backward_ms_per_step: pairs.get("loss_backward_ns").copied().unwrap_or(0.0)
             / train_steps
             / 1_000_000.0,
+        optimizer_update_ms_per_step: pairs.get("optimizer_ns").copied().unwrap_or(0.0)
+            / train_steps
+            / 1_000_000.0,
         host_to_device_bytes_per_step: pairs
             .get("dataloader_host_to_device_copy_bytes")
             .copied()
@@ -813,7 +888,100 @@ fn parse_stage_profile(
         host_sync_points_per_step: pairs.get("host_sync_points").copied().unwrap_or(0.0)
             / train_steps,
         train_steps_profiled: train_steps as usize,
+        optimizer_steps_profiled: optimizer_steps as usize,
     })
+}
+
+fn parse_structured_profile(text: &str) -> Option<TrainingDensityBenchStructuredProfileSummary> {
+    let pairs = parse_numeric_profile_line(text, "[stage-profile][training-structured]")?;
+    let train_steps = parse_numeric_profile_line(text, "[stage-profile][training]")
+        .and_then(|pairs| pairs.get("train_steps").copied())
+        .unwrap_or(0.0)
+        .max(1.0);
+    Some(TrainingDensityBenchStructuredProfileSummary {
+        calls_per_step: pairs.get("calls").copied().unwrap_or(0.0) / train_steps,
+        launches_per_step: pairs.get("launches").copied().unwrap_or(0.0) / train_steps,
+        total_ms_per_step: pairs.get("total_ns").copied().unwrap_or(0.0)
+            / train_steps
+            / 1_000_000.0,
+        setup_ms_per_step: pairs.get("setup_ns").copied().unwrap_or(0.0)
+            / train_steps
+            / 1_000_000.0,
+        copy_ms_per_step: pairs.get("copy_ns").copied().unwrap_or(0.0) / train_steps / 1_000_000.0,
+        dispatch_ms_per_step: pairs.get("dispatch_ns").copied().unwrap_or(0.0)
+            / train_steps
+            / 1_000_000.0,
+        transient_allocations_per_step: pairs.get("transient_allocations").copied().unwrap_or(0.0)
+            / train_steps,
+        metadata_upload_bytes_per_step: pairs.get("metadata_upload_bytes").copied().unwrap_or(0.0)
+            / train_steps,
+        metadata_reuse_hits_per_step: pairs.get("metadata_reuse_hits").copied().unwrap_or(0.0)
+            / train_steps,
+        metadata_reuse_bytes_per_step: pairs.get("metadata_reuse_bytes").copied().unwrap_or(0.0)
+            / train_steps,
+        resident_rollout_steps_per_step: pairs
+            .get("resident_rollout_steps")
+            .copied()
+            .unwrap_or(0.0)
+            / train_steps,
+        train_steps_profiled: train_steps as usize,
+    })
+}
+
+fn parse_stage_aware_profile(text: &str) -> Option<TrainingDensityBenchStageAwareProfileSummary> {
+    let pairs = parse_numeric_profile_line(text, "[stage-profile][training-stageaware]")?;
+    let train_steps = parse_numeric_profile_line(text, "[stage-profile][training]")
+        .and_then(|pairs| pairs.get("train_steps").copied())
+        .unwrap_or(0.0)
+        .max(1.0);
+    let raw_step_calls = pairs.get("step_calls").copied().unwrap_or(0.0);
+    let step_calls = raw_step_calls.max(1.0);
+    Some(TrainingDensityBenchStageAwareProfileSummary {
+        step_calls_per_train_step: raw_step_calls / train_steps,
+        coarse_only_step_calls_per_train_step: pairs
+            .get("coarse_only_step_calls")
+            .copied()
+            .unwrap_or(0.0)
+            / train_steps,
+        patch_local_ms_per_step_call: pairs.get("patch_local_ns").copied().unwrap_or(0.0)
+            / step_calls
+            / 1_000_000.0,
+        coarse_local_ms_per_step_call: pairs.get("coarse_local_ns").copied().unwrap_or(0.0)
+            / step_calls
+            / 1_000_000.0,
+        patch_from_coarse_ms_per_step_call: pairs
+            .get("patch_from_coarse_ns")
+            .copied()
+            .unwrap_or(0.0)
+            / step_calls
+            / 1_000_000.0,
+        hub_read_ms_per_step_call: pairs.get("hub_read_ns").copied().unwrap_or(0.0)
+            / step_calls
+            / 1_000_000.0,
+        patch_to_coarse_ms_per_step_call: pairs.get("patch_to_coarse_ns").copied().unwrap_or(0.0)
+            / step_calls
+            / 1_000_000.0,
+        hub_update_ms_per_step_call: pairs.get("hub_update_ns").copied().unwrap_or(0.0)
+            / step_calls
+            / 1_000_000.0,
+        stage_step_calls_profiled: raw_step_calls as usize,
+        train_steps_profiled: train_steps as usize,
+    })
+}
+
+fn parse_numeric_profile_line(text: &str, marker: &str) -> Option<BTreeMap<String, f64>> {
+    let line = text.lines().rev().find(|line| line.contains(marker))?;
+    let mut pairs = BTreeMap::new();
+    for token in line.split_whitespace() {
+        let Some((key, value)) = token.split_once('=') else {
+            continue;
+        };
+        let cleaned = value.trim_end_matches(',');
+        if let Ok(parsed) = cleaned.parse::<f64>() {
+            pairs.insert(key.to_string(), parsed);
+        }
+    }
+    Some(pairs)
 }
 
 fn mean_f64(values: &[f64]) -> f64 {

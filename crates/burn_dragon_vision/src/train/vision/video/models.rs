@@ -7,9 +7,10 @@
 use super::profile::{video_train_profile_enabled, video_train_profile_record};
 use crate::train::prelude::*;
 use crate::train::vision::video::dynamics::{
-    VisionVideoContextForward, VisionVideoForward, VisionVideoObservationMerger,
-    VisionVideoPredictor, VisionVideoRolloutOutput, encode_clip_frames_with_model,
-    repeat_last_future_query, split_clip_observation_and_target_projections_train,
+    SplitClipProjectionTrainConfig, VisionVideoContextForward, VisionVideoForward,
+    VisionVideoObservationMerger, VisionVideoPredictor, VisionVideoRolloutOutput,
+    encode_clip_frames_with_model, repeat_last_future_query,
+    split_clip_observation_and_target_projections_train,
 };
 use burn::nn::loss::CrossEntropyLossConfig;
 use burn_dragon_core::{
@@ -335,11 +336,13 @@ impl<B: BackendTrait> VisionVideoLejepaModel<B> {
                 &self.frame_model,
                 self.teacher_frame_model.as_ref(),
                 clip_frames.clone(),
-                context_len,
-                future_len_all,
-                steps,
-                projection_dim,
-                include_context_target_proj,
+                SplitClipProjectionTrainConfig {
+                    context_len,
+                    future_len_all,
+                    steps,
+                    projection_dim,
+                    include_context_target_proj,
+                },
             );
         if let Some(start) = split_start {
             video_train_profile_record(|state| {

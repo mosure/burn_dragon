@@ -1,8 +1,10 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use burn_dragon_core::ManifoldHyperConnectionCoefficientPolicy;
-use burn_dragon_train::WgpuGenerationExecutor;
+use burn_dragon_core::{LatentFanoutScheduleConfig, ManifoldHyperConnectionCoefficientPolicy};
+use burn_dragon_train::{
+    ParallelConfig, ParallelismKind, TensorParallelPartitionKind, WgpuGenerationExecutor,
+};
 use tempfile::tempdir;
 
 use super::super::ContextStrategyConfig;
@@ -90,17 +92,28 @@ fn load_merges_in_order() {
         config.training,
         TrainingHyperparameters {
             block_size: 256,
+            tbptt_chunk_size: None,
+            tbptt_persist_across_steps: false,
+            min_logical_block_size: None,
             batch_size: 16,
+            seed: 1337,
             gradient_accumulation_steps: 1,
             target_effective_batch_size: None,
             epochs: None,
             max_iters: 2000,
+            checkpoint_interval_iters: 2000,
             log_frequency: 50,
             fast_train: false,
+            resume_run_dir: None,
+            resume_checkpoint_epoch: None,
+            init_checkpoint_path: None,
+            init_checkpoint_epoch: None,
             context_strategy: ContextStrategyConfig::Infinite,
+            sequence_kernel_override: None,
             gdpo: None,
         }
     );
+    assert_eq!(config.parallel, ParallelConfig::default());
     assert!((config.optimizer.learning_rate - 0.0005).abs() < f64::EPSILON);
     assert!((config.optimizer.weight_decay - 0.05).abs() < f32::EPSILON);
     assert_eq!(
@@ -130,6 +143,7 @@ fn load_merges_in_order() {
     assert_eq!(config.model.n_embd, Some(320));
     assert_eq!(config.model.n_head, Some(4));
     assert_eq!(config.model.mlp_internal_dim_multiplier, Some(4));
+    assert_eq!(config.model.latent_total, None);
     assert_eq!(config.model.dropout, Some(0.1));
     assert_eq!(config.model.fused_kernels, Some(true));
     assert_eq!(config.model.block_size, Some(256));
@@ -137,6 +151,544 @@ fn load_merges_in_order() {
     assert_eq!(
         config.model.rotary_embedding,
         Some(burn_dragon_core::RotaryEmbedding::Alibi)
+    );
+}
+
+#[test]
+fn validate_accepts_explicit_latent_total_override() {
+    let text = r#"
+        [dataset]
+        cache_dir = "data"
+        type = "shakespeare"
+
+        [training]
+        block_size = 32
+        batch_size = 2
+        max_iters = 4
+        log_frequency = 1
+
+        [optimizer]
+        learning_rate = 0.001
+        weight_decay = 0.0
+
+        [generation]
+        prompt = "abc"
+
+        [model]
+        n_embd = 256
+        latent_total = 32768
+    "#;
+    let config: TrainingConfig = toml::from_str(text).expect("parse training config");
+    config.validate().expect("valid config");
+    assert_eq!(config.model.latent_total, Some(32768));
+}
+
+#[test]
+fn validate_accepts_sequence_kernel_override() {
+    let text = r#"
+        [dataset]
+        cache_dir = "data"
+        type = "shakespeare"
+
+        [training]
+        block_size = 32
+        batch_size = 2
+        max_iters = 4
+        log_frequency = 1
+
+        [optimizer]
+        learning_rate = 0.001
+        weight_decay = 0.0
+
+        [generation]
+        prompt = "abc"
+
+        [model]
+        sequence_kernel = "rwkv8_state_space_experimental"
+    "#;
+    let config: TrainingConfig = toml::from_str(text).expect("parse training config");
+    config.validate().expect("valid config");
+    assert_eq!(
+        config.model.sequence_kernel,
+        Some(burn_dragon_core::SequenceKernelKind::Rwkv8StateSpaceExperimental)
+    );
+}
+
+#[test]
+fn validate_accepts_training_sequence_kernel_override() {
+    let text = r#"
+        [dataset]
+        cache_dir = "data"
+        type = "shakespeare"
+
+        [training]
+        block_size = 32
+        batch_size = 2
+        max_iters = 4
+        log_frequency = 1
+        sequence_kernel_override = "bdh_linear_dense_score_experimental"
+
+        [optimizer]
+        learning_rate = 0.001
+        weight_decay = 0.0
+
+        [generation]
+        prompt = "abc"
+
+        [model]
+        sequence_kernel = "bdh_linear_attention"
+    "#;
+    let config: TrainingConfig = toml::from_str(text).expect("parse training config");
+    config.validate().expect("valid config");
+    assert_eq!(
+        config.training.sequence_kernel_override,
+        Some(burn_dragon_core::SequenceKernelKind::BdhLinearDenseScoreExperimental)
+    );
+    assert_eq!(
+        config.model.sequence_kernel,
+        Some(burn_dragon_core::SequenceKernelKind::BdhLinearAttention)
+    );
+}
+
+#[test]
+fn universality_manifest_dataset_config_parses_with_pretokenized_tokenizer() {
+    let text = r#"
+        [dataset]
+        cache_dir = "data/universality/nca"
+        type = "universality_manifest"
+        manifest = "data/universality/nca/manifest.json"
+
+        [dataset.tokenizer]
+        type = "pretokenized"
+        vocab_size = 50257
+        eos_id = 50256
+
+        [training]
+        block_size = 32
+        batch_size = 2
+        max_iters = 4
+        log_frequency = 1
+
+        [optimizer]
+        learning_rate = 0.001
+        weight_decay = 0.0
+
+        [generation]
+        prompt = "abc"
+    "#;
+    let config: TrainingConfig = toml::from_str(text).expect("parse training config");
+    config.validate().expect("valid config");
+    assert_eq!(
+        config.dataset.source,
+        DatasetSourceConfig::UniversalityManifest {
+            manifest: "data/universality/nca/manifest.json".into()
+        }
+    );
+}
+
+#[test]
+fn universality_nca_dataset_config_parses_with_pretokenized_tokenizer() {
+    let text = r#"
+        [dataset]
+        cache_dir = "data/universality/runtime"
+        type = "universality_nca"
+        config = "config/universality/nca_paper_aligned_smoke.toml"
+
+        [dataset.tokenizer]
+        type = "pretokenized"
+        vocab_size = 50257
+        eos_id = 50256
+
+        [training]
+        block_size = 32
+        batch_size = 2
+        max_iters = 4
+        log_frequency = 1
+
+        [optimizer]
+        learning_rate = 0.001
+        weight_decay = 0.0
+
+        [generation]
+        prompt = "abc"
+    "#;
+    let config: TrainingConfig = toml::from_str(text).expect("parse training config");
+    config.validate().expect("valid config");
+    assert_eq!(
+        config.dataset.source,
+        DatasetSourceConfig::UniversalityNca {
+            config: "config/universality/nca_paper_aligned_smoke.toml".into()
+        }
+    );
+}
+
+#[test]
+fn validate_accepts_init_checkpoint_path_with_optional_epoch() {
+    let text = r#"
+        [dataset]
+        cache_dir = "data"
+        type = "shakespeare"
+
+        [training]
+        block_size = 32
+        batch_size = 2
+        max_iters = 4
+        log_frequency = 1
+        init_checkpoint_path = "runs/example/checkpoint"
+        init_checkpoint_epoch = 3
+
+        [optimizer]
+        learning_rate = 0.001
+        weight_decay = 0.0
+
+        [generation]
+        prompt = "abc"
+    "#;
+    let config: TrainingConfig = toml::from_str(text).expect("parse training config");
+    config.validate().expect("valid config");
+    assert_eq!(
+        config.training.init_checkpoint_path,
+        Some(PathBuf::from("runs/example/checkpoint"))
+    );
+    assert_eq!(config.training.init_checkpoint_epoch, Some(3));
+}
+
+#[test]
+fn parse_defaults_parallel_and_seed_for_legacy_configs() {
+    let text = r#"
+        [dataset]
+        cache_dir = "data"
+        type = "shakespeare"
+
+        [training]
+        block_size = 32
+        batch_size = 2
+        max_iters = 4
+        log_frequency = 1
+
+        [optimizer]
+        learning_rate = 0.001
+        weight_decay = 0.0
+
+        [generation]
+        prompt = "abc"
+    "#;
+    let config: TrainingConfig = toml::from_str(text).expect("parse training config");
+    assert_eq!(config.training.seed, 1337);
+    assert_eq!(config.parallel, ParallelConfig::default());
+    assert_eq!(config.training.resume_run_dir, None);
+    assert_eq!(config.training.resume_checkpoint_epoch, None);
+    config
+        .validate()
+        .expect("legacy config should still validate");
+}
+
+#[test]
+fn validate_accepts_resume_run_dir_with_optional_epoch() {
+    let text = r#"
+        [dataset]
+        cache_dir = "data"
+        type = "shakespeare"
+
+        [training]
+        block_size = 32
+        batch_size = 2
+        max_iters = 4
+        log_frequency = 1
+        resume_run_dir = "runs/example"
+        resume_checkpoint_epoch = 3
+
+        [optimizer]
+        learning_rate = 0.001
+        weight_decay = 0.0
+
+        [generation]
+        prompt = "abc"
+    "#;
+    let config: TrainingConfig = toml::from_str(text).expect("parse training config");
+    config.validate().expect("valid resume config");
+    assert_eq!(
+        config.training.resume_run_dir,
+        Some(PathBuf::from("runs/example"))
+    );
+    assert_eq!(config.training.resume_checkpoint_epoch, Some(3));
+}
+
+#[test]
+fn validate_rejects_zero_checkpoint_interval() {
+    let text = r#"
+        [dataset]
+        cache_dir = "data"
+        type = "shakespeare"
+
+        [training]
+        block_size = 32
+        batch_size = 2
+        max_iters = 4
+        checkpoint_interval_iters = 0
+        log_frequency = 1
+
+        [optimizer]
+        learning_rate = 0.001
+        weight_decay = 0.0
+
+        [generation]
+        prompt = "abc"
+    "#;
+    let config: TrainingConfig = toml::from_str(text).expect("parse training config");
+    let err = config
+        .validate()
+        .expect_err("zero checkpoint interval should fail");
+    assert!(
+        err.to_string()
+            .contains("training.checkpoint_interval_iters must be > 0")
+    );
+}
+
+#[test]
+fn validate_accepts_explicit_parallel_config() {
+    let text = r#"
+        [dataset]
+        cache_dir = "data"
+        type = "shakespeare"
+
+        [training]
+        block_size = 32
+        batch_size = 2
+        seed = 4242
+        max_iters = 4
+        log_frequency = 1
+
+        [optimizer]
+        learning_rate = 0.001
+        weight_decay = 0.0
+
+        [parallel]
+        mode = "tensor_parallel_neuron"
+        world_size = 4
+
+        [parallel.data]
+        size = 1
+
+        [parallel.tensor]
+        size = 4
+        partition = "head_aligned"
+
+        [generation]
+        prompt = "abc"
+
+        [model]
+        n_embd = 256
+        n_head = 4
+        latent_total = 32768
+    "#;
+    let config: TrainingConfig = toml::from_str(text).expect("parse training config");
+    assert_eq!(config.training.seed, 4242);
+    assert_eq!(config.parallel.mode, ParallelismKind::TensorParallelNeuron);
+    assert_eq!(
+        config.parallel.tensor.partition,
+        TensorParallelPartitionKind::HeadAligned
+    );
+    config
+        .validate()
+        .expect("explicit parallel config should validate");
+}
+
+#[test]
+fn validate_rejects_parallel_world_size_mismatch() {
+    let text = r#"
+        [dataset]
+        cache_dir = "data"
+        type = "shakespeare"
+
+        [training]
+        block_size = 32
+        batch_size = 2
+        max_iters = 4
+        log_frequency = 1
+
+        [optimizer]
+        learning_rate = 0.001
+        weight_decay = 0.0
+
+        [parallel]
+        mode = "ddp"
+        world_size = 4
+
+        [parallel.data]
+        size = 2
+
+        [parallel.tensor]
+        size = 1
+
+        [generation]
+        prompt = "abc"
+    "#;
+    let config: TrainingConfig = toml::from_str(text).expect("parse training config");
+    let err = config
+        .validate()
+        .expect_err("parallel world size mismatch should fail validation");
+    assert!(
+        err.to_string()
+            .contains("parallel.data.size = parallel.world_size"),
+        "unexpected error: {err:#}"
+    );
+}
+
+#[test]
+fn validate_accepts_complete_collective_global_config() {
+    let text = r#"
+        [dataset]
+        cache_dir = "data"
+        type = "shakespeare"
+
+        [training]
+        block_size = 32
+        batch_size = 2
+        max_iters = 4
+        log_frequency = 1
+
+        [optimizer]
+        learning_rate = 0.001
+        weight_decay = 0.0
+
+        [parallel]
+        mode = "ddp"
+        world_size = 2
+
+        [parallel.data]
+        size = 2
+        collective_num_nodes = 2
+        collective_global_address = "127.0.0.1:32000"
+        collective_node_address = "127.0.0.1:32001"
+        collective_data_service_port = 32001
+
+        [generation]
+        prompt = "abc"
+    "#;
+    let config: TrainingConfig = toml::from_str(text).expect("parse training config");
+    config.validate().expect("valid config");
+}
+
+#[test]
+fn validate_rejects_partial_collective_global_config() {
+    let text = r#"
+        [dataset]
+        cache_dir = "data"
+        type = "shakespeare"
+
+        [training]
+        block_size = 32
+        batch_size = 2
+        max_iters = 4
+        log_frequency = 1
+
+        [optimizer]
+        learning_rate = 0.001
+        weight_decay = 0.0
+
+        [parallel]
+        mode = "ddp"
+        world_size = 2
+
+        [parallel.data]
+        size = 2
+        collective_num_nodes = 2
+        collective_global_address = "127.0.0.1:32000"
+
+        [generation]
+        prompt = "abc"
+    "#;
+    let config: TrainingConfig = toml::from_str(text).expect("parse training config");
+    let err = config
+        .validate()
+        .expect_err("partial collective config should fail validation");
+    assert!(
+        err.to_string().contains("collective global settings"),
+        "unexpected error: {err:#}"
+    );
+}
+
+#[test]
+fn validate_accepts_latent_fanout_schedule() {
+    let text = r#"
+        [dataset]
+        cache_dir = "data"
+        type = "shakespeare"
+
+        [training]
+        block_size = 32
+        batch_size = 2
+        max_iters = 4
+        log_frequency = 1
+
+        [optimizer]
+        learning_rate = 0.001
+        weight_decay = 0.0
+
+        [generation]
+        prompt = "abc"
+
+        [model]
+        n_layer = 8
+        n_embd = 256
+        n_head = 4
+        latent_total = 32768
+
+        [model.latent_fanout_schedule]
+        type = "late_layer"
+        base_latent_total = 8192
+        last_layers = 4
+    "#;
+    let config: TrainingConfig = toml::from_str(text).expect("parse training config");
+    config.validate().expect("valid config");
+    assert_eq!(
+        config.model.latent_fanout_schedule,
+        Some(LatentFanoutScheduleConfig::LateLayer {
+            base_latent_total: 8192,
+            last_layers: 4,
+        })
+    );
+}
+
+#[test]
+fn validate_rejects_invalid_latent_fanout_schedule() {
+    let text = r#"
+        [dataset]
+        cache_dir = "data"
+        type = "shakespeare"
+
+        [training]
+        block_size = 32
+        batch_size = 2
+        max_iters = 4
+        log_frequency = 1
+
+        [optimizer]
+        learning_rate = 0.001
+        weight_decay = 0.0
+
+        [generation]
+        prompt = "abc"
+
+        [model]
+        n_layer = 8
+        n_embd = 256
+        n_head = 4
+        latent_total = 32768
+
+        [model.latent_fanout_schedule]
+        type = "late_layer"
+        base_latent_total = 9000
+        last_layers = 0
+    "#;
+    let config: TrainingConfig = toml::from_str(text).expect("parse training config");
+    let err = config
+        .validate()
+        .expect_err("invalid latent schedule should fail validation");
+    assert!(
+        err.to_string().contains("model.latent_fanout_schedule"),
+        "unexpected error: {err:#}"
     );
 }
 
@@ -228,12 +780,181 @@ fn huggingface_dataset_config_parses() {
             );
             assert!(hf.validation_files.is_empty());
             assert_eq!(hf.text_fields, vec!["question", "final_answer"]);
+            assert_eq!(hf.sequence_field, None);
             assert_eq!(hf.field_separator, "\n\n");
             assert_eq!(hf.template.as_deref(), Some("{question}\n{final_answer}"));
             assert_eq!(hf.max_records, Some(1000));
+            assert!(!hf.auto_discover_train_files);
         }
         other => panic!("unexpected dataset source: {other:?}"),
     }
+}
+
+#[test]
+fn validation_override_huggingface_config_parses() {
+    let text = r#"
+        cache_dir = "data"
+        type = "nemotron_climb_mix"
+        max_records = 1024
+
+        [validation]
+        cache_dir = "data/validation"
+        train_split_ratio = 0.8
+        type = "hugging_face"
+        repo_id = "example/openwebtext-gpt2-ids"
+        format = "jsonl"
+        train_files = []
+        validation_files = ["validation.jsonl"]
+        sequence_field = "tokens"
+
+        [tokenizer]
+        type = "pretokenized"
+        vocab_size = 50257
+        eos_id = 50256
+    "#;
+    let dataset: DatasetConfig = toml::from_str(text).expect("parse dataset config");
+    let validation = dataset.validation.expect("validation override");
+    assert_eq!(
+        validation.cache_dir.as_deref(),
+        Some(Path::new("data/validation"))
+    );
+    assert_eq!(validation.train_split_ratio, Some(0.8));
+    match validation.source {
+        DatasetSourceConfig::HuggingFace(hf) => {
+            assert_eq!(hf.repo_id, "example/openwebtext-gpt2-ids");
+            assert!(hf.train_files.is_empty());
+            assert_eq!(hf.validation_files, vec!["validation.jsonl"]);
+            assert_eq!(hf.sequence_field.as_deref(), Some("tokens"));
+        }
+        other => panic!("unexpected validation dataset source: {other:?}"),
+    }
+}
+
+#[test]
+fn nemotron_climbmix_dataset_config_parses_with_pretokenized_tokenizer() {
+    let text = r#"
+        [dataset]
+        cache_dir = "data"
+        type = "nemotron_climb_mix"
+        max_records = 1024
+
+        [dataset.tokenizer]
+        type = "pretokenized"
+        vocab_size = 50257
+        eos_id = 50256
+
+        [training]
+        block_size = 128
+        batch_size = 2
+        max_iters = 4
+        log_frequency = 1
+
+        [optimizer]
+        learning_rate = 0.001
+        weight_decay = 0.0
+
+        [generation]
+        prompt = "464 329 262"
+    "#;
+
+    let config: TrainingConfig = toml::from_str(text).expect("parse nemotron config");
+    config.validate().expect("nemotron config should validate");
+    assert_eq!(
+        config.dataset.source,
+        DatasetSourceConfig::NemotronClimbMix {
+            revision: None,
+            max_records: Some(1024),
+        }
+    );
+    match config.dataset.tokenizer.kind {
+        crate::tokenizer::TokenizerKind::Pretokenized(config) => {
+            assert_eq!(config.vocab_size, 50_257);
+            assert_eq!(config.eos_id, Some(50_256));
+        }
+        other => panic!("expected pretokenized tokenizer, got {other:?}"),
+    }
+}
+
+#[test]
+fn openwebtext_gpt2_dataset_config_parses_with_pretokenized_tokenizer() {
+    let text = r#"
+        [dataset]
+        cache_dir = "data"
+        type = "openwebtext_gpt2"
+        max_records = 4096
+
+        [dataset.tokenizer]
+        type = "pretokenized"
+        vocab_size = 50257
+        eos_id = 50256
+
+        [training]
+        block_size = 128
+        batch_size = 2
+        max_iters = 4
+        log_frequency = 1
+
+        [optimizer]
+        learning_rate = 0.001
+        weight_decay = 0.0
+
+        [generation]
+        prompt = "464 329 262"
+    "#;
+
+    let config: TrainingConfig = toml::from_str(text).expect("parse openwebtext config");
+    config
+        .validate()
+        .expect("openwebtext config should validate");
+    assert_eq!(
+        config.dataset.source,
+        DatasetSourceConfig::OpenWebTextGpt2 {
+            revision: None,
+            max_records: Some(4096),
+        }
+    );
+}
+
+#[test]
+fn validate_accepts_validation_only_huggingface_override() {
+    let text = r#"
+        [dataset]
+        cache_dir = "data"
+        type = "nemotron_climb_mix"
+        max_records = 1024
+
+        [dataset.validation]
+        cache_dir = "data/validation"
+        type = "hugging_face"
+        repo_id = "example/openwebtext-gpt2-ids"
+        format = "jsonl"
+        train_files = []
+        validation_files = ["validation.jsonl"]
+        sequence_field = "tokens"
+
+        [dataset.tokenizer]
+        type = "pretokenized"
+        vocab_size = 50257
+        eos_id = 50256
+
+        [training]
+        block_size = 128
+        batch_size = 2
+        max_iters = 4
+        log_frequency = 1
+
+        [optimizer]
+        learning_rate = 0.001
+        weight_decay = 0.0
+
+        [generation]
+        prompt = "464 329 262"
+    "#;
+
+    let config: TrainingConfig = toml::from_str(text).expect("parse config");
+    config
+        .validate()
+        .expect("validation-only huggingface override should validate");
 }
 
 #[test]

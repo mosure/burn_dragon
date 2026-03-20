@@ -1,7 +1,7 @@
 use burn::prelude::*;
 use burn::tensor::Int;
 use burn::tensor::TensorData;
-use burn_dragon_wgpu::api::graph::SparseGraphCsr;
+use burn_dragon_kernel::api::graph::SparseGraphCsr;
 
 use crate::{GraphCsrAdjacency, GraphTopologyRouting};
 

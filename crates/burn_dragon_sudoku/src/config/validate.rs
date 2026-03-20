@@ -126,7 +126,7 @@ impl SudokuTrainingConfig {
                     "model.n_head must be > 0 for trm_mode=constraint_ca"
                 ));
             }
-            if !self.model.n_embd.is_multiple_of(self.model.n_head) {
+            if self.model.n_embd % self.model.n_head != 0 {
                 return Err(anyhow!(
                     "model.n_embd ({}) must be divisible by model.n_head ({}) for trm_mode=constraint_ca",
                     self.model.n_embd,
@@ -483,7 +483,7 @@ impl SudokuTrainingConfig {
         if self.model.policy_mlp_hidden_mult == 0 {
             return Err(anyhow!("model.policy_mlp_hidden_mult must be > 0"));
         }
-        if !self.model.n_embd.is_multiple_of(self.model.policy_heads) {
+        if self.model.n_embd % self.model.policy_heads != 0 {
             return Err(anyhow!(
                 "model.policy_heads ({}) must divide model.n_embd ({})",
                 self.model.policy_heads,
@@ -492,7 +492,7 @@ impl SudokuTrainingConfig {
         }
 
         if matches!(self.model.grid_positional, SudokuGridPositional::Rope2d) {
-            if !self.model.n_embd.is_multiple_of(4) {
+            if self.model.n_embd % 4 != 0 {
                 return Err(anyhow!(
                     "model.n_embd ({}) must be divisible by 4 for model.grid_positional = rope_2d",
                     self.model.n_embd

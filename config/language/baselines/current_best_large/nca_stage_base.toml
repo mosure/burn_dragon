@@ -1,0 +1,14 @@
+extends = ["../../experiments/nca_prepretrain_large_base.toml"]
+
+[training]
+# Keep the NCA budget intentionally tiny.
+# The transfer matrix showed NCA is only worth keeping as a small warm-start tax,
+# not as a major equal-budget substitute for ClimbMix time.
+max_iters = 4096
+checkpoint_interval_iters = 1024
+log_frequency = 64
+
+[optimizer.lr_schedule]
+type = "cosine"
+min_lr = 0.00003
+num_iters = 4096

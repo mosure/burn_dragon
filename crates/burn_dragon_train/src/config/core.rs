@@ -1,7 +1,237 @@
 use std::fmt;
 
 use burn::module::{Content, ModuleDisplay, ModuleDisplayDefault};
+pub use burn_dragon_core::SequenceKernelKind;
 use serde::{Deserialize, Serialize};
+
+fn default_parallel_world_size() -> usize {
+    1
+}
+
+fn default_parallel_group_size() -> usize {
+    1
+}
+
+fn default_find_unused_parameters() -> bool {
+    false
+}
+
+fn default_gradient_as_bucket_view() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ParallelismKind {
+    #[default]
+    Single,
+    Ddp,
+    Fsdp,
+    TensorParallelNeuron,
+    Hybrid2D,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ParallelCommunicationBackend {
+    #[default]
+    Auto,
+    Nccl,
+    Gloo,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TensorParallelAxis {
+    #[default]
+    Neuron,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TensorParallelPartitionKind {
+    #[default]
+    Contiguous,
+    HeadAligned,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ParallelCheckpointFormat {
+    #[default]
+    UnshardedV1,
+    ShardedV2,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum FsdpMixedPrecisionKind {
+    #[default]
+    Disabled,
+    Bf16,
+    F16,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(default)]
+pub struct ParallelDataConfig {
+    #[serde(default = "default_parallel_group_size")]
+    pub size: usize,
+    pub backend: ParallelCommunicationBackend,
+    #[serde(default = "default_find_unused_parameters")]
+    pub find_unused_parameters: bool,
+    #[serde(default = "default_gradient_as_bucket_view")]
+    pub gradient_as_bucket_view: bool,
+    #[serde(default)]
+    pub collective_num_nodes: Option<u32>,
+    #[serde(default)]
+    pub collective_global_address: Option<String>,
+    #[serde(default)]
+    pub collective_node_address: Option<String>,
+    #[serde(default)]
+    pub collective_data_service_port: Option<u16>,
+}
+
+impl Default for ParallelDataConfig {
+    fn default() -> Self {
+        Self {
+            size: default_parallel_group_size(),
+            backend: ParallelCommunicationBackend::default(),
+            find_unused_parameters: default_find_unused_parameters(),
+            gradient_as_bucket_view: default_gradient_as_bucket_view(),
+            collective_num_nodes: None,
+            collective_global_address: None,
+            collective_node_address: None,
+            collective_data_service_port: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(default)]
+pub struct ParallelTensorConfig {
+    #[serde(default = "default_parallel_group_size")]
+    pub size: usize,
+    pub axis: TensorParallelAxis,
+    pub partition: TensorParallelPartitionKind,
+    pub sequence_parallel: bool,
+}
+
+impl Default for ParallelTensorConfig {
+    fn default() -> Self {
+        Self {
+            size: default_parallel_group_size(),
+            axis: TensorParallelAxis::default(),
+            partition: TensorParallelPartitionKind::default(),
+            sequence_parallel: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default)]
+#[serde(default)]
+pub struct ParallelFsdpConfig {
+    pub enabled: bool,
+    pub reshard_after_forward: bool,
+    pub cpu_offload: bool,
+    pub mixed_precision: FsdpMixedPrecisionKind,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default)]
+#[serde(default)]
+pub struct ParallelCheckpointConfig {
+    pub format: ParallelCheckpointFormat,
+    pub async_write: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(default)]
+pub struct ParallelConfig {
+    pub mode: ParallelismKind,
+    #[serde(default = "default_parallel_world_size")]
+    pub world_size: usize,
+    pub data: ParallelDataConfig,
+    pub tensor: ParallelTensorConfig,
+    pub fsdp: ParallelFsdpConfig,
+    pub checkpoint: ParallelCheckpointConfig,
+}
+
+impl Default for ParallelConfig {
+    fn default() -> Self {
+        Self {
+            mode: ParallelismKind::Single,
+            world_size: default_parallel_world_size(),
+            data: ParallelDataConfig::default(),
+            tensor: ParallelTensorConfig::default(),
+            fsdp: ParallelFsdpConfig::default(),
+            checkpoint: ParallelCheckpointConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ModelSpec {
+    pub arch: String,
+    pub n_embd: usize,
+    pub n_head: usize,
+    pub n_layer: usize,
+    pub latent_total: usize,
+    pub latent_per_head: usize,
+    pub shared_layer_weights: bool,
+    pub sequence_kernel: SequenceKernelKind,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ParallelSpec {
+    pub mode: ParallelismKind,
+    pub world_size: usize,
+    pub data_parallel_size: usize,
+    pub tensor_parallel_size: usize,
+    pub tensor_parallel_axis: TensorParallelAxis,
+    pub tensor_parallel_partition: TensorParallelPartitionKind,
+    pub fsdp_enabled: bool,
+    pub checkpoint_format: ParallelCheckpointFormat,
+    pub collective_num_nodes: Option<u32>,
+    pub collective_global_address: Option<String>,
+    pub collective_node_address: Option<String>,
+    pub collective_data_service_port: Option<u16>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct KernelSpec {
+    pub sequence_kernel: SequenceKernelKind,
+    pub fused_kernels_enabled: bool,
+    pub rollout_fast_steps_per_slow_step: usize,
+    pub wgpu_fused_core_recurrent: Option<bool>,
+    pub wgpu_fused_core_rollout: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct StateAxisSpec {
+    pub name: String,
+    pub size: Option<usize>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct StateTensorSpec {
+    pub name: String,
+    pub axes: Vec<StateAxisSpec>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct LayerStateSpec {
+    pub layer_index: usize,
+    pub latent_total: usize,
+    pub latent_per_head: usize,
+    pub tensors: Vec<StateTensorSpec>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct StateLayout {
+    pub state_family: String,
+    pub position_tracked: bool,
+    pub layers: Vec<LayerStateSpec>,
+}
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default)]
 #[serde(rename_all = "snake_case")]

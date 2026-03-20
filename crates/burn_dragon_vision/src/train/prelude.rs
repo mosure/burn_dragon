@@ -70,9 +70,10 @@ pub(crate) use crate::config::{
     VisionLejepaConfig, VisionLejepaLossConfig, VisionMaeConfig, VisionMomentumTeacherConfig,
     VisionMovingMnistConfig, VisionPyramidMode, VisionSaccadeConfig,
     VisionSaccadeInputProjectionCnnConfig, VisionSaccadeInputProjectionConfig,
-    VisionSaccadeInputProjectionMicroVitConfig, VisionTeacherConfig, VisionTeacherVariant,
-    VisionTrainingConfig, VisionTrainingHyperparameters, VisionTrainingModeConfig,
-    VisionVideoLejepaConfig, VisionVideoTemporalConfig,
+    VisionSaccadeInputProjectionMicroVitConfig, VisionTeacherConfig, VisionTeacherDecoderMode,
+    VisionTeacherFeatureConfig, VisionTeacherTargetConfig, VisionTeacherTargetKind,
+    VisionTeacherVariant, VisionTrainingConfig, VisionTrainingHyperparameters,
+    VisionTrainingModeConfig, VisionVideoLejepaConfig, VisionVideoTemporalConfig,
 };
 pub(crate) use crate::loss::{
     VisionDistillationLossConfig, VisionDistillationLossTerms, vision_distillation_loss,
@@ -81,9 +82,10 @@ pub(crate) use crate::loss::{
 pub(crate) use crate::train::VideoTargetHorizonCurriculum;
 pub(crate) use crate::{
     DinoFeatureStore, ImageNetAugmentations, ImageNetBatch, ImageNetDataLoader, ImageNetDataset,
-    ImageNetDatasetConfig, ImageNetSplit, PatchGrid, SpatialPositionalEncodingKind,
-    VisionAttentionMode, VisionDragon, VisionDragonConfig, VisionLatentActivation, VisionNormalize,
-    VisionPatchEmbedMode, patchify, unpatchify,
+    ImageNetDatasetConfig, ImageNetSplit, ImageNetTeacherTargetBatch, ImageTeacherTargetStore,
+    PatchGrid, SpatialPositionalEncodingKind, VisionAttentionMode, VisionDragon,
+    VisionDragonConfig, VisionLatentActivation, VisionNormalize, VisionPatchEmbedMode, patchify,
+    unpatchify,
 };
 #[cfg(feature = "burn_dino")]
 pub(crate) use burn_dino::correctness::load_model_from_checkpoint;

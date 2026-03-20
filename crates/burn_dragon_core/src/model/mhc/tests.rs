@@ -150,6 +150,187 @@ fn mhc_width_connection_shapes_match_streams_and_views() {
 }
 
 #[test]
+fn dynamic_positive_stream_coefficients_preserve_positive_constraints_per_token() {
+    let device = <TestBackend as Backend>::Device::default();
+    let config = ManifoldHyperConnectionsConfig {
+        enabled: true,
+        num_streams: 2,
+        num_views: 1,
+        coefficient_policy: ManifoldHyperConnectionCoefficientPolicy::DynamicPositive,
+        ..Default::default()
+    };
+    let mhc =
+        ManifoldHyperConnections::<TestBackend>::new_with_dense_dim(&config, 0, Some(4), &device);
+    let residuals = Tensor::<TestBackend, 4>::from_data(
+        TensorData::new(
+            (0..32).map(|idx| idx as f32 / 16.0).collect::<Vec<_>>(),
+            [2, 2, 2, 4],
+        ),
+        &device,
+    );
+
+    let coeffs = mhc.stream_coefficients(residuals);
+    let residual_rows = coeffs
+        .residual_weights
+        .clone()
+        .sum_dim(3)
+        .into_data()
+        .to_vec::<f32>()
+        .expect("row sums");
+    let residual_cols = coeffs
+        .residual_weights
+        .clone()
+        .sum_dim(2)
+        .into_data()
+        .to_vec::<f32>()
+        .expect("col sums");
+    let alpha_sums = coeffs
+        .branch_input_weights
+        .clone()
+        .sum_dim(2)
+        .into_data()
+        .to_vec::<f32>()
+        .expect("alpha sums");
+    let beta = coeffs.branch_output_weights.clone().expect("beta");
+    let beta_sums = beta
+        .clone()
+        .sum_dim(2)
+        .into_data()
+        .to_vec::<f32>()
+        .expect("beta sums");
+    let alpha_values = coeffs
+        .branch_input_weights
+        .to_data()
+        .convert::<f32>()
+        .into_vec::<f32>()
+        .expect("alpha values");
+    let beta_values = beta
+        .to_data()
+        .convert::<f32>()
+        .into_vec::<f32>()
+        .expect("beta values");
+
+    for sum in residual_rows.into_iter().chain(residual_cols) {
+        assert!((sum - 1.0).abs() < 1e-3, "sum not close to 1: {sum}");
+    }
+    for value in alpha_values.into_iter().chain(beta_values) {
+        assert!(
+            (0.0..=1.0).contains(&value),
+            "coefficient should stay in [0, 1]: {value}"
+        );
+    }
+    for sum in alpha_sums.into_iter().chain(beta_sums) {
+        assert!(
+            sum.is_finite() && sum > 0.0,
+            "positive mapping sum should stay finite: {sum}"
+        );
+    }
+}
+
+#[test]
+fn dynamic_positive_stream_wrapper_uses_single_bdh_branch() {
+    let device = <TestBackend as Backend>::Device::default();
+    let config = ManifoldHyperConnectionsConfig {
+        enabled: true,
+        num_streams: 3,
+        num_views: 1,
+        coefficient_policy: ManifoldHyperConnectionCoefficientPolicy::DynamicPositive,
+        ..Default::default()
+    };
+    let mhc =
+        ManifoldHyperConnections::<TestBackend>::new_with_dense_dim(&config, 1, Some(5), &device);
+    let residuals = Tensor::<TestBackend, 4>::zeros([4, config.num_streams, 6, 5], &device);
+    let output = mhc.stream_width_connection(residuals.clone());
+    assert_eq!(output.branch_input.shape().dims::<4>(), [4, 1, 6, 5]);
+    assert_eq!(
+        output.residuals_out.shape().dims::<4>(),
+        [4, config.num_streams, 6, 5]
+    );
+    let merged = mhc.stream_depth_connection(
+        output.branch_input,
+        output.residuals_out,
+        &output.coefficients,
+    );
+    assert_eq!(merged.shape().dims::<4>(), [4, config.num_streams, 6, 5]);
+}
+
+#[test]
+fn dynamic_positive_stream_coefficients_start_from_nonuniform_static_priors() {
+    let device = <TestBackend as Backend>::Device::default();
+    let config = ManifoldHyperConnectionsConfig {
+        enabled: true,
+        num_streams: 3,
+        num_views: 1,
+        coefficient_policy: ManifoldHyperConnectionCoefficientPolicy::DynamicPositive,
+        ..Default::default()
+    };
+    let mhc =
+        ManifoldHyperConnections::<TestBackend>::new_with_dense_dim(&config, 1, Some(4), &device);
+    let residuals = Tensor::<TestBackend, 4>::zeros([2, config.num_streams, 2, 4], &device);
+    let coeffs = mhc.stream_coefficients(residuals);
+
+    let alpha = coeffs
+        .branch_input_weights
+        .to_data()
+        .convert::<f32>()
+        .into_vec::<f32>()
+        .expect("alpha");
+    let beta = coeffs
+        .branch_output_weights
+        .expect("beta")
+        .to_data()
+        .convert::<f32>()
+        .into_vec::<f32>()
+        .expect("beta");
+
+    assert!(
+        alpha
+            .windows(config.num_streams)
+            .any(|window| { window.iter().any(|value| (*value - window[0]).abs() > 1e-4) }),
+        "alpha should inherit non-uniform static priors"
+    );
+    assert!(
+        beta.windows(config.num_streams)
+            .any(|window| { window.iter().any(|value| (*value - window[0]).abs() > 1e-4) }),
+        "beta should inherit non-uniform static priors"
+    );
+}
+
+#[test]
+fn dynamic_positive_bootstrap_streams_break_initial_symmetry() {
+    let device = <TestBackend as Backend>::Device::default();
+    let config = ManifoldHyperConnectionsConfig {
+        enabled: true,
+        num_streams: 3,
+        num_views: 1,
+        coefficient_policy: ManifoldHyperConnectionCoefficientPolicy::DynamicPositive,
+        ..Default::default()
+    };
+    let mhc =
+        ManifoldHyperConnections::<TestBackend>::new_with_dense_dim(&config, 0, Some(4), &device);
+    let residuals = Tensor::<TestBackend, 4>::ones([1, 1, 2, 4], &device);
+    let bootstrapped = mhc.bootstrap_streams(residuals);
+    let stream0 = bootstrapped
+        .clone()
+        .slice_dim(1, 0..1)
+        .to_data()
+        .convert::<f32>()
+        .into_vec::<f32>()
+        .expect("stream0");
+    let stream1 = bootstrapped
+        .slice_dim(1, 1..2)
+        .to_data()
+        .convert::<f32>()
+        .into_vec::<f32>()
+        .expect("stream1");
+
+    assert_ne!(
+        stream0, stream1,
+        "bootstrapped streams should not remain identical"
+    );
+}
+
+#[test]
 fn mhc_width_and_depth_with_explicit_coefficients_match_compatibility_path() {
     let device = <TestBackend as Backend>::Device::default();
     let config = ManifoldHyperConnectionsConfig {

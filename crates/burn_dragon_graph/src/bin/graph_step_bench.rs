@@ -8,7 +8,7 @@ use burn_dragon_graph::api::expert::CompiledGraphRouting;
 use burn_dragon_graph::{
     GraphCsrAdjacency, GraphDragon, GraphDragonConfig, GraphTopologyRouting, StructuredStepMode,
 };
-use burn_dragon_wgpu::api::graph::{
+use burn_dragon_kernel::api::graph::{
     sparse_graph_rho_profile_reset, sparse_graph_rho_profile_snapshot,
 };
 use burn_wgpu::{CubeBackend, RuntimeOptions, WgpuRuntime, graphics};

@@ -796,6 +796,293 @@ impl ModuleDisplayDefault for VisionVideoTemporalConfig {
 
 impl ModuleDisplay for VisionVideoTemporalConfig {}
 
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum VisionVideoParadigmKind {
+    #[default]
+    LegacyRollout,
+    #[serde(rename = "vjepa_2_1")]
+    Vjepa21,
+}
+
+impl fmt::Display for VisionVideoParadigmKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::LegacyRollout => write!(f, "legacy_rollout"),
+            Self::Vjepa21 => write!(f, "vjepa_2_1"),
+        }
+    }
+}
+
+impl ModuleDisplayDefault for VisionVideoParadigmKind {
+    fn content(&self, content: Content) -> Option<Content> {
+        content.add_formatted(self).optional()
+    }
+}
+
+impl ModuleDisplay for VisionVideoParadigmKind {}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(default)]
+pub struct VisionVideoVjepa21MaskConfig {
+    pub spatial_scale_min: f32,
+    pub spatial_scale_max: f32,
+    pub temporal_scale_min: f32,
+    pub temporal_scale_max: f32,
+    pub aspect_ratio_min: f32,
+    pub aspect_ratio_max: f32,
+    pub num_blocks: usize,
+    pub max_context_frames_ratio: f32,
+    pub full_complement: bool,
+}
+
+impl Default for VisionVideoVjepa21MaskConfig {
+    fn default() -> Self {
+        Self {
+            spatial_scale_min: 0.2,
+            spatial_scale_max: 0.8,
+            temporal_scale_min: 0.5,
+            temporal_scale_max: 1.0,
+            aspect_ratio_min: 0.3,
+            aspect_ratio_max: 3.0,
+            num_blocks: 4,
+            max_context_frames_ratio: 1.0,
+            full_complement: false,
+        }
+    }
+}
+
+impl<B: Backend> Module<B> for VisionVideoVjepa21MaskConfig {
+    type Record = ();
+
+    fn collect_devices(&self, devices: burn::module::Devices<B>) -> burn::module::Devices<B> {
+        devices
+    }
+
+    fn fork(self, _device: &B::Device) -> Self {
+        self
+    }
+
+    fn to_device(self, _device: &B::Device) -> Self {
+        self
+    }
+
+    fn visit<Visitor: burn::module::ModuleVisitor<B>>(&self, _visitor: &mut Visitor) {}
+
+    fn map<Mapper: burn::module::ModuleMapper<B>>(self, _mapper: &mut Mapper) -> Self {
+        self
+    }
+
+    fn load_record(self, _record: Self::Record) -> Self {
+        self
+    }
+
+    fn into_record(self) -> Self::Record {}
+}
+
+impl<B: AutodiffBackend> AutodiffModule<B> for VisionVideoVjepa21MaskConfig {
+    type InnerModule = VisionVideoVjepa21MaskConfig;
+
+    fn valid(&self) -> Self::InnerModule {
+        self.clone()
+    }
+
+    fn from_inner(module: Self::InnerModule) -> Self {
+        module
+    }
+}
+
+impl ModuleDisplayDefault for VisionVideoVjepa21MaskConfig {
+    fn content(&self, content: Content) -> Option<Content> {
+        content
+            .add("spatial_scale_min", &self.spatial_scale_min)
+            .add("spatial_scale_max", &self.spatial_scale_max)
+            .add("temporal_scale_min", &self.temporal_scale_min)
+            .add("temporal_scale_max", &self.temporal_scale_max)
+            .add("aspect_ratio_min", &self.aspect_ratio_min)
+            .add("aspect_ratio_max", &self.aspect_ratio_max)
+            .add("num_blocks", &self.num_blocks)
+            .add("max_context_frames_ratio", &self.max_context_frames_ratio)
+            .add("full_complement", &self.full_complement)
+            .optional()
+    }
+}
+
+impl ModuleDisplay for VisionVideoVjepa21MaskConfig {}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(default)]
+pub struct VisionVideoVjepa21LossConfig {
+    pub masked_weight: f32,
+    pub context_weight: f32,
+    pub predict_all: bool,
+    pub weight_distance_loss: bool,
+    pub offset_context_loss: bool,
+    pub normalize_targets: bool,
+    pub loss_exp: f32,
+}
+
+impl Default for VisionVideoVjepa21LossConfig {
+    fn default() -> Self {
+        Self {
+            masked_weight: 1.0,
+            context_weight: 0.5,
+            predict_all: true,
+            weight_distance_loss: true,
+            offset_context_loss: false,
+            normalize_targets: true,
+            loss_exp: 1.0,
+        }
+    }
+}
+
+impl<B: Backend> Module<B> for VisionVideoVjepa21LossConfig {
+    type Record = ();
+
+    fn collect_devices(&self, devices: burn::module::Devices<B>) -> burn::module::Devices<B> {
+        devices
+    }
+
+    fn fork(self, _device: &B::Device) -> Self {
+        self
+    }
+
+    fn to_device(self, _device: &B::Device) -> Self {
+        self
+    }
+
+    fn visit<Visitor: burn::module::ModuleVisitor<B>>(&self, _visitor: &mut Visitor) {}
+
+    fn map<Mapper: burn::module::ModuleMapper<B>>(self, _mapper: &mut Mapper) -> Self {
+        self
+    }
+
+    fn load_record(self, _record: Self::Record) -> Self {
+        self
+    }
+
+    fn into_record(self) -> Self::Record {}
+}
+
+impl<B: AutodiffBackend> AutodiffModule<B> for VisionVideoVjepa21LossConfig {
+    type InnerModule = VisionVideoVjepa21LossConfig;
+
+    fn valid(&self) -> Self::InnerModule {
+        self.clone()
+    }
+
+    fn from_inner(module: Self::InnerModule) -> Self {
+        module
+    }
+}
+
+impl ModuleDisplayDefault for VisionVideoVjepa21LossConfig {
+    fn content(&self, content: Content) -> Option<Content> {
+        content
+            .add("masked_weight", &self.masked_weight)
+            .add("context_weight", &self.context_weight)
+            .add("predict_all", &self.predict_all)
+            .add("weight_distance_loss", &self.weight_distance_loss)
+            .add("offset_context_loss", &self.offset_context_loss)
+            .add("normalize_targets", &self.normalize_targets)
+            .add("loss_exp", &self.loss_exp)
+            .optional()
+    }
+}
+
+impl ModuleDisplay for VisionVideoVjepa21LossConfig {}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(default)]
+pub struct VisionVideoVjepa21Config {
+    pub clip_frames: usize,
+    pub observe_steps: usize,
+    pub observe_backprop_steps: usize,
+    pub predictor_hidden_dim: usize,
+    pub use_mask_token_bias: bool,
+    pub checkpoint_depths: Vec<usize>,
+    pub teacher_ema: VisionMomentumTeacherConfig,
+    pub mask: VisionVideoVjepa21MaskConfig,
+    pub loss: VisionVideoVjepa21LossConfig,
+}
+
+impl Default for VisionVideoVjepa21Config {
+    fn default() -> Self {
+        Self {
+            clip_frames: 8,
+            observe_steps: 1,
+            observe_backprop_steps: 1,
+            predictor_hidden_dim: 0,
+            use_mask_token_bias: true,
+            checkpoint_depths: vec![1, 2, 4],
+            teacher_ema: VisionMomentumTeacherConfig::default(),
+            mask: VisionVideoVjepa21MaskConfig::default(),
+            loss: VisionVideoVjepa21LossConfig::default(),
+        }
+    }
+}
+
+impl<B: Backend> Module<B> for VisionVideoVjepa21Config {
+    type Record = ();
+
+    fn collect_devices(&self, devices: burn::module::Devices<B>) -> burn::module::Devices<B> {
+        devices
+    }
+
+    fn fork(self, _device: &B::Device) -> Self {
+        self
+    }
+
+    fn to_device(self, _device: &B::Device) -> Self {
+        self
+    }
+
+    fn visit<Visitor: burn::module::ModuleVisitor<B>>(&self, _visitor: &mut Visitor) {}
+
+    fn map<Mapper: burn::module::ModuleMapper<B>>(self, _mapper: &mut Mapper) -> Self {
+        self
+    }
+
+    fn load_record(self, _record: Self::Record) -> Self {
+        self
+    }
+
+    fn into_record(self) -> Self::Record {}
+}
+
+impl<B: AutodiffBackend> AutodiffModule<B> for VisionVideoVjepa21Config {
+    type InnerModule = VisionVideoVjepa21Config;
+
+    fn valid(&self) -> Self::InnerModule {
+        self.clone()
+    }
+
+    fn from_inner(module: Self::InnerModule) -> Self {
+        module
+    }
+}
+
+impl ModuleDisplayDefault for VisionVideoVjepa21Config {
+    fn content(&self, content: Content) -> Option<Content> {
+        content
+            .add("clip_frames", &self.clip_frames)
+            .add("observe_steps", &self.observe_steps)
+            .add("observe_backprop_steps", &self.observe_backprop_steps)
+            .add("predictor_hidden_dim", &self.predictor_hidden_dim)
+            .add("use_mask_token_bias", &self.use_mask_token_bias)
+            .add(
+                "checkpoint_depths",
+                &format!("{:?}", self.checkpoint_depths),
+            )
+            .add("teacher_ema", &self.teacher_ema)
+            .add("mask", &self.mask)
+            .add("loss", &self.loss)
+            .optional()
+    }
+}
+
+impl ModuleDisplay for VisionVideoVjepa21Config {}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
 pub struct VisionVideoLejepaLossConfig {
@@ -841,6 +1128,7 @@ impl ModuleDisplay for VisionVideoLejepaLossConfig {}
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
 pub struct VisionVideoLejepaConfig {
+    pub paradigm: VisionVideoParadigmKind,
     pub context_frames: usize,
     pub target_frames: usize,
     pub train_target_frames_min: usize,
@@ -858,11 +1146,13 @@ pub struct VisionVideoLejepaConfig {
     pub artifact_future_frames: usize,
     pub artifact_upscale: usize,
     pub artifact_overwrite: bool,
+    pub vjepa21: VisionVideoVjepa21Config,
 }
 
 impl Default for VisionVideoLejepaConfig {
     fn default() -> Self {
         Self {
+            paradigm: VisionVideoParadigmKind::default(),
             context_frames: 4,
             target_frames: 2,
             train_target_frames_min: 0,
@@ -880,6 +1170,7 @@ impl Default for VisionVideoLejepaConfig {
             artifact_future_frames: 0,
             artifact_upscale: 4,
             artifact_overwrite: true,
+            vjepa21: VisionVideoVjepa21Config::default(),
         }
     }
 }
@@ -927,6 +1218,7 @@ impl<B: AutodiffBackend> AutodiffModule<B> for VisionVideoLejepaConfig {
 impl ModuleDisplayDefault for VisionVideoLejepaConfig {
     fn content(&self, content: Content) -> Option<Content> {
         content
+            .add("paradigm", &self.paradigm)
             .add("context_frames", &self.context_frames)
             .add("target_frames", &self.target_frames)
             .add("train_target_frames_min", &self.train_target_frames_min)
@@ -944,6 +1236,7 @@ impl ModuleDisplayDefault for VisionVideoLejepaConfig {
             .add("artifact_future_frames", &self.artifact_future_frames)
             .add("artifact_upscale", &self.artifact_upscale)
             .add("artifact_overwrite", &self.artifact_overwrite)
+            .add("vjepa21", &self.vjepa21)
             .optional()
     }
 }
@@ -951,6 +1244,10 @@ impl ModuleDisplayDefault for VisionVideoLejepaConfig {
 impl ModuleDisplay for VisionVideoLejepaConfig {}
 
 impl VisionVideoLejepaConfig {
+    pub fn is_vjepa21(&self) -> bool {
+        self.paradigm == VisionVideoParadigmKind::Vjepa21
+    }
+
     pub fn effective_train_target_frames_min(&self) -> usize {
         if self.train_target_frames_min == 0 {
             self.target_frames.max(1)

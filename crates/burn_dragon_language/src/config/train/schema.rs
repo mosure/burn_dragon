@@ -34,6 +34,9 @@ pub enum DatasetSourceConfig {
         #[serde(default)]
         url: Option<String>,
     },
+    LocalText {
+        path: PathBuf,
+    },
     HuggingFace(HuggingFaceDatasetConfig),
     DeepMath {
         #[serde(default)]

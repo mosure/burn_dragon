@@ -1,0 +1,9 @@
+extends = ["climbmix_stage_base.toml"]
+
+[training]
+max_iters = 135000
+
+[optimizer.lr_schedule]
+type = "cosine"
+min_lr = 0.00003
+num_iters = 135000

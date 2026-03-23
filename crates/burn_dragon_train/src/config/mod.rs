@@ -9,8 +9,11 @@ pub use artifacts::VisionArtifactOutputMode;
 pub use core::{
     FsdpMixedPrecisionKind, GdpoConfig, GdpoHardGate, KernelSpec, LayerStateSpec, ModelSpec,
     ParallelCheckpointConfig, ParallelCheckpointFormat, ParallelCommunicationBackend,
-    ParallelConfig, ParallelDataConfig, ParallelFsdpConfig, ParallelSpec, ParallelTensorConfig,
-    ParallelismKind, SequenceKernelKind, StateAxisSpec, StateLayout, StateTensorSpec,
+    ParallelConfig, ParallelDataConfig, ParallelFsdpConfig, ParallelPipelineCacheConfig,
+    ParallelPipelineConfig, ParallelSpec, ParallelTensorConfig, ParallelismKind,
+    PipelineCacheEvictionKind, PipelineCachePolicy, PipelineCommunicationKind,
+    PipelinePartitionKind, PipelineScheduleKind, PipelineSharedWeightSyncKind,
+    PipelineTransportDtype, SequenceKernelKind, StateAxisSpec, StateLayout, StateTensorSpec,
     TensorParallelAxis, TensorParallelPartitionKind, VisionTeacherVariant, WgpuBackend,
     WgpuGenerationExecutor, WgpuInferenceConfig, WgpuMemoryConfig, WgpuRuntimeConfig,
     WgpuStartupAutotuneConfig, WgpuTrainingConfig,

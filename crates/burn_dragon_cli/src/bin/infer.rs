@@ -20,15 +20,19 @@ use burn_dragon::core::BDH;
 #[cfg(feature = "viz")]
 use burn_dragon::language::build_model_config;
 use burn_dragon::language::{
-    ContextStrategy, ContextStrategyConfig, GenerationConfig, TrainingConfig,
-    apply_wgpu_fused_core_override, build_model_config_with_tokenizer, default_checkpoint_dir,
-    generate_text, generate_tokens_chunked, generation_profile_reset, generation_profile_snapshot,
+    ContextStrategy, ContextStrategyConfig, GenerationConfig, GenerationOutputFormat,
+    GenerationTokenizerSourceConfig, TrainingConfig, apply_wgpu_fused_core_override,
+    build_model_config_with_tokenizer, default_checkpoint_dir, generate_tokens,
+    generate_tokens_chunked, generation_profile_reset, generation_profile_snapshot,
     load_training_config_for_checkpoint, prefill_state, resolve_context_strategy,
     sample_next_token,
 };
 use burn_dragon::train::WgpuGenerationExecutor;
 use burn_dragon::train::wgpu::init_runtime;
 use burn_dragon_kernel::api::recurrent::{recurrent_profile_reset, recurrent_profile_snapshot};
+use burn_dragon_language::tokenizer::{
+    SharedTokenizer, Tokenizer, TokenizerConfig, pretokenized::PretokenizedTokenizer,
+};
 use burn_wgpu::Wgpu;
 
 #[cfg(feature = "cuda")]
@@ -43,6 +47,12 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResolvedGenerationOutputFormat {
+    DecodedText,
+    TokenIds,
+}
 
 #[cfg(feature = "viz")]
 struct VizRuntime<B: Backend> {
@@ -151,6 +161,149 @@ mod path_tests {
     }
 }
 
+fn initialize_tokenizer(
+    tokenizer_config: &TokenizerConfig,
+    cache_dir: &Path,
+) -> Result<SharedTokenizer> {
+    if let Some(path) = tokenizer_config.storage_path(cache_dir) {
+        tokenizer_config
+            .load(&path)
+            .with_context(|| format!("failed to load tokenizer {}", path.display()))
+    } else {
+        tokenizer_config
+            .fit(std::iter::empty::<&str>())
+            .context("failed to initialize tokenizer")
+    }
+}
+
+fn load_generation_tokenizer(
+    config: &TrainingConfig,
+    source: &GenerationTokenizerSourceConfig,
+) -> Result<SharedTokenizer> {
+    match source {
+        GenerationTokenizerSourceConfig::Dataset => {
+            initialize_tokenizer(&config.dataset.tokenizer, &config.dataset.cache_dir)
+        }
+        GenerationTokenizerSourceConfig::Config {
+            cache_dir,
+            tokenizer,
+        } => initialize_tokenizer(
+            tokenizer,
+            cache_dir
+                .as_deref()
+                .unwrap_or(config.dataset.cache_dir.as_path()),
+        ),
+    }
+}
+
+fn resolve_generation_output_format(
+    requested: GenerationOutputFormat,
+    decode_tokenizer: &dyn Tokenizer,
+) -> ResolvedGenerationOutputFormat {
+    match requested {
+        GenerationOutputFormat::Auto => {
+            if decode_tokenizer.as_any().is::<PretokenizedTokenizer>() {
+                ResolvedGenerationOutputFormat::TokenIds
+            } else {
+                ResolvedGenerationOutputFormat::DecodedText
+            }
+        }
+        GenerationOutputFormat::DecodedText => ResolvedGenerationOutputFormat::DecodedText,
+        GenerationOutputFormat::TokenIds => ResolvedGenerationOutputFormat::TokenIds,
+    }
+}
+
+fn render_token_ids(ids: &[u32]) -> String {
+    ids.iter().map(u32::to_string).collect::<Vec<_>>().join(" ")
+}
+
+fn sanitize_display_text(text: &str) -> String {
+    let mut sanitized = String::with_capacity(text.len());
+    for ch in text.chars() {
+        if ch.is_control() && !matches!(ch, '\n' | '\r' | '\t') {
+            let code = ch as u32;
+            if code <= 0xFF {
+                sanitized.push_str(&format!("\\x{code:02X}"));
+            } else {
+                sanitized.push_str(&format!("\\u{{{code:X}}}"));
+            }
+        } else {
+            sanitized.push(ch);
+        }
+    }
+    sanitized
+}
+
+fn render_output(
+    ids: &[u32],
+    decode_tokenizer: &dyn Tokenizer,
+    output_format: ResolvedGenerationOutputFormat,
+    stop_at_eos: bool,
+) -> String {
+    match output_format {
+        ResolvedGenerationOutputFormat::DecodedText => {
+            sanitize_display_text(&decode_tokenizer.decode_with_options(ids, stop_at_eos))
+        }
+        ResolvedGenerationOutputFormat::TokenIds => render_token_ids(ids),
+    }
+}
+
+fn should_decode_past_eos(
+    generation: &GenerationConfig,
+    output_format: ResolvedGenerationOutputFormat,
+) -> bool {
+    generation.max_chars.is_some()
+        && matches!(output_format, ResolvedGenerationOutputFormat::DecodedText)
+}
+
+fn should_stop_on_eos(
+    decode_tokenizer: &dyn Tokenizer,
+    output_format: ResolvedGenerationOutputFormat,
+    decode_past_eos: bool,
+) -> Option<u32> {
+    if decode_past_eos {
+        return None;
+    }
+    match output_format {
+        ResolvedGenerationOutputFormat::DecodedText | ResolvedGenerationOutputFormat::TokenIds => {
+            decode_tokenizer.eos_id()
+        }
+    }
+}
+
+fn byte_len_for_char_limit(text: &str, max_chars: usize) -> usize {
+    if max_chars == 0 {
+        return 0;
+    }
+    let mut count = 0usize;
+    for (idx, ch) in text.char_indices() {
+        count += 1;
+        if count == max_chars {
+            return idx + ch.len_utf8();
+        }
+    }
+    text.len()
+}
+
+fn write_token_id_chunk<W: Write>(
+    writer: &mut W,
+    ids: &[u32],
+    wrote_any_output: &mut bool,
+) -> Result<()> {
+    for &id in ids {
+        if *wrote_any_output {
+            writer
+                .write_all(b" ")
+                .context("failed to write token separator")?;
+        }
+        writer
+            .write_all(id.to_string().as_bytes())
+            .context("failed to write token id")?;
+        *wrote_any_output = true;
+    }
+    Ok(())
+}
+
 fn infer_backend<B, Init>(
     config: &TrainingConfig,
     args: &Args,
@@ -189,23 +342,8 @@ where
     B::seed(&device, 1337);
     init_backend(&device);
 
-    let tokenizer_path = config
-        .dataset
-        .tokenizer
-        .storage_path(&config.dataset.cache_dir);
-    let tokenizer = if let Some(path) = tokenizer_path {
-        config
-            .dataset
-            .tokenizer
-            .load(&path)
-            .with_context(|| format!("failed to load tokenizer {}", path.display()))?
-    } else {
-        config
-            .dataset
-            .tokenizer
-            .fit(std::iter::empty::<&str>())
-            .context("failed to initialize tokenizer")?
-    };
+    let model_tokenizer =
+        initialize_tokenizer(&config.dataset.tokenizer, &config.dataset.cache_dir)?;
 
     let checkpoint_dir = args
         .checkpoint
@@ -216,7 +354,7 @@ where
     let mut model_config = build_model_config_with_tokenizer(
         &config.model,
         config.training.block_size,
-        tokenizer.as_ref(),
+        model_tokenizer.as_ref(),
     )?;
     apply_wgpu_fused_core_override(
         &mut model_config,
@@ -251,6 +389,12 @@ where
 
     let mut generation = config.generation.clone();
     apply_generation_overrides(&mut generation, args, config.training.block_size);
+    let prompt_tokenizer = load_generation_tokenizer(config, &generation.prompt_tokenizer)?;
+    let decode_tokenizer = load_generation_tokenizer(config, &generation.decode_tokenizer)?;
+    let output_format =
+        resolve_generation_output_format(generation.output_format, decode_tokenizer.as_ref());
+    let decode_past_eos = should_decode_past_eos(&generation, output_format);
+    let stop_on_eos = should_stop_on_eos(decode_tokenizer.as_ref(), output_format, decode_past_eos);
 
     let status_msg =
         format!("Loaded epoch {epoch} from {checkpoint_display} using {backend_name} backend.",);
@@ -262,13 +406,14 @@ where
     let infer_wall_start = stage_profile.then(Instant::now);
 
     let use_streaming = args.streaming;
+    let chunked_plan = resolve_chunked_generation_plan(config, backend_name, &generation);
 
     if use_streaming {
         let strategy =
             resolve_context_strategy(&generation.context_strategy, config.training.block_size);
         eprintln!("{status_msg}");
 
-        let mut prompt_ids = tokenizer.encode(&generation.prompt, false, false);
+        let mut prompt_ids = prompt_tokenizer.encode(&generation.prompt, false, false);
         if let ContextStrategy::Sliding { window } = strategy
             && prompt_ids.len() > window
         {
@@ -279,7 +424,12 @@ where
         let prompt_ids_u32: Vec<u32> = prompt_ids.to_vec();
 
         let mut writer = io::stdout();
-        let prompt_text = tokenizer.decode(&prompt_ids_u32);
+        let prompt_text = render_output(
+            &prompt_ids_u32,
+            decode_tokenizer.as_ref(),
+            output_format,
+            true,
+        );
         writer
             .write_all(prompt_text.as_bytes())
             .context("failed to write prompt to stdout")?;
@@ -287,6 +437,8 @@ where
 
         let mut generated_ids: Vec<u32> = Vec::new();
         let mut last_print_len = 0usize;
+        let mut wrote_any_output = !prompt_text.is_empty();
+        let mut generated_display_chars = 0usize;
         let mut stream_err: Option<anyhow::Error> = None;
         let max_tokens = normalize_max_tokens(generation.max_tokens);
         let settings = burn_dragon::language::GenerationSettings {
@@ -296,7 +448,13 @@ where
             strategy,
         };
 
-        let chunked_enabled = is_chunked_streaming_enabled(config, backend_name, &generation) && {
+        let chunked_plan = chunked_plan.filter(|_| {
+            if generation.max_chars.is_some() {
+                return false;
+            }
+            if stop_on_eos.is_some() {
+                return false;
+            }
             #[cfg(feature = "viz")]
             {
                 viz_runtime.is_none()
@@ -305,41 +463,59 @@ where
             {
                 true
             }
-        };
+        });
 
-        if chunked_enabled {
-            let chunk_tokens = config.wgpu.inference.generation_chunk_tokens.max(1);
-            let buffer_tokens = config
-                .wgpu
-                .inference
-                .generation_device_buffer_tokens
-                .max(chunk_tokens);
+        if let Some((chunk_tokens, buffer_tokens)) = chunked_plan {
             let mut on_chunk = |chunk: &[i64]| {
                 if stream_err.is_some() {
                     return;
                 }
+                let mut chunk_ids = Vec::with_capacity(chunk.len());
                 for &token in chunk {
                     if let Ok(token_u32) = u32::try_from(token) {
+                        chunk_ids.push(token_u32);
                         generated_ids.push(token_u32);
                     }
                 }
-                let decoded = tokenizer.decode(&generated_ids);
-                if decoded.len() <= last_print_len {
-                    return;
-                }
-                let new_text = &decoded[last_print_len..];
-                if new_text.is_empty() {
-                    return;
-                }
-                if let Err(err) = writer.write_all(new_text.as_bytes()) {
-                    stream_err = Some(anyhow!("failed to write streamed chunk: {err}"));
-                    return;
+                match output_format {
+                    ResolvedGenerationOutputFormat::DecodedText => {
+                        let decoded =
+                            decode_tokenizer.decode_with_options(&generated_ids, !decode_past_eos);
+                        if decoded.len() <= last_print_len {
+                            return;
+                        }
+                        let new_text = &decoded[last_print_len..];
+                        if new_text.is_empty() {
+                            return;
+                        }
+                        let mut sanitized_new_text = sanitize_display_text(new_text);
+                        if let Some(max_chars) = generation.max_chars {
+                            let remaining = max_chars.saturating_sub(generated_display_chars);
+                            if remaining == 0 {
+                                return;
+                            }
+                            let keep_len = byte_len_for_char_limit(&sanitized_new_text, remaining);
+                            sanitized_new_text.truncate(keep_len);
+                            generated_display_chars += sanitized_new_text.chars().count();
+                        }
+                        if let Err(err) = writer.write_all(sanitized_new_text.as_bytes()) {
+                            stream_err = Some(anyhow!("failed to write streamed chunk: {err}"));
+                            return;
+                        }
+                        last_print_len = decoded.len();
+                    }
+                    ResolvedGenerationOutputFormat::TokenIds => {
+                        if let Err(err) =
+                            write_token_id_chunk(&mut writer, &chunk_ids, &mut wrote_any_output)
+                        {
+                            stream_err = Some(err.context("failed to write streamed token ids"));
+                            return;
+                        }
+                    }
                 }
                 if let Err(err) = writer.flush() {
                     stream_err = Some(anyhow!("failed to flush stdout during streaming: {err}"));
-                    return;
                 }
-                last_print_len = decoded.len();
             };
             let _ = generate_tokens_chunked(
                 &model,
@@ -382,13 +558,60 @@ where
 
                 if let Ok(token_u32) = u32::try_from(next) {
                     generated_ids.push(token_u32);
-                    let decoded = tokenizer.decode(&generated_ids);
+                    if Some(token_u32) == stop_on_eos {
+                        break;
+                    }
+                    match output_format {
+                        ResolvedGenerationOutputFormat::DecodedText => {
+                            let decoded = decode_tokenizer
+                                .decode_with_options(&generated_ids, !decode_past_eos);
 
-                    if decoded.len() > last_print_len {
-                        let new_text = &decoded[last_print_len..];
-                        if !new_text.is_empty() {
-                            if let Err(err) = writer.write_all(new_text.as_bytes()) {
-                                stream_err = Some(anyhow!("failed to write streamed token: {err}"));
+                            if decoded.len() > last_print_len {
+                                let new_text = &decoded[last_print_len..];
+                                if !new_text.is_empty() {
+                                    let mut sanitized_new_text = sanitize_display_text(new_text);
+                                    let mut reached_char_limit = false;
+                                    if let Some(max_chars) = generation.max_chars {
+                                        let remaining =
+                                            max_chars.saturating_sub(generated_display_chars);
+                                        if remaining == 0 {
+                                            break;
+                                        }
+                                        let keep_len =
+                                            byte_len_for_char_limit(&sanitized_new_text, remaining);
+                                        sanitized_new_text.truncate(keep_len);
+                                        generated_display_chars +=
+                                            sanitized_new_text.chars().count();
+                                        reached_char_limit = generated_display_chars >= max_chars;
+                                    }
+                                    if let Err(err) =
+                                        writer.write_all(sanitized_new_text.as_bytes())
+                                    {
+                                        stream_err =
+                                            Some(anyhow!("failed to write streamed token: {err}"));
+                                        break;
+                                    }
+                                    if let Err(err) = writer.flush() {
+                                        stream_err = Some(anyhow!(
+                                            "failed to flush stdout during streaming: {err}"
+                                        ));
+                                        break;
+                                    }
+                                    if reached_char_limit {
+                                        break;
+                                    }
+                                }
+                                last_print_len = decoded.len();
+                            }
+                        }
+                        ResolvedGenerationOutputFormat::TokenIds => {
+                            if let Err(err) = write_token_id_chunk(
+                                &mut writer,
+                                &[token_u32],
+                                &mut wrote_any_output,
+                            ) {
+                                stream_err =
+                                    Some(err.context("failed to write streamed token ids"));
                                 break;
                             }
                             if let Err(err) = writer.flush() {
@@ -397,7 +620,6 @@ where
                                 break;
                             }
                         }
-                        last_print_len = decoded.len();
                     }
                 }
 
@@ -440,13 +662,33 @@ where
             .context("failed to write trailing newline")?;
         writer.flush().context("failed to flush stdout")?;
     } else {
-        let output = generate_text::<B>(
-            &model,
-            tokenizer.as_ref(),
-            &device,
-            config.training.block_size,
-            &generation,
-        )?;
+        let output = if let Some((chunk_tokens, buffer_tokens)) = chunked_plan {
+            generate_output_chunked::<B>(
+                &model,
+                prompt_tokenizer.as_ref(),
+                decode_tokenizer.as_ref(),
+                output_format,
+                !decode_past_eos,
+                stop_on_eos,
+                &device,
+                config.training.block_size,
+                &generation,
+                chunk_tokens,
+                buffer_tokens,
+            )?
+        } else {
+            generate_output::<B>(
+                &model,
+                prompt_tokenizer.as_ref(),
+                decode_tokenizer.as_ref(),
+                output_format,
+                !decode_past_eos,
+                stop_on_eos,
+                &device,
+                config.training.block_size,
+                &generation,
+            )?
+        };
 
         eprintln!("{status_msg}");
         println!("{output}");
@@ -482,21 +724,205 @@ where
     Ok(())
 }
 
-fn is_chunked_streaming_enabled(
-    config: &TrainingConfig,
-    backend_name: &str,
+fn generate_output<B: Backend>(
+    model: &BDH<B>,
+    prompt_tokenizer: &dyn Tokenizer,
+    decode_tokenizer: &dyn Tokenizer,
+    output_format: ResolvedGenerationOutputFormat,
+    stop_at_eos: bool,
+    stop_on_eos: Option<u32>,
+    device: &B::Device,
+    block_size: usize,
     generation: &GenerationConfig,
-) -> bool {
-    if !burn_dragon::language::is_wgpu_backend_name(backend_name) {
-        return false;
+) -> Result<String> {
+    let strategy = resolve_context_strategy(&generation.context_strategy, block_size);
+    let mut prompt_ids = prompt_tokenizer.encode(&generation.prompt, false, false);
+    if let ContextStrategy::Sliding { window } = strategy
+        && prompt_ids.len() > window
+    {
+        prompt_ids = prompt_ids[prompt_ids.len() - window..].to_vec();
     }
-    if !matches!(
-        config.wgpu.inference.generation_executor,
-        WgpuGenerationExecutor::RolloutChunked
-    ) {
-        return false;
+
+    let prompt_tokens: Vec<i64> = prompt_ids.iter().map(|&id| id as i64).collect();
+    let settings = burn_dragon::language::GenerationSettings {
+        max_new_tokens: normalize_max_tokens(generation.max_tokens),
+        temperature: generation.temperature,
+        top_k: generation.top_k,
+        strategy,
+    };
+    let max_chars = generation.max_chars;
+    if max_chars.is_some() && matches!(output_format, ResolvedGenerationOutputFormat::DecodedText) {
+        let prompt_ids_u32 = prompt_ids.clone();
+        let prompt_text = render_output(&prompt_ids_u32, decode_tokenizer, output_format, true);
+        let (mut state, mut last_logits) = prefill_state::<B>(model, &prompt_tokens, device)?;
+        if let ContextStrategy::Sliding { window } = strategy
+            && window > 0
+            && state.position > window
+        {
+            state.trim(window);
+        }
+        let mut generated_ids = Vec::new();
+        let mut last_render_len = 0usize;
+        let mut generated_suffix = String::new();
+        let mut generated_display_chars = 0usize;
+        let max_new_tokens = normalize_max_tokens(generation.max_tokens);
+        let max_chars = max_chars.unwrap_or(usize::MAX);
+
+        while max_new_tokens.is_none_or(|max| generated_ids.len() < max) {
+            let (next, logits) = sample_next_token(
+                model,
+                &mut state,
+                last_logits,
+                generation.temperature,
+                generation.top_k,
+                device,
+            )?;
+            last_logits = logits;
+            if let Ok(token_u32) = u32::try_from(next) {
+                generated_ids.push(token_u32);
+                if Some(token_u32) == stop_on_eos {
+                    break;
+                }
+                let decoded = decode_tokenizer.decode_with_options(&generated_ids, stop_at_eos);
+                if decoded.len() > last_render_len {
+                    let new_text = &decoded[last_render_len..];
+                    let mut sanitized_new_text = sanitize_display_text(new_text);
+                    let remaining = max_chars.saturating_sub(generated_display_chars);
+                    if remaining == 0 {
+                        break;
+                    }
+                    let keep_len = byte_len_for_char_limit(&sanitized_new_text, remaining);
+                    sanitized_new_text.truncate(keep_len);
+                    generated_display_chars += sanitized_new_text.chars().count();
+                    generated_suffix.push_str(&sanitized_new_text);
+                    last_render_len = decoded.len();
+                    if generated_display_chars >= max_chars {
+                        break;
+                    }
+                }
+            }
+            if let ContextStrategy::Sliding { window } = strategy
+                && window > 0
+                && state.position > window
+            {
+                state.trim(window);
+            }
+        }
+
+        return Ok(format!("{prompt_text}{generated_suffix}"));
     }
-    generation.top_k == Some(1)
+
+    let tokens_all = if stop_on_eos.is_some() {
+        let (mut state, mut last_logits) = prefill_state::<B>(model, &prompt_tokens, device)?;
+        if let ContextStrategy::Sliding { window } = strategy
+            && window > 0
+            && state.position > window
+        {
+            state.trim(window);
+        }
+        let mut generated_ids = Vec::new();
+        let max_new_tokens = normalize_max_tokens(generation.max_tokens);
+        while max_new_tokens.is_none_or(|max| generated_ids.len() < max) {
+            let (next, logits) = sample_next_token(
+                model,
+                &mut state,
+                last_logits,
+                generation.temperature,
+                generation.top_k,
+                device,
+            )?;
+            last_logits = logits;
+            if let Ok(token_u32) = u32::try_from(next) {
+                generated_ids.push(token_u32);
+                if Some(token_u32) == stop_on_eos {
+                    break;
+                }
+            }
+            if let ContextStrategy::Sliding { window } = strategy
+                && window > 0
+                && state.position > window
+            {
+                state.trim(window);
+            }
+        }
+        let mut tokens_all = prompt_tokens.clone();
+        tokens_all.extend(generated_ids.into_iter().map(i64::from));
+        tokens_all
+    } else {
+        generate_tokens(model, prompt_tokens, device, settings, None)?
+    };
+    let decoded_ids: Vec<u32> = tokens_all
+        .iter()
+        .filter_map(|&tok| (tok >= 0).then_some(tok as u32))
+        .collect();
+    Ok(render_output(
+        &decoded_ids,
+        decode_tokenizer,
+        output_format,
+        stop_at_eos,
+    ))
+}
+
+fn generate_output_chunked<B: Backend>(
+    model: &BDH<B>,
+    prompt_tokenizer: &dyn Tokenizer,
+    decode_tokenizer: &dyn Tokenizer,
+    output_format: ResolvedGenerationOutputFormat,
+    stop_at_eos: bool,
+    stop_on_eos: Option<u32>,
+    device: &B::Device,
+    block_size: usize,
+    generation: &GenerationConfig,
+    chunk_tokens: usize,
+    device_buffer_tokens: usize,
+) -> Result<String> {
+    if stop_on_eos.is_some() {
+        return generate_output(
+            model,
+            prompt_tokenizer,
+            decode_tokenizer,
+            output_format,
+            stop_at_eos,
+            stop_on_eos,
+            device,
+            block_size,
+            generation,
+        );
+    }
+    let strategy = resolve_context_strategy(&generation.context_strategy, block_size);
+    let mut prompt_ids = prompt_tokenizer.encode(&generation.prompt, false, false);
+    if let ContextStrategy::Sliding { window } = strategy
+        && prompt_ids.len() > window
+    {
+        prompt_ids = prompt_ids[prompt_ids.len() - window..].to_vec();
+    }
+
+    let prompt_tokens: Vec<i64> = prompt_ids.iter().map(|&id| id as i64).collect();
+    let settings = burn_dragon::language::GenerationSettings {
+        max_new_tokens: normalize_max_tokens(generation.max_tokens),
+        temperature: generation.temperature,
+        top_k: generation.top_k,
+        strategy,
+    };
+    let tokens_all = generate_tokens_chunked(
+        model,
+        prompt_tokens,
+        device,
+        settings,
+        chunk_tokens,
+        device_buffer_tokens,
+        None,
+    )?;
+    let decoded_ids: Vec<u32> = tokens_all
+        .iter()
+        .filter_map(|&tok| (tok >= 0).then_some(tok as u32))
+        .collect();
+    Ok(render_output(
+        &decoded_ids,
+        decode_tokenizer,
+        output_format,
+        stop_at_eos,
+    ))
 }
 
 #[cfg(feature = "viz")]
@@ -588,6 +1014,9 @@ fn apply_generation_overrides(generation: &mut GenerationConfig, args: &Args, bl
         } else {
             Some(max_tokens)
         };
+    }
+    if let Some(max_chars) = args.max_chars {
+        generation.max_chars = Some(max_chars);
     }
     if let Some(temperature) = args.temperature {
         generation.temperature = temperature;
@@ -762,6 +1191,9 @@ struct Args {
     /// Override the number of tokens to generate.
     #[arg(long, value_name = "N")]
     max_tokens: Option<i64>,
+    /// Stop after emitting this many generated display characters.
+    #[arg(long, value_name = "N")]
+    max_chars: Option<usize>,
     /// Override the sampling temperature.
     #[arg(long, value_name = "T")]
     temperature: Option<f32>,
@@ -809,10 +1241,75 @@ fn normalize_max_tokens(max_tokens: Option<i64>) -> Option<usize> {
     }
 }
 
+fn parse_chunked_override(raw: Option<&str>) -> Option<bool> {
+    let normalized = raw?.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+fn resolve_chunked_generation_plan_for_values(
+    is_wgpu_backend: bool,
+    generation_executor: WgpuGenerationExecutor,
+    top_k: Option<usize>,
+    chunk_tokens: usize,
+    device_buffer_tokens: usize,
+    env_override: Option<&str>,
+) -> Option<(usize, usize)> {
+    if top_k != Some(1) {
+        return None;
+    }
+
+    match parse_chunked_override(env_override) {
+        Some(false) => return None,
+        Some(true) => {}
+        None => {
+            if is_wgpu_backend
+                && !matches!(generation_executor, WgpuGenerationExecutor::RolloutChunked)
+            {
+                return None;
+            }
+        }
+    }
+
+    let chunk_tokens = chunk_tokens.max(1);
+    let device_buffer_tokens = device_buffer_tokens.max(chunk_tokens);
+    Some((chunk_tokens, device_buffer_tokens))
+}
+
+fn resolve_chunked_generation_plan(
+    config: &TrainingConfig,
+    backend_name: &str,
+    generation: &GenerationConfig,
+) -> Option<(usize, usize)> {
+    if generation.max_chars.is_some() {
+        return None;
+    }
+    resolve_chunked_generation_plan_for_values(
+        burn_dragon::language::is_wgpu_backend_name(backend_name),
+        config.wgpu.inference.generation_executor.clone(),
+        generation.top_k,
+        config.wgpu.inference.generation_chunk_tokens,
+        config.wgpu.inference.generation_device_buffer_tokens,
+        std::env::var("BDH_INFER_CHUNKED").ok().as_deref(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use super::apply_wgpu_fused_core_override;
+    use super::{
+        ResolvedGenerationOutputFormat, apply_wgpu_fused_core_override, parse_chunked_override,
+        render_output, render_token_ids, resolve_chunked_generation_plan_for_values,
+        resolve_generation_output_format, sanitize_display_text,
+    };
     use burn_dragon::core::BDHConfig;
+    use burn_dragon::train::WgpuGenerationExecutor;
+    use burn_dragon_language::{
+        GenerationOutputFormat,
+        tokenizer::{Tokenizer, byte::ByteTokenizer, pretokenized::PretokenizedTokenizer},
+    };
 
     #[test]
     fn wgpu_backend_override_enables_fused_recurrent_path() {
@@ -866,5 +1363,146 @@ mod tests {
         assert!(!model_config.fused_kernels.enabled);
         assert!(!model_config.fused_kernels.wgpu_recurrent_kernel);
         assert!(!model_config.fused_kernels.wgpu_rollout_fused);
+    }
+
+    #[test]
+    fn parse_chunked_override_accepts_common_boolean_spellings() {
+        assert_eq!(parse_chunked_override(Some("1")), Some(true));
+        assert_eq!(parse_chunked_override(Some("true")), Some(true));
+        assert_eq!(parse_chunked_override(Some("on")), Some(true));
+        assert_eq!(parse_chunked_override(Some("0")), Some(false));
+        assert_eq!(parse_chunked_override(Some("false")), Some(false));
+        assert_eq!(parse_chunked_override(Some("off")), Some(false));
+        assert_eq!(parse_chunked_override(Some("maybe")), None);
+        assert_eq!(parse_chunked_override(None), None);
+    }
+
+    #[test]
+    fn cuda_chunked_inference_defaults_on_for_argmax_sampling() {
+        let plan = resolve_chunked_generation_plan_for_values(
+            false,
+            WgpuGenerationExecutor::Baseline,
+            Some(1),
+            8,
+            64,
+            None,
+        );
+        assert_eq!(plan, Some((8, 64)));
+    }
+
+    #[test]
+    fn wgpu_chunked_inference_stays_executor_gated_by_default() {
+        let plan = resolve_chunked_generation_plan_for_values(
+            true,
+            WgpuGenerationExecutor::Baseline,
+            Some(1),
+            8,
+            64,
+            None,
+        );
+        assert_eq!(plan, None);
+    }
+
+    #[test]
+    fn override_can_force_or_disable_chunked_inference() {
+        let forced = resolve_chunked_generation_plan_for_values(
+            true,
+            WgpuGenerationExecutor::Baseline,
+            Some(1),
+            8,
+            64,
+            Some("1"),
+        );
+        assert_eq!(forced, Some((8, 64)));
+
+        let disabled = resolve_chunked_generation_plan_for_values(
+            false,
+            WgpuGenerationExecutor::RolloutChunked,
+            Some(1),
+            8,
+            64,
+            Some("0"),
+        );
+        assert_eq!(disabled, None);
+    }
+
+    #[test]
+    fn auto_output_format_uses_token_ids_for_pretokenized_decode() {
+        let tokenizer = PretokenizedTokenizer::new(32, None, None, None, None);
+        assert_eq!(
+            resolve_generation_output_format(GenerationOutputFormat::Auto, &tokenizer),
+            ResolvedGenerationOutputFormat::TokenIds
+        );
+    }
+
+    #[test]
+    fn auto_output_format_uses_decoded_text_for_textual_decode_tokenizers() {
+        let tokenizer = ByteTokenizer::new(true);
+        assert_eq!(
+            resolve_generation_output_format(GenerationOutputFormat::Auto, &tokenizer),
+            ResolvedGenerationOutputFormat::DecodedText
+        );
+    }
+
+    #[test]
+    fn render_token_ids_formats_with_single_spaces() {
+        assert_eq!(render_token_ids(&[464, 329, 262]), "464 329 262");
+        assert_eq!(render_token_ids(&[]), "");
+    }
+
+    #[test]
+    fn render_output_switches_between_decoded_text_and_token_ids() {
+        let byte = ByteTokenizer::new(true);
+        let pretokenized = PretokenizedTokenizer::new(1024, None, None, None, None);
+        let hello_ids = byte.encode("hello", false, false);
+
+        assert_eq!(
+            render_output(
+                &hello_ids,
+                &byte,
+                ResolvedGenerationOutputFormat::DecodedText,
+                true,
+            ),
+            "hello"
+        );
+        assert_eq!(
+            render_output(
+                &[464, 329, 262],
+                &pretokenized,
+                ResolvedGenerationOutputFormat::TokenIds,
+                true,
+            ),
+            "464 329 262"
+        );
+    }
+
+    #[test]
+    fn sanitize_display_text_escapes_non_printable_controls() {
+        assert_eq!(sanitize_display_text("a\x08b\n"), "a\\x08b\n");
+    }
+
+    #[test]
+    fn render_output_can_decode_past_eos_when_requested() {
+        let byte = ByteTokenizer::new(true);
+        let eos = byte.eos_id().expect("eos");
+        let ids = vec![b'A' as u32, eos, b'B' as u32];
+        assert_eq!(
+            render_output(
+                &ids,
+                &byte,
+                ResolvedGenerationOutputFormat::DecodedText,
+                true
+            ),
+            "A"
+        );
+        assert_eq!(
+            render_output(
+                &ids,
+                &byte,
+                ResolvedGenerationOutputFormat::DecodedText,
+                false
+            ),
+            "AB"
+        );
     }
 }

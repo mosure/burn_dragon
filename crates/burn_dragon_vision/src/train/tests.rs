@@ -33,14 +33,24 @@ use std::path::PathBuf;
 fn make_training(max_iters: usize, epochs: Option<usize>) -> TrainingHyperparameters {
     TrainingHyperparameters {
         block_size: 16,
+        tbptt_chunk_size: None,
+        tbptt_persist_across_steps: false,
+        min_logical_block_size: None,
         batch_size: 2,
+        seed: 1337,
         gradient_accumulation_steps: 1,
         target_effective_batch_size: None,
         epochs,
         max_iters,
+        checkpoint_interval_iters: 0,
         log_frequency: 10,
         fast_train: false,
+        resume_run_dir: None,
+        resume_checkpoint_epoch: None,
+        init_checkpoint_path: None,
+        init_checkpoint_epoch: None,
         context_strategy: ContextStrategyConfig::Infinite,
+        sequence_kernel_override: None,
         gdpo: None,
     }
 }

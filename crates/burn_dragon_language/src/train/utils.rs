@@ -204,6 +204,25 @@ pub(crate) fn build_parallel_spec(config: &TrainingConfig) -> ParallelSpec {
         collective_global_address: config.parallel.data.collective_global_address.clone(),
         collective_node_address: config.parallel.data.collective_node_address.clone(),
         collective_data_service_port: config.parallel.data.collective_data_service_port,
+        pipeline_enabled: config.parallel.pipeline.enabled,
+        pipeline_stage_count: config.parallel.pipeline.stage_count,
+        pipeline_virtual_stages_per_rank: config.parallel.pipeline.virtual_stages_per_rank,
+        pipeline_schedule: config.parallel.pipeline.schedule,
+        pipeline_microbatches: config.parallel.pipeline.microbatches,
+        pipeline_partition: config.parallel.pipeline.partition,
+        pipeline_activation_checkpointing: config.parallel.pipeline.activation_checkpointing,
+        pipeline_shared_weight_sync: config.parallel.pipeline.shared_weight_sync,
+        pipeline_communication: config.parallel.pipeline.communication,
+        pipeline_cache_enabled: config.parallel.pipeline.cache.enabled,
+        pipeline_cache_policy: config.parallel.pipeline.cache.policy,
+        pipeline_cache_reuse_across_backward: config.parallel.pipeline.cache.reuse_across_backward,
+        pipeline_cache_max_inflight_microbatches: config
+            .parallel
+            .pipeline
+            .cache
+            .max_inflight_microbatches,
+        pipeline_cache_eviction: config.parallel.pipeline.cache.eviction,
+        pipeline_cache_transport_dtype: config.parallel.pipeline.cache.transport_dtype,
     }
 }
 
@@ -552,9 +571,13 @@ mod tests {
             generation: GenerationConfig {
                 prompt: "abc".to_string(),
                 max_tokens: Some(4),
+                max_chars: None,
                 temperature: 1.0,
                 top_k: None,
                 context_strategy: ContextStrategyConfig::Infinite,
+                prompt_tokenizer: Default::default(),
+                decode_tokenizer: Default::default(),
+                output_format: Default::default(),
             },
             wgpu: Default::default(),
             model: ModelOverrides {
@@ -658,9 +681,13 @@ mod tests {
             generation: GenerationConfig {
                 prompt: "abc".to_string(),
                 max_tokens: Some(4),
+                max_chars: None,
                 temperature: 1.0,
                 top_k: None,
                 context_strategy: ContextStrategyConfig::Infinite,
+                prompt_tokenizer: Default::default(),
+                decode_tokenizer: Default::default(),
+                output_format: Default::default(),
             },
             wgpu: Default::default(),
             model: ModelOverrides {
@@ -693,6 +720,122 @@ mod tests {
             "127.0.0.1:32001"
         );
         assert_eq!(json["parallel_spec"]["collective_data_service_port"], 32001);
+    }
+
+    #[test]
+    fn write_run_config_records_pipeline_cache_metadata() {
+        let dir = tempdir().expect("tempdir");
+        let run_dir = dir.path().join("run");
+        let config = TrainingConfig {
+            dataset: DatasetConfig {
+                cache_dir: dir.path().join("cache"),
+                train_split_ratio: 0.9,
+                validation: None,
+                source: DatasetSourceConfig::Shakespeare { url: None },
+                tokenizer: TokenizerConfig::default(),
+            },
+            training: TrainingHyperparameters {
+                block_size: 64,
+                tbptt_chunk_size: None,
+                tbptt_persist_across_steps: false,
+                min_logical_block_size: None,
+                batch_size: 4,
+                seed: 4242,
+                gradient_accumulation_steps: 1,
+                target_effective_batch_size: None,
+                epochs: None,
+                max_iters: 8,
+                checkpoint_interval_iters: 2000,
+                log_frequency: 1,
+                fast_train: false,
+                resume_run_dir: None,
+                resume_checkpoint_epoch: None,
+                init_checkpoint_path: None,
+                init_checkpoint_epoch: None,
+                context_strategy: ContextStrategyConfig::Infinite,
+                sequence_kernel_override: None,
+                gdpo: None,
+            },
+            optimizer: OptimizerConfig {
+                learning_rate: 1.0e-3,
+                weight_decay: 0.0,
+                lr_schedule: None,
+                grad_clip_norm: None,
+                grad_clip_value: None,
+            },
+            parallel: ParallelConfig {
+                mode: ParallelismKind::Ddp,
+                world_size: 4,
+                data: burn_dragon_train::ParallelDataConfig {
+                    size: 4,
+                    ..Default::default()
+                },
+                pipeline: burn_dragon_train::ParallelPipelineConfig {
+                    enabled: true,
+                    stage_count: 2,
+                    virtual_stages_per_rank: 1,
+                    schedule: burn_dragon_train::PipelineScheduleKind::Interleaved1f1b,
+                    microbatches: 2,
+                    communication: burn_dragon_train::PipelineCommunicationKind::BlockResidualCache,
+                    cache: burn_dragon_train::ParallelPipelineCacheConfig {
+                        enabled: true,
+                        policy: burn_dragon_train::PipelineCachePolicy::ResidentBlockSummaries,
+                        reuse_across_backward: true,
+                        max_inflight_microbatches: 2,
+                        transport_dtype: burn_dragon_train::PipelineTransportDtype::Bf16,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            generation: GenerationConfig {
+                prompt: "abc".to_string(),
+                max_tokens: Some(4),
+                max_chars: None,
+                temperature: 1.0,
+                top_k: None,
+                context_strategy: ContextStrategyConfig::Infinite,
+                prompt_tokenizer: Default::default(),
+                decode_tokenizer: Default::default(),
+                output_format: Default::default(),
+            },
+            wgpu: Default::default(),
+            model: ModelOverrides {
+                n_layer: Some(2),
+                n_embd: Some(256),
+                n_head: Some(4),
+                latent_total: Some(32768),
+                ..ModelOverrides::default()
+            },
+        };
+        let mut model_config = BDHConfig::default();
+        model_config.n_layer = 2;
+        model_config.n_embd = 256;
+        model_config.n_head = 4;
+        model_config.mlp_internal_dim_multiplier = 128;
+
+        write_run_config(&config, &model_config, &run_dir, "test-run", "cuda", None)
+            .expect("write run config");
+
+        let payload = std::fs::read_to_string(run_dir.join("config.json")).expect("read config");
+        let json: Value = serde_json::from_str(&payload).expect("parse config json");
+        assert_eq!(json["parallel_spec"]["pipeline_enabled"], true);
+        assert_eq!(json["parallel_spec"]["pipeline_stage_count"], 2);
+        assert_eq!(json["parallel_spec"]["pipeline_microbatches"], 2);
+        assert_eq!(
+            json["parallel_spec"]["pipeline_communication"],
+            "block_residual_cache"
+        );
+        assert_eq!(json["parallel_spec"]["pipeline_cache_enabled"], true);
+        assert_eq!(
+            json["parallel_spec"]["pipeline_cache_policy"],
+            "resident_block_summaries"
+        );
+        assert_eq!(
+            json["parallel_spec"]["pipeline_cache_transport_dtype"],
+            "bf16"
+        );
     }
 
     #[test]
@@ -790,9 +933,13 @@ mod tests {
             generation: GenerationConfig {
                 prompt: "abc".to_string(),
                 max_tokens: Some(4),
+                max_chars: None,
                 temperature: 1.0,
                 top_k: None,
                 context_strategy: ContextStrategyConfig::Infinite,
+                prompt_tokenizer: Default::default(),
+                decode_tokenizer: Default::default(),
+                output_format: Default::default(),
             },
             wgpu: Default::default(),
             model: ModelOverrides {

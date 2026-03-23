@@ -1,4 +1,6 @@
-extends = ["../../experiments/nca_prepretrain_large_base.toml"]
+extends = [
+  "../../experiments/nca_prepretrain_large_base.toml",
+]
 
 [training]
 # Keep the NCA budget intentionally tiny.

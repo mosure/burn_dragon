@@ -61,4 +61,11 @@ burn-cuda = { version = "0.21.0-pre.2", optional = true, default-features = fals
 [dev-dependencies]
 avirus = "0.2"
 burn-ndarray = "0.21.0-pre.2"
+criterion = { version = "0.7", features = ["html_reports"] }
 tempfile = "3"
+
+[[bench]]
+name = "pipeline_cache"
+harness = false
+path = "benches/pipeline_cache.rs"
+required-features = ["benchmark", "train"]

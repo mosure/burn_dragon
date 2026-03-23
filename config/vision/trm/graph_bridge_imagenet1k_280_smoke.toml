@@ -1,0 +1,134 @@
+# ImageNet-1k graph-bridge training smoke.
+# Purpose:
+# - validate canonicalized ImageNet layout
+# - validate prefetch / decode / device transfer
+# - validate medium-scale graph-bridge training plumbing before teacher export
+
+[dataset]
+imagenet_root = "data/imagenet1k"
+train_dir = "train"
+val_dir = "val"
+prefetch_batches = 8
+prefetch_workers = 12
+prefetch_to_device = true
+cache_decoded = true
+cache_capacity = 2048
+cache_preprocessed = false
+
+[training]
+batch_size = 8
+max_iters = 4
+log_frequency = 1
+device_memory_check_every = 1
+max_device_memory_mb = 98304
+rollout_min_steps = 2
+rollout_max_steps = 4
+rollout_backprop_steps = 4
+
+[optimizer]
+learning_rate = 0.0003
+weight_decay = 0.05
+grad_clip_norm = 1.0
+
+[optimizer.lr_schedule]
+type = "constant"
+
+[vision]
+image_size = 280
+patch_size = 14
+backbone = "pyramid"
+in_channels = 3
+embed_dim = 320
+steps = 4
+n_head = 8
+mlp_internal_dim_multiplier = 4
+dropout = 0.1
+projection_dim = 384
+projection_hidden_dim = 768
+use_cls_token = true
+pos_encoding = "learned2d"
+pos_max_height = 20
+pos_max_width = 20
+attention_mode = "row_l1"
+allow_softmax_attention = false
+use_alibi = true
+fused_kernels = false
+relu_threshold = 0.0
+
+[vision.trm_graph]
+enabled = true
+coarse_stride = 2
+hub_count = 8
+rank = 8
+value_dim = 32
+local_radius = 1
+local_diagonals = true
+local_self = true
+coarse_local_radius = 1
+coarse_local_diagonals = true
+coarse_local_self = true
+predict_coarse_substeps = 2
+predict_substep_kind = "local_bridge"
+decay = 0.9
+hub_gates = true
+grid_mismatch_policy = "fallback_default"
+
+[vision.trm_graph.bank_schedule.predict]
+patch_local_read = false
+patch_local_write = false
+patch_from_coarse_read = false
+patch_to_coarse_write = false
+patch_to_global_write = false
+
+[mode]
+type = "lejepa"
+views = 4
+global_views = 2
+local_views = 2
+local_image_size = 112
+local_min_scale = 0.05
+local_max_scale = 0.3
+min_view_overlap = 0.2
+view_overlap_attempts = 8
+artifact_every = 0
+artifact_output = "mp4"
+artifact_fps = 8
+artifact_max_images = 2
+artifact_max_views = 2
+artifact_overwrite = true
+
+[mode.loss.lejepa]
+enabled = true
+lambda = 0.02
+sigreg_knots = 17
+sigreg_t_max = 3.0
+sigreg_proj_dim = 256
+
+[mode.loss.recon]
+weight = 1.0
+mask_ratio = 0.6
+loss_on_all_patches = false
+recon_head_norm = true
+hidden_dim = 256
+
+[augment]
+image_size = 280
+resize_short = 320
+min_scale = 0.08
+max_scale = 1.0
+min_aspect_ratio = 0.75
+max_aspect_ratio = 1.3333334
+flip_prob = 0.5
+color_jitter_prob = 1.0
+brightness = 0.4
+contrast = 0.4
+saturation = 0.0
+hue = 0.1
+grayscale_prob = 0.0
+blur_prob = 0.0
+blur_sigma_min = 0.1
+blur_sigma_max = 2.0
+solarize_prob = 0.0
+solarize_threshold = 128
+normalize_mean = [0.485, 0.456, 0.406]
+normalize_std = [0.229, 0.224, 0.225]

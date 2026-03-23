@@ -1,5 +1,6 @@
 mod factory;
 mod huggingface;
+mod local_text;
 pub mod scheduler;
 mod shakespeare;
 mod universality;
@@ -8,6 +9,7 @@ use crate::tokenizer::SharedTokenizer;
 
 pub use factory::build_dataset;
 pub use huggingface::HuggingFaceDataset;
+pub use local_text::LocalTextDataset;
 pub use scheduler::{
     RandomDataLoader, SequenceBatch, StreamingDataLoader, TokenSequenceDataset,
     sample_batch_with_shape,
@@ -24,6 +26,7 @@ pub enum DatasetSplit {
 #[derive(Clone)]
 pub enum Dataset {
     Shakespeare(ShakespeareDataset),
+    LocalText(LocalTextDataset),
     HuggingFace(HuggingFaceDataset),
     Universality(UniversalityDataset),
 }
@@ -35,6 +38,10 @@ impl Dataset {
 
     pub fn from_huggingface(dataset: HuggingFaceDataset) -> Self {
         Self::HuggingFace(dataset)
+    }
+
+    pub fn from_local_text(dataset: LocalTextDataset) -> Self {
+        Self::LocalText(dataset)
     }
 
     pub fn from_universality(dataset: UniversalityDataset) -> Self {
@@ -62,6 +69,7 @@ impl TokenSequenceDataset for Dataset {
     fn tokenizer(&self) -> SharedTokenizer {
         match self {
             Dataset::Shakespeare(dataset) => dataset.tokenizer(),
+            Dataset::LocalText(dataset) => dataset.tokenizer(),
             Dataset::HuggingFace(dataset) => dataset.tokenizer(),
             Dataset::Universality(dataset) => dataset.tokenizer(),
         }
@@ -70,6 +78,7 @@ impl TokenSequenceDataset for Dataset {
     fn token_count(&self) -> usize {
         match self {
             Dataset::Shakespeare(dataset) => dataset.token_count(),
+            Dataset::LocalText(dataset) => dataset.token_count(),
             Dataset::HuggingFace(dataset) => dataset.token_count(),
             Dataset::Universality(dataset) => dataset.token_count(),
         }
@@ -78,6 +87,7 @@ impl TokenSequenceDataset for Dataset {
     fn copy_token_range(&self, start: usize, dst: &mut [u32]) {
         match self {
             Dataset::Shakespeare(dataset) => dataset.copy_token_range(start, dst),
+            Dataset::LocalText(dataset) => dataset.copy_token_range(start, dst),
             Dataset::HuggingFace(dataset) => dataset.copy_token_range(start, dst),
             Dataset::Universality(dataset) => dataset.copy_token_range(start, dst),
         }
@@ -86,6 +96,7 @@ impl TokenSequenceDataset for Dataset {
     fn train_len(&self) -> usize {
         match self {
             Dataset::Shakespeare(dataset) => dataset.train_len(),
+            Dataset::LocalText(dataset) => dataset.train_len(),
             Dataset::HuggingFace(dataset) => dataset.train_len(),
             Dataset::Universality(dataset) => dataset.train_len(),
         }
@@ -94,6 +105,7 @@ impl TokenSequenceDataset for Dataset {
     fn block_size(&self) -> usize {
         match self {
             Dataset::Shakespeare(dataset) => dataset.block_size(),
+            Dataset::LocalText(dataset) => dataset.block_size(),
             Dataset::HuggingFace(dataset) => dataset.block_size(),
             Dataset::Universality(dataset) => dataset.block_size(),
         }
@@ -102,6 +114,7 @@ impl TokenSequenceDataset for Dataset {
     fn batch_size(&self) -> usize {
         match self {
             Dataset::Shakespeare(dataset) => dataset.batch_size(),
+            Dataset::LocalText(dataset) => dataset.batch_size(),
             Dataset::HuggingFace(dataset) => dataset.batch_size(),
             Dataset::Universality(dataset) => dataset.batch_size(),
         }
@@ -110,6 +123,7 @@ impl TokenSequenceDataset for Dataset {
     fn train_split_ratio(&self) -> f32 {
         match self {
             Dataset::Shakespeare(dataset) => dataset.train_split_ratio(),
+            Dataset::LocalText(dataset) => dataset.train_split_ratio(),
             Dataset::HuggingFace(dataset) => dataset.train_split_ratio(),
             Dataset::Universality(dataset) => dataset.train_split_ratio(),
         }
@@ -118,6 +132,7 @@ impl TokenSequenceDataset for Dataset {
     fn preferred_logical_document_tokens(&self, split: DatasetSplit) -> Option<usize> {
         match self {
             Dataset::Shakespeare(dataset) => dataset.preferred_logical_document_tokens(split),
+            Dataset::LocalText(dataset) => dataset.preferred_logical_document_tokens(split),
             Dataset::HuggingFace(dataset) => dataset.preferred_logical_document_tokens(split),
             Dataset::Universality(dataset) => dataset.preferred_logical_document_tokens(split),
         }
@@ -126,6 +141,9 @@ impl TokenSequenceDataset for Dataset {
     fn split_offset_and_span(&self, split: DatasetSplit) -> (usize, usize) {
         match self {
             Dataset::Shakespeare(dataset) => {
+                TokenSequenceDataset::split_offset_and_span(dataset, split)
+            }
+            Dataset::LocalText(dataset) => {
                 TokenSequenceDataset::split_offset_and_span(dataset, split)
             }
             Dataset::HuggingFace(dataset) => {
@@ -140,6 +158,7 @@ impl TokenSequenceDataset for Dataset {
     fn steps_per_epoch(&self, split: DatasetSplit) -> usize {
         match self {
             Dataset::Shakespeare(dataset) => TokenSequenceDataset::steps_per_epoch(dataset, split),
+            Dataset::LocalText(dataset) => TokenSequenceDataset::steps_per_epoch(dataset, split),
             Dataset::HuggingFace(dataset) => TokenSequenceDataset::steps_per_epoch(dataset, split),
             Dataset::Universality(dataset) => TokenSequenceDataset::steps_per_epoch(dataset, split),
         }
@@ -148,6 +167,7 @@ impl TokenSequenceDataset for Dataset {
     fn decode(&self, tokens: &[i64]) -> String {
         match self {
             Dataset::Shakespeare(dataset) => TokenSequenceDataset::decode(dataset, tokens),
+            Dataset::LocalText(dataset) => TokenSequenceDataset::decode(dataset, tokens),
             Dataset::HuggingFace(dataset) => TokenSequenceDataset::decode(dataset, tokens),
             Dataset::Universality(dataset) => TokenSequenceDataset::decode(dataset, tokens),
         }

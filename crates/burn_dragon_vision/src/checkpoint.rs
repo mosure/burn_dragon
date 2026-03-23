@@ -17,7 +17,7 @@ use burn_ndarray::NdArray;
 
 use crate::VisionDragon;
 use crate::config::{VisionTrainingConfig, VisionTrainingModeConfig, load_vision_training_config};
-use crate::train::vision::VisionVideoLejepaModel;
+use crate::train::vision::{VisionVideoLejepaModel, VisionVideoVjepa21Model};
 use crate::train::{
     VisionDistillModel, VisionLejepaInit, VisionLejepaModel, VisionReconstructionInit,
     resolve_vision_rollout,
@@ -123,23 +123,37 @@ pub fn export_vision_encoder_checkpoint_to_burnpack(
         }
         VisionTrainingModeConfig::VideoLejepa(video) => {
             let model = VisionDragon::<ExportBackend>::new(vision_config.clone(), &device);
-            let mut video_model = VisionVideoLejepaModel::new(
-                model,
-                video.clone(),
-                &vision_config,
-                rollout,
-                infer_video_dataset_num_classes(&config)?,
-                &device,
-            );
-            let record = BinFileRecorder::<FullPrecisionSettings>::new()
-                .load::<<VisionVideoLejepaModel<ExportBackend> as Module<ExportBackend>>::Record>(
-                    checkpoint_base.clone(),
+            if video.is_vjepa21() {
+                let mut video_model =
+                    VisionVideoVjepa21Model::new(model, video.clone(), &vision_config, &device);
+                let record = BinFileRecorder::<FullPrecisionSettings>::new()
+                    .load::<<VisionVideoVjepa21Model<ExportBackend> as Module<ExportBackend>>::Record>(
+                        checkpoint_base.clone(),
+                        &device,
+                    )
+                    .map_err(|err| anyhow!(format_checkpoint_load_error(&checkpoint_base, err)))?;
+                video_model = video_model.load_record(record);
+                export_model_to_burnpack_bundle(&video_model.frame_model, output_base, options)
+                    .map_err(|err| anyhow!(err))?
+            } else {
+                let mut video_model = VisionVideoLejepaModel::new(
+                    model,
+                    video.clone(),
+                    &vision_config,
+                    rollout,
+                    infer_video_dataset_num_classes(&config)?,
                     &device,
-                )
-                .map_err(|err| anyhow!(format_checkpoint_load_error(&checkpoint_base, err)))?;
-            video_model = video_model.load_record(record);
-            export_model_to_burnpack_bundle(&video_model.frame_model, output_base, options)
-                .map_err(|err| anyhow!(err))?
+                );
+                let record = BinFileRecorder::<FullPrecisionSettings>::new()
+                    .load::<<VisionVideoLejepaModel<ExportBackend> as Module<ExportBackend>>::Record>(
+                        checkpoint_base.clone(),
+                        &device,
+                    )
+                    .map_err(|err| anyhow!(format_checkpoint_load_error(&checkpoint_base, err)))?;
+                video_model = video_model.load_record(record);
+                export_model_to_burnpack_bundle(&video_model.frame_model, output_base, options)
+                    .map_err(|err| anyhow!(err))?
+            }
         }
         _ => {
             return Err(anyhow!(
@@ -216,22 +230,35 @@ pub fn load_vision_encoder_from_checkpoint<B: BackendTrait>(
         }
         VisionTrainingModeConfig::VideoLejepa(video) => {
             let model = VisionDragon::<B>::new(vision_config.clone(), device);
-            let mut video_model = VisionVideoLejepaModel::new(
-                model,
-                video.clone(),
-                &vision_config,
-                rollout,
-                infer_video_dataset_num_classes(&config)?,
-                device,
-            );
-            let record = BinFileRecorder::<FullPrecisionSettings>::new()
-                .load::<<VisionVideoLejepaModel<B> as Module<B>>::Record>(
-                    checkpoint_base.clone(),
+            if video.is_vjepa21() {
+                let mut video_model =
+                    VisionVideoVjepa21Model::new(model, video.clone(), &vision_config, device);
+                let record = BinFileRecorder::<FullPrecisionSettings>::new()
+                    .load::<<VisionVideoVjepa21Model<B> as Module<B>>::Record>(
+                        checkpoint_base.clone(),
+                        device,
+                    )
+                    .map_err(|err| anyhow!(format_checkpoint_load_error(&checkpoint_base, err)))?;
+                video_model = video_model.load_record(record);
+                Ok(video_model.frame_model)
+            } else {
+                let mut video_model = VisionVideoLejepaModel::new(
+                    model,
+                    video.clone(),
+                    &vision_config,
+                    rollout,
+                    infer_video_dataset_num_classes(&config)?,
                     device,
-                )
-                .map_err(|err| anyhow!(format_checkpoint_load_error(&checkpoint_base, err)))?;
-            video_model = video_model.load_record(record);
-            Ok(video_model.frame_model)
+                );
+                let record = BinFileRecorder::<FullPrecisionSettings>::new()
+                    .load::<<VisionVideoLejepaModel<B> as Module<B>>::Record>(
+                        checkpoint_base.clone(),
+                        device,
+                    )
+                    .map_err(|err| anyhow!(format_checkpoint_load_error(&checkpoint_base, err)))?;
+                video_model = video_model.load_record(record);
+                Ok(video_model.frame_model)
+            }
         }
         _ => Err(anyhow!(
             "vision encoder load currently supports only mode.type = \"distill\", \"lejepa\", or \"video_lejepa\""

@@ -1,0 +1,4 @@
+# Strongest current Mamba single-stage contender baseline.
+# This mirrors the promoted large baseline shape and budget knobs, but swaps in the
+# tuned Mamba sequence family.
+extends = ["current_best_large_mamba_contender/climbmix_stage_base.toml"]

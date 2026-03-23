@@ -20,6 +20,22 @@ fn default_gradient_as_bucket_view() -> bool {
     true
 }
 
+fn default_pipeline_stage_count() -> usize {
+    1
+}
+
+fn default_pipeline_microbatches() -> usize {
+    1
+}
+
+fn default_pipeline_virtual_stages_per_rank() -> usize {
+    1
+}
+
+fn default_pipeline_max_inflight_microbatches() -> usize {
+    1
+}
+
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ParallelismKind {
@@ -68,6 +84,62 @@ pub enum ParallelCheckpointFormat {
 pub enum FsdpMixedPrecisionKind {
     #[default]
     Disabled,
+    Bf16,
+    F16,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PipelineScheduleKind {
+    Gpipe,
+    #[serde(rename = "interleaved_1f1b")]
+    #[default]
+    Interleaved1f1b,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PipelinePartitionKind {
+    #[default]
+    LayerContiguous,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PipelineCommunicationKind {
+    #[default]
+    ActivationTensor,
+    BlockResidualCache,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PipelineSharedWeightSyncKind {
+    #[default]
+    AllReducePerStep,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PipelineCachePolicy {
+    #[default]
+    Disabled,
+    ResidentBlockSummaries,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PipelineCacheEvictionKind {
+    #[default]
+    StepBoundary,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PipelineTransportDtype {
+    #[default]
+    Auto,
+    Fp32,
     Bf16,
     F16,
 }
@@ -146,6 +218,66 @@ pub struct ParallelCheckpointConfig {
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
+pub struct ParallelPipelineCacheConfig {
+    pub enabled: bool,
+    pub policy: PipelineCachePolicy,
+    pub reuse_across_backward: bool,
+    #[serde(default = "default_pipeline_max_inflight_microbatches")]
+    pub max_inflight_microbatches: usize,
+    pub eviction: PipelineCacheEvictionKind,
+    pub transport_dtype: PipelineTransportDtype,
+}
+
+impl Default for ParallelPipelineCacheConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            policy: PipelineCachePolicy::default(),
+            reuse_across_backward: true,
+            max_inflight_microbatches: default_pipeline_max_inflight_microbatches(),
+            eviction: PipelineCacheEvictionKind::default(),
+            transport_dtype: PipelineTransportDtype::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(default)]
+pub struct ParallelPipelineConfig {
+    pub enabled: bool,
+    #[serde(default = "default_pipeline_stage_count")]
+    pub stage_count: usize,
+    #[serde(default = "default_pipeline_virtual_stages_per_rank")]
+    pub virtual_stages_per_rank: usize,
+    pub schedule: PipelineScheduleKind,
+    #[serde(default = "default_pipeline_microbatches")]
+    pub microbatches: usize,
+    pub partition: PipelinePartitionKind,
+    pub activation_checkpointing: bool,
+    pub shared_weight_sync: PipelineSharedWeightSyncKind,
+    pub communication: PipelineCommunicationKind,
+    pub cache: ParallelPipelineCacheConfig,
+}
+
+impl Default for ParallelPipelineConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            stage_count: default_pipeline_stage_count(),
+            virtual_stages_per_rank: default_pipeline_virtual_stages_per_rank(),
+            schedule: PipelineScheduleKind::default(),
+            microbatches: default_pipeline_microbatches(),
+            partition: PipelinePartitionKind::default(),
+            activation_checkpointing: false,
+            shared_weight_sync: PipelineSharedWeightSyncKind::default(),
+            communication: PipelineCommunicationKind::default(),
+            cache: ParallelPipelineCacheConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(default)]
 pub struct ParallelConfig {
     pub mode: ParallelismKind,
     #[serde(default = "default_parallel_world_size")]
@@ -154,6 +286,7 @@ pub struct ParallelConfig {
     pub tensor: ParallelTensorConfig,
     pub fsdp: ParallelFsdpConfig,
     pub checkpoint: ParallelCheckpointConfig,
+    pub pipeline: ParallelPipelineConfig,
 }
 
 impl Default for ParallelConfig {
@@ -165,6 +298,7 @@ impl Default for ParallelConfig {
             tensor: ParallelTensorConfig::default(),
             fsdp: ParallelFsdpConfig::default(),
             checkpoint: ParallelCheckpointConfig::default(),
+            pipeline: ParallelPipelineConfig::default(),
         }
     }
 }
@@ -195,6 +329,36 @@ pub struct ParallelSpec {
     pub collective_global_address: Option<String>,
     pub collective_node_address: Option<String>,
     pub collective_data_service_port: Option<u16>,
+    #[serde(default)]
+    pub pipeline_enabled: bool,
+    #[serde(default)]
+    pub pipeline_stage_count: usize,
+    #[serde(default)]
+    pub pipeline_virtual_stages_per_rank: usize,
+    #[serde(default)]
+    pub pipeline_schedule: PipelineScheduleKind,
+    #[serde(default)]
+    pub pipeline_microbatches: usize,
+    #[serde(default)]
+    pub pipeline_partition: PipelinePartitionKind,
+    #[serde(default)]
+    pub pipeline_activation_checkpointing: bool,
+    #[serde(default)]
+    pub pipeline_shared_weight_sync: PipelineSharedWeightSyncKind,
+    #[serde(default)]
+    pub pipeline_communication: PipelineCommunicationKind,
+    #[serde(default)]
+    pub pipeline_cache_enabled: bool,
+    #[serde(default)]
+    pub pipeline_cache_policy: PipelineCachePolicy,
+    #[serde(default)]
+    pub pipeline_cache_reuse_across_backward: bool,
+    #[serde(default)]
+    pub pipeline_cache_max_inflight_microbatches: usize,
+    #[serde(default)]
+    pub pipeline_cache_eviction: PipelineCacheEvictionKind,
+    #[serde(default)]
+    pub pipeline_cache_transport_dtype: PipelineTransportDtype,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]

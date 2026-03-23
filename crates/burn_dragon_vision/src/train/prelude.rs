@@ -73,7 +73,9 @@ pub(crate) use crate::config::{
     VisionSaccadeInputProjectionMicroVitConfig, VisionTeacherConfig, VisionTeacherDecoderMode,
     VisionTeacherFeatureConfig, VisionTeacherTargetConfig, VisionTeacherTargetKind,
     VisionTeacherVariant, VisionTrainingConfig, VisionTrainingHyperparameters,
-    VisionTrainingModeConfig, VisionVideoLejepaConfig, VisionVideoTemporalConfig,
+    VisionTrainingModeConfig, VisionVideoLejepaConfig, VisionVideoParadigmKind,
+    VisionVideoTemporalConfig, VisionVideoVjepa21Config, VisionVideoVjepa21LossConfig,
+    VisionVideoVjepa21MaskConfig,
 };
 pub(crate) use crate::loss::{
     VisionDistillationLossConfig, VisionDistillationLossTerms, vision_distillation_loss,
@@ -122,13 +124,13 @@ pub(crate) use crate::train::vision::{
     VisionLejepaInit, VisionLejepaLosses, VisionLejepaModel, VisionMaeInit, VisionMaeLosses,
     VisionMaeModel, VisionProbe, VisionReconstructionHead, VisionReconstructionInit,
     VisionSaccadeHead, VisionSaccadeInputProjection, VisionSaccadeProjection,
-    VisionVideoLejepaLosses, VisionVideoLejepaModel, build_lejepa_artifacts, collect_views,
-    ema_update_module, init_momentum_teacher, lejepa_invariance_loss, lejepa_sigreg_loss,
-    lejepa_sigreg_loss_params, lejepa_teacher_invariance_loss, maybe_download_vision_dataset,
-    normalize_artifact_legend, normalize_columns, patch_heatmap_or_norm, pca_patch_heatmap,
-    pca_patch_rgb, recon_psnr, restore_optional_teacher_from_student, sample_patch_mask,
-    select_trajectory_indices, split_view_tensor, stack_views, sync_optional_teacher_from_student,
-    train_vision_backend,
+    VisionVideoLejepaLosses, VisionVideoLejepaModel, VisionVideoVjepa21Model,
+    build_lejepa_artifacts, collect_views, ema_update_module, init_momentum_teacher,
+    lejepa_invariance_loss, lejepa_sigreg_loss, lejepa_sigreg_loss_params,
+    lejepa_teacher_invariance_loss, maybe_download_vision_dataset, normalize_artifact_legend,
+    normalize_columns, patch_heatmap_or_norm, pca_patch_heatmap, pca_patch_rgb, recon_psnr,
+    restore_optional_teacher_from_student, sample_patch_mask, select_trajectory_indices,
+    split_view_tensor, stack_views, sync_optional_teacher_from_student, train_vision_backend,
 };
 pub(crate) use burn_dragon_train::train::teacher::*;
 

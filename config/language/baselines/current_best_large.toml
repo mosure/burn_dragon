@@ -1,3 +1,6 @@
+# Promoted operational large language bundle.
+# This remains the dense-score line because it is the only full staged bundle that has already
+# been proven end-to-end on the streaming-TBPTT + NCA-warm-start regime.
 name = "current_best_large_48h"
 output_dir = "runs/language_bundles/current_best_large"
 resume_from_last_completed_stage = true

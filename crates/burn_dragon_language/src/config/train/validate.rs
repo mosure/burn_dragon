@@ -1,8 +1,9 @@
 use anyhow::{Result, anyhow};
 
-use burn_dragon_core::BDHConfig;
+use burn_dragon_core::{BDHConfig, ResidualConnectorKind};
 use burn_dragon_train::{
-    GdpoHardGate, LearningRateScheduleConfig, ParallelismKind, TensorParallelPartitionKind,
+    GdpoHardGate, LearningRateScheduleConfig, ParallelismKind, PipelineCommunicationKind,
+    PipelineScheduleKind, TensorParallelPartitionKind,
 };
 
 use super::{DatasetSourceConfig, TrainingConfig};
@@ -88,11 +89,26 @@ impl TrainingConfig {
         if self.parallel.tensor.size == 0 {
             return Err(anyhow!("parallel.tensor.size must be > 0"));
         }
-        if self.parallel.data.size * self.parallel.tensor.size != self.parallel.world_size {
+        let pipeline_stage_multiplier = if self.parallel.pipeline.enabled {
+            self.parallel.pipeline.stage_count.max(1)
+        } else {
+            1
+        };
+        let expected_world_size = self
+            .parallel
+            .data
+            .size
+            .checked_mul(self.parallel.tensor.size)
+            .and_then(|value| value.checked_mul(pipeline_stage_multiplier))
+            .ok_or_else(|| anyhow!("parallel size configuration overflow"))?;
+        if self.parallel.mode != ParallelismKind::Single
+            && expected_world_size != self.parallel.world_size
+        {
             return Err(anyhow!(
-                "parallel.data.size * parallel.tensor.size must equal parallel.world_size (got {} * {} != {})",
+                "parallel.data.size * parallel.tensor.size * pipeline_stage_multiplier must equal parallel.world_size (got {} * {} * {} != {})",
                 self.parallel.data.size,
                 self.parallel.tensor.size,
+                pipeline_stage_multiplier,
                 self.parallel.world_size
             ));
         }
@@ -123,9 +139,9 @@ impl TrainingConfig {
                         "parallel.mode=ddp requires parallel.tensor.size = 1"
                     ));
                 }
-                if self.parallel.data.size != self.parallel.world_size {
+                if self.parallel.data.size * pipeline_stage_multiplier != self.parallel.world_size {
                     return Err(anyhow!(
-                        "parallel.mode=ddp requires parallel.data.size = parallel.world_size"
+                        "parallel.mode=ddp requires parallel.data.size * pipeline_stage_multiplier = parallel.world_size"
                     ));
                 }
                 if self.parallel.fsdp.enabled {
@@ -145,9 +161,9 @@ impl TrainingConfig {
                         "parallel.mode=fsdp requires parallel.tensor.size = 1"
                     ));
                 }
-                if self.parallel.data.size != self.parallel.world_size {
+                if self.parallel.data.size * pipeline_stage_multiplier != self.parallel.world_size {
                     return Err(anyhow!(
-                        "parallel.mode=fsdp requires parallel.data.size = parallel.world_size"
+                        "parallel.mode=fsdp requires parallel.data.size * pipeline_stage_multiplier = parallel.world_size"
                     ));
                 }
                 if !self.parallel.fsdp.enabled {
@@ -167,9 +183,10 @@ impl TrainingConfig {
                         "parallel.mode=tensor_parallel_neuron requires parallel.data.size = 1"
                     ));
                 }
-                if self.parallel.tensor.size != self.parallel.world_size {
+                if self.parallel.tensor.size * pipeline_stage_multiplier != self.parallel.world_size
+                {
                     return Err(anyhow!(
-                        "parallel.mode=tensor_parallel_neuron requires parallel.tensor.size = parallel.world_size"
+                        "parallel.mode=tensor_parallel_neuron requires parallel.tensor.size * pipeline_stage_multiplier = parallel.world_size"
                     ));
                 }
                 if self.parallel.fsdp.enabled {
@@ -190,6 +207,81 @@ impl TrainingConfig {
                     ));
                 }
             }
+        }
+        if self.parallel.pipeline.enabled {
+            if self.parallel.pipeline.stage_count == 0 {
+                return Err(anyhow!(
+                    "parallel.pipeline.stage_count must be > 0 when pipeline is enabled"
+                ));
+            }
+            if self.parallel.pipeline.virtual_stages_per_rank == 0 {
+                return Err(anyhow!(
+                    "parallel.pipeline.virtual_stages_per_rank must be > 0 when pipeline is enabled"
+                ));
+            }
+            if self.parallel.pipeline.microbatches == 0 {
+                return Err(anyhow!(
+                    "parallel.pipeline.microbatches must be > 0 when pipeline is enabled"
+                ));
+            }
+            if self.parallel.pipeline.microbatches > self.training.batch_size {
+                return Err(anyhow!(
+                    "parallel.pipeline.microbatches must be <= training.batch_size (got {} > {})",
+                    self.parallel.pipeline.microbatches,
+                    self.training.batch_size
+                ));
+            }
+            if self.parallel.mode != ParallelismKind::Single
+                && self.parallel.pipeline.stage_count > self.parallel.world_size
+            {
+                return Err(anyhow!(
+                    "parallel.pipeline.stage_count must be <= parallel.world_size (got {} > {})",
+                    self.parallel.pipeline.stage_count,
+                    self.parallel.world_size
+                ));
+            }
+            if self.parallel.pipeline.virtual_stages_per_rank > self.parallel.pipeline.stage_count {
+                return Err(anyhow!(
+                    "parallel.pipeline.virtual_stages_per_rank must be <= parallel.pipeline.stage_count (got {} > {})",
+                    self.parallel.pipeline.virtual_stages_per_rank,
+                    self.parallel.pipeline.stage_count
+                ));
+            }
+            if matches!(
+                self.parallel.pipeline.schedule,
+                PipelineScheduleKind::Interleaved1f1b
+            ) && self.parallel.pipeline.microbatches < self.parallel.pipeline.stage_count
+            {
+                return Err(anyhow!(
+                    "parallel.pipeline.microbatches must be >= parallel.pipeline.stage_count for interleaved_1f1b (got {} < {})",
+                    self.parallel.pipeline.microbatches,
+                    self.parallel.pipeline.stage_count
+                ));
+            }
+            if self.parallel.pipeline.cache.max_inflight_microbatches == 0 {
+                return Err(anyhow!(
+                    "parallel.pipeline.cache.max_inflight_microbatches must be > 0 when pipeline is enabled"
+                ));
+            }
+        } else if self.parallel.pipeline.cache.enabled {
+            return Err(anyhow!(
+                "parallel.pipeline.cache.enabled requires parallel.pipeline.enabled"
+            ));
+        }
+        if self.parallel.pipeline.cache.enabled
+            && self.parallel.pipeline.communication != PipelineCommunicationKind::BlockResidualCache
+        {
+            return Err(anyhow!(
+                "parallel.pipeline.cache.enabled requires parallel.pipeline.communication = \"block_residual_cache\""
+            ));
+        }
+        if self.parallel.pipeline.enabled
+            && self.parallel.pipeline.communication == PipelineCommunicationKind::BlockResidualCache
+            && self.model.residual_connector != Some(ResidualConnectorKind::BlockAttentionResidual)
+        {
+            return Err(anyhow!(
+                "parallel.pipeline.communication = \"block_residual_cache\" requires model.residual_connector = \"block_attention_residual\""
+            ));
         }
         if matches!(self.training.target_effective_batch_size, Some(0)) {
             return Err(anyhow!(
@@ -578,6 +670,117 @@ impl TrainingConfig {
                 return Err(anyhow!("model.mhc.mhc_tau must be > 0 when enabled"));
             }
         }
+        if let Some(attention_residual) = &self.model.attention_residual
+            && attention_residual.enabled
+        {
+            if attention_residual.num_heads == 0 {
+                return Err(anyhow!(
+                    "model.attention_residual.num_heads must be > 0 when enabled"
+                ));
+            }
+            if matches!(attention_residual.last_layers, Some(0)) {
+                return Err(anyhow!(
+                    "model.attention_residual.last_layers must be > 0 when set"
+                ));
+            }
+            if matches!(attention_residual.history_window, Some(0)) {
+                return Err(anyhow!(
+                    "model.attention_residual.history_window must be > 0 when set"
+                ));
+            }
+        }
+        if let Some(block_attention_residual) = &self.model.block_attention_residual
+            && block_attention_residual.enabled
+        {
+            if block_attention_residual.num_heads == 0 {
+                return Err(anyhow!(
+                    "model.block_attention_residual.num_heads must be > 0 when enabled"
+                ));
+            }
+            if matches!(block_attention_residual.last_layers, Some(0)) {
+                return Err(anyhow!(
+                    "model.block_attention_residual.last_layers must be > 0 when set"
+                ));
+            }
+            if block_attention_residual.layers_per_block == 0 {
+                return Err(anyhow!(
+                    "model.block_attention_residual.layers_per_block must be > 0 when enabled"
+                ));
+            }
+            if matches!(block_attention_residual.block_history_window, Some(0)) {
+                return Err(anyhow!(
+                    "model.block_attention_residual.block_history_window must be > 0 when set"
+                ));
+            }
+            if matches!(block_attention_residual.intra_block_history_window, Some(0)) {
+                return Err(anyhow!(
+                    "model.block_attention_residual.intra_block_history_window must be > 0 when set"
+                ));
+            }
+        }
+        if let Some(mhc) = self.model.mhc.as_ref()
+            && mhc.enabled
+            && self.model.residual_connector != Some(ResidualConnectorKind::Mhc)
+        {
+            return Err(anyhow!(
+                "model.residual_connector = \"mhc\" is required when model.mhc.enabled = true"
+            ));
+        }
+        if let Some(attention_residual) = self.model.attention_residual.as_ref()
+            && attention_residual.enabled
+            && self.model.residual_connector != Some(ResidualConnectorKind::AttentionResidual)
+        {
+            return Err(anyhow!(
+                "model.residual_connector = \"attention_residual\" is required when model.attention_residual.enabled = true"
+            ));
+        }
+        if let Some(block_attention_residual) = self.model.block_attention_residual.as_ref()
+            && block_attention_residual.enabled
+            && self.model.residual_connector != Some(ResidualConnectorKind::BlockAttentionResidual)
+        {
+            return Err(anyhow!(
+                "model.residual_connector = \"block_attention_residual\" is required when model.block_attention_residual.enabled = true"
+            ));
+        }
+        if let Some(residual_connector) = self.model.residual_connector {
+            match residual_connector {
+                ResidualConnectorKind::Vanilla => {}
+                ResidualConnectorKind::Mhc => {
+                    let mhc = self.model.mhc.as_ref().ok_or_else(|| {
+                        anyhow!("model.mhc must be set when model.residual_connector = \"mhc\"")
+                    })?;
+                    if !mhc.enabled {
+                        return Err(anyhow!(
+                            "model.mhc.enabled must be true when model.residual_connector = \"mhc\""
+                        ));
+                    }
+                }
+                ResidualConnectorKind::AttentionResidual => {
+                    let attention_residual = self
+                        .model
+                        .attention_residual
+                        .as_ref()
+                        .ok_or_else(|| anyhow!("model.attention_residual must be set when model.residual_connector = \"attention_residual\""))?;
+                    if !attention_residual.enabled {
+                        return Err(anyhow!(
+                            "model.attention_residual.enabled must be true when model.residual_connector = \"attention_residual\""
+                        ));
+                    }
+                }
+                ResidualConnectorKind::BlockAttentionResidual => {
+                    let block_attention_residual = self
+                        .model
+                        .block_attention_residual
+                        .as_ref()
+                        .ok_or_else(|| anyhow!("model.block_attention_residual must be set when model.residual_connector = \"block_attention_residual\""))?;
+                    if !block_attention_residual.enabled {
+                        return Err(anyhow!(
+                            "model.block_attention_residual.enabled must be true when model.residual_connector = \"block_attention_residual\""
+                        ));
+                    }
+                }
+            }
+        }
 
         if let Some(schedule) = &self.optimizer.lr_schedule {
             match schedule {
@@ -658,6 +861,11 @@ fn validate_dataset_source(
     label: &str,
 ) -> Result<()> {
     match source {
+        DatasetSourceConfig::LocalText { path } => {
+            if path.as_os_str().is_empty() {
+                return Err(anyhow!("{label}.path must not be empty"));
+            }
+        }
         DatasetSourceConfig::HuggingFace(config) => {
             if config.repo_id.trim().is_empty() {
                 return Err(anyhow!("{label}.repo_id must not be empty"));
@@ -773,9 +981,13 @@ mod tests {
             generation: GenerationConfig {
                 prompt: "abc".to_string(),
                 max_tokens: Some(4),
+                max_chars: None,
                 temperature: 1.0,
                 top_k: None,
                 context_strategy: ContextStrategyConfig::Infinite,
+                prompt_tokenizer: Default::default(),
+                decode_tokenizer: Default::default(),
+                output_format: Default::default(),
             },
             wgpu: Default::default(),
             model: ModelOverrides {
@@ -837,9 +1049,13 @@ mod tests {
             generation: GenerationConfig {
                 prompt: "abc".to_string(),
                 max_tokens: Some(4),
+                max_chars: None,
                 temperature: 1.0,
                 top_k: None,
                 context_strategy: ContextStrategyConfig::Infinite,
+                prompt_tokenizer: Default::default(),
+                decode_tokenizer: Default::default(),
+                output_format: Default::default(),
             },
             wgpu: Default::default(),
             model: ModelOverrides::default(),
@@ -895,9 +1111,13 @@ mod tests {
             generation: GenerationConfig {
                 prompt: "abc".to_string(),
                 max_tokens: Some(4),
+                max_chars: None,
                 temperature: 1.0,
                 top_k: None,
                 context_strategy: ContextStrategyConfig::Infinite,
+                prompt_tokenizer: Default::default(),
+                decode_tokenizer: Default::default(),
+                output_format: Default::default(),
             },
             wgpu: Default::default(),
             model: ModelOverrides::default(),
@@ -955,9 +1175,13 @@ mod tests {
             generation: GenerationConfig {
                 prompt: "abc".to_string(),
                 max_tokens: Some(4),
+                max_chars: None,
                 temperature: 1.0,
                 top_k: None,
                 context_strategy: ContextStrategyConfig::Infinite,
+                prompt_tokenizer: Default::default(),
+                decode_tokenizer: Default::default(),
+                output_format: Default::default(),
             },
             wgpu: Default::default(),
             model: ModelOverrides::default(),

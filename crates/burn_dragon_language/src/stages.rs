@@ -623,4 +623,20 @@ rotary_embedding = "alibi"
         assert_eq!(config.stages[0].name, "nca_prepretrain");
         assert_eq!(config.stages[1].name, "climbmix_pretrain");
     }
+
+    #[test]
+    fn current_best_large_mamba_contender_bundle_loads() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("config")
+            .join("language")
+            .join("baselines");
+        let bundle_path = root.join("current_best_large_mamba_contender.toml");
+        let config = load_experiment_bundle_config(&bundle_path).expect("mamba contender bundle");
+        assert_eq!(config.name, "current_best_large_mamba_contender_48h");
+        assert_eq!(config.stages.len(), 2);
+        assert_eq!(config.stages[0].name, "nca_prepretrain");
+        assert_eq!(config.stages[1].name, "climbmix_pretrain");
+    }
 }

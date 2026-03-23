@@ -1,11 +1,14 @@
 use std::path::PathBuf;
 use std::{fs, path::Path};
 
+use burn_dragon_core::ResidualConnectorKind;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tempfile::tempdir;
 
 use super::train::{TrainingConfig, load_training_config};
+use crate::config::train::DatasetSourceConfig;
+use crate::tokenizer::TokenizerKind;
 
 fn config_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -13,6 +16,13 @@ fn config_root() -> PathBuf {
         .join("..")
         .join("config")
         .join("language")
+}
+
+fn load_config_from_root(relative_path: &str) -> TrainingConfig {
+    let root = config_root();
+    let path = root.join(relative_path);
+    load_training_config(&[path.clone()])
+        .unwrap_or_else(|err| panic!("failed to load language config {path:?}: {err}"))
 }
 
 fn roundtrip_config<T>(config: &T) -> T
@@ -266,4 +276,115 @@ fn language_loader_supports_relative_extends() {
         config_with_base.model.rollout_fast_steps_per_slow_step,
         Some(4)
     );
+}
+
+#[test]
+fn baseline_configs_do_not_extend_ambiguous_sibling_base_toml() {
+    fn visit(dir: &Path, files: &mut Vec<PathBuf>) {
+        for entry in fs::read_dir(dir).expect("read baseline dir") {
+            let entry = entry.expect("dir entry");
+            let path = entry.path();
+            if path.is_dir() {
+                visit(&path, files);
+            } else if path.extension().and_then(|ext| ext.to_str()) == Some("toml") {
+                files.push(path);
+            }
+        }
+    }
+
+    let baselines_root = config_root().join("baselines");
+    let mut files = Vec::new();
+    visit(&baselines_root, &mut files);
+
+    for path in files {
+        if path.file_name().and_then(|name| name.to_str()) == Some("base.toml") {
+            continue;
+        }
+        let content = fs::read_to_string(&path).expect("read baseline config");
+        let value: toml::Value =
+            toml::from_str(&content).unwrap_or_else(|err| panic!("parse {path:?}: {err}"));
+        let extends = value.get("extends");
+        let has_ambiguous_local_base = match extends {
+            Some(toml::Value::String(value)) => value == "base.toml",
+            Some(toml::Value::Array(values)) => values.iter().any(|value| match value {
+                toml::Value::String(value) => value == "base.toml",
+                _ => false,
+            }),
+            _ => false,
+        };
+        assert!(
+            !has_ambiguous_local_base,
+            "baseline config {} must not extend ambiguous sibling base.toml; use ../base.toml or a named fragment instead",
+            path.display()
+        );
+    }
+}
+
+#[test]
+fn shakespeare_deployed_repro_resolves_to_the_old_shakespeare_recipe() {
+    let config = load_config_from_root("baselines/shakespeare_deployed_repro.toml");
+    config.validate().expect("validate shakespeare repro");
+
+    assert!(matches!(
+        config.dataset.source,
+        DatasetSourceConfig::Shakespeare { .. }
+    ));
+    assert!(matches!(
+        config.dataset.tokenizer.kind,
+        TokenizerKind::Char(_)
+    ));
+    assert_eq!(config.training.block_size, 512);
+    assert_eq!(config.training.batch_size, 24);
+    assert_eq!(config.training.epochs, Some(30));
+    assert_eq!(config.training.max_iters, 3000);
+    assert_eq!(config.model.n_layer, Some(4));
+    assert_eq!(config.model.n_embd, Some(128));
+    assert_eq!(config.model.n_head, Some(4));
+    assert_eq!(
+        config.model.residual_connector,
+        Some(ResidualConnectorKind::Vanilla)
+    );
+    assert!(matches!(
+        config.model.mhc.as_ref(),
+        Some(mhc) if !mhc.enabled
+    ));
+    assert!(matches!(
+        config.model.attention_residual.as_ref(),
+        Some(attn) if !attn.enabled
+    ));
+}
+
+#[test]
+fn shakespeare_small_attention_residual_baseline_matches_deployed_recipe_except_connector() {
+    let config = load_config_from_root("baselines/shakespeare_small_attention_residual.toml");
+    config
+        .validate()
+        .expect("validate shakespeare attention residual baseline");
+
+    assert!(matches!(
+        config.dataset.source,
+        DatasetSourceConfig::Shakespeare { .. }
+    ));
+    assert!(matches!(
+        config.dataset.tokenizer.kind,
+        TokenizerKind::Char(_)
+    ));
+    assert_eq!(config.training.block_size, 512);
+    assert_eq!(config.training.batch_size, 24);
+    assert_eq!(config.training.epochs, Some(30));
+    assert_eq!(config.model.n_embd, Some(128));
+    assert_eq!(config.model.n_layer, Some(4));
+    assert_eq!(config.model.n_head, Some(4));
+    assert_eq!(
+        config.model.residual_connector,
+        Some(ResidualConnectorKind::AttentionResidual)
+    );
+    assert!(matches!(
+        config.model.mhc.as_ref(),
+        Some(mhc) if !mhc.enabled
+    ));
+    assert!(matches!(
+        config.model.attention_residual.as_ref(),
+        Some(attn) if attn.enabled
+    ));
 }

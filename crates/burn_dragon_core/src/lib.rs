@@ -22,13 +22,13 @@ pub mod api {
 
     pub mod config {
         pub use crate::{
-            BDHConfig, ClockedSlowMemoryConfig, DragonNormConfig, DragonNormKind,
-            FusedAttentionExecutor, FusedKernelConfig, FusedProjectionExecutor,
+            AttentionResidualConfig, BDHConfig, BlockAttentionResidualConfig,
+            BlockAttentionResidualSummaryMode, ClockedSlowMemoryConfig, DragonNormConfig,
+            DragonNormKind, FusedAttentionExecutor, FusedKernelConfig, FusedProjectionExecutor,
             LatentFanoutScheduleConfig, MambaSequenceConfig,
-            ManifoldHyperConnectionCoefficientPolicy,
-            ManifoldHyperConnectionsConfig, SequenceKernelConfig, SequenceKernelFamily,
-            SequenceKernelKind, SequenceTrainingExecutor, SummaryMemoryConfig,
-            YNeuronRecurrenceConfig,
+            ManifoldHyperConnectionCoefficientPolicy, ManifoldHyperConnectionsConfig,
+            ResidualConnectorKind, SequenceKernelConfig, SequenceKernelFamily, SequenceKernelKind,
+            SequenceTrainingExecutor, SummaryMemoryConfig, YNeuronRecurrenceConfig,
         };
         pub use burn_dragon_kernel::api::projection::LowrankGradInputExecutor;
     }
@@ -42,7 +42,7 @@ pub mod api {
 
     pub mod recurrent {
         pub use crate::{
-            BDH, DragonNorm, HaltHead, LanguageMhcLayerDiagnostics,
+            BDH, DragonNorm, HaltHead, LanguageMhcLayerDiagnostics, LanguagePipelineState,
             LogitsProjectionProfileSnapshot, LowRankResidualOutput, LowRankResidualProfileSnapshot,
             StructuredDenseUpdateOutput, logits_projection_profile_reset,
             logits_projection_profile_snapshot, lowrank_residual_profile_reset,
@@ -78,19 +78,20 @@ pub use kernel::{BlockPattern1d, BlockPattern2d, BlockSparseConfig};
 #[cfg(feature = "viz")]
 pub use model::LayerVizState;
 pub use model::{
-    BDH, BDHConfig, BankedRhoState, ClockedSlowMemoryConfig, DragonNorm, DragonNormConfig,
-    DragonNormKind, FusedAttentionExecutor, FusedKernelConfig, FusedProjectionExecutor, HaltHead,
-    LanguageMhcLayerDiagnostics, LatentFanoutScheduleConfig, LogitsProjectionProfileSnapshot,
-    MambaSequenceConfig,
-    LowRankResidualOutput, LowRankResidualProfileSnapshot,
+    AttentionResidual, AttentionResidualConfig, BDH, BDHConfig, BankedRhoState,
+    BlockAttentionResidual, BlockAttentionResidualConfig, BlockAttentionResidualSummaryMode,
+    ClockedSlowMemoryConfig, DragonNorm, DragonNormConfig, DragonNormKind, FusedAttentionExecutor,
+    FusedKernelConfig, FusedProjectionExecutor, HaltHead, LanguageMhcLayerDiagnostics,
+    LanguagePipelineState, LatentFanoutScheduleConfig, LogitsProjectionProfileSnapshot,
+    LowRankResidualOutput, LowRankResidualProfileSnapshot, MambaSequenceConfig,
     ManifoldHyperConnectionCoefficientPolicy, ManifoldHyperConnectionCoefficients,
     ManifoldHyperConnectionStreamCoefficients, ManifoldHyperConnectionStreamOutput,
     ManifoldHyperConnectionWidthOutput, ManifoldHyperConnections, ManifoldHyperConnectionsConfig,
-    ModelState, SequenceKernelConfig, SequenceKernelFamily, SequenceKernelKind,
-    SequenceTrainingExecutor, StructuredBankRole, StructuredDenseUpdateOutput, StructuredGridState,
-    StructuredRouteOperation, StructuredRoutePattern, StructuredRouteSpec, StructuredRoutingSpec,
-    StructuredStepMode, StructuredTopologyState, SummaryMemoryConfig, YNeuronRecurrenceConfig,
-    logits_projection_profile_reset, logits_projection_profile_snapshot,
+    ModelState, ResidualConnectorKind, SequenceKernelConfig, SequenceKernelFamily,
+    SequenceKernelKind, SequenceTrainingExecutor, StructuredBankRole, StructuredDenseUpdateOutput,
+    StructuredGridState, StructuredRouteOperation, StructuredRoutePattern, StructuredRouteSpec,
+    StructuredRoutingSpec, StructuredStepMode, StructuredTopologyState, SummaryMemoryConfig,
+    YNeuronRecurrenceConfig, logits_projection_profile_reset, logits_projection_profile_snapshot,
     lowrank_residual_profile_reset, lowrank_residual_profile_snapshot, lowrank_residual_step,
     mhc_merge, mhc_merge_with_coefficients, mhc_passthrough, mhc_passthrough_with_coefficients,
     mhc_split, mhc_split_with_coefficients, near_critical_embedding_initializer,

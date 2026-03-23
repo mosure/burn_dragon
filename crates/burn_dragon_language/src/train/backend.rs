@@ -244,6 +244,100 @@ where
             "cuda language training still mixes burn_dragon_kernel fused kernels with generic Burn tensor ops; only selected recurrent/projection paths are accelerated today"
         );
     }
+    let pipeline_plan = if resolved_config.parallel.pipeline.enabled {
+        let pipeline_plan =
+            build_pipeline_plan(model_config.n_layer, &resolved_config.parallel.pipeline)?;
+        info!("resolved pipeline plan: {}", pipeline_plan.summary());
+        if resolved_config.parallel.pipeline.communication
+            == burn_dragon_train::PipelineCommunicationKind::BlockResidualCache
+            && resolved_config.model.residual_connector
+                == Some(burn_dragon_core::ResidualConnectorKind::BlockAttentionResidual)
+        {
+            let layers_per_block = resolved_config
+                .model
+                .block_attention_residual
+                .as_ref()
+                .map(|cfg| cfg.layers_per_block.max(1))
+                .unwrap_or(1);
+            let payload_bytes = model_config
+                .n_embd
+                .saturating_mul(training.block_size.max(1))
+                .saturating_mul(std::mem::size_of::<f32>());
+            let communication = simulate_pipeline_communication(
+                &pipeline_plan,
+                resolved_config.parallel.pipeline.communication,
+                &resolved_config.parallel.pipeline.cache,
+                layers_per_block,
+                payload_bytes,
+            )?;
+            info!(
+                "resolved pipeline communication: requested_bytes={} transmitted_bytes={} bytes_saved={} cache_hits={} cache_misses={} backward_reuse_hits={} hit_rate={:.3}",
+                communication.raw_payload_bytes_requested,
+                communication.payload_bytes_transmitted,
+                communication.bytes_saved(),
+                communication.cache_hits,
+                communication.cache_misses,
+                communication.backward_reuse_hits,
+                communication.cache_hit_rate(),
+            );
+        }
+        if parallel_runtime.mode != ParallelismKind::Single {
+            let layout =
+                resolve_pipeline_parallel_layout(&parallel_runtime, &resolved_config.parallel)?
+                    .ok_or_else(|| {
+                        anyhow!("parallel.pipeline.enabled requires a resolved DDP pipeline layout")
+                    })?;
+            let assignment = layout.assignment(parallel_runtime.global_rank).clone();
+            let workload = build_pipeline_rank_workload(
+                &pipeline_plan,
+                assignment.global_rank,
+                assignment.pipeline_stage_id,
+                assignment.data_parallel_rank,
+            );
+            info!(
+                "resolved distributed pipeline rank workload: {} rank={} stage={} dp_rank={} assignments={} forward_events={} backward_events={}",
+                layout.summary(),
+                assignment.global_rank,
+                assignment.pipeline_stage_id,
+                assignment.data_parallel_rank,
+                workload.stage_assignments.len(),
+                workload.forward_events.len(),
+                workload.backward_events.len(),
+            );
+            if parallel_runtime.mode != ParallelismKind::Ddp
+                || !parallel_runtime.is_process_group_launch()
+            {
+                return Err(anyhow!(
+                    "parallel.pipeline.enabled distributed execution currently requires a process-group DDP launch"
+                ));
+            }
+            if layout.data_parallel_size > 1 {
+                return Err(anyhow!(
+                    "parallel.pipeline.enabled process-group execution is currently implemented for layer pipeline parallelism with parallel.data.size = 1; resolved {}",
+                    layout.summary(),
+                ));
+            }
+        }
+        if training.tbptt_chunk_size.is_some() || training.tbptt_persist_across_steps {
+            return Err(anyhow!(
+                "parallel.pipeline.enabled does not yet support tbptt chunking or persistent stream state"
+            ));
+        }
+        if model_config.rollout_fast_steps_per_slow_step != 1 {
+            return Err(anyhow!(
+                "parallel.pipeline.enabled requires rollout_fast_steps_per_slow_step = 1 (got {})",
+                model_config.rollout_fast_steps_per_slow_step
+            ));
+        }
+        if model_config.y_neuron_recurrence.enabled {
+            return Err(anyhow!(
+                "parallel.pipeline.enabled does not yet support y_neuron_recurrence"
+            ));
+        }
+        Some(pipeline_plan)
+    } else {
+        None
+    };
     let summary_event_token_ids = model_config.summary_memory.write_trigger_token_ids.clone();
 
     let dataset_steps_per_epoch = datasets.train.steps_per_epoch(DatasetSplit::Train);
@@ -307,6 +401,7 @@ where
     initialize_model_from_checkpoint(training, &mut base_model, &device)?;
     let mut model = Some(
         LanguageTrainModel::new(base_model)
+            .with_pipeline_plan(pipeline_plan.clone())
             .with_tbptt_chunk_size(training.tbptt_chunk_size)
             .with_tbptt_persist_across_steps(training.tbptt_persist_across_steps),
     );
@@ -570,9 +665,13 @@ mod tests {
             generation: GenerationConfig {
                 prompt: String::new(),
                 max_tokens: Some(1),
+                max_chars: None,
                 temperature: 1.0,
                 top_k: None,
                 context_strategy: ContextStrategyConfig::Infinite,
+                prompt_tokenizer: Default::default(),
+                decode_tokenizer: Default::default(),
+                output_format: Default::default(),
             },
             wgpu: WgpuRuntimeConfig::default(),
             model: ModelOverrides {
@@ -731,6 +830,84 @@ mod tests {
         let checkpoint_dir = run_dir.join("checkpoint");
         assert!(checkpoint_dir.join("model-2.bin").is_file());
         assert!(checkpoint_dir.join("model-3.bin").is_file());
+    }
+
+    #[test]
+    fn train_backend_single_process_pipeline_runs_and_writes_checkpoint() {
+        let _cwd_guard = cwd_lock().lock().expect("cwd lock");
+        let dir = tempdir().expect("tempdir");
+        let cache_dir = dir.path().join("cache");
+        fs::create_dir_all(&cache_dir).expect("cache dir");
+        fs::write(
+            cache_dir.join("tinyshakespeare.txt"),
+            b"Once more unto the breach, dear friends, once more.\n".repeat(64),
+        )
+        .expect("write tiny shakespeare");
+
+        let mut config = tiny_training_config(&cache_dir);
+        config.parallel = burn_dragon_train::ParallelConfig {
+            mode: ParallelismKind::Single,
+            world_size: 1,
+            pipeline: burn_dragon_train::ParallelPipelineConfig {
+                enabled: true,
+                stage_count: 2,
+                virtual_stages_per_rank: 1,
+                schedule: burn_dragon_train::PipelineScheduleKind::Interleaved1f1b,
+                microbatches: 2,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        config.model.n_layer = Some(2);
+        let dataset = crate::train::utils::prepare_dataset(&config.dataset, &config.training)
+            .expect("prepare dataset");
+
+        let _cwd = CurrentDirGuard::enter(dir.path());
+        train_backend::<TestBackend, _>(&config, dataset, "cpu", |_| {})
+            .expect("single-process pipeline train backend");
+        let latest = fs::read_to_string(dir.path().join("runs/latest")).expect("read latest");
+        let run_dir = dir.path().join("runs").join(latest.trim());
+        assert!(run_dir.join("config.json").is_file(), "expected run config");
+        assert!(
+            run_dir.join("checkpoint").join("model-1.bin").is_file(),
+            "expected checkpoint"
+        );
+    }
+
+    #[test]
+    fn train_backend_rejects_pipeline_for_non_single_runtime() {
+        let _cwd_guard = cwd_lock().lock().expect("cwd lock");
+        let dir = tempdir().expect("tempdir");
+        let cache_dir = dir.path().join("cache");
+        fs::create_dir_all(&cache_dir).expect("cache dir");
+        fs::write(
+            cache_dir.join("tinyshakespeare.txt"),
+            b"Once more unto the breach, dear friends, once more.\n".repeat(64),
+        )
+        .expect("write tiny shakespeare");
+
+        let mut config = tiny_training_config(&cache_dir);
+        config.parallel.data.size = 1;
+        config.parallel.pipeline = burn_dragon_train::ParallelPipelineConfig {
+            enabled: true,
+            stage_count: 2,
+            virtual_stages_per_rank: 1,
+            schedule: burn_dragon_train::PipelineScheduleKind::Interleaved1f1b,
+            microbatches: 2,
+            ..Default::default()
+        };
+        config.model.n_layer = Some(2);
+        let dataset = crate::train::utils::prepare_dataset(&config.dataset, &config.training)
+            .expect("prepare dataset");
+
+        let _cwd = CurrentDirGuard::enter(dir.path());
+        let err = train_backend::<TestBackend, _>(&config, dataset, "cpu", |_| {})
+            .expect_err("ddp pipeline runtime should fail explicitly");
+        assert!(
+            err.to_string()
+                .contains("parallel.pipeline.enabled distributed execution currently requires a process-group DDP launch"),
+            "unexpected error: {err:#}"
+        );
     }
 
     #[cfg(feature = "ddp")]

@@ -272,7 +272,6 @@ pub(super) fn validate_vision_mode(
                     "video LEJEPA requires dataset.source = \"moving_mnist\""
                 ));
             }
-            validate_momentum_teacher("mode.teacher_ema", &video.teacher_ema)?;
             if !vision.use_cls_token {
                 return Err(anyhow!("video LEJEPA requires vision.use_cls_token = true"));
             }
@@ -281,62 +280,119 @@ pub(super) fn validate_vision_mode(
                     "video LEJEPA currently requires vision.in_channels = 3"
                 ));
             }
-            if video.context_frames == 0 {
-                return Err(anyhow!("mode.context_frames must be > 0"));
-            }
-            if video.target_frames == 0 {
-                return Err(anyhow!("mode.target_frames must be > 0"));
-            }
-            if video.train_target_frames_max > 0
-                && video.train_target_frames_min > 0
-                && video.train_target_frames_max < video.train_target_frames_min
-            {
-                return Err(anyhow!(
-                    "mode.train_target_frames_max ({}) must be >= mode.train_target_frames_min ({})",
-                    video.train_target_frames_max,
-                    video.train_target_frames_min
-                ));
-            }
             if video.frame_stride == 0 {
                 return Err(anyhow!("mode.frame_stride must be > 0"));
             }
-            if video.temporal.n_layer == 0 {
-                return Err(anyhow!("mode.temporal.n_layer must be > 0"));
-            }
-            if video.temporal.n_head == 0 {
-                return Err(anyhow!("mode.temporal.n_head must be > 0"));
-            }
-            if video.temporal.mlp_internal_dim_multiplier == 0 {
-                return Err(anyhow!(
-                    "mode.temporal.mlp_internal_dim_multiplier must be > 0"
-                ));
-            }
-            if !BDHConfig::is_valid_rollout_fast_steps(
-                video.temporal.rollout_fast_steps_per_slow_step,
-            ) {
-                return Err(anyhow!(
-                    "mode.temporal.rollout_fast_steps_per_slow_step must be one of {:?} (got {})",
-                    BDHConfig::SUPPORTED_ROLLOUT_FAST_STEPS,
-                    video.temporal.rollout_fast_steps_per_slow_step
-                ));
-            }
-            if vision.embed_dim % video.temporal.n_head != 0 {
-                return Err(anyhow!(
-                    "vision.embed_dim ({}) must be divisible by mode.temporal.n_head ({})",
-                    vision.embed_dim,
-                    video.temporal.n_head
-                ));
-            }
-            if video.temporal.latent_block_size == 0 {
-                return Err(anyhow!("mode.temporal.latent_block_size must be > 0"));
-            }
-            if video.temporal.time_block_size == 0 {
-                return Err(anyhow!("mode.temporal.time_block_size must be > 0"));
-            }
-            if video.temporal.wgpu_rollout_fused && !video.temporal.wgpu_recurrent_kernel {
-                return Err(anyhow!(
-                    "mode.temporal.wgpu_rollout_fused requires mode.temporal.wgpu_recurrent_kernel = true"
-                ));
+            if video.is_vjepa21() {
+                validate_momentum_teacher("mode.vjepa21.teacher_ema", &video.vjepa21.teacher_ema)?;
+                if video.vjepa21.clip_frames == 0 {
+                    return Err(anyhow!("mode.vjepa21.clip_frames must be > 0"));
+                }
+                if video.vjepa21.observe_steps == 0 {
+                    return Err(anyhow!("mode.vjepa21.observe_steps must be > 0"));
+                }
+                if video.vjepa21.observe_backprop_steps == 0 {
+                    return Err(anyhow!("mode.vjepa21.observe_backprop_steps must be > 0"));
+                }
+                if video.vjepa21.observe_backprop_steps > video.vjepa21.observe_steps {
+                    return Err(anyhow!(
+                        "mode.vjepa21.observe_backprop_steps ({}) must be <= mode.vjepa21.observe_steps ({})",
+                        video.vjepa21.observe_backprop_steps,
+                        video.vjepa21.observe_steps
+                    ));
+                }
+                if video.vjepa21.mask.num_blocks == 0 {
+                    return Err(anyhow!("mode.vjepa21.mask.num_blocks must be > 0"));
+                }
+                if !(0.0..=1.0).contains(&video.vjepa21.mask.spatial_scale_min)
+                    || !(0.0..=1.0).contains(&video.vjepa21.mask.spatial_scale_max)
+                {
+                    return Err(anyhow!(
+                        "mode.vjepa21.mask spatial scales must be in [0, 1]"
+                    ));
+                }
+                if !(0.0..=1.0).contains(&video.vjepa21.mask.temporal_scale_min)
+                    || !(0.0..=1.0).contains(&video.vjepa21.mask.temporal_scale_max)
+                {
+                    return Err(anyhow!(
+                        "mode.vjepa21.mask temporal scales must be in [0, 1]"
+                    ));
+                }
+                if video.vjepa21.mask.aspect_ratio_min <= 0.0
+                    || video.vjepa21.mask.aspect_ratio_max <= 0.0
+                {
+                    return Err(anyhow!("mode.vjepa21.mask aspect ratios must be > 0"));
+                }
+                if !(0.0..=1.0).contains(&video.vjepa21.mask.max_context_frames_ratio) {
+                    return Err(anyhow!(
+                        "mode.vjepa21.mask.max_context_frames_ratio must be in [0, 1]"
+                    ));
+                }
+                if video.vjepa21.loss.masked_weight < 0.0 {
+                    return Err(anyhow!("mode.vjepa21.loss.masked_weight must be >= 0"));
+                }
+                if video.vjepa21.loss.context_weight < 0.0 {
+                    return Err(anyhow!("mode.vjepa21.loss.context_weight must be >= 0"));
+                }
+                if video.vjepa21.loss.loss_exp <= 0.0 {
+                    return Err(anyhow!("mode.vjepa21.loss.loss_exp must be > 0"));
+                }
+            } else {
+                validate_momentum_teacher("mode.teacher_ema", &video.teacher_ema)?;
+                if video.context_frames == 0 {
+                    return Err(anyhow!("mode.context_frames must be > 0"));
+                }
+                if video.target_frames == 0 {
+                    return Err(anyhow!("mode.target_frames must be > 0"));
+                }
+                if video.train_target_frames_max > 0
+                    && video.train_target_frames_min > 0
+                    && video.train_target_frames_max < video.train_target_frames_min
+                {
+                    return Err(anyhow!(
+                        "mode.train_target_frames_max ({}) must be >= mode.train_target_frames_min ({})",
+                        video.train_target_frames_max,
+                        video.train_target_frames_min
+                    ));
+                }
+                if video.temporal.n_layer == 0 {
+                    return Err(anyhow!("mode.temporal.n_layer must be > 0"));
+                }
+                if video.temporal.n_head == 0 {
+                    return Err(anyhow!("mode.temporal.n_head must be > 0"));
+                }
+                if video.temporal.mlp_internal_dim_multiplier == 0 {
+                    return Err(anyhow!(
+                        "mode.temporal.mlp_internal_dim_multiplier must be > 0"
+                    ));
+                }
+                if !BDHConfig::is_valid_rollout_fast_steps(
+                    video.temporal.rollout_fast_steps_per_slow_step,
+                ) {
+                    return Err(anyhow!(
+                        "mode.temporal.rollout_fast_steps_per_slow_step must be one of {:?} (got {})",
+                        BDHConfig::SUPPORTED_ROLLOUT_FAST_STEPS,
+                        video.temporal.rollout_fast_steps_per_slow_step
+                    ));
+                }
+                if vision.embed_dim % video.temporal.n_head != 0 {
+                    return Err(anyhow!(
+                        "vision.embed_dim ({}) must be divisible by mode.temporal.n_head ({})",
+                        vision.embed_dim,
+                        video.temporal.n_head
+                    ));
+                }
+                if video.temporal.latent_block_size == 0 {
+                    return Err(anyhow!("mode.temporal.latent_block_size must be > 0"));
+                }
+                if video.temporal.time_block_size == 0 {
+                    return Err(anyhow!("mode.temporal.time_block_size must be > 0"));
+                }
+                if video.temporal.wgpu_rollout_fused && !video.temporal.wgpu_recurrent_kernel {
+                    return Err(anyhow!(
+                        "mode.temporal.wgpu_rollout_fused requires mode.temporal.wgpu_recurrent_kernel = true"
+                    ));
+                }
             }
             if video.loss.prediction_weight < 0.0 {
                 return Err(anyhow!("mode.loss.prediction_weight must be >= 0"));

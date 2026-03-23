@@ -1,14 +1,19 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use burn_dragon_core::{LatentFanoutScheduleConfig, ManifoldHyperConnectionCoefficientPolicy};
+use burn_dragon_core::{
+    LatentFanoutScheduleConfig, ManifoldHyperConnectionCoefficientPolicy, ResidualConnectorKind,
+};
 use burn_dragon_train::{
     ParallelConfig, ParallelismKind, TensorParallelPartitionKind, WgpuGenerationExecutor,
 };
 use tempfile::tempdir;
 
-use super::super::ContextStrategyConfig;
+use super::super::{
+    ContextStrategyConfig, GenerationOutputFormat, GenerationTokenizerSourceConfig,
+};
 use super::*;
+use crate::tokenizer::{ByteTokenizerConfig, PretokenizedTokenizerConfig, TokenizerKind};
 
 fn write_config(dir: &Path, name: &str, contents: &str) -> PathBuf {
     let path = dir.join(name);
@@ -251,6 +256,75 @@ fn validate_accepts_training_sequence_kernel_override() {
 }
 
 #[test]
+fn generation_tokenizer_overrides_parse_with_distinct_source_and_tokenizer_tags() {
+    let text = r#"
+        [dataset]
+        cache_dir = "data"
+        type = "shakespeare"
+
+        [training]
+        block_size = 32
+        batch_size = 2
+        max_iters = 4
+        log_frequency = 1
+
+        [optimizer]
+        learning_rate = 0.001
+        weight_decay = 0.0
+
+        [generation]
+        prompt = "1 2 3"
+        output_format = "decoded_text"
+
+        [generation.prompt_tokenizer]
+        source = "config"
+        type = "pretokenized"
+        vocab_size = 50257
+        bos_id = 1
+
+        [generation.decode_tokenizer]
+        source = "config"
+        cache_dir = "data/tokenizers"
+        type = "byte"
+        add_special_tokens = false
+    "#;
+    let config: TrainingConfig = toml::from_str(text).expect("parse training config");
+
+    assert_eq!(
+        config.generation.output_format,
+        GenerationOutputFormat::DecodedText
+    );
+    assert_eq!(
+        config.generation.prompt_tokenizer,
+        GenerationTokenizerSourceConfig::Config {
+            cache_dir: None,
+            tokenizer: TokenizerConfig {
+                vocab_path: None,
+                kind: TokenizerKind::Pretokenized(PretokenizedTokenizerConfig {
+                    vocab_size: 50257,
+                    bos_id: Some(1),
+                    eos_id: None,
+                    pad_id: None,
+                    unk_id: None,
+                }),
+            },
+        }
+    );
+    assert_eq!(
+        config.generation.decode_tokenizer,
+        GenerationTokenizerSourceConfig::Config {
+            cache_dir: Some(PathBuf::from("data/tokenizers")),
+            tokenizer: TokenizerConfig {
+                vocab_path: None,
+                kind: TokenizerKind::Byte(ByteTokenizerConfig {
+                    add_special_tokens: false,
+                }),
+            },
+        }
+    );
+}
+
+#[test]
 fn universality_manifest_dataset_config_parses_with_pretokenized_tokenizer() {
     let text = r#"
         [dataset]
@@ -320,6 +394,45 @@ fn universality_nca_dataset_config_parses_with_pretokenized_tokenizer() {
             config: "config/universality/nca_paper_aligned_smoke.toml".into()
         }
     );
+}
+
+#[test]
+fn local_text_dataset_config_parses_with_byte_tokenizer() {
+    let text = r#"
+        [dataset]
+        cache_dir = "data/local_text"
+        type = "local_text"
+        path = "data/local_text/train.txt"
+
+        [dataset.tokenizer]
+        type = "byte"
+        add_special_tokens = true
+
+        [training]
+        block_size = 32
+        batch_size = 2
+        max_iters = 4
+        log_frequency = 1
+
+        [optimizer]
+        learning_rate = 0.001
+        weight_decay = 0.0
+
+        [generation]
+        prompt = "track|n=3|init=ABC____|s=AB,__,__,__,__|q=A|a="
+    "#;
+    let config: TrainingConfig = toml::from_str(text).expect("parse training config");
+    config.validate().expect("valid config");
+    assert_eq!(
+        config.dataset.source,
+        DatasetSourceConfig::LocalText {
+            path: "data/local_text/train.txt".into()
+        }
+    );
+    assert!(matches!(
+        config.dataset.tokenizer.kind,
+        TokenizerKind::Byte(_)
+    ));
 }
 
 #[test]
@@ -495,6 +608,101 @@ fn validate_accepts_explicit_parallel_config() {
 }
 
 #[test]
+fn validate_accepts_pipeline_cache_parallel_config() {
+    let text = r#"
+        [dataset]
+        cache_dir = "data"
+        type = "shakespeare"
+
+        [training]
+        block_size = 32
+        batch_size = 2
+        max_iters = 4
+        log_frequency = 1
+
+        [optimizer]
+        learning_rate = 0.001
+        weight_decay = 0.0
+
+        [parallel]
+        mode = "ddp"
+        world_size = 4
+
+        [parallel.data]
+        size = 2
+
+        [parallel.pipeline]
+        enabled = true
+        stage_count = 2
+        virtual_stages_per_rank = 1
+        schedule = "interleaved_1f1b"
+        microbatches = 2
+        communication = "block_residual_cache"
+
+        [parallel.pipeline.cache]
+        enabled = true
+        policy = "resident_block_summaries"
+        reuse_across_backward = true
+        max_inflight_microbatches = 2
+        eviction = "step_boundary"
+        transport_dtype = "bf16"
+
+        [generation]
+        prompt = "abc"
+
+        [model]
+        residual_connector = "block_attention_residual"
+
+        [model.block_attention_residual]
+        enabled = true
+        layers_per_block = 2
+        num_heads = 2
+    "#;
+    let config: TrainingConfig = toml::from_str(text).expect("parse training config");
+    assert!(config.parallel.pipeline.enabled);
+    assert!(config.parallel.pipeline.cache.enabled);
+    config
+        .validate()
+        .expect("pipeline cache config should validate");
+}
+
+#[test]
+fn validate_rejects_pipeline_cache_without_pipeline() {
+    let text = r#"
+        [dataset]
+        cache_dir = "data"
+        type = "shakespeare"
+
+        [training]
+        block_size = 32
+        batch_size = 2
+        max_iters = 4
+        log_frequency = 1
+
+        [optimizer]
+        learning_rate = 0.001
+        weight_decay = 0.0
+
+        [parallel.pipeline.cache]
+        enabled = true
+        policy = "resident_block_summaries"
+        max_inflight_microbatches = 2
+
+        [generation]
+        prompt = "abc"
+    "#;
+    let config: TrainingConfig = toml::from_str(text).expect("parse training config");
+    let err = config
+        .validate()
+        .expect_err("pipeline cache without pipeline should fail validation");
+    assert!(
+        err.to_string()
+            .contains("parallel.pipeline.cache.enabled requires parallel.pipeline.enabled"),
+        "unexpected error: {err:#}"
+    );
+}
+
+#[test]
 fn validate_rejects_parallel_world_size_mismatch() {
     let text = r#"
         [dataset]
@@ -530,7 +738,185 @@ fn validate_rejects_parallel_world_size_mismatch() {
         .expect_err("parallel world size mismatch should fail validation");
     assert!(
         err.to_string()
-            .contains("parallel.data.size = parallel.world_size"),
+            .contains("parallel.data.size * parallel.tensor.size * pipeline_stage_multiplier"),
+        "unexpected error: {err:#}"
+    );
+}
+
+#[test]
+fn validate_accepts_single_process_pipeline_simulation_config() {
+    let text = r#"
+        [dataset]
+        cache_dir = "data"
+        type = "shakespeare"
+
+        [training]
+        block_size = 32
+        batch_size = 2
+        max_iters = 4
+        log_frequency = 1
+
+        [optimizer]
+        learning_rate = 0.001
+        weight_decay = 0.0
+
+        [parallel]
+        mode = "single"
+        world_size = 1
+
+        [parallel.data]
+        size = 1
+
+        [parallel.tensor]
+        size = 1
+
+        [parallel.pipeline]
+        enabled = true
+        stage_count = 2
+        virtual_stages_per_rank = 1
+        schedule = "interleaved_1f1b"
+        microbatches = 2
+
+        [generation]
+        prompt = "abc"
+    "#;
+    let config: TrainingConfig = toml::from_str(text).expect("parse training config");
+    config
+        .validate()
+        .expect("single-process pipeline simulation config should validate");
+}
+
+#[test]
+fn validate_rejects_pipeline_virtual_stages_exceeding_stage_count() {
+    let text = r#"
+        [dataset]
+        cache_dir = "data"
+        type = "shakespeare"
+
+        [training]
+        block_size = 32
+        batch_size = 2
+        max_iters = 4
+        log_frequency = 1
+
+        [optimizer]
+        learning_rate = 0.001
+        weight_decay = 0.0
+
+        [parallel]
+        mode = "single"
+        world_size = 1
+
+        [parallel.pipeline]
+        enabled = true
+        stage_count = 2
+        virtual_stages_per_rank = 3
+        schedule = "interleaved_1f1b"
+        microbatches = 2
+
+        [generation]
+        prompt = "abc"
+    "#;
+    let config: TrainingConfig = toml::from_str(text).expect("parse training config");
+    let err = config
+        .validate()
+        .expect_err("virtual stages larger than stage count should fail validation");
+    assert!(
+        err.to_string().contains(
+            "parallel.pipeline.virtual_stages_per_rank must be <= parallel.pipeline.stage_count"
+        ),
+        "unexpected error: {err:#}"
+    );
+}
+
+#[test]
+fn validate_rejects_pipeline_microbatches_exceeding_batch_size() {
+    let text = r#"
+        [dataset]
+        cache_dir = "data"
+        type = "shakespeare"
+
+        [training]
+        block_size = 32
+        batch_size = 2
+        max_iters = 4
+        log_frequency = 1
+
+        [optimizer]
+        learning_rate = 0.001
+        weight_decay = 0.0
+
+        [parallel]
+        mode = "single"
+        world_size = 1
+
+        [parallel.pipeline]
+        enabled = true
+        stage_count = 2
+        virtual_stages_per_rank = 1
+        schedule = "interleaved_1f1b"
+        microbatches = 3
+
+        [generation]
+        prompt = "abc"
+    "#;
+    let config: TrainingConfig = toml::from_str(text).expect("parse training config");
+    let err = config
+        .validate()
+        .expect_err("microbatches above batch size should fail validation");
+    assert!(
+        err.to_string()
+            .contains("parallel.pipeline.microbatches must be <= training.batch_size"),
+        "unexpected error: {err:#}"
+    );
+}
+
+#[test]
+fn validate_rejects_block_residual_cache_without_block_connector() {
+    let text = r#"
+        [dataset]
+        cache_dir = "data"
+        type = "shakespeare"
+
+        [training]
+        block_size = 32
+        batch_size = 2
+        max_iters = 4
+        log_frequency = 1
+
+        [optimizer]
+        learning_rate = 0.001
+        weight_decay = 0.0
+
+        [parallel]
+        mode = "ddp"
+        world_size = 4
+
+        [parallel.data]
+        size = 2
+
+        [parallel.pipeline]
+        enabled = true
+        stage_count = 2
+        virtual_stages_per_rank = 1
+        schedule = "interleaved_1f1b"
+        microbatches = 2
+        communication = "block_residual_cache"
+
+        [generation]
+        prompt = "abc"
+
+        [model]
+        residual_connector = "attention_residual"
+    "#;
+    let config: TrainingConfig = toml::from_str(text).expect("parse training config");
+    let err = config
+        .validate()
+        .expect_err("block residual cache should require block connector");
+    assert!(
+        err.to_string().contains(
+            "parallel.pipeline.communication = \"block_residual_cache\" requires model.residual_connector = \"block_attention_residual\""
+        ),
         "unexpected error: {err:#}"
     );
 }
@@ -1088,6 +1474,9 @@ fn mhc_override_parses_and_validates_for_language_bdh() {
         [generation]
         prompt = "abc"
 
+        [model]
+        residual_connector = "mhc"
+
         [model.mhc]
         enabled = true
         num_streams = 1
@@ -1297,6 +1686,9 @@ fn language_mhc_multi_streams_validate_for_language_bdh() {
         [generation]
         prompt = "abc"
 
+        [model]
+        residual_connector = "mhc"
+
         [model.mhc]
         enabled = true
         num_streams = 2
@@ -1311,6 +1703,222 @@ fn language_mhc_multi_streams_validate_for_language_bdh() {
     config
         .validate()
         .expect("language multi-stream mHC should now validate");
+}
+
+#[test]
+fn attention_residual_override_parses_and_validates_for_language_bdh() {
+    let text = r#"
+        [dataset]
+        cache_dir = "data"
+        type = "shakespeare"
+
+        [training]
+        block_size = 32
+        batch_size = 2
+        max_iters = 4
+        log_frequency = 1
+
+        [optimizer]
+        learning_rate = 0.001
+        weight_decay = 0.0
+
+        [generation]
+        prompt = "abc"
+
+        [model]
+        residual_connector = "attention_residual"
+
+        [model.attention_residual]
+        enabled = true
+        last_layers = 2
+        num_heads = 4
+        history_window = 3
+        dropout = 0.0
+        recency_bias = 1.5
+    "#;
+    let config: TrainingConfig = toml::from_str(text).expect("parse training config");
+    config
+        .validate()
+        .expect("attention residual config should validate");
+    assert_eq!(
+        config.model.residual_connector,
+        Some(ResidualConnectorKind::AttentionResidual)
+    );
+    let attention_residual = config
+        .model
+        .attention_residual
+        .expect("attention residual override");
+    assert!(attention_residual.enabled);
+    assert_eq!(attention_residual.last_layers, Some(2));
+    assert_eq!(attention_residual.num_heads, 4);
+    assert_eq!(attention_residual.history_window, Some(3));
+}
+
+#[test]
+fn block_attention_residual_override_parses_and_validates_for_language_bdh() {
+    let text = r#"
+        [dataset]
+        cache_dir = "data"
+        type = "shakespeare"
+
+        [training]
+        block_size = 32
+        batch_size = 2
+        max_iters = 4
+        log_frequency = 1
+
+        [optimizer]
+        learning_rate = 0.001
+        weight_decay = 0.0
+
+        [generation]
+        prompt = "abc"
+
+        [model]
+        residual_connector = "block_attention_residual"
+
+        [model.block_attention_residual]
+        enabled = true
+        last_layers = 2
+        num_heads = 4
+        layers_per_block = 2
+        block_history_window = 3
+        intra_block_history_window = 1
+        summary_mode = "learned_projection"
+        dropout = 0.0
+        recency_bias = 1.5
+        cache_block_summaries = true
+        two_phase_compute = true
+    "#;
+    let config: TrainingConfig = toml::from_str(text).expect("parse training config");
+    config
+        .validate()
+        .expect("block attention residual config should validate");
+    assert_eq!(
+        config.model.residual_connector,
+        Some(ResidualConnectorKind::BlockAttentionResidual)
+    );
+    let block_attention_residual = config
+        .model
+        .block_attention_residual
+        .expect("block attention residual override");
+    assert!(block_attention_residual.enabled);
+    assert_eq!(block_attention_residual.last_layers, Some(2));
+    assert_eq!(block_attention_residual.num_heads, 4);
+    assert_eq!(block_attention_residual.layers_per_block, 2);
+    assert_eq!(block_attention_residual.block_history_window, Some(3));
+    assert_eq!(block_attention_residual.intra_block_history_window, Some(1));
+}
+
+#[test]
+fn validate_rejects_enabled_mhc_without_matching_connector_enum() {
+    let text = r#"
+        [dataset]
+        cache_dir = "data"
+        type = "shakespeare"
+
+        [training]
+        block_size = 32
+        batch_size = 2
+        max_iters = 4
+        log_frequency = 1
+
+        [optimizer]
+        learning_rate = 0.001
+        weight_decay = 0.0
+
+        [generation]
+        prompt = "abc"
+
+        [model.mhc]
+        enabled = true
+        num_streams = 2
+        num_views = 1
+        mhc_iters = 4
+        mhc_tau = 0.1
+        add_branch_out_to_residual = true
+        dropout = 0.0
+    "#;
+    let config: TrainingConfig = toml::from_str(text).expect("parse training config");
+    let err = config
+        .validate()
+        .expect_err("enabled mHC should require explicit connector enum selection");
+    assert!(
+        err.to_string()
+            .contains("model.residual_connector = \"mhc\""),
+        "unexpected error: {err:#}"
+    );
+}
+
+#[test]
+fn validate_rejects_enabled_attention_residual_without_matching_connector_enum() {
+    let text = r#"
+        [dataset]
+        cache_dir = "data"
+        type = "shakespeare"
+
+        [training]
+        block_size = 32
+        batch_size = 2
+        max_iters = 4
+        log_frequency = 1
+
+        [optimizer]
+        learning_rate = 0.001
+        weight_decay = 0.0
+
+        [generation]
+        prompt = "abc"
+
+        [model.attention_residual]
+        enabled = true
+        num_heads = 4
+    "#;
+    let config: TrainingConfig = toml::from_str(text).expect("parse training config");
+    let err = config
+        .validate()
+        .expect_err("enabled attention residual should require explicit connector enum selection");
+    assert!(
+        err.to_string()
+            .contains("model.residual_connector = \"attention_residual\""),
+        "unexpected error: {err:#}"
+    );
+}
+
+#[test]
+fn validate_rejects_enabled_block_attention_residual_without_matching_connector_enum() {
+    let text = r#"
+        [dataset]
+        cache_dir = "data"
+        type = "shakespeare"
+
+        [training]
+        block_size = 32
+        batch_size = 2
+        max_iters = 4
+        log_frequency = 1
+
+        [optimizer]
+        learning_rate = 0.001
+        weight_decay = 0.0
+
+        [generation]
+        prompt = "abc"
+
+        [model.block_attention_residual]
+        enabled = true
+        num_heads = 4
+        layers_per_block = 2
+    "#;
+    let config: TrainingConfig = toml::from_str(text).expect("parse training config");
+    let err = config.validate().expect_err(
+        "enabled block attention residual should require explicit connector enum selection",
+    );
+    assert!(
+        err.to_string()
+            .contains("model.residual_connector = \"block_attention_residual\""),
+        "unexpected error: {err:#}"
+    );
 }
 
 #[test]
@@ -1332,6 +1940,9 @@ fn validate_rejects_zero_last_layers_for_mhc() {
 
         [generation]
         prompt = "abc"
+
+        [model]
+        residual_connector = "mhc"
 
         [model.mhc]
         enabled = true

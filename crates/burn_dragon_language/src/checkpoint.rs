@@ -284,6 +284,15 @@ pub fn merge_model_overrides(base: &mut ModelOverrides, incoming: &ModelOverride
     if let Some(value) = &incoming.mamba {
         base.mamba = Some(value.clone());
     }
+    if let Some(value) = incoming.residual_connector {
+        base.residual_connector = Some(value);
+    }
+    if let Some(value) = &incoming.attention_residual {
+        base.attention_residual = Some(value.clone());
+    }
+    if let Some(value) = &incoming.block_attention_residual {
+        base.block_attention_residual = Some(value.clone());
+    }
     if let Some(value) = &incoming.latent_fanout_schedule {
         base.latent_fanout_schedule = Some(value.clone());
     }
@@ -574,9 +583,13 @@ mod tests {
             generation: GenerationConfig {
                 prompt: "To be".to_string(),
                 max_tokens: Some(4),
+                max_chars: None,
                 temperature: 1.0,
                 top_k: Some(4),
                 context_strategy: ContextStrategyConfig::Infinite,
+                prompt_tokenizer: Default::default(),
+                decode_tokenizer: Default::default(),
+                output_format: Default::default(),
             },
             wgpu: WgpuRuntimeConfig::default(),
             model: ModelOverrides::default(),

@@ -37,6 +37,15 @@ pub fn build_model_config(overrides: &ModelOverrides, training_block_size: usize
     if let Some(mamba) = &overrides.mamba {
         model_config.mamba = mamba.clone();
     }
+    if let Some(residual_connector) = overrides.residual_connector {
+        model_config.residual_connector = residual_connector;
+    }
+    if let Some(attention_residual) = &overrides.attention_residual {
+        model_config.attention_residual = attention_residual.clone();
+    }
+    if let Some(block_attention_residual) = &overrides.block_attention_residual {
+        model_config.block_attention_residual = block_attention_residual.clone();
+    }
     if let Some(schedule) = &overrides.latent_fanout_schedule {
         if let Err(message) = model_config.validate_latent_fanout_schedule(schedule) {
             panic!("{message}");
@@ -76,6 +85,35 @@ pub fn build_model_config(overrides: &ModelOverrides, training_block_size: usize
     }
     if let Some(mhc) = &overrides.mhc {
         model_config.mhc = mhc.clone();
+    }
+
+    match overrides.residual_connector {
+        Some(burn_dragon_core::ResidualConnectorKind::Vanilla) => {
+            model_config.mhc.enabled = false;
+            model_config.attention_residual.enabled = false;
+            model_config.block_attention_residual.enabled = false;
+        }
+        Some(burn_dragon_core::ResidualConnectorKind::Mhc) => {
+            model_config.mhc.enabled = true;
+            model_config.attention_residual.enabled = false;
+            model_config.block_attention_residual.enabled = false;
+        }
+        Some(burn_dragon_core::ResidualConnectorKind::AttentionResidual) => {
+            model_config.mhc.enabled = false;
+            model_config.attention_residual.enabled = true;
+            model_config.block_attention_residual.enabled = false;
+        }
+        Some(burn_dragon_core::ResidualConnectorKind::BlockAttentionResidual) => {
+            model_config.mhc.enabled = false;
+            model_config.attention_residual.enabled = false;
+            model_config.block_attention_residual.enabled = true;
+        }
+        None => {
+            model_config.residual_connector = burn_dragon_core::ResidualConnectorKind::Vanilla;
+            model_config.mhc.enabled = false;
+            model_config.attention_residual.enabled = false;
+            model_config.block_attention_residual.enabled = false;
+        }
     }
 
     model_config
@@ -148,7 +186,7 @@ pub fn apply_wgpu_fused_core_override(
 mod tests {
     use super::{apply_wgpu_fused_core_override, build_model_config, is_wgpu_backend_name};
     use crate::ModelOverrides;
-    use burn_dragon_core::BDHConfig;
+    use burn_dragon_core::{BDHConfig, ResidualConnectorKind};
 
     #[test]
     fn backend_name_detection_accepts_wgpu_variants() {
@@ -239,5 +277,94 @@ mod tests {
             config.sequence_kernel,
             burn_dragon_core::SequenceKernelKind::Rwkv8StateSpaceExperimental
         );
+    }
+
+    #[test]
+    fn model_override_without_explicit_connector_defaults_to_vanilla() {
+        let overrides = ModelOverrides {
+            mhc: Some(burn_dragon_core::ManifoldHyperConnectionsConfig {
+                enabled: true,
+                num_streams: 2,
+                num_views: 1,
+                mhc_iters: 4,
+                mhc_tau: 0.1,
+                add_branch_out_to_residual: true,
+                dropout: 0.0,
+                ..Default::default()
+            }),
+            ..ModelOverrides::default()
+        };
+
+        let config = build_model_config(&overrides, 32);
+        assert_eq!(config.residual_connector, ResidualConnectorKind::Vanilla);
+        assert!(!config.mhc.enabled);
+        assert!(!config.attention_residual.enabled);
+        assert!(!config.block_attention_residual.enabled);
+    }
+
+    #[test]
+    fn model_override_explicit_vanilla_disables_other_connectors() {
+        let overrides = ModelOverrides {
+            residual_connector: Some(ResidualConnectorKind::Vanilla),
+            mhc: Some(burn_dragon_core::ManifoldHyperConnectionsConfig {
+                enabled: true,
+                num_streams: 2,
+                num_views: 1,
+                mhc_iters: 4,
+                mhc_tau: 0.1,
+                add_branch_out_to_residual: true,
+                dropout: 0.0,
+                ..Default::default()
+            }),
+            attention_residual: Some(burn_dragon_core::AttentionResidualConfig {
+                enabled: true,
+                num_heads: 4,
+                ..Default::default()
+            }),
+            block_attention_residual: Some(burn_dragon_core::BlockAttentionResidualConfig {
+                enabled: true,
+                num_heads: 4,
+                layers_per_block: 2,
+                ..Default::default()
+            }),
+            ..ModelOverrides::default()
+        };
+
+        let config = build_model_config(&overrides, 32);
+        assert_eq!(config.residual_connector, ResidualConnectorKind::Vanilla);
+        assert!(!config.mhc.enabled);
+        assert!(!config.attention_residual.enabled);
+        assert!(!config.block_attention_residual.enabled);
+    }
+
+    #[test]
+    fn model_override_explicit_block_attention_residual_enables_block_connector() {
+        let overrides = ModelOverrides {
+            residual_connector: Some(ResidualConnectorKind::BlockAttentionResidual),
+            block_attention_residual: Some(burn_dragon_core::BlockAttentionResidualConfig {
+                enabled: true,
+                num_heads: 4,
+                layers_per_block: 2,
+                block_history_window: Some(3),
+                intra_block_history_window: Some(1),
+                ..Default::default()
+            }),
+            attention_residual: Some(burn_dragon_core::AttentionResidualConfig {
+                enabled: true,
+                num_heads: 4,
+                ..Default::default()
+            }),
+            ..ModelOverrides::default()
+        };
+
+        let config = build_model_config(&overrides, 32);
+        assert_eq!(
+            config.residual_connector,
+            ResidualConnectorKind::BlockAttentionResidual
+        );
+        assert!(!config.mhc.enabled);
+        assert!(!config.attention_residual.enabled);
+        assert!(config.block_attention_residual.enabled);
+        assert_eq!(config.block_attention_residual.layers_per_block, 2);
     }
 }

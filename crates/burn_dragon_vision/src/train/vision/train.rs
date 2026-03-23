@@ -56,6 +56,16 @@ where
     maybe_download_vision_dataset(&config.dataset)?;
 
     if let VisionTrainingModeConfig::VideoLejepa(video) = &config.mode {
+        if video.is_vjepa21() {
+            return train_video_vjepa21_backend::<B>(
+                config,
+                backend_name,
+                &device,
+                &vision_config,
+                video,
+                optimizer_cfg,
+            );
+        }
         return train_video_lejepa_backend::<B>(
             config,
             backend_name,
@@ -1284,6 +1294,219 @@ where
 
     info!("Vision video LEJEPA training complete on {backend_name}");
 
+    Ok(())
+}
+
+fn train_video_vjepa21_backend<B>(
+    config: &VisionTrainingConfig,
+    backend_name: &str,
+    device: &B::Device,
+    vision_config: &VisionDragonConfig,
+    video: &VisionVideoLejepaConfig,
+    optimizer_cfg: &OptimizerConfig,
+) -> Result<()>
+where
+    B: AutodiffBackend + Clone + 'static,
+    B::Device: Clone,
+{
+    crate::device::pin_stream_zero();
+    let training = &config.training;
+    let normalize =
+        VisionNormalize::new(config.augment.normalize_mean, config.augment.normalize_std);
+    let clip_frames = video.vjepa21.clip_frames.max(1);
+    let train_dataset = Arc::new(MovingMnistVideoDataset::new_from_mnist(
+        MovingMnistVideoDatasetConfig {
+            split: MovingMnistSplit::Train,
+            frame_size: vision_config.image_size,
+            digit_size: config.dataset.moving_mnist.digit_size,
+            in_channels: vision_config.in_channels,
+            context_len: clip_frames,
+            target_len: 0,
+            extra_future_frames: 0,
+            frame_stride: video.frame_stride.max(1),
+            max_records: config.dataset.max_records,
+            normalize,
+            min_velocity: config.dataset.moving_mnist.min_velocity,
+            max_velocity: config.dataset.moving_mnist.max_velocity,
+            seed: config.dataset.moving_mnist.train_seed,
+        },
+    )?);
+    let val_dataset = Arc::new(MovingMnistVideoDataset::new_from_mnist(
+        MovingMnistVideoDatasetConfig {
+            split: MovingMnistSplit::Val,
+            frame_size: vision_config.image_size,
+            digit_size: config.dataset.moving_mnist.digit_size,
+            in_channels: vision_config.in_channels,
+            context_len: clip_frames,
+            target_len: 0,
+            extra_future_frames: 0,
+            frame_stride: video.frame_stride.max(1),
+            max_records: config.dataset.max_records,
+            normalize,
+            min_velocity: config.dataset.moving_mnist.min_velocity,
+            max_velocity: config.dataset.moving_mnist.max_velocity,
+            seed: config.dataset.moving_mnist.val_seed,
+        },
+    )?);
+
+    let steps_per_epoch = train_dataset.steps_per_epoch(training.batch_size);
+    let schedule = resolve_vision_train_schedule(training, steps_per_epoch)?;
+    let steps_per_epoch = schedule.steps_per_epoch;
+    let total_epochs = schedule.total_epochs;
+    let total_steps = schedule.total_steps;
+
+    info!(
+        "vision vjepa21 schedule: steps_per_epoch={steps_per_epoch}, total_steps={total_steps}, epochs={total_epochs}, source={}",
+        schedule.source.as_str()
+    );
+    info!(
+        "video vjepa21 moving mnist: clip_frames={}, frame_stride={}",
+        clip_frames,
+        video.frame_stride.max(1)
+    );
+
+    let train_loader: Arc<dyn DataLoader<B, VideoClipBatch<B>>> =
+        Arc::new(MovingMnistVideoDataLoader::<B>::new(
+            Arc::clone(&train_dataset),
+            device,
+            MovingMnistVideoLoaderConfig {
+                batch_size: training.batch_size,
+                steps_per_epoch,
+                total_steps: Some(total_steps),
+                target_horizon_curriculum: None,
+                prefetch_batches: config.dataset.prefetch_batches,
+                prefetch_workers: config.dataset.prefetch_workers,
+                prefetch_to_device: config.dataset.prefetch_to_device,
+                sequential: false,
+                artifact_capture_every: 0,
+                artifact_capture_images: 0,
+                artifact_extra_future_frames: 0,
+            },
+        ));
+
+    let val_steps_per_epoch = val_dataset.steps_per_epoch(training.batch_size);
+    let valid_steps =
+        resolve_valid_steps_per_epoch(total_steps, training.log_frequency, val_steps_per_epoch);
+    let valid_loader: Arc<dyn DataLoader<ValidBackend<B>, VideoClipBatch<ValidBackend<B>>>> =
+        Arc::new(MovingMnistVideoDataLoader::<ValidBackend<B>>::new(
+            Arc::clone(&val_dataset),
+            device,
+            MovingMnistVideoLoaderConfig {
+                batch_size: training.batch_size,
+                steps_per_epoch: valid_steps,
+                total_steps: None,
+                target_horizon_curriculum: None,
+                prefetch_batches: config.dataset.prefetch_batches,
+                prefetch_workers: config.dataset.prefetch_workers,
+                prefetch_to_device: false,
+                sequential: true,
+                artifact_capture_every: 0,
+                artifact_capture_images: 0,
+                artifact_extra_future_frames: 0,
+            },
+        ));
+
+    let scheduler_iters = match schedule.source {
+        ScheduleSource::Epochs => Some(total_steps),
+        ScheduleSource::MaxIters => None,
+    };
+    let scheduler =
+        resolve_vision_lr_scheduler(optimizer_cfg, total_steps, scheduler_iters, vision_config)?;
+
+    let run_root = PathBuf::from("runs").join("vision");
+    let (run_dir, run_name) = create_run_dir(&run_root)?;
+    write_latest_run(&run_root, &run_name)?;
+    crate::write_training_snapshot(config, &run_dir)?;
+    info!("vision run name: {run_name}");
+
+    let context = VisionTrainEnvironment {
+        run_dir: &run_dir,
+        run_name: &run_name,
+        backend_name,
+        training,
+        device,
+        train_loader,
+        valid_loader,
+        epochs: total_epochs,
+    };
+
+    let model = VisionDragon::<B>::new(vision_config.clone(), device);
+    let mut model = Some(VisionVideoVjepa21Model::new(
+        model,
+        video.clone(),
+        vision_config,
+        device,
+    ));
+    let mut optim =
+        Some(adamw_config_from_optimizer(optimizer_cfg).init::<B, VisionVideoVjepa21Model<B>>());
+    let diagnostics = Some(VisionDiagnostics {
+        metric_prefix: "video_vjepa21".to_string(),
+        distill: false,
+        distill_rollout: false,
+        inv: true,
+        observe: video.vjepa21.loss.predict_all && video.vjepa21.loss.context_weight > 0.0,
+        mode_separation: true,
+        rollout_horizon_metrics: false,
+        sigreg: false,
+        recon: false,
+        policy: false,
+        probe: false,
+        artifact_every: 0,
+        artifact_output: video.artifact_output,
+        artifact_overwrite: video.artifact_overwrite,
+        artifact_max_images: 0,
+        artifact_fps: video.artifact_fps,
+        normalize_mean: config.augment.normalize_mean,
+        normalize_std: config.augment.normalize_std,
+        ffmpeg_path: training.ffmpeg_path.clone(),
+    });
+
+    match scheduler {
+        ResolvedLrScheduler::Constant(lr) => train_vision_with_scheduler(
+            &context,
+            model.take().expect("model initialized"),
+            optim.take().expect("optimizer initialized"),
+            lr,
+            diagnostics,
+        )?,
+        ResolvedLrScheduler::Cosine(scheduler) => train_vision_with_scheduler(
+            &context,
+            model.take().expect("model initialized"),
+            optim.take().expect("optimizer initialized"),
+            scheduler,
+            diagnostics,
+        )?,
+        ResolvedLrScheduler::Linear(scheduler) => train_vision_with_scheduler(
+            &context,
+            model.take().expect("model initialized"),
+            optim.take().expect("optimizer initialized"),
+            scheduler,
+            diagnostics,
+        )?,
+        ResolvedLrScheduler::Exponential(scheduler) => train_vision_with_scheduler(
+            &context,
+            model.take().expect("model initialized"),
+            optim.take().expect("optimizer initialized"),
+            scheduler,
+            diagnostics,
+        )?,
+        ResolvedLrScheduler::Step(scheduler) => train_vision_with_scheduler(
+            &context,
+            model.take().expect("model initialized"),
+            optim.take().expect("optimizer initialized"),
+            scheduler,
+            diagnostics,
+        )?,
+        ResolvedLrScheduler::Noam(scheduler) => train_vision_with_scheduler(
+            &context,
+            model.take().expect("model initialized"),
+            optim.take().expect("optimizer initialized"),
+            scheduler,
+            diagnostics,
+        )?,
+    }
+
+    info!("Vision video V-JEPA 2.1 training complete on {backend_name}");
     Ok(())
 }
 

@@ -34,7 +34,7 @@ pub(crate) use burn::tensor::backend::{AutodiffBackend, Backend as BackendTrait}
 pub(crate) use burn::tensor::{Int, Tensor, TensorData};
 #[cfg(feature = "ddp")]
 pub(crate) use burn_collective::{
-    PeerId, ReduceOperation, all_reduce, finish_collective, register,
+    PeerId, ReduceOperation, all_reduce, broadcast, finish_collective, register,
 };
 #[cfg(feature = "ddp")]
 pub(crate) use burn_train::checkpoint::{Checkpointer, FileCheckpointer};
@@ -66,7 +66,7 @@ pub(crate) use crate::{ContextStrategyConfig, GenerationConfig, ModelOverrides};
 
 pub(crate) use crate::loss::language_model_loss;
 pub(crate) use crate::train::steps::LanguageTrainModel;
-pub(crate) use burn_dragon_core::{BDH, BDHConfig};
+pub(crate) use burn_dragon_core::{BDH, BDHConfig, LanguagePipelineState, ModelState};
 pub(crate) use burn_dragon_train::train::constants::{
     FAST_TRAIN, ValidBackend, fast_train_enabled,
 };
@@ -75,14 +75,17 @@ pub(crate) use burn_dragon_train::train::metrics::{
     MetricSinkSplit, MetricSinkValueKind, MetricsSinkSpec, ScalarMetric, ScalarValue,
 };
 pub(crate) use burn_dragon_train::train::pipeline::{
-    ResolvedLrScheduler, ScheduleSource, TrainSchedule, adamw_config_from_optimizer,
-    create_run_dir, resolve_valid_steps_per_epoch, write_latest_run,
+    PipelinePlan, PipelineRankWorkload, ResolvedLrScheduler, ScheduleSource, TrainSchedule,
+    adamw_config_from_optimizer, build_pipeline_plan, build_pipeline_rank_workload, create_run_dir,
+    resolve_valid_steps_per_epoch, simulate_pipeline_communication, split_microbatch_ranges,
+    write_latest_run,
 };
 #[cfg(feature = "ddp")]
 pub(crate) use burn_dragon_train::train::runtime::resolve_collective_config;
 pub(crate) use burn_dragon_train::train::runtime::{
-    DeviceMemoryUsage, ParallelRuntime, cleanup_device_memory, device_memory_usage_safe,
-    resolve_parallel_runtime, resolve_training_devices,
+    DeviceMemoryUsage, ParallelRuntime, PipelineParallelLayout, PipelineRankAssignment,
+    cleanup_device_memory, device_memory_usage_safe, resolve_parallel_runtime,
+    resolve_pipeline_parallel_layout, resolve_training_devices,
 };
 pub(crate) use burn_dragon_train::{
     GdpoConfig, GdpoHardGate, KernelSpec, LayerStateSpec, LearningRateScheduleConfig, ModelSpec,

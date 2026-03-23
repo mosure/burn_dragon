@@ -6,7 +6,10 @@ mod tests;
 #[cfg(feature = "train")]
 pub mod train;
 
-pub use core::{ContextStrategyConfig, GenerationConfig, ModelOverrides};
+pub use core::{
+    ContextStrategyConfig, GenerationConfig, GenerationOutputFormat,
+    GenerationTokenizerSourceConfig, ModelOverrides,
+};
 #[cfg(feature = "train")]
 pub use train::{
     DatasetConfig, DatasetSourceConfig, HuggingFaceDatasetConfig, HuggingFaceRecordFormat,

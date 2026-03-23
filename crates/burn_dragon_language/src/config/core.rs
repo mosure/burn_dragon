@@ -1,10 +1,13 @@
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
 
+use crate::tokenizer::TokenizerConfig;
 use burn_dragon_core::{
-    ClockedSlowMemoryConfig, DragonNormConfig, LatentFanoutScheduleConfig,
-    MambaSequenceConfig, ManifoldHyperConnectionsConfig, RotaryEmbedding, SequenceKernelKind,
-    SummaryMemoryConfig,
-    YNeuronRecurrenceConfig,
+    AttentionResidualConfig, BlockAttentionResidualConfig, ClockedSlowMemoryConfig,
+    DragonNormConfig, LatentFanoutScheduleConfig, MambaSequenceConfig,
+    ManifoldHyperConnectionsConfig, ResidualConnectorKind, RotaryEmbedding, SequenceKernelKind,
+    SummaryMemoryConfig, YNeuronRecurrenceConfig,
 };
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -12,12 +15,42 @@ pub struct GenerationConfig {
     pub prompt: String,
     #[serde(default)]
     pub max_tokens: Option<i64>,
+    #[serde(default)]
+    pub max_chars: Option<usize>,
     #[serde(default = "default_temperature")]
     pub temperature: f32,
     #[serde(default)]
     pub top_k: Option<usize>,
     #[serde(default = "default_context_strategy")]
     pub context_strategy: ContextStrategyConfig,
+    #[serde(default)]
+    pub prompt_tokenizer: GenerationTokenizerSourceConfig,
+    #[serde(default)]
+    pub decode_tokenizer: GenerationTokenizerSourceConfig,
+    #[serde(default)]
+    pub output_format: GenerationOutputFormat,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default)]
+#[serde(tag = "source", rename_all = "snake_case")]
+pub enum GenerationTokenizerSourceConfig {
+    #[default]
+    Dataset,
+    Config {
+        #[serde(default)]
+        cache_dir: Option<PathBuf>,
+        #[serde(flatten)]
+        tokenizer: TokenizerConfig,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum GenerationOutputFormat {
+    #[default]
+    Auto,
+    DecodedText,
+    TokenIds,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default)]
@@ -40,6 +73,9 @@ pub struct ModelOverrides {
     pub latent_total: Option<usize>,
     pub sequence_kernel: Option<SequenceKernelKind>,
     pub mamba: Option<MambaSequenceConfig>,
+    pub residual_connector: Option<ResidualConnectorKind>,
+    pub attention_residual: Option<AttentionResidualConfig>,
+    pub block_attention_residual: Option<BlockAttentionResidualConfig>,
     pub latent_fanout_schedule: Option<LatentFanoutScheduleConfig>,
     pub relu_threshold: Option<f32>,
     pub dropout: Option<f64>,

@@ -1,1 +1,3 @@
-extends = ["../experiments/nemotron_climbmix_bdh_mhc_phase4_constant.toml"]
+# Promoted single-stage language-training baseline.
+# This is the operational dense-score line that also powers the staged 48h bundle.
+extends = ["current_best_large/climbmix_stage_base.toml"]

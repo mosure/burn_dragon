@@ -45,6 +45,52 @@ pub struct ParallelRuntime {
     pub process_group_launch: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PipelineRankAssignment {
+    pub global_rank: usize,
+    pub pipeline_stage_id: usize,
+    pub data_parallel_rank: usize,
+    pub predecessor_global_rank: Option<usize>,
+    pub successor_global_rank: Option<usize>,
+    pub pipeline_group_ranks: Vec<usize>,
+    pub data_parallel_group_ranks: Vec<usize>,
+}
+
+impl PipelineRankAssignment {
+    pub fn is_first_stage(&self) -> bool {
+        self.predecessor_global_rank.is_none()
+    }
+
+    pub fn is_last_stage(&self) -> bool {
+        self.successor_global_rank.is_none()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PipelineParallelLayout {
+    pub stage_count: usize,
+    pub virtual_stages_per_rank: usize,
+    pub data_parallel_size: usize,
+    pub world_size: usize,
+    pub rank_assignments: Vec<PipelineRankAssignment>,
+}
+
+impl PipelineParallelLayout {
+    pub fn assignment(&self, global_rank: usize) -> &PipelineRankAssignment {
+        &self.rank_assignments[global_rank]
+    }
+
+    pub fn summary(&self) -> String {
+        format!(
+            "pipeline_layout=replica_major stage_count={} virtual_stages_per_rank={} data_parallel_size={} world_size={}",
+            self.stage_count,
+            self.virtual_stages_per_rank,
+            self.data_parallel_size,
+            self.world_size
+        )
+    }
+}
+
 impl ParallelRuntime {
     pub fn is_primary(&self) -> bool {
         self.global_rank == 0
@@ -71,6 +117,64 @@ impl ParallelRuntime {
 
 pub fn resolve_parallel_runtime(config: &ParallelConfig) -> Result<ParallelRuntime> {
     resolve_parallel_runtime_with_env(config, &parallel_env_from_process())
+}
+
+pub fn resolve_pipeline_parallel_layout(
+    runtime: &ParallelRuntime,
+    config: &ParallelConfig,
+) -> Result<Option<PipelineParallelLayout>> {
+    if !config.pipeline.enabled || runtime.mode != ParallelismKind::Ddp {
+        return Ok(None);
+    }
+
+    let stage_count = config.pipeline.stage_count.max(1);
+    let data_parallel_size = config.data.size.max(1);
+    let expected_world_size = stage_count
+        .checked_mul(data_parallel_size)
+        .ok_or_else(|| anyhow!("pipeline layout world-size overflow"))?;
+    if runtime.world_size != expected_world_size {
+        return Err(anyhow!(
+            "pipeline layout requires runtime.world_size = parallel.pipeline.stage_count * parallel.data.size (got {} != {} * {})",
+            runtime.world_size,
+            stage_count,
+            data_parallel_size
+        ));
+    }
+
+    let rank_assignments = (0..runtime.world_size)
+        .map(|global_rank| {
+            let pipeline_stage_id = global_rank % stage_count;
+            let data_parallel_rank = global_rank / stage_count;
+            let predecessor_global_rank = pipeline_stage_id
+                .checked_sub(1)
+                .map(|stage_id| data_parallel_rank * stage_count + stage_id);
+            let successor_global_rank = (pipeline_stage_id + 1 < stage_count)
+                .then_some(data_parallel_rank * stage_count + pipeline_stage_id + 1);
+            let pipeline_group_ranks = (0..stage_count)
+                .map(|stage_id| data_parallel_rank * stage_count + stage_id)
+                .collect::<Vec<_>>();
+            let data_parallel_group_ranks = (0..data_parallel_size)
+                .map(|replica_rank| replica_rank * stage_count + pipeline_stage_id)
+                .collect::<Vec<_>>();
+            PipelineRankAssignment {
+                global_rank,
+                pipeline_stage_id,
+                data_parallel_rank,
+                predecessor_global_rank,
+                successor_global_rank,
+                pipeline_group_ranks,
+                data_parallel_group_ranks,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    Ok(Some(PipelineParallelLayout {
+        stage_count,
+        virtual_stages_per_rank: config.pipeline.virtual_stages_per_rank.max(1),
+        data_parallel_size,
+        world_size: runtime.world_size,
+        rank_assignments,
+    }))
 }
 
 fn parallel_env_from_process() -> ParallelEnv {
@@ -100,6 +204,11 @@ fn resolve_parallel_runtime_with_env(
     config: &ParallelConfig,
     env: &ParallelEnv,
 ) -> Result<ParallelRuntime> {
+    let pipeline_stage_multiplier = if config.pipeline.enabled {
+        config.pipeline.stage_count.max(1)
+    } else {
+        1
+    };
     match config.mode {
         ParallelismKind::Single => {
             if env.world_size.is_some_and(|value| value != 1) {
@@ -150,10 +259,11 @@ fn resolve_parallel_runtime_with_env(
                         "parallel.mode=ddp process-group launch requires RANK < WORLD_SIZE (got {global_rank} >= {world_size})"
                     ));
                 }
-                if config.data.size != world_size {
+                if config.data.size.max(1) * pipeline_stage_multiplier != world_size {
                     return Err(anyhow!(
-                        "parallel.mode=ddp process-group launch currently requires parallel.data.size = WORLD_SIZE (got {} != {world_size})",
-                        config.data.size
+                        "parallel.mode=ddp process-group launch requires parallel.data.size * pipeline_stage_multiplier = WORLD_SIZE (got {} * {} != {world_size})",
+                        config.data.size,
+                        pipeline_stage_multiplier
                     ));
                 }
 
@@ -472,7 +582,10 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{ParallelEnv, resolve_parallel_runtime_with_env, resolve_training_devices};
+    use super::{
+        ParallelEnv, resolve_parallel_runtime_with_env, resolve_pipeline_parallel_layout,
+        resolve_training_devices,
+    };
     #[cfg(feature = "ddp")]
     use crate::train::runtime::resolve_collective_config;
     use crate::{ParallelConfig, ParallelismKind};
@@ -555,6 +668,96 @@ mod tests {
         assert_eq!(runtime.data_parallel_size, 2);
         assert_eq!(runtime.local_data_parallel_size, 1);
         assert!(runtime.is_process_group_launch());
+    }
+
+    #[test]
+    fn resolve_parallel_runtime_accepts_process_group_ddp_with_pipeline_partitioning() {
+        let config = ParallelConfig {
+            mode: ParallelismKind::Ddp,
+            world_size: 4,
+            data: crate::ParallelDataConfig {
+                size: 2,
+                ..Default::default()
+            },
+            pipeline: crate::ParallelPipelineConfig {
+                enabled: true,
+                stage_count: 2,
+                virtual_stages_per_rank: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let env = ParallelEnv {
+            world_size: Some(4),
+            global_rank: Some(2),
+            local_rank: Some(0),
+        };
+
+        let runtime = resolve_parallel_runtime_with_env(&config, &env)
+            .expect("process-group ddp pipeline runtime should resolve");
+        assert_eq!(runtime.mode, ParallelismKind::Ddp);
+        assert_eq!(runtime.world_size, 4);
+        assert_eq!(runtime.data_parallel_size, 2);
+        assert!(runtime.is_process_group_launch());
+    }
+
+    #[test]
+    fn resolve_pipeline_parallel_layout_maps_replica_major_stage_groups() {
+        let config = ParallelConfig {
+            mode: ParallelismKind::Ddp,
+            world_size: 6,
+            data: crate::ParallelDataConfig {
+                size: 2,
+                ..Default::default()
+            },
+            pipeline: crate::ParallelPipelineConfig {
+                enabled: true,
+                stage_count: 3,
+                virtual_stages_per_rank: 2,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let env = ParallelEnv {
+            world_size: Some(6),
+            global_rank: Some(4),
+            local_rank: Some(1),
+        };
+        let runtime =
+            resolve_parallel_runtime_with_env(&config, &env).expect("process-group runtime");
+        let layout = resolve_pipeline_parallel_layout(&runtime, &config)
+            .expect("layout")
+            .expect("pipeline layout");
+        let assignment = layout.assignment(4);
+
+        assert_eq!(layout.stage_count, 3);
+        assert_eq!(layout.data_parallel_size, 2);
+        assert_eq!(assignment.pipeline_stage_id, 1);
+        assert_eq!(assignment.data_parallel_rank, 1);
+        assert_eq!(assignment.predecessor_global_rank, Some(3));
+        assert_eq!(assignment.successor_global_rank, Some(5));
+        assert_eq!(assignment.pipeline_group_ranks, vec![3, 4, 5]);
+        assert_eq!(assignment.data_parallel_group_ranks, vec![1, 4]);
+    }
+
+    #[test]
+    fn resolve_pipeline_parallel_layout_returns_none_without_pipeline() {
+        let config = ParallelConfig {
+            mode: ParallelismKind::Ddp,
+            world_size: 2,
+            data: crate::ParallelDataConfig {
+                size: 2,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let runtime = resolve_parallel_runtime_with_env(&config, &ParallelEnv::default())
+            .expect("local ddp bridge");
+
+        assert_eq!(
+            resolve_pipeline_parallel_layout(&runtime, &config).expect("layout"),
+            None
+        );
     }
 
     #[test]

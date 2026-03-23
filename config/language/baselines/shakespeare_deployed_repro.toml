@@ -1,0 +1,7 @@
+extends = [
+  "../base.toml",
+  "../shared/residual_connector_vanilla_modifier.toml",
+]
+
+[model]
+n_embd = 128

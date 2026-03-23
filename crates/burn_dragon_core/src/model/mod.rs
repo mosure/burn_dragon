@@ -1,4 +1,5 @@
 mod attention;
+mod attention_residual;
 mod bdh;
 mod config;
 mod halt;
@@ -13,8 +14,12 @@ mod structured_routing;
 mod structured_state;
 mod structured_step;
 
+pub use attention_residual::{
+    AttentionResidual, AttentionResidualConfig, BlockAttentionResidual,
+    BlockAttentionResidualConfig, BlockAttentionResidualSummaryMode, ResidualConnectorKind,
+};
 pub use bdh::{
-    BDH, LanguageMhcLayerDiagnostics, LogitsProjectionProfileSnapshot,
+    BDH, LanguageMhcLayerDiagnostics, LanguagePipelineState, LogitsProjectionProfileSnapshot,
     logits_projection_profile_reset, logits_projection_profile_snapshot,
 };
 pub use burn_dragon_kernel::api::projection::LowrankGradInputExecutor;

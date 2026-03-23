@@ -28,10 +28,14 @@ pub mod api {
             FsdpMixedPrecisionKind, GdpoConfig, GdpoHardGate, KernelSpec, LayerStateSpec,
             ModelSpec, ParallelCheckpointConfig, ParallelCheckpointFormat,
             ParallelCommunicationBackend, ParallelConfig, ParallelDataConfig, ParallelFsdpConfig,
-            ParallelSpec, ParallelTensorConfig, ParallelismKind, SequenceKernelKind, StateAxisSpec,
-            StateLayout, StateTensorSpec, TensorParallelAxis, TensorParallelPartitionKind,
-            VisionTeacherVariant, WgpuBackend, WgpuGenerationExecutor, WgpuInferenceConfig,
-            WgpuMemoryConfig, WgpuRuntimeConfig, WgpuStartupAutotuneConfig, WgpuTrainingConfig,
+            ParallelPipelineCacheConfig, ParallelPipelineConfig, ParallelSpec,
+            ParallelTensorConfig, ParallelismKind, PipelineCacheEvictionKind, PipelineCachePolicy,
+            PipelineCommunicationKind, PipelinePartitionKind, PipelineScheduleKind,
+            PipelineSharedWeightSyncKind, PipelineTransportDtype, SequenceKernelKind,
+            StateAxisSpec, StateLayout, StateTensorSpec, TensorParallelAxis,
+            TensorParallelPartitionKind, VisionTeacherVariant, WgpuBackend, WgpuGenerationExecutor,
+            WgpuInferenceConfig, WgpuMemoryConfig, WgpuRuntimeConfig, WgpuStartupAutotuneConfig,
+            WgpuTrainingConfig,
         };
         #[cfg(feature = "train")]
         pub use crate::config::{
@@ -44,9 +48,10 @@ pub mod api {
         pub use crate::train::runtime::resolve_collective_config;
         #[cfg(feature = "train")]
         pub use crate::train::runtime::{
-            DeviceMemoryUsage, ParallelRuntime, bytes_to_mb, cleanup_device_memory,
-            cleanup_device_memory_allowed, device_memory_usage, device_memory_usage_safe,
-            resolve_parallel_runtime, resolve_training_devices,
+            DeviceMemoryUsage, ParallelRuntime, PipelineParallelLayout, PipelineRankAssignment,
+            bytes_to_mb, cleanup_device_memory, cleanup_device_memory_allowed, device_memory_usage,
+            device_memory_usage_safe, resolve_parallel_runtime, resolve_pipeline_parallel_layout,
+            resolve_training_devices,
         };
     }
 
@@ -65,8 +70,11 @@ pub mod api {
 pub use config::{
     FsdpMixedPrecisionKind, GdpoConfig, GdpoHardGate, KernelSpec, LayerStateSpec, ModelSpec,
     ParallelCheckpointConfig, ParallelCheckpointFormat, ParallelCommunicationBackend,
-    ParallelConfig, ParallelDataConfig, ParallelFsdpConfig, ParallelSpec, ParallelTensorConfig,
-    ParallelismKind, SequenceKernelKind, StateAxisSpec, StateLayout, StateTensorSpec,
+    ParallelConfig, ParallelDataConfig, ParallelFsdpConfig, ParallelPipelineCacheConfig,
+    ParallelPipelineConfig, ParallelSpec, ParallelTensorConfig, ParallelismKind,
+    PipelineCacheEvictionKind, PipelineCachePolicy, PipelineCommunicationKind,
+    PipelinePartitionKind, PipelineScheduleKind, PipelineSharedWeightSyncKind,
+    PipelineTransportDtype, SequenceKernelKind, StateAxisSpec, StateLayout, StateTensorSpec,
     TensorParallelAxis, TensorParallelPartitionKind, VisionTeacherVariant, WgpuBackend,
     WgpuGenerationExecutor, WgpuInferenceConfig, WgpuMemoryConfig, WgpuRuntimeConfig,
     WgpuStartupAutotuneConfig, WgpuTrainingConfig,

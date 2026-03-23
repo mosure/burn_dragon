@@ -1,1 +1,3 @@
+# Operational alias for the promoted large baseline.
+# Do not use this as a generic dataset/training base for unrelated configs.
 extends = ["current_best.toml"]

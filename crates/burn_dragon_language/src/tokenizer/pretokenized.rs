@@ -62,13 +62,20 @@ impl Tokenizer for PretokenizedTokenizer {
     }
 
     fn decode(&self, ids: &[u32]) -> String {
+        self.decode_with_options(ids, true)
+    }
+
+    fn decode_with_options(&self, ids: &[u32], stop_at_eos: bool) -> String {
         let mut rendered = Vec::with_capacity(ids.len());
         for &id in ids {
             if Some(id) == self.pad || Some(id) == self.bos {
                 continue;
             }
             if Some(id) == self.eos {
-                break;
+                if stop_at_eos {
+                    break;
+                }
+                continue;
             }
             rendered.push(id.to_string());
         }

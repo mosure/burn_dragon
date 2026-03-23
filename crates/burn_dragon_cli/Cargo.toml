@@ -185,6 +185,11 @@ path = "src/bin/language_experiment.rs"
 required-features = ["language-train", "language-universality"]
 
 [[bin]]
+name = "language_ttcl_experiment"
+path = "src/bin/language_ttcl_experiment.rs"
+required-features = ["language-train"]
+
+[[bin]]
 name = "vision_model_stats"
 path = "src/bin/vision_model_stats.rs"
 required-features = ["train"]

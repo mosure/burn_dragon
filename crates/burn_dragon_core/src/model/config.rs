@@ -7,6 +7,9 @@ use burn_dragon_kernel::api::projection::LowrankGradInputExecutor;
 use serde::{Deserialize, Serialize};
 
 use crate::kernel::{BlockPattern1d, BlockPattern2d, BlockSparseConfig};
+use crate::model::attention_residual::{
+    AttentionResidualConfig, BlockAttentionResidualConfig, ResidualConnectorKind,
+};
 use crate::model::mhc::ManifoldHyperConnectionsConfig;
 use crate::model::norm::DragonNormConfig;
 use crate::model::sequence::MambaSequenceConfig;
@@ -626,7 +629,13 @@ pub struct BDHConfig {
     pub rollout_fast_steps_per_slow_step: usize,
     pub fused_kernels: FusedKernelConfig,
     pub normalization: DragonNormConfig,
+    #[serde(default)]
+    pub residual_connector: ResidualConnectorKind,
     pub mhc: ManifoldHyperConnectionsConfig,
+    #[serde(default)]
+    pub attention_residual: AttentionResidualConfig,
+    #[serde(default)]
+    pub block_attention_residual: BlockAttentionResidualConfig,
     pub y_neuron_recurrence: YNeuronRecurrenceConfig,
     pub clocked_slow_memory: ClockedSlowMemoryConfig,
     pub summary_memory: SummaryMemoryConfig,
@@ -648,7 +657,10 @@ impl Default for BDHConfig {
             rollout_fast_steps_per_slow_step: 1,
             fused_kernels: FusedKernelConfig::default(),
             normalization: DragonNormConfig::default(),
+            residual_connector: ResidualConnectorKind::default(),
             mhc: ManifoldHyperConnectionsConfig::default(),
+            attention_residual: AttentionResidualConfig::default(),
+            block_attention_residual: BlockAttentionResidualConfig::default(),
             y_neuron_recurrence: YNeuronRecurrenceConfig::default(),
             clocked_slow_memory: ClockedSlowMemoryConfig::default(),
             summary_memory: SummaryMemoryConfig::default(),
@@ -658,6 +670,27 @@ impl Default for BDHConfig {
 
 impl BDHConfig {
     pub const SUPPORTED_ROLLOUT_FAST_STEPS: [usize; 5] = [1, 2, 4, 8, 16];
+
+    pub fn resolved_residual_connector_kind(&self) -> ResidualConnectorKind {
+        match self.residual_connector {
+            ResidualConnectorKind::Mhc => ResidualConnectorKind::Mhc,
+            ResidualConnectorKind::AttentionResidual => ResidualConnectorKind::AttentionResidual,
+            ResidualConnectorKind::BlockAttentionResidual => {
+                ResidualConnectorKind::BlockAttentionResidual
+            }
+            ResidualConnectorKind::Vanilla => {
+                if self.block_attention_residual.enabled {
+                    ResidualConnectorKind::BlockAttentionResidual
+                } else if self.attention_residual.enabled {
+                    ResidualConnectorKind::AttentionResidual
+                } else if self.mhc.enabled {
+                    ResidualConnectorKind::Mhc
+                } else {
+                    ResidualConnectorKind::Vanilla
+                }
+            }
+        }
+    }
 
     pub fn is_valid_rollout_fast_steps(value: usize) -> bool {
         Self::SUPPORTED_ROLLOUT_FAST_STEPS.contains(&value)

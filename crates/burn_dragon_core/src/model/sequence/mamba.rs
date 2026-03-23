@@ -147,9 +147,9 @@ impl<B: Backend> MambaSequenceParameters<B> {
             TensorDistribution::Normal(0.0, conv_std as f64),
             device,
         ));
-        let conv_bias = config.conv_bias.then(|| {
-            Param::from_tensor(Tensor::<B, 1>::zeros([config.d_inner], device))
-        });
+        let conv_bias = config
+            .conv_bias
+            .then(|| Param::from_tensor(Tensor::<B, 1>::zeros([config.d_inner], device)));
         let x_proj = Param::from_tensor(Tensor::<B, 2>::random(
             [config.d_inner, config.dt_rank + config.d_state * 2],
             TensorDistribution::Normal(0.0, out_std as f64),
@@ -210,6 +210,42 @@ impl<B: Backend> MambaSequenceParameters<B> {
             use_fast_path: false,
         }
     }
+
+    pub fn in_proj_tensor(&self) -> Tensor<B, 2> {
+        self.in_proj.val()
+    }
+
+    pub fn conv_weight_tensor(&self) -> Tensor<B, 2> {
+        self.conv_weight.val()
+    }
+
+    pub fn conv_bias_tensor(&self) -> Option<Tensor<B, 1>> {
+        self.conv_bias.as_ref().map(|bias| bias.val())
+    }
+
+    pub fn x_proj_tensor(&self) -> Tensor<B, 2> {
+        self.x_proj.val()
+    }
+
+    pub fn dt_proj_weight_tensor(&self) -> Tensor<B, 2> {
+        self.dt_proj_weight.val()
+    }
+
+    pub fn dt_proj_bias_tensor(&self) -> Tensor<B, 1> {
+        self.dt_proj_bias.val()
+    }
+
+    pub fn a_log_tensor(&self) -> Tensor<B, 2> {
+        self.a_log.val()
+    }
+
+    pub fn d_skip_tensor(&self) -> Tensor<B, 1> {
+        self.d_skip.val()
+    }
+
+    pub fn out_proj_tensor(&self) -> Tensor<B, 2> {
+        self.out_proj.val()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -220,6 +256,80 @@ pub struct MambaReferenceState<B: Backend> {
 
 fn silu<B: Backend, const D: usize>(values: Tensor<B, D>) -> Tensor<B, D> {
     values.clone() * activation::sigmoid(values)
+}
+
+pub(crate) fn mamba_depthwise_conv_step_reference<B: Backend>(
+    x_t: Tensor<B, 3>,
+    conv_state: Tensor<B, 4>,
+    conv_weight: Tensor<B, 2>,
+    conv_bias: Option<Tensor<B, 1>>,
+) -> (Tensor<B, 3>, Tensor<B, 4>) {
+    let [batch, views, d_inner] = x_t.shape().dims::<3>();
+    let d_conv = conv_state.shape().dims::<4>()[3];
+    let device = x_t.device();
+    let conv_tail = if d_conv > 1 {
+        conv_state.clone().slice_dim(3, 1..d_conv)
+    } else {
+        Tensor::<B, 4>::zeros([batch, views, d_inner, 0], &device)
+    };
+    let next_conv_state = Tensor::cat(vec![conv_tail, x_t.clone().unsqueeze_dim::<4>(3)], 3);
+    let mut u_t = (next_conv_state.clone() * conv_weight.reshape([1, 1, d_inner, d_conv]))
+        .sum_dim(3)
+        .reshape([batch, views, d_inner]);
+    if let Some(bias) = conv_bias {
+        u_t = u_t + bias.reshape([1, 1, d_inner]);
+    }
+    (silu(u_t), next_conv_state)
+}
+
+pub(crate) fn mamba_selective_scan_step_reference<B: Backend>(
+    u_t: Tensor<B, 3>,
+    z_t: Tensor<B, 3>,
+    ssm_state: Tensor<B, 4>,
+    params: &MambaSequenceParameters<B>,
+) -> (Tensor<B, 3>, Tensor<B, 4>) {
+    let [batch, views, d_inner] = u_t.shape().dims::<3>();
+    let config = params.config();
+    let a = params
+        .a_log
+        .val()
+        .exp()
+        .neg()
+        .reshape([1, 1, config.d_inner, config.d_state]);
+    let d_skip = params.d_skip.val().reshape([1, 1, config.d_inner]);
+
+    let x_db = u_t
+        .clone()
+        .reshape([batch, d_inner])
+        .matmul(params.x_proj.val())
+        .reshape([batch, config.dt_rank + config.d_state * 2]);
+    let dt = activation::softplus(
+        x_db.clone()
+            .slice_dim(1, 0..config.dt_rank)
+            .matmul(params.dt_proj_weight.val())
+            .reshape([batch, views, config.d_inner])
+            + params.dt_proj_bias.val().reshape([1, 1, config.d_inner]),
+        1.0,
+    );
+    let b_t = x_db
+        .clone()
+        .slice_dim(1, config.dt_rank..(config.dt_rank + config.d_state))
+        .reshape([batch, views, config.d_state]);
+    let c_t = x_db
+        .slice_dim(
+            1,
+            (config.dt_rank + config.d_state)..(config.dt_rank + config.d_state * 2),
+        )
+        .reshape([batch, views, config.d_state]);
+
+    let d_a = (dt.clone().unsqueeze_dim::<4>(3) * a).exp();
+    let d_b = dt.clone().unsqueeze_dim::<4>(3) * b_t.clone().unsqueeze_dim::<4>(2);
+    let next_ssm_state = ssm_state * d_a + u_t.clone().unsqueeze_dim::<4>(3) * d_b;
+    let y_t = (next_ssm_state.clone() * c_t.unsqueeze_dim::<4>(2))
+        .sum_dim(3)
+        .reshape([batch, views, config.d_inner])
+        + d_skip * u_t;
+    (y_t * silu(z_t), next_ssm_state)
 }
 
 pub fn mamba_reference<B: Backend>(
@@ -242,16 +352,16 @@ pub fn mamba_reference<B: Backend>(
     let config = params.config();
 
     let mut conv_state = match state.as_ref() {
-        Some(existing) if existing.conv.shape().dims::<4>()
-            == [batch, 1, config.d_inner, config.d_conv] =>
+        Some(existing)
+            if existing.conv.shape().dims::<4>() == [batch, 1, config.d_inner, config.d_conv] =>
         {
             existing.conv.clone()
         }
         _ => Tensor::<B, 4>::zeros([batch, 1, config.d_inner, config.d_conv], &device),
     };
     let mut ssm_state = match state.as_ref() {
-        Some(existing) if existing.ssm.shape().dims::<4>()
-            == [batch, 1, config.d_inner, config.d_state] =>
+        Some(existing)
+            if existing.ssm.shape().dims::<4>() == [batch, 1, config.d_inner, config.d_state] =>
         {
             existing.ssm.clone()
         }
@@ -273,22 +383,6 @@ pub fn mamba_reference<B: Backend>(
         .swap_dims(1, 2)
         .reshape([batch, 1, config.d_inner, time]);
 
-    let conv_weight = params
-        .conv_weight
-        .val()
-        .reshape([1, 1, config.d_inner, config.d_conv]);
-    let conv_bias = params
-        .conv_bias
-        .as_ref()
-        .map(|bias| bias.val().reshape([1, 1, config.d_inner]));
-    let a = params
-        .a_log
-        .val()
-        .exp()
-        .neg()
-        .reshape([1, 1, config.d_inner, config.d_state]);
-    let d_skip = params.d_skip.val().reshape([1, 1, config.d_inner]);
-
     let mut outputs = Vec::with_capacity(time);
 
     for step in 0..time {
@@ -300,53 +394,16 @@ pub fn mamba_reference<B: Backend>(
             .clone()
             .slice_dim(3, step..step + 1)
             .reshape([batch, 1, config.d_inner]);
-        let conv_tail = if config.d_conv > 1 {
-            conv_state.clone().slice_dim(3, 1..config.d_conv)
-        } else {
-            Tensor::<B, 4>::zeros([batch, 1, config.d_inner, 0], &device)
-        };
-        conv_state = Tensor::cat(vec![conv_tail, x_t.clone().unsqueeze_dim::<4>(3)], 3);
-        let mut u_t = (conv_state.clone() * conv_weight.clone())
-            .sum_dim(3)
-            .reshape([batch, 1, config.d_inner]);
-        if let Some(bias) = &conv_bias {
-            u_t = u_t + bias.clone();
-        }
-        u_t = silu(u_t);
-
-        let x_db = u_t
-            .clone()
-            .reshape([batch, config.d_inner])
-            .matmul(params.x_proj.val())
-            .reshape([batch, config.dt_rank + config.d_state * 2]);
-        let dt = activation::softplus(
-            x_db.clone()
-                .slice_dim(1, 0..config.dt_rank)
-                .matmul(params.dt_proj_weight.val())
-                .reshape([batch, 1, config.d_inner])
-                + params.dt_proj_bias.val().reshape([1, 1, config.d_inner]),
-            1.0,
+        let (u_t, next_conv_state) = mamba_depthwise_conv_step_reference(
+            x_t,
+            conv_state,
+            params.conv_weight.val(),
+            params.conv_bias.as_ref().map(|bias| bias.val()),
         );
-        let b_t = x_db
-            .clone()
-            .slice_dim(1, config.dt_rank..(config.dt_rank + config.d_state))
-            .reshape([batch, 1, config.d_state]);
-        let c_t = x_db
-            .slice_dim(
-                1,
-                (config.dt_rank + config.d_state)..(config.dt_rank + config.d_state * 2),
-            )
-            .reshape([batch, 1, config.d_state]);
-
-        let d_a = (dt.clone().unsqueeze_dim::<4>(3) * a.clone()).exp();
-        let d_b = dt.clone().unsqueeze_dim::<4>(3) * b_t.clone().unsqueeze_dim::<4>(2);
-        ssm_state = ssm_state * d_a + u_t.clone().unsqueeze_dim::<4>(3) * d_b;
-
-        let y_t = (ssm_state.clone() * c_t.clone().unsqueeze_dim::<4>(2))
-            .sum_dim(3)
-            .reshape([batch, 1, config.d_inner])
-            + d_skip.clone() * u_t.clone();
-        let y_t = y_t * silu(z_t);
+        conv_state = next_conv_state;
+        let (y_t, next_ssm_state) =
+            mamba_selective_scan_step_reference(u_t, z_t, ssm_state, params);
+        ssm_state = next_ssm_state;
         let out_t = y_t
             .reshape([batch, config.d_inner])
             .matmul(params.out_proj.val())
@@ -366,8 +423,8 @@ pub fn mamba_reference<B: Backend>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use burn::tensor::backend::Backend as BackendTrait;
     use burn::tensor::TensorData;
+    use burn::tensor::backend::Backend as BackendTrait;
     use burn_ndarray::NdArray;
     use serde::Deserialize;
 
@@ -400,8 +457,10 @@ mod tests {
     }
 
     fn fixture() -> MambaFixture {
-        serde_json::from_str(include_str!("../../../tests/data/mamba_c5afbdf_fixture.json"))
-            .expect("parse mamba fixture")
+        serde_json::from_str(include_str!(
+            "../../../tests/data/mamba_c5afbdf_fixture.json"
+        ))
+        .expect("parse mamba fixture")
     }
 
     fn flatten2(values: &[Vec<f32>]) -> Vec<f32> {
@@ -433,8 +492,14 @@ mod tests {
 
         let (output, state) = mamba_reference(hidden, &params, None);
         assert_eq!(output.shape().dims::<4>(), [2, 1, 5, 8]);
-        assert_eq!(state.conv.shape().dims::<4>(), [2, 1, config.d_inner, config.d_conv]);
-        assert_eq!(state.ssm.shape().dims::<4>(), [2, 1, config.d_inner, config.d_state]);
+        assert_eq!(
+            state.conv.shape().dims::<4>(),
+            [2, 1, config.d_inner, config.d_conv]
+        );
+        assert_eq!(
+            state.ssm.shape().dims::<4>(),
+            [2, 1, config.d_inner, config.d_state]
+        );
     }
 
     #[test]
@@ -461,7 +526,10 @@ mod tests {
             &device,
         ));
         params.conv_weight = Param::from_tensor(Tensor::<Backend, 2>::from_data(
-            TensorData::new(flatten2(&fixture.conv_weight), [resolved.d_inner, resolved.d_conv]),
+            TensorData::new(
+                flatten2(&fixture.conv_weight),
+                [resolved.d_inner, resolved.d_conv],
+            ),
             &device,
         ));
         params.conv_bias = Some(Param::from_tensor(Tensor::<Backend, 1>::from_data(
@@ -498,7 +566,10 @@ mod tests {
             &device,
         ));
         params.out_proj = Param::from_tensor(Tensor::<Backend, 2>::from_data(
-            TensorData::new(flatten2(&fixture.out_proj), [resolved.d_inner, fixture.d_model]),
+            TensorData::new(
+                flatten2(&fixture.out_proj),
+                [resolved.d_inner, fixture.d_model],
+            ),
             &device,
         ));
 
@@ -556,5 +627,223 @@ mod tests {
         assert!(max_output_diff <= 1.0e-6, "output diff {max_output_diff}");
         assert!(max_conv_diff <= 1.0e-7, "conv diff {max_conv_diff}");
         assert!(max_ssm_diff <= 1.0e-7, "ssm diff {max_ssm_diff}");
+    }
+
+    #[test]
+    fn mamba_reference_step_mode_matches_full_sequence() {
+        let device = <Backend as BackendTrait>::Device::default();
+        <Backend as BackendTrait>::seed(&device, 7);
+        let resolved = MambaSequenceConfig::default().resolve(8);
+        let params = MambaSequenceParameters::<Backend>::new(resolved, &device);
+        let hidden = Tensor::<Backend, 4>::from_data(
+            TensorData::new(
+                (0..(2 * 1 * 5 * 8))
+                    .map(|idx| ((idx % 17) as f32) / 17.0 - 0.25)
+                    .collect::<Vec<_>>(),
+                [2, 1, 5, 8],
+            ),
+            &device,
+        );
+
+        let (full_out, full_state) = mamba_reference(hidden.clone(), &params, None);
+
+        let mut outputs = Vec::with_capacity(5);
+        let mut state = None;
+        for step in 0..5 {
+            let step_hidden = hidden.clone().slice_dim(2, step..step + 1);
+            let (step_out, next_state) = mamba_reference(step_hidden, &params, state);
+            outputs.push(step_out);
+            state = Some(next_state);
+        }
+        let step_out = Tensor::cat(outputs, 2);
+        let step_state = state.expect("mamba step state");
+
+        let out_diff = step_out.clone().sub(full_out).abs().max().into_scalar();
+        let conv_diff = step_state
+            .conv
+            .clone()
+            .sub(full_state.conv)
+            .abs()
+            .max()
+            .into_scalar();
+        let ssm_diff = step_state
+            .ssm
+            .clone()
+            .sub(full_state.ssm)
+            .abs()
+            .max()
+            .into_scalar();
+
+        assert!(out_diff <= 1.0e-6, "output diff {out_diff}");
+        assert!(conv_diff <= 1.0e-6, "conv diff {conv_diff}");
+        assert!(ssm_diff <= 1.0e-6, "ssm diff {ssm_diff}");
+    }
+
+    #[test]
+    fn mamba_reference_chunked_state_matches_full_sequence() {
+        let device = <Backend as BackendTrait>::Device::default();
+        <Backend as BackendTrait>::seed(&device, 11);
+        let resolved = MambaSequenceConfig::default().resolve(8);
+        let params = MambaSequenceParameters::<Backend>::new(resolved, &device);
+        let hidden = Tensor::<Backend, 4>::from_data(
+            TensorData::new(
+                (0..(2 * 1 * 6 * 8))
+                    .map(|idx| ((idx % 23) as f32) / 23.0 - 0.35)
+                    .collect::<Vec<_>>(),
+                [2, 1, 6, 8],
+            ),
+            &device,
+        );
+
+        let (full_out, full_state) = mamba_reference(hidden.clone(), &params, None);
+        let (prefix_out, prefix_state) =
+            mamba_reference(hidden.clone().slice_dim(2, 0..2), &params, None);
+        let (suffix_out, suffix_state) = mamba_reference(
+            hidden.clone().slice_dim(2, 2..6),
+            &params,
+            Some(prefix_state),
+        );
+        let chunked_out = Tensor::cat(vec![prefix_out, suffix_out], 2);
+
+        let out_diff = chunked_out.clone().sub(full_out).abs().max().into_scalar();
+        let conv_diff = suffix_state
+            .conv
+            .clone()
+            .sub(full_state.conv)
+            .abs()
+            .max()
+            .into_scalar();
+        let ssm_diff = suffix_state
+            .ssm
+            .clone()
+            .sub(full_state.ssm)
+            .abs()
+            .max()
+            .into_scalar();
+
+        assert!(out_diff <= 1.0e-6, "output diff {out_diff}");
+        assert!(conv_diff <= 1.0e-6, "conv diff {conv_diff}");
+        assert!(ssm_diff <= 1.0e-6, "ssm diff {ssm_diff}");
+    }
+
+    #[test]
+    fn mamba_depthwise_conv_step_matches_full_reference_first_step_state() {
+        let device = <Backend as BackendTrait>::Device::default();
+        <Backend as BackendTrait>::seed(&device, 5);
+        let resolved = MambaSequenceConfig::default().resolve(8);
+        let params = MambaSequenceParameters::<Backend>::new(resolved, &device);
+        let hidden = Tensor::<Backend, 4>::from_data(
+            TensorData::new(
+                (0..8)
+                    .map(|idx| idx as f32 / 8.0 - 0.25)
+                    .collect::<Vec<_>>(),
+                [1, 1, 1, 8],
+            ),
+            &device,
+        );
+        let xz = hidden
+            .clone()
+            .reshape([1, resolved.d_model])
+            .matmul(params.in_proj.val())
+            .reshape([1, 1, resolved.d_inner * 2]);
+        let x_t = xz
+            .clone()
+            .slice_dim(2, 0..resolved.d_inner)
+            .reshape([1, 1, resolved.d_inner]);
+        let z_t = xz
+            .slice_dim(2, resolved.d_inner..(resolved.d_inner * 2))
+            .reshape([1, 1, resolved.d_inner]);
+        let initial_conv =
+            Tensor::<Backend, 4>::zeros([1, 1, resolved.d_inner, resolved.d_conv], &device);
+        let initial_ssm =
+            Tensor::<Backend, 4>::zeros([1, 1, resolved.d_inner, resolved.d_state], &device);
+
+        let (_u_t, helper_conv_state) = mamba_depthwise_conv_step_reference(
+            x_t.clone(),
+            initial_conv,
+            params.conv_weight.val(),
+            params.conv_bias.as_ref().map(|bias| bias.val()),
+        );
+        let (_y_t, helper_ssm_state) = mamba_selective_scan_step_reference(
+            mamba_depthwise_conv_step_reference(
+                x_t,
+                Tensor::<Backend, 4>::zeros([1, 1, resolved.d_inner, resolved.d_conv], &device),
+                params.conv_weight.val(),
+                params.conv_bias.as_ref().map(|bias| bias.val()),
+            )
+            .0,
+            z_t,
+            initial_ssm,
+            &params,
+        );
+        let (_full_out, full_state) = mamba_reference(hidden, &params, None);
+
+        let conv_diff = helper_conv_state
+            .sub(full_state.conv)
+            .abs()
+            .max()
+            .into_scalar();
+        let ssm_diff = helper_ssm_state
+            .sub(full_state.ssm)
+            .abs()
+            .max()
+            .into_scalar();
+        assert!(conv_diff <= 1.0e-6, "conv diff {conv_diff}");
+        assert!(ssm_diff <= 1.0e-6, "ssm diff {ssm_diff}");
+    }
+
+    #[test]
+    fn mamba_selective_scan_step_matches_full_reference_first_step_output() {
+        let device = <Backend as BackendTrait>::Device::default();
+        <Backend as BackendTrait>::seed(&device, 17);
+        let resolved = MambaSequenceConfig::default().resolve(8);
+        let params = MambaSequenceParameters::<Backend>::new(resolved, &device);
+        let hidden = Tensor::<Backend, 4>::from_data(
+            TensorData::new(
+                (0..8)
+                    .map(|idx| idx as f32 / 11.0 - 0.2)
+                    .collect::<Vec<_>>(),
+                [1, 1, 1, 8],
+            ),
+            &device,
+        );
+        let xz = hidden
+            .clone()
+            .reshape([1, resolved.d_model])
+            .matmul(params.in_proj.val())
+            .reshape([1, 1, resolved.d_inner * 2]);
+        let x_t = xz
+            .clone()
+            .slice_dim(2, 0..resolved.d_inner)
+            .reshape([1, 1, resolved.d_inner]);
+        let z_t = xz
+            .slice_dim(2, resolved.d_inner..(resolved.d_inner * 2))
+            .reshape([1, 1, resolved.d_inner]);
+        let (u_t, _conv_state) = mamba_depthwise_conv_step_reference(
+            x_t,
+            Tensor::<Backend, 4>::zeros([1, 1, resolved.d_inner, resolved.d_conv], &device),
+            params.conv_weight.val(),
+            params.conv_bias.as_ref().map(|bias| bias.val()),
+        );
+        let (y_t, helper_ssm_state) = mamba_selective_scan_step_reference(
+            u_t,
+            z_t,
+            Tensor::<Backend, 4>::zeros([1, 1, resolved.d_inner, resolved.d_state], &device),
+            &params,
+        );
+        let helper_out = y_t
+            .reshape([1, resolved.d_inner])
+            .matmul(params.out_proj.val())
+            .reshape([1, 1, 1, resolved.d_model]);
+        let (full_out, full_state) = mamba_reference(hidden, &params, None);
+
+        let out_diff = helper_out.sub(full_out).abs().max().into_scalar();
+        let ssm_diff = helper_ssm_state
+            .sub(full_state.ssm)
+            .abs()
+            .max()
+            .into_scalar();
+        assert!(out_diff <= 1.0e-6, "output diff {out_diff}");
+        assert!(ssm_diff <= 1.0e-6, "ssm diff {ssm_diff}");
     }
 }

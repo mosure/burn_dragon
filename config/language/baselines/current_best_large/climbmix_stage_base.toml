@@ -1,3 +1,5 @@
+extends = ["../../shared/current_best_large_dense_stack.toml"]
+
 [dataset]
 cache_dir = "data/nemotron_climbmix"
 train_split_ratio = 0.9
@@ -15,24 +17,13 @@ type = "openwebtext_gpt2"
 max_records = 2048
 
 [training]
-sequence_kernel_override = "bdh_linear_dense_score_experimental"
-block_size = 128
-tbptt_chunk_size = 128
-tbptt_persist_across_steps = true
-min_logical_block_size = 1024
-batch_size = 8
-gradient_accumulation_steps = 1
-target_effective_batch_size = 8
+# Dense-score remains the promoted operational executor on the large staged line.
+# The tuned Mamba contender uses the sibling current_best_large_mamba_contender baseline.
 checkpoint_interval_iters = 2000
 log_frequency = 100
-seed = 1337
 # Base large stage keeps the proven 24h rung. Longer baselines extend this file
 # and only override the wall-clock budget knobs below.
 max_iters = 70000
-
-[optimizer]
-learning_rate = 0.0003
-weight_decay = 0.1
 
 [optimizer.lr_schedule]
 type = "cosine"
@@ -40,28 +31,23 @@ min_lr = 0.00003
 num_iters = 70000
 
 [generation]
-prompt = "464 329 262"
-temperature = 1.0
-top_k = 1
+prompt = "The"
+temperature = 0.9
+top_k = 40
+output_format = "decoded_text"
 
-[model]
-n_layer = 8
-n_embd = 256
-n_head = 1
-latent_total = 65536
-mlp_internal_dim_multiplier = 256
-rollout_fast_steps_per_slow_step = 1
-relu_threshold = 0.0
-dropout = 0.0
-fused_kernels = true
-rotary_embedding = "alibi"
+[generation.prompt_tokenizer]
+source = "config"
+cache_dir = "data/tokenizers/gpt2"
+type = "rust_bpe"
+vocab_path = "tokenizer.json"
+mergeable_vocab_size = 50256
+eos_id = 50256
 
-[model.mhc]
-enabled = true
-num_streams = 2
-num_views = 1
-coefficient_policy = "dynamic_positive"
-mhc_iters = 4
-mhc_tau = 0.1
-add_branch_out_to_residual = true
-dropout = 0.0
+[generation.decode_tokenizer]
+source = "config"
+cache_dir = "data/tokenizers/gpt2"
+type = "rust_bpe"
+vocab_path = "tokenizer.json"
+mergeable_vocab_size = 50256
+eos_id = 50256

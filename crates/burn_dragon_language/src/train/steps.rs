@@ -1,4 +1,5 @@
 use crate::train::prelude::*;
+use burn::module::Ignored;
 use burn_dragon_core::ModelState;
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
@@ -22,6 +23,7 @@ fn next_streaming_runtime_key() -> usize {
 pub(crate) struct LanguageTrainModel<B: BackendTrait> {
     pub(crate) model: BDH<B>,
     pub(crate) tbptt_chunk_size: Option<usize>,
+    pub(crate) pipeline_plan: Ignored<Option<PipelinePlan>>,
     #[module(ignore)]
     pub(crate) tbptt_persist_across_steps: bool,
     #[module(ignore)]
@@ -33,6 +35,7 @@ impl<B: BackendTrait> LanguageTrainModel<B> {
         Self {
             model,
             tbptt_chunk_size: None,
+            pipeline_plan: Ignored(None),
             tbptt_persist_across_steps: false,
             streaming_runtime_key: next_streaming_runtime_key(),
         }
@@ -40,6 +43,11 @@ impl<B: BackendTrait> LanguageTrainModel<B> {
 
     pub(crate) fn with_tbptt_chunk_size(mut self, tbptt_chunk_size: Option<usize>) -> Self {
         self.tbptt_chunk_size = tbptt_chunk_size;
+        self
+    }
+
+    pub(crate) fn with_pipeline_plan(mut self, pipeline_plan: Option<PipelinePlan>) -> Self {
+        self.pipeline_plan = Ignored(pipeline_plan);
         self
     }
 
@@ -102,6 +110,119 @@ impl<B: BackendTrait> LanguageTrainModel<B> {
         end: usize,
     ) -> Tensor<B, 2, Int> {
         tensor.slice([0..batch_size, start..end])
+    }
+
+    fn slice_batch(
+        tensor: Tensor<B, 2, Int>,
+        batch_start: usize,
+        batch_end: usize,
+    ) -> Tensor<B, 2, Int> {
+        let [_batch_size, block_size] = tensor.shape().dims();
+        tensor.slice([batch_start..batch_end, 0..block_size])
+    }
+
+    fn pipeline_enabled(&self) -> bool {
+        self.pipeline_plan.is_some()
+    }
+
+    fn forward_loss_with_pipeline(
+        &self,
+        inputs: Tensor<B, 2, Int>,
+        targets: Tensor<B, 2, Int>,
+        summary_event_mask: Option<Tensor<B, 2, Int>>,
+    ) -> (Tensor<B, 1>, Tensor<B, 3>, Tensor<B, 3>) {
+        let plan = self
+            .pipeline_plan
+            .as_ref()
+            .expect("forward_loss_with_pipeline requires a pipeline plan");
+        assert!(
+            !self.tbptt_persist_across_steps,
+            "pipeline execution does not support tbptt_persist_across_steps"
+        );
+        assert!(
+            self.tbptt_chunk_size.is_none(),
+            "pipeline execution does not support tbptt chunking"
+        );
+
+        let [batch_size, _block_size] = inputs.shape().dims();
+        let ranges = split_microbatch_ranges(batch_size, plan.microbatches)
+            .expect("pipeline execution requires batch_size >= microbatches");
+        let chunk_inputs = ranges
+            .iter()
+            .map(|range| Self::slice_batch(inputs.clone(), range.start, range.end))
+            .collect::<Vec<_>>();
+        let chunk_targets = ranges
+            .iter()
+            .map(|range| Self::slice_batch(targets.clone(), range.start, range.end))
+            .collect::<Vec<_>>();
+        let chunk_masks = ranges
+            .iter()
+            .map(|range| {
+                summary_event_mask
+                    .clone()
+                    .map(|mask| Self::slice_batch(mask, range.start, range.end))
+            })
+            .collect::<Vec<_>>();
+
+        let mut chunk_states = (0..plan.microbatches)
+            .map(|_| self.model.init_state())
+            .collect::<Vec<_>>();
+        let mut pipeline_states = vec![None; plan.microbatches];
+
+        for event in plan.events.iter().filter(|event| {
+            matches!(
+                event.kind,
+                burn_dragon_train::train::pipeline::PipelineEventKind::Forward
+            )
+        }) {
+            let microbatch_id = event.microbatch_id;
+            if pipeline_states[microbatch_id].is_none() {
+                pipeline_states[microbatch_id] = Some(
+                    self.model
+                        .begin_language_pipeline(chunk_inputs[microbatch_id].clone()),
+                );
+            }
+            let assignment = plan.assignment(event.virtual_stage_id).clone();
+            let state = &mut chunk_states[microbatch_id];
+            let stage_state = pipeline_states[microbatch_id]
+                .take()
+                .expect("microbatch stage state");
+            pipeline_states[microbatch_id] =
+                Some(self.model.forward_language_pipeline_stage_with_state(
+                    stage_state,
+                    state,
+                    assignment.layer_range.clone(),
+                    chunk_masks[microbatch_id].clone(),
+                ));
+        }
+
+        let mut total_loss: Option<Tensor<B, 1>> = None;
+        let mut hidden_chunks = Vec::with_capacity(plan.microbatches);
+        let mut logits_chunks = Vec::with_capacity(plan.microbatches);
+        for microbatch_id in 0..plan.microbatches {
+            let (hidden, logits) = self.model.finish_language_pipeline_with_state(
+                pipeline_states[microbatch_id]
+                    .take()
+                    .expect("pipeline state after scheduled forward"),
+                &mut chunk_states[microbatch_id],
+            );
+            let weight = ranges[microbatch_id].len() as f32 / batch_size as f32;
+            let chunk_loss =
+                language_model_loss::<B>(logits.clone(), chunk_targets[microbatch_id].clone())
+                    .mul_scalar(weight);
+            total_loss = Some(match total_loss {
+                Some(accumulated) => accumulated + chunk_loss,
+                None => chunk_loss,
+            });
+            hidden_chunks.push(hidden);
+            logits_chunks.push(logits);
+        }
+
+        (
+            total_loss.expect("pipeline forward should produce at least one microbatch loss"),
+            Tensor::cat(hidden_chunks, 0),
+            Tensor::cat(logits_chunks, 0),
+        )
     }
 
     fn forward_loss_with_tbptt(
@@ -174,9 +295,18 @@ impl<B: AutodiffBackend> TrainStep for LanguageTrainModel<B> {
             .then(|| summary_event_mask.clone())
             .flatten();
         let mut step_state = self.load_step_state(reset_stream_state);
-        let (loss, probe_hidden, probe_logits, forward_ns) = if let Some(chunk_size) =
-            tbptt_chunk_size
-        {
+        let (loss, probe_hidden, probe_logits, forward_ns) = if self.pipeline_enabled() {
+            let forward_start = Instant::now();
+            let (loss, hidden, logits) =
+                self.forward_loss_with_pipeline(inputs, targets.clone(), summary_event_mask);
+            step_state = self.model.init_state();
+            (
+                loss,
+                Some(hidden),
+                Some(logits),
+                forward_start.elapsed().as_nanos(),
+            )
+        } else if let Some(chunk_size) = tbptt_chunk_size {
             if detail_prof_enabled {
                 let [batch_size, block_size] = inputs.shape().dims();
                 let mut hidden_chunks = Vec::new();
@@ -414,6 +544,14 @@ impl<B: BackendTrait> ValidStep for LanguageTrainModel<B> {
     type Output = LanguageModelOutput<B>;
 
     fn step(&self, batch: SequenceBatch<B>) -> LanguageModelOutput<B> {
+        if self.pipeline_enabled() {
+            let (loss, _hidden, _logits) = self.forward_loss_with_pipeline(
+                batch.inputs,
+                batch.targets,
+                batch.summary_event_mask,
+            );
+            return LanguageModelOutput::new(loss);
+        }
         let logits = if let Some(summary_event_mask) = batch.summary_event_mask {
             if let Some(chunk_size) =
                 self.effective_tbptt_chunk_size(batch.inputs.shape().dims::<2>()[1])
@@ -510,7 +648,7 @@ mod tests {
 
     fn tiny_model_config() -> BDHConfig {
         BDHConfig {
-            n_layer: 1,
+            n_layer: 2,
             n_embd: 8,
             n_head: 1,
             mlp_internal_dim_multiplier: 1,
@@ -518,6 +656,21 @@ mod tests {
             vocab_size: 16,
             ..Default::default()
         }
+    }
+
+    fn pipeline_plan_for_tiny_model() -> PipelinePlan {
+        build_pipeline_plan(
+            tiny_model_config().n_layer,
+            &burn_dragon_train::ParallelPipelineConfig {
+                enabled: true,
+                stage_count: 2,
+                virtual_stages_per_rank: 1,
+                schedule: burn_dragon_train::PipelineScheduleKind::Interleaved1f1b,
+                microbatches: 2,
+                ..Default::default()
+            },
+        )
+        .expect("pipeline plan")
     }
 
     fn loss_scalar<B: BackendTrait>(output: LanguageModelOutput<B>) -> f32 {
@@ -564,6 +717,46 @@ mod tests {
         let synced = output.item.sync();
         let loss = loss_scalar(synced);
         assert!(loss.is_finite(), "tbptt train loss must be finite");
+    }
+
+    #[test]
+    fn pipeline_valid_step_matches_full_loss_value() {
+        let device = <TestValidBackend as BackendTrait>::Device::default();
+        let model = BDH::<TestValidBackend>::new(tiny_model_config(), &device);
+        let baseline = LanguageTrainModel::new(model.clone());
+        let pipelined =
+            LanguageTrainModel::new(model).with_pipeline_plan(Some(pipeline_plan_for_tiny_model()));
+        let batch = make_batch::<TestValidBackend>(
+            &device,
+            &[0, 1, 2, 3, 7, 6, 5, 4],
+            &[1, 2, 3, 4, 6, 5, 4, 3],
+            [2, 4],
+        );
+
+        let baseline_loss = loss_scalar(ValidStep::step(&baseline, batch.clone()));
+        let pipeline_loss = loss_scalar(ValidStep::step(&pipelined, batch));
+        assert!(
+            (baseline_loss - pipeline_loss).abs() < 1.0e-5,
+            "expected pipeline loss to match full loss value, got baseline={baseline_loss} pipeline={pipeline_loss}"
+        );
+    }
+
+    #[test]
+    fn pipeline_train_step_runs_and_emits_finite_loss() {
+        let device = <TestBackend as BackendTrait>::Device::default();
+        let model = LanguageTrainModel::new(BDH::<TestBackend>::new(tiny_model_config(), &device))
+            .with_pipeline_plan(Some(pipeline_plan_for_tiny_model()));
+        let batch = make_batch::<TestBackend>(
+            &device,
+            &[0, 1, 2, 3, 7, 6, 5, 4],
+            &[1, 2, 3, 4, 6, 5, 4, 3],
+            [2, 4],
+        );
+
+        let output = TrainStep::step(&model, batch);
+        let synced = output.item.sync();
+        let loss = loss_scalar(synced);
+        assert!(loss.is_finite(), "pipeline train loss must be finite");
     }
 
     #[test]

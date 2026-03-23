@@ -3,27 +3,26 @@ pub mod char_vocab;
 pub mod pretokenized;
 pub mod rust_bpe;
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-#[cfg(feature = "train")]
-use std::path::{Path, PathBuf};
-
-#[cfg(feature = "train")]
 use anyhow::{Result, anyhow};
-#[cfg(feature = "train")]
 use byte::ByteTokenizer;
-#[cfg(feature = "train")]
 use char_vocab::CharVocab;
-#[cfg(feature = "train")]
 use pretokenized::PretokenizedTokenizer;
-#[cfg(feature = "train")]
 use rust_bpe::RustBpeTokenizer;
-#[cfg(feature = "train")]
 use serde::{Deserialize, Serialize};
 
 pub trait Tokenizer: Send + Sync {
     fn encode(&self, text: &str, add_bos: bool, add_eos: bool) -> Vec<u32>;
     fn decode(&self, ids: &[u32]) -> String;
+    fn decode_with_options(&self, ids: &[u32], stop_at_eos: bool) -> String {
+        if stop_at_eos {
+            self.decode(ids)
+        } else {
+            self.decode(ids)
+        }
+    }
     fn len(&self) -> usize;
     fn is_empty(&self) -> bool;
     fn bos_id(&self) -> Option<u32>;
@@ -35,7 +34,6 @@ pub trait Tokenizer: Send + Sync {
 
 pub type SharedTokenizer = Arc<dyn Tokenizer>;
 
-#[cfg(feature = "train")]
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct TokenizerConfig {
     #[serde(default)]
@@ -44,7 +42,6 @@ pub struct TokenizerConfig {
     pub kind: TokenizerKind,
 }
 
-#[cfg(feature = "train")]
 impl Default for TokenizerConfig {
     fn default() -> Self {
         Self {
@@ -54,7 +51,6 @@ impl Default for TokenizerConfig {
     }
 }
 
-#[cfg(feature = "train")]
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TokenizerKind {
@@ -64,14 +60,12 @@ pub enum TokenizerKind {
     RustBpe(RustBpeTokenizerConfig),
 }
 
-#[cfg(feature = "train")]
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct CharTokenizerConfig {
     #[serde(default = "default_true")]
     pub include_unknown: bool,
 }
 
-#[cfg(feature = "train")]
 impl Default for CharTokenizerConfig {
     fn default() -> Self {
         Self {
@@ -80,14 +74,12 @@ impl Default for CharTokenizerConfig {
     }
 }
 
-#[cfg(feature = "train")]
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct ByteTokenizerConfig {
     #[serde(default = "default_true")]
     pub add_special_tokens: bool,
 }
 
-#[cfg(feature = "train")]
 impl Default for ByteTokenizerConfig {
     fn default() -> Self {
         Self {
@@ -96,7 +88,6 @@ impl Default for ByteTokenizerConfig {
     }
 }
 
-#[cfg(feature = "train")]
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct PretokenizedTokenizerConfig {
     pub vocab_size: usize,
@@ -110,7 +101,6 @@ pub struct PretokenizedTokenizerConfig {
     pub unk_id: Option<u32>,
 }
 
-#[cfg(feature = "train")]
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct RustBpeTokenizerConfig {
     pub mergeable_vocab_size: usize,
@@ -126,7 +116,6 @@ pub struct RustBpeTokenizerConfig {
     pub unk_id: Option<u32>,
 }
 
-#[cfg(feature = "train")]
 impl TokenizerConfig {
     pub fn storage_path(&self, cache_dir: &Path) -> Option<PathBuf> {
         match &self.kind {
@@ -260,7 +249,6 @@ impl TokenizerConfig {
     }
 }
 
-#[cfg(feature = "train")]
 fn default_true() -> bool {
     true
 }

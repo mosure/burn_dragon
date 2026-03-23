@@ -1,0 +1,4 @@
+extends = [
+  "shakespeare_deployed_repro.toml",
+  "../shared/residual_connector_attention_residual_modifier.toml",
+]

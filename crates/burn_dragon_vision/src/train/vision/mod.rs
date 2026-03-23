@@ -81,3 +81,4 @@ pub(crate) use video::models::{VisionVideoLejepaLosses, VisionVideoLejepaModel};
 pub use video::profile::{
     VisionVideoTrainProfileSnapshot, video_train_profile_reset, video_train_profile_snapshot,
 };
+pub(crate) use video::vjepa21::VisionVideoVjepa21Model;

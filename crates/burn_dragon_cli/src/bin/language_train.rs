@@ -926,9 +926,13 @@ mod tests {
             generation: GenerationConfig {
                 prompt: "abc".to_string(),
                 max_tokens: Some(1),
+                max_chars: None,
                 temperature: 1.0,
                 top_k: None,
                 context_strategy: ContextStrategyConfig::Infinite,
+                prompt_tokenizer: Default::default(),
+                decode_tokenizer: Default::default(),
+                output_format: Default::default(),
             },
             wgpu: WgpuRuntimeConfig::default(),
             model: ModelOverrides::default(),

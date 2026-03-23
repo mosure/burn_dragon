@@ -173,6 +173,10 @@ impl CharVocab {
     }
 
     pub fn decode(&self, ids: &[u32]) -> String {
+        self.decode_with_options(ids, true)
+    }
+
+    pub fn decode_with_options(&self, ids: &[u32], stop_at_eos: bool) -> String {
         let mut text = String::new();
         for &id in ids {
             let idx = id as usize;
@@ -186,7 +190,10 @@ impl CharVocab {
             }
 
             if id == self.eos {
-                break;
+                if stop_at_eos {
+                    break;
+                }
+                continue;
             }
 
             if Some(id) == self.unk {
@@ -244,6 +251,10 @@ impl super::Tokenizer for CharVocab {
 
     fn decode(&self, ids: &[u32]) -> String {
         Self::decode(self, ids)
+    }
+
+    fn decode_with_options(&self, ids: &[u32], stop_at_eos: bool) -> String {
+        Self::decode_with_options(self, ids, stop_at_eos)
     }
 
     fn len(&self) -> usize {

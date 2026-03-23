@@ -1,0 +1,22 @@
+name = "current_best_large_mamba_contender_48h"
+output_dir = "runs/language_bundles/current_best_large_mamba_contender"
+resume_from_last_completed_stage = true
+
+[[stages]]
+# Keep the NCA warm-start budget identical to the promoted dense-score bundle so the comparison
+# stays apples-to-apples at the bundle level.
+name = "nca_prepretrain"
+type = "language_train"
+config = "current_best_large_mamba_contender/nca_stage_base.toml"
+backend = "cuda"
+resume_from_last_checkpoint = true
+
+[[stages]]
+# Same 48h budget envelope as the promoted dense-score bundle, but with the tuned Mamba line.
+name = "climbmix_pretrain"
+depends_on = ["nca_prepretrain"]
+type = "language_train"
+config = "current_best_large_mamba_contender/climbmix_stage_48h.toml"
+backend = "cuda"
+init_checkpoint_from_stage = "nca_prepretrain"
+resume_from_last_checkpoint = true

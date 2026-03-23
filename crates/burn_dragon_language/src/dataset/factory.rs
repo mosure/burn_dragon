@@ -5,7 +5,9 @@ use crate::config::{
     TrainingHyperparameters,
 };
 
-use super::{Dataset, HuggingFaceDataset, ShakespeareDataset, UniversalityDataset};
+use super::{
+    Dataset, HuggingFaceDataset, LocalTextDataset, ShakespeareDataset, UniversalityDataset,
+};
 
 pub fn build_dataset(
     cfg: &DatasetConfig,
@@ -22,6 +24,17 @@ pub fn build_dataset(
                 url.as_deref(),
             )
             .with_context(|| "failed to prepare Shakespeare dataset")?,
+        ),
+        DatasetSourceConfig::LocalText { path } => Dataset::from_local_text(
+            LocalTextDataset::new(
+                &cfg.cache_dir,
+                path,
+                training.block_size,
+                training.batch_size,
+                cfg.train_split_ratio,
+                &cfg.tokenizer,
+            )
+            .with_context(|| format!("failed to prepare local text dataset {}", path.display()))?,
         ),
         DatasetSourceConfig::HuggingFace(hf_cfg) => Dataset::from_huggingface(
             HuggingFaceDataset::new(
@@ -172,6 +185,14 @@ pub fn build_dataset(
     let description = match &dataset {
         Dataset::Shakespeare(ds) => format!(
             "Prepared Shakespeare dataset with batch_size={}, block_size={}, split_ratio={}",
+            ds.batch_size(),
+            ds.block_size(),
+            ds.train_split_ratio()
+        ),
+        Dataset::LocalText(ds) => format!(
+            "Prepared local text dataset {} with docs={}, batch_size={}, block_size={}, split_ratio={}",
+            ds.source_path().display(),
+            ds.document_count(),
             ds.batch_size(),
             ds.block_size(),
             ds.train_split_ratio()

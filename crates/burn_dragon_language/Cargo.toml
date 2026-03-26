@@ -14,6 +14,7 @@ readme = "../../README.md"
 default = []
 cli = []
 ddp = ["train", "burn_dragon_train/ddp", "burn-train/ddp", "dep:burn-collective"]
+probe = ["burn_dragon_core/probe"]
 train = [
   "burn/dataset",
   "dep:burn_dragon_checkpoint",

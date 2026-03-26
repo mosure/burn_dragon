@@ -1,4 +1,4 @@
-use crate::model::vision::VisionProjectionHead;
+use crate::model::VisionProjectionHead;
 use crate::train::prelude::*;
 
 #[cfg(feature = "burn_dino")]
@@ -125,7 +125,7 @@ impl<B: BackendTrait> VisionDistillModel<B> {
             .teacher_targets
             .iter()
             .filter_map(|target| {
-                VisionTeacherDecoderHead::from_target(
+                VisionTeacherDecoderHead::<B>::from_target(
                     target,
                     model.projection_dim(),
                     model.normalization_config(),

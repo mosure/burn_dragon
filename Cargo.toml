@@ -39,6 +39,7 @@ members = [
   "crates/burn_dragon_cli",
   "crates/burn_dragon_language",
   "crates/burn_dragon_multimodal",
+  "crates/burn_dragon_reasoning",
   "crates/burn_dragon_sudoku",
   "crates/burn_dragon_stream",
   "crates/burn_dragon_train",
@@ -60,6 +61,11 @@ benchmark = [
   "burn_dragon_sudoku/benchmark",
   "burn_dragon_train/benchmark",
   "burn_dragon_vision/benchmark",
+]
+probe = [
+  "burn_dragon_core/probe",
+  "burn_dragon_language/probe",
+  "burn_dragon_multimodal/probe",
 ]
 cli = [
   "train",
@@ -88,7 +94,13 @@ integration_test = [
   "burn_dragon_vision/integration_test",
 ]
 web = ["burn_dragon_core/web", "burn_dragon_language/web", "burn_dragon_web"]
-viz = ["burn_dragon_core/viz", "burn_dragon_language/viz", "bevy_dragon/viz", "bevy_dragon"]
+viz = [
+  "burn_dragon_core/viz",
+  "burn_dragon_language/viz",
+  "burn_dragon_multimodal/viz",
+  "bevy_dragon/viz",
+  "bevy_dragon",
+]
 
 
 [dependencies]

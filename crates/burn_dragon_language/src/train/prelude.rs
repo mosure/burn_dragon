@@ -26,7 +26,7 @@ pub(crate) use burn::nn::{LayerNorm, LayerNormConfig, Linear, LinearConfig};
 pub(crate) use burn::optim::adaptor::OptimizerAdaptor;
 pub(crate) use burn::optim::grad_clipping::GradientClippingConfig;
 pub(crate) use burn::optim::{
-    AdamW, AdamWConfig, GradientsAccumulator, GradientsParams, LearningRate,
+    AdamW, AdamWConfig, GradientsAccumulator, GradientsParams, LearningRate, Optimizer,
 };
 pub(crate) use burn::record::{BinFileRecorder, FullPrecisionSettings, Recorder};
 pub(crate) use burn::tensor::Distribution as TensorDistribution;
@@ -67,18 +67,16 @@ pub(crate) use crate::{ContextStrategyConfig, GenerationConfig, ModelOverrides};
 pub(crate) use crate::loss::language_model_loss;
 pub(crate) use crate::train::steps::LanguageTrainModel;
 pub(crate) use burn_dragon_core::{BDH, BDHConfig, LanguagePipelineState, ModelState};
-pub(crate) use burn_dragon_train::train::constants::{
-    FAST_TRAIN, ValidBackend, fast_train_enabled,
-};
+pub(crate) use burn_dragon_train::train::constants::ValidBackend;
 pub(crate) use burn_dragon_train::train::metrics::{
     DeviceMetric, LanguageModelOutput, LanguageModelTrainItem, LossValue, MetricSinkEntry,
     MetricSinkSplit, MetricSinkValueKind, MetricsSinkSpec, ScalarMetric, ScalarValue,
 };
 pub(crate) use burn_dragon_train::train::pipeline::{
-    PipelinePlan, PipelineRankWorkload, ResolvedLrScheduler, ScheduleSource, TrainSchedule,
-    adamw_config_from_optimizer, build_pipeline_plan, build_pipeline_rank_workload, create_run_dir,
-    resolve_valid_steps_per_epoch, simulate_pipeline_communication, split_microbatch_ranges,
-    write_latest_run,
+    PipelinePlan, PipelineRankWorkload, ResolvedLrScheduler, ResolvedOptimizer, ScheduleSource,
+    TrainSchedule, adamw_config_from_optimizer, build_pipeline_plan, build_pipeline_rank_workload,
+    create_run_dir, resolve_optimizer, resolve_valid_steps_per_epoch,
+    simulate_pipeline_communication, split_microbatch_ranges, write_latest_run,
 };
 #[cfg(feature = "ddp")]
 pub(crate) use burn_dragon_train::train::runtime::resolve_collective_config;
@@ -88,7 +86,8 @@ pub(crate) use burn_dragon_train::train::runtime::{
     resolve_pipeline_parallel_layout, resolve_training_devices,
 };
 pub(crate) use burn_dragon_train::{
-    GdpoConfig, GdpoHardGate, KernelSpec, LayerStateSpec, LearningRateScheduleConfig, ModelSpec,
-    OptimizerConfig, ParallelConfig, ParallelSpec, ParallelismKind, SequenceKernelKind,
-    StateAxisSpec, StateLayout, StateTensorSpec, WgpuRuntimeConfig,
+    GdpoConfig, GdpoHardGate, KernelSpec, LayerStateSpec, LearningRateScheduleConfig,
+    LowBitMemorySpec, LowBitModelSpec, ModelSpec, OptimizerConfig, OptimizerKind,
+    OptimizerScheduleMode, OptimizerSpec, ParallelConfig, ParallelSpec, ParallelismKind,
+    SequenceKernelKind, StateAxisSpec, StateLayout, StateTensorSpec, WgpuRuntimeConfig,
 };

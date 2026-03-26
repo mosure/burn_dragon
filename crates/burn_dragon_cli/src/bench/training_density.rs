@@ -10,6 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use burn_dragon::vision::{VisionArtifactHeader, push_vision_artifact_markdown_prelude};
+use burn_dragon_train::train::pipeline::resolve_latest_run_name_in;
 use serde::Serialize;
 use serde_json::Value;
 
@@ -611,10 +612,7 @@ fn run_case(
 }
 
 fn read_latest_run(run_root: &Path) -> Option<String> {
-    fs::read_to_string(run_root.join("latest"))
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
+    resolve_latest_run_name_in(run_root)
 }
 
 fn query_nvidia_smi() -> Option<TrainingDensityBenchGpuSample> {

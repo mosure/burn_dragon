@@ -1,10 +1,10 @@
 #![recursion_limit = "256"]
 
+#[cfg(feature = "language-ddp")]
 use std::fs;
 use std::path::{Path, PathBuf};
 #[cfg(feature = "language-ddp")]
 use std::process::{Command as ProcessCommand, Stdio};
-use std::sync::atomic::Ordering;
 #[cfg(feature = "language-ddp")]
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -13,10 +13,13 @@ use anyhow::Context;
 use anyhow::Result;
 use burn::tensor::backend::AutodiffBackend;
 use burn_autodiff::Autodiff;
+use burn_autodiff::checkpoint::strategy::BalancedCheckpointing;
 #[cfg(feature = "language-ddp")]
 use burn_collective::start_global_orchestrator;
 use burn_dragon::api::core::recurrent::{
     logits_projection_profile_reset, logits_projection_profile_snapshot,
+    low_bit_training_lowrank_memory_profile_snapshot,
+    lowrank_residual_memory_profile_reset, lowrank_residual_memory_profile_snapshot,
     lowrank_residual_profile_reset, lowrank_residual_profile_snapshot,
 };
 use burn_dragon_kernel::api::projection::{
@@ -25,23 +28,22 @@ use burn_dragon_kernel::api::projection::{
     relu_lowrank_grad_weight_profile_reset, relu_lowrank_grad_weight_profile_snapshot,
 };
 use burn_dragon_kernel::api::recurrent::{recurrent_profile_reset, recurrent_profile_snapshot};
-use burn_dragon_language::checkpoint::{
-    RUN_DIR_ENV, RUN_NAME_ENV, RUN_ROOT_ENV, resolve_latest_run_dir_in,
-};
+use burn_dragon_language::checkpoint::{RUN_DIR_ENV, RUN_NAME_ENV, RUN_ROOT_ENV};
 use burn_dragon_language::train::{
     build_vocab_only, prepare_dataset, train_backend as train_language_backend,
 };
 use burn_dragon_language::{
     TrainingConfig as LanguageTrainingConfig, load_training_config as load_language_training_config,
 };
-use burn_dragon_train::train::constants::FAST_TRAIN;
-use burn_dragon_train::train::pipeline::create_run_dir;
+use burn_dragon_train::cli::init_experiment_tracing;
+use burn_dragon_train::train::pipeline::{
+    PlannedRunArtifacts, TrainingLaunchMode, plan_run_artifacts, resolve_resume_run_dir,
+    resolve_run_root_for_config_paths,
+};
 use burn_dragon_train::wgpu::init_runtime;
 use burn_ndarray::NdArray;
 use burn_wgpu::{CubeBackend, WgpuRuntime};
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use tracing_appender::non_blocking::WorkerGuard;
-use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 #[cfg(feature = "language-cuda")]
 use burn_cuda::Cuda;
@@ -49,6 +51,28 @@ use burn_cuda::Cuda;
 type WgpuNoFusion = CubeBackend<WgpuRuntime, f32, i32, u32>;
 
 const PROCESS_GROUP_RUN_DIR_ENV: &str = "BURN_DRAGON_PROCESS_GROUP_RUN_DIR";
+
+fn balanced_checkpointing_enabled() -> bool {
+    std::env::var_os("BURN_DRAGON_BALANCED_CHECKPOINTING").is_some()
+}
+
+fn print_low_bit_training_memory_profile() {
+    let profile = low_bit_training_lowrank_memory_profile_snapshot();
+    for (stage_name, stage) in [
+        ("after_weight_codes", profile.after_weight_codes),
+        ("after_activation_codes", profile.after_activation_codes),
+        ("after_output", profile.after_output),
+    ] {
+        eprintln!(
+            "[stage-profile][training-lowbit-lowrank-memory] calls={} stage={} reserved_bytes={} in_use_bytes={} tracked_tensor_bytes={}",
+            profile.calls,
+            stage_name,
+            stage.reserved_bytes,
+            stage.in_use_bytes,
+            stage.tracked_tensor_bytes,
+        );
+    }
+}
 
 fn default_or_explicit_config_paths(default_base: &str, explicit: &[PathBuf]) -> Vec<PathBuf> {
     if explicit.is_empty() {
@@ -93,9 +117,9 @@ struct LanguageArgs {
     /// Backend to use for training.
     #[arg(long, value_enum, default_value_t = BackendArg::Cuda)]
     backend: BackendArg,
-    /// Resume from the newest checkpoint under this config family's run root.
-    #[arg(long)]
-    resume_from_last_checkpoint: bool,
+    /// Explicit launch intent for fresh runs, exact resumes, or latest-checkpoint reuse.
+    #[arg(long, value_enum, default_value_t = LaunchModeArg::FromConfig)]
+    launch_mode: LaunchModeArg,
     /// Build vocabulary and exit without training.
     #[arg(long)]
     build_vocab_only: bool,
@@ -122,9 +146,9 @@ struct LanguageLocalDdpArgs {
     /// Backend to use for training.
     #[arg(long, value_enum, default_value_t = BackendArg::Ndarray)]
     backend: BackendArg,
-    /// Resume from the newest checkpoint under this config family's run root.
-    #[arg(long)]
-    resume_from_last_checkpoint: bool,
+    /// Explicit launch intent for fresh runs, exact resumes, or latest-checkpoint reuse.
+    #[arg(long, value_enum, default_value_t = LaunchModeArg::FromConfig)]
+    launch_mode: LaunchModeArg,
     /// Number of launched ranks.
     #[arg(long, default_value_t = 2)]
     world_size: usize,
@@ -149,50 +173,38 @@ enum BackendArg {
     Ndarray,
 }
 
-fn sanitize_run_root_component(value: &str) -> String {
-    let mut output = String::with_capacity(value.len());
-    let mut previous_was_sep = false;
-    for ch in value.chars() {
-        let normalized = if ch.is_ascii_alphanumeric() { ch } else { '_' };
-        if normalized == '_' {
-            if previous_was_sep {
-                continue;
+#[derive(Copy, Clone, Debug, ValueEnum)]
+enum LaunchModeArg {
+    FromConfig,
+    Fresh,
+    ResumeExactRun,
+    ResumeLatestCheckpointIfPresent,
+    InitFromCheckpoint,
+}
+
+impl LaunchModeArg {
+    fn resolve(self, config_mode: TrainingLaunchMode) -> TrainingLaunchMode {
+        match self {
+            Self::FromConfig => config_mode,
+            Self::Fresh => TrainingLaunchMode::Fresh,
+            Self::ResumeExactRun => TrainingLaunchMode::ResumeExactRun,
+            Self::ResumeLatestCheckpointIfPresent => {
+                TrainingLaunchMode::ResumeLatestCheckpointIfPresent
             }
-            previous_was_sep = true;
-        } else {
-            previous_was_sep = false;
+            Self::InitFromCheckpoint => TrainingLaunchMode::InitFromCheckpoint,
         }
-        output.push(normalized);
     }
-    output.trim_matches('_').to_string()
-}
 
-fn config_family_name(config_paths: &[PathBuf]) -> String {
-    let selected = config_paths
-        .last()
-        .cloned()
-        .unwrap_or_else(|| PathBuf::from("config/language/base.toml"));
-    let stem = selected.with_extension("");
-    let rendered = stem.to_string_lossy();
-    let sanitized = sanitize_run_root_component(&rendered);
-    if sanitized.is_empty() {
-        "language".to_string()
-    } else {
-        sanitized
+    #[cfg(feature = "language-ddp")]
+    fn as_cli_value(self) -> &'static str {
+        match self {
+            Self::FromConfig => "from-config",
+            Self::Fresh => "fresh",
+            Self::ResumeExactRun => "resume-exact-run",
+            Self::ResumeLatestCheckpointIfPresent => "resume-latest-checkpoint-if-present",
+            Self::InitFromCheckpoint => "init-from-checkpoint",
+        }
     }
-}
-
-fn default_language_run_root(config_paths: &[PathBuf]) -> PathBuf {
-    PathBuf::from("runs")
-        .join("language")
-        .join(config_family_name(config_paths))
-}
-
-#[derive(Debug, Clone)]
-struct PlannedRunArtifacts {
-    run_root: PathBuf,
-    run_dir: PathBuf,
-    run_name: String,
 }
 
 #[derive(Debug)]
@@ -217,46 +229,28 @@ impl Drop for RerunSessionGuard {
     }
 }
 
-fn resolve_cli_run_root(config_paths: &[PathBuf]) -> PathBuf {
+fn resolve_cli_run_root(config: &LanguageTrainingConfig, config_paths: &[PathBuf]) -> PathBuf {
     std::env::var_os(RUN_ROOT_ENV)
         .map(PathBuf::from)
-        .unwrap_or_else(|| default_language_run_root(config_paths))
-}
-
-fn resolve_resume_run_dir_from_latest(run_root: &Path) -> Result<PathBuf> {
-    let run_dir = resolve_latest_run_dir_in(run_root).ok_or_else(|| {
-        anyhow::anyhow!(
-            "no latest run checkpoint family found under {}; start a run first or pass training.resume_run_dir explicitly",
-            run_root.display()
-        )
-    })?;
-    if !run_dir.is_dir() {
-        return Err(anyhow::anyhow!(
-            "latest run directory does not exist or is not a directory: {}",
-            run_dir.display()
-        ));
-    }
-    Ok(run_dir)
+        .unwrap_or_else(|| {
+            resolve_run_root_for_config_paths("language", &config.run_layout, config_paths)
+        })
 }
 
 fn apply_run_root_and_resume_policy(
     mut config: LanguageTrainingConfig,
     config_paths: &[PathBuf],
-    resume_from_last_checkpoint: bool,
+    launch_mode_override: LaunchModeArg,
 ) -> Result<(LanguageTrainingConfig, PathBuf)> {
-    let run_root = resolve_cli_run_root(config_paths);
-    if resume_from_last_checkpoint && config.training.resume_run_dir.is_none() {
-        config.training.resume_run_dir = Some(resolve_resume_run_dir_from_latest(&run_root)?);
-    }
+    let run_root = resolve_cli_run_root(&config, config_paths);
+    let resolved_launch_mode = launch_mode_override.resolve(config.training.launch_mode);
+    config.training.launch_mode = resolved_launch_mode;
+    config.training.resume_run_dir = resolve_resume_run_dir(
+        &run_root,
+        config.training.resume_run_dir.as_deref(),
+        resolved_launch_mode,
+    )?;
     Ok((config, run_root))
-}
-
-fn derive_run_name(run_dir: &Path) -> Result<String> {
-    run_dir
-        .file_name()
-        .and_then(|value| value.to_str())
-        .map(ToOwned::to_owned)
-        .ok_or_else(|| anyhow::anyhow!("failed to derive run name from {}", run_dir.display()))
 }
 
 fn plan_single_process_run_artifacts(
@@ -266,32 +260,7 @@ fn plan_single_process_run_artifacts(
     if config.training.resume_run_dir.is_none() && config.training.max_iters == 0 {
         return Ok(None);
     }
-    if let Some(run_dir) = &config.training.resume_run_dir {
-        fs::create_dir_all(run_dir).map_err(|err| {
-            anyhow::anyhow!(
-                "failed to create resume run directory {}: {err}",
-                run_dir.display()
-            )
-        })?;
-        return Ok(Some(PlannedRunArtifacts {
-            run_root: run_root.to_path_buf(),
-            run_name: derive_run_name(run_dir)?,
-            run_dir: run_dir.clone(),
-        }));
-    }
-
-    let (run_dir, run_name) = create_run_dir(run_root)?;
-    fs::create_dir_all(&run_dir).map_err(|err| {
-        anyhow::anyhow!(
-            "failed to create planned run directory {}: {err}",
-            run_dir.display()
-        )
-    })?;
-    Ok(Some(PlannedRunArtifacts {
-        run_root: run_root.to_path_buf(),
-        run_dir,
-        run_name,
-    }))
+    plan_run_artifacts(run_root, config.training.resume_run_dir.as_deref()).map(Some)
 }
 
 fn apply_planned_run_env(planned_run: &PlannedRunArtifacts) {
@@ -306,7 +275,7 @@ fn prepare_language_command(args: LanguageArgs) -> Result<PreparedLanguageComman
     let config_paths = default_or_explicit_config_paths("config/language/base.toml", &args.config);
     let config = load_language_training_config(&config_paths)?;
     let (config, run_root) =
-        apply_run_root_and_resume_policy(config, &config_paths, args.resume_from_last_checkpoint)?;
+        apply_run_root_and_resume_policy(config, &config_paths, args.launch_mode)?;
     let planned_run =
         if args.build_vocab_only || std::env::var_os(PROCESS_GROUP_RUN_DIR_ENV).is_some() {
             None
@@ -320,48 +289,6 @@ fn prepare_language_command(args: LanguageArgs) -> Result<PreparedLanguageComman
         run_root,
         planned_run,
     })
-}
-
-fn init_cli_tracing(log_path: Option<&Path>) -> Result<Option<WorkerGuard>> {
-    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    let stderr_layer = tracing_subscriber::fmt::layer().with_target(false);
-
-    match log_path {
-        Some(log_path) => {
-            let parent = log_path.parent().ok_or_else(|| {
-                anyhow::anyhow!("failed to determine log parent for {}", log_path.display())
-            })?;
-            fs::create_dir_all(parent).map_err(|err| {
-                anyhow::anyhow!("failed to create log directory {}: {err}", parent.display())
-            })?;
-            let file_name = log_path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .ok_or_else(|| anyhow::anyhow!("invalid log file name {}", log_path.display()))?;
-            let file_appender = tracing_appender::rolling::never(parent, file_name);
-            let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
-            tracing_subscriber::registry()
-                .with(env_filter)
-                .with(stderr_layer)
-                .with(
-                    tracing_subscriber::fmt::layer()
-                        .with_ansi(false)
-                        .with_target(false)
-                        .with_writer(non_blocking),
-                )
-                .try_init()
-                .map_err(|err| anyhow::anyhow!("failed to initialize tracing subscriber: {err}"))?;
-            Ok(Some(guard))
-        }
-        None => {
-            tracing_subscriber::registry()
-                .with(env_filter)
-                .with(stderr_layer)
-                .try_init()
-                .map_err(|err| anyhow::anyhow!("failed to initialize tracing subscriber: {err}"))?;
-            Ok(None)
-        }
-    }
 }
 
 fn run_in_training_thread<F, T>(name: &str, work: F) -> Result<T>
@@ -419,7 +346,6 @@ fn run_language(prepared: PreparedLanguageCommand) -> Result<()> {
         return Ok(());
     }
 
-    FAST_TRAIN.store(config.training.fast_train, Ordering::Relaxed);
     if let Some(planned_run) = &planned_run {
         apply_planned_run_env(planned_run);
     } else {
@@ -455,7 +381,17 @@ fn run_language(prepared: PreparedLanguageCommand) -> Result<()> {
     }
 
     run_in_training_thread("language-train", move || match args.backend {
-        BackendArg::Ndarray => train_language::<Autodiff<NdArray<f32>>, _>(&config, "cpu", |_| {}),
+        BackendArg::Ndarray => {
+            if balanced_checkpointing_enabled() {
+                train_language::<Autodiff<NdArray<f32>, BalancedCheckpointing>, _>(
+                    &config,
+                    "cpu",
+                    |_| {},
+                )
+            } else {
+                train_language::<Autodiff<NdArray<f32>>, _>(&config, "cpu", |_| {})
+            }
+        }
         BackendArg::Wgpu => {
             let stage_profile = std::env::var_os("BDH_STAGE_PROFILE").is_some();
             if stage_profile {
@@ -464,6 +400,7 @@ fn run_language(prepared: PreparedLanguageCommand) -> Result<()> {
                 relu_lowrank_grad_input_profile_reset();
                 relu_lowrank_grad_weight_profile_reset();
                 logits_projection_profile_reset();
+                lowrank_residual_memory_profile_reset();
                 lowrank_residual_profile_reset();
             }
             let wgpu_config = config.wgpu.clone();
@@ -475,15 +412,23 @@ fn run_language(prepared: PreparedLanguageCommand) -> Result<()> {
             eprintln!(
                 "language training: routing --backend wgpu through CubeBackend (backend={backend_name}) for the best measured Shakespeare training throughput"
             );
-            let result =
+            let result = if balanced_checkpointing_enabled() {
+                train_language::<Autodiff<WgpuNoFusion, BalancedCheckpointing>, _>(
+                    &config,
+                    backend_name,
+                    move |device| init_runtime(device, &wgpu_config),
+                )
+            } else {
                 train_language::<Autodiff<WgpuNoFusion>, _>(&config, backend_name, move |device| {
                     init_runtime(device, &wgpu_config)
-                });
+                })
+            };
             if stage_profile {
                 let lowrank_forward = relu_lowrank_forward_profile_snapshot();
                 let lowrank_grad_input = relu_lowrank_grad_input_profile_snapshot();
                 let lowrank_grad_weight = relu_lowrank_grad_weight_profile_snapshot();
                 let logits_projection = logits_projection_profile_snapshot();
+                let residual_memory = lowrank_residual_memory_profile_snapshot();
                 let residual = lowrank_residual_profile_snapshot();
                 let snapshot = recurrent_profile_snapshot();
                 eprintln!(
@@ -513,6 +458,23 @@ fn run_language(prepared: PreparedLanguageCommand) -> Result<()> {
                     residual.mlp_norm_ns,
                     residual.residual_combine_ns,
                 );
+                for (stage_name, stage) in [
+                    ("after_attention_norm", residual_memory.after_attention_norm),
+                    ("after_y_projection", residual_memory.after_y_projection),
+                    ("after_y_post_quant", residual_memory.after_y_post_quant),
+                    ("after_y_neuron", residual_memory.after_y_neuron),
+                    ("after_decoder_tail", residual_memory.after_decoder_tail),
+                    ("after_mlp_norm", residual_memory.after_mlp_norm),
+                ] {
+                    eprintln!(
+                        "[stage-profile][training-residual-memory] calls={} stage={} reserved_bytes={} in_use_bytes={} tracked_tensor_bytes={}",
+                        residual_memory.calls,
+                        stage_name,
+                        stage.reserved_bytes,
+                        stage.in_use_bytes,
+                        stage.tracked_tensor_bytes,
+                    );
+                }
                 eprintln!(
                     "[stage-profile][training-recurrent] calls={} total_ns={} setup_ns={} copy_ns={} dispatch_ns={}",
                     snapshot.calls,
@@ -521,6 +483,7 @@ fn run_language(prepared: PreparedLanguageCommand) -> Result<()> {
                     snapshot.copy_ns,
                     snapshot.dispatch_ns,
                 );
+                print_low_bit_training_memory_profile();
             }
             result
         }
@@ -532,6 +495,7 @@ fn run_language(prepared: PreparedLanguageCommand) -> Result<()> {
                 relu_lowrank_grad_input_profile_reset();
                 relu_lowrank_grad_weight_profile_reset();
                 logits_projection_profile_reset();
+                lowrank_residual_memory_profile_reset();
                 lowrank_residual_profile_reset();
             }
             let wgpu_config = config.wgpu.clone();
@@ -540,15 +504,23 @@ fn run_language(prepared: PreparedLanguageCommand) -> Result<()> {
             } else {
                 "wgpu-nofusion"
             };
-            let result =
+            let result = if balanced_checkpointing_enabled() {
+                train_language::<Autodiff<WgpuNoFusion, BalancedCheckpointing>, _>(
+                    &config,
+                    backend_name,
+                    move |device| init_runtime(device, &wgpu_config),
+                )
+            } else {
                 train_language::<Autodiff<WgpuNoFusion>, _>(&config, backend_name, move |device| {
                     init_runtime(device, &wgpu_config)
-                });
+                })
+            };
             if stage_profile {
                 let lowrank_forward = relu_lowrank_forward_profile_snapshot();
                 let lowrank_grad_input = relu_lowrank_grad_input_profile_snapshot();
                 let lowrank_grad_weight = relu_lowrank_grad_weight_profile_snapshot();
                 let logits_projection = logits_projection_profile_snapshot();
+                let residual_memory = lowrank_residual_memory_profile_snapshot();
                 let residual = lowrank_residual_profile_snapshot();
                 let snapshot = recurrent_profile_snapshot();
                 eprintln!(
@@ -578,6 +550,23 @@ fn run_language(prepared: PreparedLanguageCommand) -> Result<()> {
                     residual.mlp_norm_ns,
                     residual.residual_combine_ns,
                 );
+                for (stage_name, stage) in [
+                    ("after_attention_norm", residual_memory.after_attention_norm),
+                    ("after_y_projection", residual_memory.after_y_projection),
+                    ("after_y_post_quant", residual_memory.after_y_post_quant),
+                    ("after_y_neuron", residual_memory.after_y_neuron),
+                    ("after_decoder_tail", residual_memory.after_decoder_tail),
+                    ("after_mlp_norm", residual_memory.after_mlp_norm),
+                ] {
+                    eprintln!(
+                        "[stage-profile][training-residual-memory] calls={} stage={} reserved_bytes={} in_use_bytes={} tracked_tensor_bytes={}",
+                        residual_memory.calls,
+                        stage_name,
+                        stage.reserved_bytes,
+                        stage.in_use_bytes,
+                        stage.tracked_tensor_bytes,
+                    );
+                }
                 eprintln!(
                     "[stage-profile][training-recurrent] calls={} total_ns={} setup_ns={} copy_ns={} dispatch_ns={}",
                     snapshot.calls,
@@ -586,6 +575,7 @@ fn run_language(prepared: PreparedLanguageCommand) -> Result<()> {
                     snapshot.copy_ns,
                     snapshot.dispatch_ns,
                 );
+                print_low_bit_training_memory_profile();
             }
             result
         }
@@ -599,14 +589,24 @@ fn run_language(prepared: PreparedLanguageCommand) -> Result<()> {
                     relu_lowrank_grad_input_profile_reset();
                     relu_lowrank_grad_weight_profile_reset();
                     logits_projection_profile_reset();
+                    lowrank_residual_memory_profile_reset();
                     lowrank_residual_profile_reset();
                 }
-                let result = train_language::<Autodiff<Cuda<f32>>, _>(&config, "cuda", |_| {});
+                let result = if balanced_checkpointing_enabled() {
+                    train_language::<Autodiff<Cuda<f32>, BalancedCheckpointing>, _>(
+                        &config,
+                        "cuda",
+                        |_| {},
+                    )
+                } else {
+                    train_language::<Autodiff<Cuda<f32>>, _>(&config, "cuda", |_| {})
+                };
                 if stage_profile {
                     let lowrank_forward = relu_lowrank_forward_profile_snapshot();
                     let lowrank_grad_input = relu_lowrank_grad_input_profile_snapshot();
                     let lowrank_grad_weight = relu_lowrank_grad_weight_profile_snapshot();
                     let logits_projection = logits_projection_profile_snapshot();
+                    let residual_memory = lowrank_residual_memory_profile_snapshot();
                     let residual = lowrank_residual_profile_snapshot();
                     let snapshot = recurrent_profile_snapshot();
                     eprintln!(
@@ -636,6 +636,23 @@ fn run_language(prepared: PreparedLanguageCommand) -> Result<()> {
                         residual.mlp_norm_ns,
                         residual.residual_combine_ns,
                     );
+                    for (stage_name, stage) in [
+                        ("after_attention_norm", residual_memory.after_attention_norm),
+                        ("after_y_projection", residual_memory.after_y_projection),
+                        ("after_y_post_quant", residual_memory.after_y_post_quant),
+                        ("after_y_neuron", residual_memory.after_y_neuron),
+                        ("after_decoder_tail", residual_memory.after_decoder_tail),
+                        ("after_mlp_norm", residual_memory.after_mlp_norm),
+                    ] {
+                        eprintln!(
+                            "[stage-profile][training-residual-memory] calls={} stage={} reserved_bytes={} in_use_bytes={} tracked_tensor_bytes={}",
+                            residual_memory.calls,
+                            stage_name,
+                            stage.reserved_bytes,
+                            stage.in_use_bytes,
+                            stage.tracked_tensor_bytes,
+                        );
+                    }
                     eprintln!(
                         "[stage-profile][training-recurrent] calls={} total_ns={} setup_ns={} copy_ns={} dispatch_ns={}",
                         snapshot.calls,
@@ -644,6 +661,7 @@ fn run_language(prepared: PreparedLanguageCommand) -> Result<()> {
                         snapshot.copy_ns,
                         snapshot.dispatch_ns,
                     );
+                    print_low_bit_training_memory_profile();
                 }
                 result
             }
@@ -726,7 +744,7 @@ fn run_language_local_ddp(args: LanguageLocalDdpArgs) -> Result<()> {
     let config_paths = default_or_explicit_config_paths("config/language/base.toml", &args.config);
     let config = load_language_training_config(&config_paths)?;
     let (config, run_root) =
-        apply_run_root_and_resume_policy(config, &config_paths, args.resume_from_last_checkpoint)?;
+        apply_run_root_and_resume_policy(config, &config_paths, args.launch_mode)?;
     let (run_name, run_dir) = match &config.training.resume_run_dir {
         Some(run_dir) => {
             if !run_dir.is_dir() {
@@ -800,6 +818,9 @@ fn run_language_local_ddp(args: LanguageLocalDdpArgs) -> Result<()> {
         }
         command.arg("--config").arg(overlay);
         command
+            .arg("--launch-mode")
+            .arg(args.launch_mode.as_cli_value());
+        command
             .arg("--backend")
             .arg(backend_arg_cli_value(args.backend))
             .env(RUN_ROOT_ENV, &run_root)
@@ -851,9 +872,9 @@ fn run_collective_orchestrator(args: CollectiveOrchestratorArgs) -> Result<()> {
 #[cfg(all(test, feature = "language-train"))]
 mod tests {
     use super::{
-        Cli, Command, PreparedCommand, PreparedLanguageCommand, apply_run_root_and_resume_policy,
-        config_family_name, default_or_explicit_config_paths, plan_single_process_run_artifacts,
-        prepare_command, resolve_resume_run_dir_from_latest,
+        Cli, Command, LaunchModeArg, PreparedCommand, PreparedLanguageCommand,
+        apply_run_root_and_resume_policy, default_or_explicit_config_paths,
+        plan_single_process_run_artifacts, prepare_command, resolve_cli_run_root,
     };
     use burn_dragon_language::TrainingConfig as LanguageTrainingConfig;
     use burn_dragon_language::checkpoint::RUN_ROOT_ENV;
@@ -898,6 +919,9 @@ mod tests {
             },
             training: TrainingHyperparameters {
                 block_size: 32,
+                tbptt_chunk_size: None,
+                tbptt_persist_across_steps: false,
+                min_logical_block_size: None,
                 batch_size: 2,
                 seed: 1337,
                 gradient_accumulation_steps: 1,
@@ -906,7 +930,7 @@ mod tests {
                 max_iters: 4,
                 checkpoint_interval_iters: 2000,
                 log_frequency: 1,
-                fast_train: false,
+                launch_mode: burn_dragon_train::train::pipeline::TrainingLaunchMode::Fresh,
                 resume_run_dir: None,
                 resume_checkpoint_epoch: None,
                 init_checkpoint_path: None,
@@ -916,11 +940,15 @@ mod tests {
                 gdpo: None,
             },
             optimizer: OptimizerConfig {
+                name: burn_dragon_train::OptimizerKind::default(),
                 learning_rate: 1.0e-3,
                 weight_decay: 0.0,
+                weight_decay_final: None,
                 lr_schedule: None,
+                schedule_mode: burn_dragon_train::OptimizerScheduleMode::default(),
                 grad_clip_norm: None,
                 grad_clip_value: None,
+                muon: None,
             },
             parallel: ParallelConfig::default(),
             generation: GenerationConfig {
@@ -935,6 +963,7 @@ mod tests {
                 output_format: Default::default(),
             },
             wgpu: WgpuRuntimeConfig::default(),
+            run_layout: burn_dragon_train::RunLayoutConfig::default(),
             model: ModelOverrides::default(),
         }
     }
@@ -945,26 +974,19 @@ mod tests {
     }
 
     #[test]
-    fn config_family_name_uses_last_override_path() {
-        let family = config_family_name(&[
-            PathBuf::from("config/language/base.toml"),
-            PathBuf::from("config/language/baselines/current_best_large.toml"),
-        ]);
+    fn resolve_cli_run_root_mirrors_last_matching_config_stem() {
+        let run_root = resolve_cli_run_root(
+            &tiny_training_config(),
+            &[
+                PathBuf::from("config/language/base.toml"),
+                PathBuf::from("config/language/baselines/current_best_large.toml"),
+            ],
+        );
 
-        assert_eq!(family, "config_language_baselines_current_best_large");
-    }
-
-    #[test]
-    fn resolve_resume_run_dir_from_latest_reads_family_latest_file() {
-        let dir = tempdir().expect("tempdir");
-        let run_root = dir.path().join("runs").join("language").join("family");
-        let run_dir = run_root.join("serious-dragon");
-        fs::create_dir_all(&run_dir).expect("create run dir");
-        fs::create_dir_all(&run_root).expect("create run root");
-        fs::write(run_root.join("latest"), "serious-dragon").expect("write latest");
-
-        let resolved = resolve_resume_run_dir_from_latest(&run_root).expect("resolve latest");
-        assert_eq!(resolved, run_dir);
+        assert_eq!(
+            run_root,
+            PathBuf::from("runs/language/baselines/current_best_large")
+        );
     }
 
     #[test]
@@ -974,6 +996,8 @@ mod tests {
         let explicit_root = dir.path().join("family-root");
         let run_dir = explicit_root.join("resume-me");
         fs::create_dir_all(&run_dir).expect("create run dir");
+        fs::create_dir_all(run_dir.join("checkpoint")).expect("checkpoint dir");
+        fs::write(run_dir.join("checkpoint/model-1.bin"), b"checkpoint").expect("checkpoint");
         fs::create_dir_all(&explicit_root).expect("create explicit root");
         fs::write(explicit_root.join("latest"), "resume-me").expect("write latest");
         unsafe { std::env::set_var(RUN_ROOT_ENV, &explicit_root) };
@@ -984,7 +1008,7 @@ mod tests {
             &[PathBuf::from(
                 "config/language/baselines/current_best_large.toml",
             )],
-            true,
+            LaunchModeArg::ResumeLatestCheckpointIfPresent,
         )
         .expect("apply resume policy");
         assert_eq!(run_root, explicit_root);
@@ -1136,7 +1160,7 @@ fn main() {
         #[cfg(feature = "language-ddp")]
         PreparedCommand::CollectiveOrchestrator(_) => None,
     };
-    let _log_guard = match init_cli_tracing(log_path.as_deref()) {
+    let _log_guard = match init_experiment_tracing(log_path.as_deref()) {
         Ok(guard) => guard,
         Err(err) => {
             eprintln!("error: {err:#}");

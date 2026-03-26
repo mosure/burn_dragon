@@ -1,0 +1,1 @@
+extends = ["../moving_mnist_vjepa21_dense_wgpu_diag_probe025_recon1_256_wide.toml"]

@@ -37,6 +37,7 @@ pub struct VisionArtifactInput<B: BackendTrait> {
     pub views: Option<Tensor<B, 5>>,
     pub frames: Option<Tensor<B, 5>>,
     pub debug_recon_frames: Option<Tensor<B, 5>>,
+    pub aux_frames: Option<Tensor<B, 5>>,
     pub patch_norms: Option<Tensor<B, 3>>,
     pub pca_rgb: Option<Tensor<B, 4>>,
     pub posterior_patch_norms_steps: Option<Tensor<B, 4>>,
@@ -48,6 +49,7 @@ pub struct VisionArtifactInput<B: BackendTrait> {
     pub probe_logits: Option<Tensor<B, 2>>,
     pub labels: Option<Tensor<B, 1, Int>>,
     pub legend: Option<Vec<String>>,
+    pub sidecar_json: Option<String>,
     pub artifact_scale: usize,
     pub prediction_start: Option<usize>,
 }
@@ -58,6 +60,7 @@ impl<B: BackendTrait> VisionArtifactInput<B> {
             views: None,
             frames: None,
             debug_recon_frames: None,
+            aux_frames: None,
             patch_norms: None,
             pca_rgb: None,
             posterior_patch_norms_steps: None,
@@ -69,6 +72,7 @@ impl<B: BackendTrait> VisionArtifactInput<B> {
             probe_logits: None,
             labels: None,
             legend: None,
+            sidecar_json: None,
             artifact_scale: 1,
             prediction_start: None,
         }
@@ -79,6 +83,7 @@ impl<B: BackendTrait> VisionArtifactInput<B> {
             views: sync_optional_float_tensor(self.views),
             frames: sync_optional_float_tensor(self.frames),
             debug_recon_frames: sync_optional_float_tensor(self.debug_recon_frames),
+            aux_frames: sync_optional_float_tensor(self.aux_frames),
             patch_norms: sync_optional_float_tensor(self.patch_norms),
             pca_rgb: sync_optional_float_tensor(self.pca_rgb),
             posterior_patch_norms_steps: sync_optional_float_tensor(
@@ -92,6 +97,7 @@ impl<B: BackendTrait> VisionArtifactInput<B> {
             probe_logits: sync_optional_float_tensor(self.probe_logits),
             labels: sync_optional_int_tensor(self.labels),
             legend: self.legend,
+            sidecar_json: self.sidecar_json,
             artifact_scale: self.artifact_scale,
             prediction_start: self.prediction_start,
         }
@@ -108,6 +114,14 @@ pub struct VisionOutput<B: BackendTrait> {
     recon_loss: Tensor<B, 1>,
     recon_psnr_masked: Tensor<B, 1>,
     recon_psnr_full: Tensor<B, 1>,
+    forward_path_loss: Option<Tensor<B, 1>>,
+    reverse_path_loss: Option<Tensor<B, 1>>,
+    forward_velocity_loss: Option<Tensor<B, 1>>,
+    reverse_latent_loss: Option<Tensor<B, 1>>,
+    reverse_to_init_loss: Option<Tensor<B, 1>>,
+    roundtrip_state_loss: Option<Tensor<B, 1>>,
+    block_const_loss: Option<Tensor<B, 1>>,
+    semantic_loss: Option<Tensor<B, 1>>,
     policy_loss: Tensor<B, 1>,
     policy_advantage_abs_mean: Tensor<B, 1>,
     policy_advantage_std: Tensor<B, 1>,
@@ -172,6 +186,14 @@ impl<B: BackendTrait> VisionOutput<B> {
             recon_loss,
             recon_psnr_masked,
             recon_psnr_full,
+            forward_path_loss: None,
+            reverse_path_loss: None,
+            forward_velocity_loss: None,
+            reverse_latent_loss: None,
+            reverse_to_init_loss: None,
+            roundtrip_state_loss: None,
+            block_const_loss: None,
+            semantic_loss: None,
             policy_loss,
             policy_advantage_abs_mean,
             policy_advantage_std,
@@ -203,6 +225,31 @@ impl<B: BackendTrait> VisionOutput<B> {
         self.rollout_inv_to_horizon = rollout_inv_to_horizon;
         self.rollout_state_norm_ratio_to_horizon = rollout_state_norm_ratio_to_horizon;
         self.rollout_state_motion_to_horizon = rollout_state_motion_to_horizon;
+        self
+    }
+
+    pub fn with_directional_metrics(
+        mut self,
+        forward_path_loss: Option<Tensor<B, 1>>,
+        reverse_path_loss: Option<Tensor<B, 1>>,
+        forward_velocity_loss: Option<Tensor<B, 1>>,
+        reverse_latent_loss: Option<Tensor<B, 1>>,
+        reverse_to_init_loss: Option<Tensor<B, 1>>,
+        roundtrip_state_loss: Option<Tensor<B, 1>>,
+        block_const_loss: Option<Tensor<B, 1>>,
+    ) -> Self {
+        self.forward_path_loss = forward_path_loss;
+        self.reverse_path_loss = reverse_path_loss;
+        self.forward_velocity_loss = forward_velocity_loss;
+        self.reverse_latent_loss = reverse_latent_loss;
+        self.reverse_to_init_loss = reverse_to_init_loss;
+        self.roundtrip_state_loss = roundtrip_state_loss;
+        self.block_const_loss = block_const_loss;
+        self
+    }
+
+    pub fn with_semantic_loss(mut self, semantic_loss: Option<Tensor<B, 1>>) -> Self {
+        self.semantic_loss = semantic_loss;
         self
     }
 
@@ -252,6 +299,14 @@ impl<B: BackendTrait> ItemLazy for VisionOutput<B> {
             recon_loss: sync_float_tensor(self.recon_loss),
             recon_psnr_masked: sync_float_tensor(self.recon_psnr_masked),
             recon_psnr_full: sync_float_tensor(self.recon_psnr_full),
+            forward_path_loss: sync_optional_float_tensor(self.forward_path_loss),
+            reverse_path_loss: sync_optional_float_tensor(self.reverse_path_loss),
+            forward_velocity_loss: sync_optional_float_tensor(self.forward_velocity_loss),
+            reverse_latent_loss: sync_optional_float_tensor(self.reverse_latent_loss),
+            reverse_to_init_loss: sync_optional_float_tensor(self.reverse_to_init_loss),
+            roundtrip_state_loss: sync_optional_float_tensor(self.roundtrip_state_loss),
+            block_const_loss: sync_optional_float_tensor(self.block_const_loss),
+            semantic_loss: sync_optional_float_tensor(self.semantic_loss),
             policy_loss: sync_float_tensor(self.policy_loss),
             policy_advantage_abs_mean: sync_float_tensor(self.policy_advantage_abs_mean),
             policy_advantage_std: sync_float_tensor(self.policy_advantage_std),
@@ -388,6 +443,14 @@ define_scalar_input!(SigRegLossInput, scalar);
 define_scalar_input!(ReconLossInput, scalar);
 define_scalar_input!(ReconPsnrMaskedInput, scalar);
 define_scalar_input!(ReconPsnrFullInput, scalar);
+define_scalar_input!(ForwardPathLossInput, optional);
+define_scalar_input!(ReversePathLossInput, optional);
+define_scalar_input!(ForwardVelocityLossInput, optional);
+define_scalar_input!(ReverseLatentLossInput, optional);
+define_scalar_input!(ReverseToInitLossInput, optional);
+define_scalar_input!(RoundtripStateLossInput, optional);
+define_scalar_input!(BlockConstLossInput, optional);
+define_scalar_input!(SemanticLossInput, optional);
 define_scalar_input!(PolicyLossInput, scalar);
 define_scalar_input!(AdvantageAbsMeanInput, scalar);
 define_scalar_input!(AdvantageStdInput, scalar);
@@ -446,6 +509,54 @@ impl<B: BackendTrait> Adaptor<ReconPsnrMaskedInput<B>> for VisionOutput<B> {
 impl<B: BackendTrait> Adaptor<ReconPsnrFullInput<B>> for VisionOutput<B> {
     fn adapt(&self) -> ReconPsnrFullInput<B> {
         ReconPsnrFullInput::new(self.recon_psnr_full.clone())
+    }
+}
+
+impl<B: BackendTrait> Adaptor<ForwardPathLossInput<B>> for VisionOutput<B> {
+    fn adapt(&self) -> ForwardPathLossInput<B> {
+        ForwardPathLossInput::new(self.forward_path_loss.clone())
+    }
+}
+
+impl<B: BackendTrait> Adaptor<ReversePathLossInput<B>> for VisionOutput<B> {
+    fn adapt(&self) -> ReversePathLossInput<B> {
+        ReversePathLossInput::new(self.reverse_path_loss.clone())
+    }
+}
+
+impl<B: BackendTrait> Adaptor<ForwardVelocityLossInput<B>> for VisionOutput<B> {
+    fn adapt(&self) -> ForwardVelocityLossInput<B> {
+        ForwardVelocityLossInput::new(self.forward_velocity_loss.clone())
+    }
+}
+
+impl<B: BackendTrait> Adaptor<ReverseLatentLossInput<B>> for VisionOutput<B> {
+    fn adapt(&self) -> ReverseLatentLossInput<B> {
+        ReverseLatentLossInput::new(self.reverse_latent_loss.clone())
+    }
+}
+
+impl<B: BackendTrait> Adaptor<ReverseToInitLossInput<B>> for VisionOutput<B> {
+    fn adapt(&self) -> ReverseToInitLossInput<B> {
+        ReverseToInitLossInput::new(self.reverse_to_init_loss.clone())
+    }
+}
+
+impl<B: BackendTrait> Adaptor<RoundtripStateLossInput<B>> for VisionOutput<B> {
+    fn adapt(&self) -> RoundtripStateLossInput<B> {
+        RoundtripStateLossInput::new(self.roundtrip_state_loss.clone())
+    }
+}
+
+impl<B: BackendTrait> Adaptor<BlockConstLossInput<B>> for VisionOutput<B> {
+    fn adapt(&self) -> BlockConstLossInput<B> {
+        BlockConstLossInput::new(self.block_const_loss.clone())
+    }
+}
+
+impl<B: BackendTrait> Adaptor<SemanticLossInput<B>> for VisionOutput<B> {
+    fn adapt(&self) -> SemanticLossInput<B> {
+        SemanticLossInput::new(self.semantic_loss.clone())
     }
 }
 
@@ -592,6 +703,14 @@ pub struct VisionTrainItem<B: AutodiffBackend> {
     recon_loss: Tensor<MetricsBackend, 1>,
     recon_psnr_masked: Tensor<MetricsBackend, 1>,
     recon_psnr_full: Tensor<MetricsBackend, 1>,
+    forward_path_loss: Option<Tensor<MetricsBackend, 1>>,
+    reverse_path_loss: Option<Tensor<MetricsBackend, 1>>,
+    forward_velocity_loss: Option<Tensor<MetricsBackend, 1>>,
+    reverse_latent_loss: Option<Tensor<MetricsBackend, 1>>,
+    reverse_to_init_loss: Option<Tensor<MetricsBackend, 1>>,
+    roundtrip_state_loss: Option<Tensor<MetricsBackend, 1>>,
+    block_const_loss: Option<Tensor<MetricsBackend, 1>>,
+    semantic_loss: Option<Tensor<MetricsBackend, 1>>,
     policy_loss: Tensor<MetricsBackend, 1>,
     policy_advantage_abs_mean: Tensor<MetricsBackend, 1>,
     policy_advantage_std: Tensor<MetricsBackend, 1>,
@@ -642,6 +761,14 @@ impl<B: AutodiffBackend> VisionTrainItem<B> {
             recon_loss: sync_float_tensor(recon_loss.detach().inner()),
             recon_psnr_masked: sync_float_tensor(recon_psnr_masked.detach().inner()),
             recon_psnr_full: sync_float_tensor(recon_psnr_full.detach().inner()),
+            forward_path_loss: None,
+            reverse_path_loss: None,
+            forward_velocity_loss: None,
+            reverse_latent_loss: None,
+            reverse_to_init_loss: None,
+            roundtrip_state_loss: None,
+            block_const_loss: None,
+            semantic_loss: None,
             policy_loss: sync_float_tensor(policy_loss.detach().inner()),
             policy_advantage_abs_mean: sync_float_tensor(
                 policy_advantage_abs_mean.detach().inner(),
@@ -673,6 +800,38 @@ impl<B: AutodiffBackend> VisionTrainItem<B> {
             rollout_state_motion_to_horizon.map(|value| sync_float_tensor(value.detach().inner()));
         self
     }
+
+    pub fn with_directional_metrics(
+        mut self,
+        forward_path_loss: Option<Tensor<B, 1>>,
+        reverse_path_loss: Option<Tensor<B, 1>>,
+        forward_velocity_loss: Option<Tensor<B, 1>>,
+        reverse_latent_loss: Option<Tensor<B, 1>>,
+        reverse_to_init_loss: Option<Tensor<B, 1>>,
+        roundtrip_state_loss: Option<Tensor<B, 1>>,
+        block_const_loss: Option<Tensor<B, 1>>,
+    ) -> Self {
+        self.forward_path_loss =
+            forward_path_loss.map(|value| sync_float_tensor(value.detach().inner()));
+        self.reverse_path_loss =
+            reverse_path_loss.map(|value| sync_float_tensor(value.detach().inner()));
+        self.forward_velocity_loss =
+            forward_velocity_loss.map(|value| sync_float_tensor(value.detach().inner()));
+        self.reverse_latent_loss =
+            reverse_latent_loss.map(|value| sync_float_tensor(value.detach().inner()));
+        self.reverse_to_init_loss =
+            reverse_to_init_loss.map(|value| sync_float_tensor(value.detach().inner()));
+        self.roundtrip_state_loss =
+            roundtrip_state_loss.map(|value| sync_float_tensor(value.detach().inner()));
+        self.block_const_loss =
+            block_const_loss.map(|value| sync_float_tensor(value.detach().inner()));
+        self
+    }
+
+    pub fn with_semantic_loss(mut self, semantic_loss: Option<Tensor<B, 1>>) -> Self {
+        self.semantic_loss = semantic_loss.map(|value| sync_float_tensor(value.detach().inner()));
+        self
+    }
 }
 
 impl<B: AutodiffBackend> ItemLazy for VisionTrainItem<B> {
@@ -688,6 +847,14 @@ impl<B: AutodiffBackend> ItemLazy for VisionTrainItem<B> {
             recon_loss: self.recon_loss,
             recon_psnr_masked: self.recon_psnr_masked,
             recon_psnr_full: self.recon_psnr_full,
+            forward_path_loss: self.forward_path_loss,
+            reverse_path_loss: self.reverse_path_loss,
+            forward_velocity_loss: self.forward_velocity_loss,
+            reverse_latent_loss: self.reverse_latent_loss,
+            reverse_to_init_loss: self.reverse_to_init_loss,
+            roundtrip_state_loss: self.roundtrip_state_loss,
+            block_const_loss: self.block_const_loss,
+            semantic_loss: self.semantic_loss,
             policy_loss: self.policy_loss,
             policy_advantage_abs_mean: self.policy_advantage_abs_mean,
             policy_advantage_std: self.policy_advantage_std,

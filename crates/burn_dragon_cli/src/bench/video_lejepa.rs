@@ -327,11 +327,15 @@ fn build_bench(
         ..Default::default()
     };
     let optimizer = burn_dragon::train::OptimizerConfig {
+        name: burn_dragon::train::OptimizerKind::default(),
         learning_rate: 1e-3,
         weight_decay: 0.0,
+        weight_decay_final: None,
         lr_schedule: None,
+        schedule_mode: burn_dragon::train::OptimizerScheduleMode::default(),
         grad_clip_norm: None,
         grad_clip_value: None,
+        muon: None,
     };
     <VideoLejepaBenchTrainBackend as BackendTrait>::seed(device, 4_242);
     VisionVideoLejepaTrainStepBench::<VideoLejepaBenchTrainBackend>::new(

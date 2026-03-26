@@ -165,8 +165,11 @@ pub struct RunConfigOutput {
     training_gradient_accumulation_steps: usize,
     training_effective_batch_size: usize,
     training_checkpoint_interval_iters: usize,
+    training_execution_form: String,
+    training_launch_mode_requested: burn_dragon_train::train::pipeline::TrainingLaunchMode,
     #[serde(skip_serializing_if = "Option::is_none")]
     training_sequence_kernel_override: Option<SequenceKernelKind>,
+    optimizer_spec: OptimizerSpec,
     overrides: ModelOverrides,
     model_spec: ModelSpec,
     parallel_spec: ParallelSpec,
@@ -175,6 +178,24 @@ pub struct RunConfigOutput {
     metrics_sink: MetricsSinkSpec,
     #[serde(skip_serializing_if = "Option::is_none")]
     startup_autotune: Option<StartupAutotuneReport>,
+}
+
+pub(crate) fn build_training_execution_form(config: &TrainingConfig) -> String {
+    if config.parallel.pipeline.enabled {
+        "pipeline".to_string()
+    } else if config.training.tbptt_chunk_size.is_some() {
+        "tbptt".to_string()
+    } else {
+        "default_stateful".to_string()
+    }
+}
+
+pub(crate) fn effective_training_kernel_block_size(training: &TrainingHyperparameters) -> usize {
+    training
+        .tbptt_chunk_size
+        .filter(|chunk| *chunk > 0 && *chunk < training.block_size)
+        .unwrap_or(training.block_size)
+        .max(1)
 }
 
 pub(crate) fn build_model_spec(model_config: &BDHConfig) -> ModelSpec {
@@ -187,6 +208,26 @@ pub(crate) fn build_model_spec(model_config: &BDHConfig) -> ModelSpec {
         latent_per_head: model_config.latent_per_head(),
         shared_layer_weights: true,
         sequence_kernel: model_config.sequence_kernel,
+        bdh_initialization_kind: model_config.initialization.kind,
+        bdh_residual_scaling_kind: model_config.initialization.residual_scaling.kind,
+        bdh_neuron_gain_kind: model_config.initialization.neuron_gains.kind,
+        bdh_topology_prior_kind: model_config.initialization.topology_prior.kind,
+        bdh_firing_target_kind: model_config.initialization.firing_targets.kind,
+        low_bit: model_config.quant.enable.then(|| LowBitModelSpec {
+            enabled: model_config.quant.enable,
+            protocol: model_config.quant.protocol,
+            training_mode: model_config.quant.training_mode,
+            inference_mode: model_config.quant.inference_mode,
+            weight_format: model_config.quant.weight_format,
+            activation_format: model_config.quant.act_format,
+            decoder_x_mode: model_config.quant.decoder_x_mode,
+            activation_grouping: model_config.quant.act_grouping,
+            weight_grouping: model_config.quant.weight_grouping,
+            strict_bitnet_reference: model_config.quant.strict_bitnet_reference,
+            target_modules: model_config.quant.target_modules.clone(),
+            rho_precision: model_config.rho.precision,
+            rho_compression: model_config.rho.compression,
+        }),
     }
 }
 
@@ -226,13 +267,114 @@ pub(crate) fn build_parallel_spec(config: &TrainingConfig) -> ParallelSpec {
     }
 }
 
-pub(crate) fn build_kernel_spec(config: &TrainingConfig, model_config: &BDHConfig) -> KernelSpec {
+pub(crate) fn build_optimizer_spec(config: &TrainingConfig) -> OptimizerSpec {
+    OptimizerSpec {
+        name: config.optimizer.name,
+        learning_rate: config.optimizer.learning_rate,
+        weight_decay: config.optimizer.weight_decay,
+        weight_decay_final: config.optimizer.weight_decay_final,
+        schedule_mode: config.optimizer.schedule_mode,
+    }
+}
+
+pub(crate) fn build_kernel_spec(
+    config: &TrainingConfig,
+    model_config: &BDHConfig,
+    backend_name: &str,
+) -> KernelSpec {
+    let kernel_plan = burn_dragon_core::resolve_low_bit_kernel_plan_for_backend_name(
+        backend_name,
+        &model_config.quant,
+        false,
+    );
+    let low_bit_memory = model_config.quant.enable.then(|| {
+        let estimate = burn_dragon_core::estimate_low_bit_memory_buckets(
+            &model_config.quant,
+            &model_config.rho,
+            burn_dragon_core::LowBitMemoryEstimateInput {
+                batch_size: config.training.batch_size,
+                time_steps: effective_training_kernel_block_size(&config.training),
+                n_layer: model_config.n_layer,
+                n_head: model_config.n_head,
+                n_embd: model_config.n_embd,
+                latent_total: model_config.latent_total(),
+            },
+        );
+        LowBitMemorySpec {
+            master_weight_bytes: estimate.master_weight_bytes,
+            execution_weight_bytes: estimate.execution_weight_bytes,
+            activation_shell_bytes: estimate.activation_shell_bytes,
+            saved_activation_bytes: estimate.saved_activation_bytes,
+            rho_state_bytes: estimate.rho_state_bytes,
+            workspace_bytes: estimate.workspace_bytes,
+            estimated_total_bytes: estimate.estimated_total_bytes(),
+        }
+    });
+    let low_bit_inventory = model_config
+        .quant
+        .enable
+        .then(|| {
+            burn_dragon_core::build_low_bit_saved_activation_inventory(
+                &model_config.quant,
+                burn_dragon_core::LowBitMemoryEstimateInput {
+                    batch_size: config.training.batch_size,
+                    time_steps: effective_training_kernel_block_size(&config.training),
+                    n_layer: model_config.n_layer,
+                    n_head: model_config.n_head,
+                    n_embd: model_config.n_embd,
+                    latent_total: model_config.latent_total(),
+                },
+            )
+        })
+        .flatten()
+        .map(
+            |inventory| burn_dragon_train::LowBitSavedActivationInventorySpec {
+                mode: inventory.mode,
+                format: inventory.format.as_str().to_string(),
+                requires_rho_window_anchor: inventory.requires_rho_window_anchor,
+                tensors: inventory
+                    .tensors
+                    .into_iter()
+                    .map(|entry| burn_dragon_train::LowBitSavedActivationTensorSpec {
+                        name: entry.name,
+                        shape: entry.shape,
+                        element_count: entry.element_count,
+                        estimated_bytes: entry.estimated_bytes,
+                        recompute_policy: entry.recompute_policy.as_str().to_string(),
+                    })
+                    .collect(),
+            },
+        );
+
     KernelSpec {
         sequence_kernel: model_config.sequence_kernel,
         fused_kernels_enabled: model_config.fused_kernels.enabled,
         rollout_fast_steps_per_slow_step: model_config.rollout_fast_steps_per_slow_step,
         wgpu_fused_core_recurrent: config.wgpu.training.fused_core_recurrent,
         wgpu_fused_core_rollout: config.wgpu.training.fused_core_rollout,
+        low_bit_kernel_abi_version: model_config.quant.enable.then_some(1),
+        low_bit_runtime: model_config
+            .quant
+            .enable
+            .then(|| kernel_plan.runtime.as_str().to_string()),
+        low_bit_saved_activation_mode: model_config
+            .quant
+            .enable
+            .then_some(model_config.quant.saved_activations.mode),
+        low_bit_saved_activation_format: model_config.quant.enable.then(|| {
+            model_config
+                .quant
+                .saved_activations
+                .format
+                .as_str()
+                .to_string()
+        }),
+        low_bit_saved_activation_inventory: low_bit_inventory,
+        low_bit_native_supported: model_config
+            .quant
+            .enable
+            .then_some(kernel_plan.capabilities.any_native_supported()),
+        low_bit_memory,
     }
 }
 
@@ -481,11 +623,14 @@ pub fn write_run_config(
             .batch_size
             .saturating_mul(config.training.gradient_accumulation_steps),
         training_checkpoint_interval_iters: config.training.checkpoint_interval_iters,
+        training_execution_form: build_training_execution_form(config),
+        training_launch_mode_requested: config.training.launch_mode,
         training_sequence_kernel_override: config.training.sequence_kernel_override,
+        optimizer_spec: build_optimizer_spec(config),
         overrides: config.model.clone(),
         model_spec: build_model_spec(model_config),
         parallel_spec: build_parallel_spec(config),
-        kernel_spec: build_kernel_spec(config, model_config),
+        kernel_spec: build_kernel_spec(config, model_config, backend_name),
         state_layout: build_state_layout(model_config),
         metrics_sink: build_language_metrics_sink(config.training.log_frequency),
         startup_autotune: startup_autotune.cloned(),
@@ -499,20 +644,51 @@ pub fn write_run_config(
 
 #[cfg(test)]
 mod tests {
-    use super::{prepare_datasets, write_run_config};
+    use super::{effective_training_kernel_block_size, prepare_datasets, write_run_config};
     use crate::config::{
         ContextStrategyConfig, DatasetConfig, DatasetSourceConfig, GenerationConfig,
         ModelOverrides, TrainingConfig, TrainingHyperparameters, ValidationDatasetConfig,
     };
     use crate::dataset::TokenSequenceDataset;
     use crate::tokenizer::TokenizerConfig;
-    use burn_dragon_core::{BDHConfig, SequenceKernelKind};
+    use burn_dragon_core::{
+        BDHConfig, BdhFiringTargetKind, BdhInitializationKind, BdhNeuronGainKind,
+        BdhResidualScalingKind, BdhTopologyPriorKind, SequenceKernelKind,
+    };
     use burn_dragon_train::{
         OptimizerConfig, ParallelCheckpointFormat, ParallelConfig, ParallelismKind,
     };
     use serde_json::Value;
     use std::fs;
     use tempfile::tempdir;
+
+    #[test]
+    fn effective_training_kernel_block_size_prefers_tbptt_subchunk() {
+        let training = TrainingHyperparameters {
+            block_size: 4096,
+            tbptt_chunk_size: Some(256),
+            tbptt_persist_across_steps: true,
+            min_logical_block_size: Some(1024),
+            batch_size: 16,
+            seed: 1337,
+            gradient_accumulation_steps: 1,
+            target_effective_batch_size: Some(16),
+            epochs: None,
+            max_iters: 1024,
+            checkpoint_interval_iters: 256,
+            log_frequency: 32,
+            launch_mode: burn_dragon_train::train::pipeline::TrainingLaunchMode::Fresh,
+            resume_run_dir: None,
+            resume_checkpoint_epoch: None,
+            init_checkpoint_path: None,
+            init_checkpoint_epoch: None,
+            context_strategy: ContextStrategyConfig::Infinite,
+            sequence_kernel_override: None,
+            gdpo: None,
+        };
+
+        assert_eq!(effective_training_kernel_block_size(&training), 256);
+    }
 
     #[test]
     fn write_run_config_emits_phase0_model_parallel_metadata() {
@@ -539,7 +715,7 @@ mod tests {
                 max_iters: 8,
                 checkpoint_interval_iters: 2000,
                 log_frequency: 1,
-                fast_train: false,
+                launch_mode: burn_dragon_train::train::pipeline::TrainingLaunchMode::Fresh,
                 resume_run_dir: None,
                 resume_checkpoint_epoch: None,
                 init_checkpoint_path: None,
@@ -549,11 +725,15 @@ mod tests {
                 gdpo: None,
             },
             optimizer: OptimizerConfig {
+                name: burn_dragon_train::OptimizerKind::default(),
                 learning_rate: 1.0e-3,
                 weight_decay: 0.0,
+                weight_decay_final: None,
                 lr_schedule: None,
+                schedule_mode: burn_dragon_train::OptimizerScheduleMode::default(),
                 grad_clip_norm: None,
                 grad_clip_value: None,
+                muon: None,
             },
             parallel: ParallelConfig {
                 mode: ParallelismKind::TensorParallelNeuron,
@@ -580,6 +760,7 @@ mod tests {
                 output_format: Default::default(),
             },
             wgpu: Default::default(),
+            run_layout: burn_dragon_train::RunLayoutConfig::default(),
             model: ModelOverrides {
                 n_layer: Some(8),
                 n_embd: Some(256),
@@ -593,6 +774,11 @@ mod tests {
         model_config.n_embd = 256;
         model_config.n_head = 4;
         model_config.mlp_internal_dim_multiplier = 128;
+        model_config.initialization.kind = BdhInitializationKind::HeadwiseSemiOrthogonal;
+        model_config.initialization.residual_scaling.kind = BdhResidualScalingKind::DepthScaled;
+        model_config.initialization.neuron_gains.kind = BdhNeuronGainKind::HeavyTailedLogNormal;
+        model_config.initialization.topology_prior.kind = BdhTopologyPriorKind::ModularBridges;
+        model_config.initialization.firing_targets.kind = BdhFiringTargetKind::GaussianEstimate;
 
         write_run_config(&config, &model_config, &run_dir, "test-run", "cuda", None)
             .expect("write run config");
@@ -603,6 +789,26 @@ mod tests {
         assert_eq!(json["arch_version"], "dragon_bdh_v1");
         assert_eq!(json["shard_layout_version"], 1);
         assert_eq!(json["model_spec"]["latent_total"], 32768);
+        assert_eq!(
+            json["model_spec"]["bdh_initialization_kind"],
+            serde_json::Value::String("headwise_semi_orthogonal".to_string())
+        );
+        assert_eq!(
+            json["model_spec"]["bdh_residual_scaling_kind"],
+            serde_json::Value::String("depth_scaled".to_string())
+        );
+        assert_eq!(
+            json["model_spec"]["bdh_neuron_gain_kind"],
+            serde_json::Value::String("heavy_tailed_log_normal".to_string())
+        );
+        assert_eq!(
+            json["model_spec"]["bdh_topology_prior_kind"],
+            serde_json::Value::String("modular_bridges".to_string())
+        );
+        assert_eq!(
+            json["model_spec"]["bdh_firing_target_kind"],
+            serde_json::Value::String("gaussian_estimate".to_string())
+        );
         assert_eq!(
             json["parallel_spec"]["mode"],
             serde_json::Value::String("tensor_parallel_neuron".to_string())
@@ -615,6 +821,14 @@ mod tests {
             json["kernel_spec"]["sequence_kernel"],
             serde_json::Value::String("bdh_linear_attention".to_string())
         );
+        assert_eq!(
+            json["kernel_spec"]["low_bit_runtime"],
+            serde_json::Value::Null
+        );
+        assert_eq!(json["optimizer_spec"]["name"], "adamw");
+        assert_eq!(json["optimizer_spec"]["schedule_mode"], "bdh_reference");
+        assert_eq!(json["training_execution_form"], "default_stateful");
+        assert_eq!(json["training_launch_mode_requested"], "fresh");
         assert_eq!(json["state_layout"]["state_family"], "bdh_model_state");
         assert_eq!(
             json["state_layout"]["layers"][0]["tensors"][0]["name"],
@@ -649,7 +863,7 @@ mod tests {
                 max_iters: 8,
                 checkpoint_interval_iters: 2000,
                 log_frequency: 1,
-                fast_train: false,
+                launch_mode: burn_dragon_train::train::pipeline::TrainingLaunchMode::Fresh,
                 resume_run_dir: None,
                 resume_checkpoint_epoch: None,
                 init_checkpoint_path: None,
@@ -659,11 +873,15 @@ mod tests {
                 gdpo: None,
             },
             optimizer: OptimizerConfig {
+                name: burn_dragon_train::OptimizerKind::default(),
                 learning_rate: 1.0e-3,
                 weight_decay: 0.0,
+                weight_decay_final: None,
                 lr_schedule: None,
+                schedule_mode: burn_dragon_train::OptimizerScheduleMode::default(),
                 grad_clip_norm: None,
                 grad_clip_value: None,
+                muon: None,
             },
             parallel: ParallelConfig {
                 mode: ParallelismKind::Ddp,
@@ -690,6 +908,7 @@ mod tests {
                 output_format: Default::default(),
             },
             wgpu: Default::default(),
+            run_layout: burn_dragon_train::RunLayoutConfig::default(),
             model: ModelOverrides {
                 n_layer: Some(1),
                 n_embd: Some(256),
@@ -747,7 +966,7 @@ mod tests {
                 max_iters: 8,
                 checkpoint_interval_iters: 2000,
                 log_frequency: 1,
-                fast_train: false,
+                launch_mode: burn_dragon_train::train::pipeline::TrainingLaunchMode::Fresh,
                 resume_run_dir: None,
                 resume_checkpoint_epoch: None,
                 init_checkpoint_path: None,
@@ -757,11 +976,15 @@ mod tests {
                 gdpo: None,
             },
             optimizer: OptimizerConfig {
+                name: burn_dragon_train::OptimizerKind::default(),
                 learning_rate: 1.0e-3,
                 weight_decay: 0.0,
+                weight_decay_final: None,
                 lr_schedule: None,
+                schedule_mode: burn_dragon_train::OptimizerScheduleMode::default(),
                 grad_clip_norm: None,
                 grad_clip_value: None,
+                muon: None,
             },
             parallel: ParallelConfig {
                 mode: ParallelismKind::Ddp,
@@ -801,6 +1024,7 @@ mod tests {
                 output_format: Default::default(),
             },
             wgpu: Default::default(),
+            run_layout: burn_dragon_train::RunLayoutConfig::default(),
             model: ModelOverrides {
                 n_layer: Some(2),
                 n_embd: Some(256),
@@ -823,6 +1047,7 @@ mod tests {
         assert_eq!(json["parallel_spec"]["pipeline_enabled"], true);
         assert_eq!(json["parallel_spec"]["pipeline_stage_count"], 2);
         assert_eq!(json["parallel_spec"]["pipeline_microbatches"], 2);
+        assert_eq!(json["training_execution_form"], "pipeline");
         assert_eq!(
             json["parallel_spec"]["pipeline_communication"],
             "block_residual_cache"
@@ -913,7 +1138,7 @@ mod tests {
                 max_iters: 8,
                 checkpoint_interval_iters: 2000,
                 log_frequency: 1,
-                fast_train: false,
+                launch_mode: burn_dragon_train::train::pipeline::TrainingLaunchMode::Fresh,
                 resume_run_dir: None,
                 resume_checkpoint_epoch: None,
                 init_checkpoint_path: None,
@@ -923,11 +1148,15 @@ mod tests {
                 gdpo: None,
             },
             optimizer: OptimizerConfig {
+                name: burn_dragon_train::OptimizerKind::default(),
                 learning_rate: 1.0e-3,
                 weight_decay: 0.0,
+                weight_decay_final: None,
                 lr_schedule: None,
+                schedule_mode: burn_dragon_train::OptimizerScheduleMode::default(),
                 grad_clip_norm: None,
                 grad_clip_value: None,
+                muon: None,
             },
             parallel: ParallelConfig::default(),
             generation: GenerationConfig {
@@ -942,6 +1171,7 @@ mod tests {
                 output_format: Default::default(),
             },
             wgpu: Default::default(),
+            run_layout: burn_dragon_train::RunLayoutConfig::default(),
             model: ModelOverrides {
                 sequence_kernel: Some(SequenceKernelKind::BdhLinearAttention),
                 ..ModelOverrides::default()
@@ -949,6 +1179,17 @@ mod tests {
         };
         let mut model_config = BDHConfig::default();
         model_config.sequence_kernel = SequenceKernelKind::BdhLinearDenseScoreExperimental;
+        model_config.quant = burn_dragon_core::LowBitQuantizationConfig {
+            enable: true,
+            protocol: burn_dragon_core::BitNetLowBitProtocol::BitnetB158,
+            training_mode: burn_dragon_core::LowBitTrainingMode::TrainKernelExp,
+            inference_mode: burn_dragon_core::LowBitInferenceMode::OfflinePack,
+            saved_activations: burn_dragon_core::LowBitSavedActivationConfig {
+                mode: burn_dragon_core::LowBitSavedActivationMode::QuantizedCacheRecomputeExp,
+                format: burn_dragon_core::LowBitActivationFormat::Int8,
+            },
+            ..Default::default()
+        };
 
         write_run_config(&config, &model_config, &run_dir, "test-run", "cuda", None)
             .expect("write run config");
@@ -959,10 +1200,48 @@ mod tests {
             json["training_sequence_kernel_override"],
             serde_json::Value::String("bdh_linear_dense_score_experimental".to_string())
         );
+        assert_eq!(json["training_execution_form"], "default_stateful");
+        assert_eq!(json["training_launch_mode_requested"], "fresh");
         assert_eq!(json["training_checkpoint_interval_iters"], 2000);
         assert_eq!(
             json["kernel_spec"]["sequence_kernel"],
             serde_json::Value::String("bdh_linear_dense_score_experimental".to_string())
+        );
+        assert_eq!(
+            json["kernel_spec"]["low_bit_runtime"],
+            serde_json::Value::String("packed_native_training_forward".to_string())
+        );
+        assert_eq!(
+            json["kernel_spec"]["low_bit_saved_activation_mode"],
+            serde_json::Value::String("quantized_cache_recompute_exp".to_string())
+        );
+        assert_eq!(
+            json["kernel_spec"]["low_bit_saved_activation_format"],
+            serde_json::Value::String("int8".to_string())
+        );
+        assert_eq!(
+            json["kernel_spec"]["low_bit_saved_activation_inventory"]["requires_rho_window_anchor"],
+            serde_json::Value::Bool(true)
+        );
+        assert_eq!(
+            json["kernel_spec"]["low_bit_saved_activation_inventory"]["tensors"][0]["name"],
+            serde_json::Value::String("x_projection_input".to_string())
+        );
+        assert_eq!(
+            json["kernel_spec"]["low_bit_native_supported"],
+            serde_json::Value::Bool(true)
+        );
+        assert!(
+            json["kernel_spec"]["low_bit_memory"]["estimated_total_bytes"]
+                .as_u64()
+                .expect("low bit estimated bytes")
+                > 0
+        );
+        assert!(
+            json["kernel_spec"]["low_bit_memory"]["saved_activation_bytes"]
+                .as_u64()
+                .expect("saved activation bytes")
+                > 0
         );
         assert_eq!(
             json["overrides"]["sequence_kernel"],
@@ -984,7 +1263,7 @@ mod tests {
             max_iters: 4,
             checkpoint_interval_iters: 2000,
             log_frequency: 1,
-            fast_train: false,
+            launch_mode: burn_dragon_train::train::pipeline::TrainingLaunchMode::Fresh,
             resume_run_dir: None,
             resume_checkpoint_epoch: None,
             init_checkpoint_path: None,

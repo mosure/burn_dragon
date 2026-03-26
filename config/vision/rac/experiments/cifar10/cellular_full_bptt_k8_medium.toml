@@ -1,0 +1,49 @@
+extends = ["../../base.toml"]
+
+[dataset]
+max_records = 8192
+
+[training]
+schedule_mode = "max_iters"
+epochs = 1
+max_iters = 128
+batch_size = 8
+log_frequency = 16
+rollout_min_steps = 3
+rollout_max_steps = 3
+rollout_backprop_steps = 2
+
+[optimizer.lr_schedule]
+type = "constant"
+
+[vision]
+embed_dim = 64
+steps = 3
+n_head = 4
+projection_dim = 96
+projection_hidden_dim = 192
+fused_kernels = false
+
+[vision.rho_stream]
+enabled = true
+local_radius = 1
+local_diagonals = true
+local_self = true
+decay = 0.985
+mode_embeddings = true
+wgpu_forward_kernel = false
+wgpu_rollout_fused = false
+
+[mode]
+sample_steps = 8
+random_time_grid = true
+velocity_hidden_dim = 96
+artifact_output = "images"
+artifact_every = 1
+artifact_max_images = 4
+artifact_upscale = 2
+
+[mode.memory]
+observe_steps = 2
+backprop_steps = 2
+reset_each_step = false

@@ -1,5 +1,7 @@
 use burn::tensor::Tensor;
 use burn::tensor::backend::{AutodiffBackend, Backend};
+#[cfg(any(feature = "viz", feature = "probe"))]
+use burn_dragon_core::LayerVizState;
 use burn_dragon_core::api::state::{BankedRhoState, ModelState, StructuredTopologyState};
 use burn_dragon_core::model::LayerState;
 use burn_dragon_stream::{
@@ -157,11 +159,23 @@ pub fn detach_model_state<B: Backend>(state: &ModelState<B>) -> ModelState<B> {
             .iter()
             .map(|layer| LayerState {
                 rho: layer.rho.clone().map(Tensor::detach),
+                packed_rho_int8: layer.packed_rho_int8.clone(),
+                packed_rho_int8_device: layer
+                    .packed_rho_int8_device
+                    .clone()
+                    .map(|state| state.detach()),
                 rho_norm: layer.rho_norm.clone().map(Tensor::detach),
                 sequence_aux: layer.sequence_aux.clone().map(Tensor::detach),
                 y_neuron_state: layer.y_neuron_state.clone().map(Tensor::detach),
                 clocked_slow_hidden: layer.clocked_slow_hidden.clone().map(Tensor::detach),
                 summary_memory_hidden: layer.summary_memory_hidden.clone().map(Tensor::detach),
+                #[cfg(any(feature = "viz", feature = "probe"))]
+                viz: layer.viz.clone().map(|viz| LayerVizState {
+                    x_neuron_last: viz.x_neuron_last.detach(),
+                    y_gate_last: viz.y_gate_last.detach(),
+                    y_neuron_last: viz.y_neuron_last.detach(),
+                    rho_last: viz.rho_last.detach(),
+                }),
             })
             .collect(),
         position: state.position,
@@ -175,11 +189,27 @@ pub fn model_state_inner<B: AutodiffBackend>(state: &ModelState<B>) -> ModelStat
             .iter()
             .map(|layer| LayerState {
                 rho: layer.rho.clone().map(Tensor::inner),
+                packed_rho_int8: layer.packed_rho_int8.clone(),
+                packed_rho_int8_device: layer.packed_rho_int8_device.clone().map(|state| {
+                    burn_dragon_core::PackedRhoInt8DeviceState {
+                        logical_shape: state.logical_shape,
+                        block_size: state.block_size,
+                        scales: state.scales.inner(),
+                        packed: state.packed.inner(),
+                    }
+                }),
                 rho_norm: layer.rho_norm.clone().map(Tensor::inner),
                 sequence_aux: layer.sequence_aux.clone().map(Tensor::inner),
                 y_neuron_state: layer.y_neuron_state.clone().map(Tensor::inner),
                 clocked_slow_hidden: layer.clocked_slow_hidden.clone().map(Tensor::inner),
                 summary_memory_hidden: layer.summary_memory_hidden.clone().map(Tensor::inner),
+                #[cfg(any(feature = "viz", feature = "probe"))]
+                viz: layer.viz.clone().map(|viz| LayerVizState {
+                    x_neuron_last: viz.x_neuron_last.inner(),
+                    y_gate_last: viz.y_gate_last.inner(),
+                    y_neuron_last: viz.y_neuron_last.inner(),
+                    rho_last: viz.rho_last.inner(),
+                }),
             })
             .collect(),
         position: state.position,
@@ -195,11 +225,27 @@ pub fn model_state_from_inner<B: AutodiffBackend>(
             .into_iter()
             .map(|layer| LayerState {
                 rho: layer.rho.map(Tensor::from_inner),
+                packed_rho_int8: layer.packed_rho_int8,
+                packed_rho_int8_device: layer.packed_rho_int8_device.map(|state| {
+                    burn_dragon_core::PackedRhoInt8DeviceState {
+                        logical_shape: state.logical_shape,
+                        block_size: state.block_size,
+                        scales: Tensor::from_inner(state.scales),
+                        packed: Tensor::from_inner(state.packed),
+                    }
+                }),
                 rho_norm: layer.rho_norm.map(Tensor::from_inner),
                 sequence_aux: layer.sequence_aux.map(Tensor::from_inner),
                 y_neuron_state: layer.y_neuron_state.map(Tensor::from_inner),
                 clocked_slow_hidden: layer.clocked_slow_hidden.map(Tensor::from_inner),
                 summary_memory_hidden: layer.summary_memory_hidden.map(Tensor::from_inner),
+                #[cfg(any(feature = "viz", feature = "probe"))]
+                viz: layer.viz.map(|viz| LayerVizState {
+                    x_neuron_last: Tensor::from_inner(viz.x_neuron_last),
+                    y_gate_last: Tensor::from_inner(viz.y_gate_last),
+                    y_neuron_last: Tensor::from_inner(viz.y_neuron_last),
+                    rho_last: Tensor::from_inner(viz.rho_last),
+                }),
             })
             .collect(),
         position: state.position,

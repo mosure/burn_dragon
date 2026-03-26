@@ -1,17 +1,6 @@
 #![recursion_limit = "256"]
 
 #[cfg(feature = "train")]
-use std::fs;
-#[cfg(feature = "train")]
-use std::path::PathBuf;
-#[cfg(all(feature = "train", feature = "ddp"))]
-use std::process::{Command as ProcessCommand, Stdio};
-#[cfg(feature = "train")]
-use std::sync::atomic::Ordering;
-#[cfg(feature = "train")]
-use std::time::{SystemTime, UNIX_EPOCH};
-
-#[cfg(feature = "train")]
 use anyhow::{Context, Result, anyhow};
 #[cfg(feature = "train")]
 use burn::tensor::backend::AutodiffBackend;
@@ -33,8 +22,10 @@ use burn_dragon::multimodal::{
     load_multimodal_runtime_config, train_backend as train_multimodal_backend,
     train_video_backend as train_multimodal_video_backend,
 };
-#[cfg(feature = "train")]
-use burn_dragon::train::train::constants::FAST_TRAIN;
+#[cfg(all(feature = "train", feature = "ddp"))]
+use burn_dragon::train::train::pipeline::{
+    plan_run_artifacts, resolve_resume_run_dir, resolve_run_root_for_config_paths,
+};
 #[cfg(feature = "train")]
 use burn_dragon::train::wgpu::{init_runtime, is_wgpu_backend_name};
 #[cfg(feature = "train")]
@@ -55,14 +46,18 @@ use burn_ndarray::NdArray;
 use burn_wgpu::{CubeBackend, Wgpu, WgpuRuntime};
 #[cfg(feature = "train")]
 use clap::{Args, Parser, Subcommand, ValueEnum};
+#[cfg(feature = "train")]
+use std::fs;
+#[cfg(feature = "train")]
+use std::path::PathBuf;
+#[cfg(all(feature = "train", feature = "ddp"))]
+use std::process::{Command as ProcessCommand, Stdio};
 
 #[cfg(all(feature = "train", feature = "cuda"))]
 use burn_cuda::Cuda;
 
 #[cfg(feature = "train")]
 type WgpuNoFusion = CubeBackend<WgpuRuntime, f32, i32, u32>;
-#[cfg(feature = "train")]
-const RUN_ROOT_ENV: &str = "BURN_DRAGON_RUN_ROOT";
 
 #[cfg(feature = "train")]
 fn default_or_explicit_config_paths(default_base: &str, explicit: &[PathBuf]) -> Vec<PathBuf> {
@@ -309,8 +304,6 @@ fn run_language(args: LanguageArgs) -> Result<()> {
         return Ok(());
     }
 
-    FAST_TRAIN.store(config.training.fast_train, Ordering::Relaxed);
-
     run_in_training_thread("language-train", move || match args.backend {
         BackendArg::Ndarray => train_language::<Autodiff<NdArray<f32>>, _>(&config, "cpu", |_| {}),
         BackendArg::Wgpu => {
@@ -388,25 +381,6 @@ fn run_language(args: LanguageArgs) -> Result<()> {
 }
 
 #[cfg(all(feature = "train", feature = "ddp"))]
-fn local_ddp_run_name() -> Result<String> {
-    let suffix = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|err| anyhow!("failed to read system time: {err}"))?
-        .as_secs();
-    Ok(format!(
-        "language-local-ddp-{}-{suffix}",
-        std::process::id()
-    ))
-}
-
-#[cfg(feature = "train")]
-fn resolve_cli_run_root() -> PathBuf {
-    std::env::var_os(RUN_ROOT_ENV)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("runs"))
-}
-
-#[cfg(all(feature = "train", feature = "ddp"))]
 fn backend_arg_cli_value(backend: BackendArg) -> &'static str {
     match backend {
         BackendArg::Cuda => "cuda",
@@ -461,34 +435,15 @@ fn run_language_local_ddp(args: LanguageLocalDdpArgs) -> Result<()> {
     let current_exe = std::env::current_exe().context("resolve current train binary")?;
     let config_paths = default_or_explicit_config_paths("config/language/base.toml", &args.config);
     let config = load_language_training_config(&config_paths)?;
-    let run_root = resolve_cli_run_root();
-    let (run_name, run_dir) = match &config.training.resume_run_dir {
-        Some(run_dir) => {
-            if !run_dir.is_dir() {
-                return Err(anyhow!(
-                    "training.resume_run_dir does not exist or is not a directory: {}",
-                    run_dir.display()
-                ));
-            }
-            let run_name = run_dir
-                .file_name()
-                .and_then(|name| name.to_str())
-                .ok_or_else(|| anyhow!("failed to derive run name from {}", run_dir.display()))?
-                .to_string();
-            (run_name, run_dir.clone())
-        }
-        None => {
-            let run_name = local_ddp_run_name()?;
-            let run_dir = run_root.join(&run_name);
-            fs::create_dir_all(&run_dir).map_err(|err| {
-                anyhow!(
-                    "failed to create shared DDP run directory {}: {err}",
-                    run_dir.display()
-                )
-            })?;
-            (run_name, run_dir)
-        }
-    };
+    let run_root = resolve_run_root_for_config_paths("language", &config.run_layout, &config_paths);
+    let resume_run_dir = resolve_resume_run_dir(
+        &run_root,
+        config.training.resume_run_dir.as_deref(),
+        config.training.launch_mode,
+    )?;
+    let planned_run = plan_run_artifacts(&run_root, resume_run_dir.as_deref())?;
+    let run_name = planned_run.run_name;
+    let run_dir = planned_run.run_dir;
 
     let overlay_root = std::env::temp_dir().join(format!(
         "burn_dragon_language_local_ddp_{}_{}",

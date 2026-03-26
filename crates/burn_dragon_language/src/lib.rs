@@ -14,8 +14,6 @@ pub mod inference;
 pub mod loss;
 pub mod summary_events;
 pub mod tokenizer;
-#[cfg(feature = "train")]
-pub mod ttcl;
 
 #[cfg(feature = "train")]
 pub mod checkpoint;
@@ -67,10 +65,13 @@ pub mod api {
     #[cfg(feature = "train")]
     pub mod checkpoint {
         pub use crate::checkpoint::{
-            LanguageBurnpackExportReport, LanguageRunConfigSnapshot, default_checkpoint_dir,
-            export_language_checkpoint_to_burnpack, load_language_core_from_checkpoint,
-            load_tokenizer_for_checkpoint, load_training_config_for_checkpoint,
-            write_training_snapshot,
+            LanguageBitNetArtifactBundle, LanguageBitNetArtifactExportReport,
+            LanguageBurnpackExportReport, LanguageRunConfigSnapshot,
+            candidate_bitnet_artifact_paths, default_bitnet_artifact_path, default_checkpoint_dir,
+            export_language_checkpoint_to_bitnet_artifact, export_language_checkpoint_to_burnpack,
+            load_bitnet_artifact_bundle, load_language_core_from_checkpoint,
+            load_language_core_from_checkpoint_with_bitnet_artifact, load_tokenizer_for_checkpoint,
+            load_training_config_for_checkpoint, write_training_snapshot,
         };
     }
 
@@ -79,15 +80,17 @@ pub mod api {
         pub use crate::dataset;
         pub use crate::stages;
         pub use crate::train;
-        pub use crate::ttcl;
     }
 }
 
 pub use burn_dragon_core::{BDH, BDHConfig, ModelState, SequenceKernelKind};
 #[cfg(feature = "train")]
 pub use checkpoint::{
-    LanguageBurnpackExportReport, LanguageRunConfigSnapshot, default_checkpoint_dir,
-    export_language_checkpoint_to_burnpack, load_language_core_from_checkpoint,
+    LanguageBitNetArtifactBundle, LanguageBitNetArtifactExportReport, LanguageBurnpackExportReport,
+    LanguageRunConfigSnapshot, candidate_bitnet_artifact_paths, default_bitnet_artifact_path,
+    default_checkpoint_dir, export_language_checkpoint_to_bitnet_artifact,
+    export_language_checkpoint_to_burnpack, load_bitnet_artifact_bundle,
+    load_language_core_from_checkpoint, load_language_core_from_checkpoint_with_bitnet_artifact,
     load_tokenizer_for_checkpoint, load_training_config_for_checkpoint, write_training_snapshot,
 };
 pub use config::{
@@ -125,15 +128,3 @@ pub use summary_events::{
     summary_event_mask_from_tokens, summary_event_mask_tensor,
 };
 pub use tokenizer::char_vocab::CharVocab;
-#[cfg(feature = "train")]
-pub use ttcl::{
-    DeductionEpisodesConfig, GeneratedPermutationTransferData, PermutationEpisode,
-    PermutationExample, PermutationRenderConfig, PermutationTaskKind,
-    PermutationTransferExperimentConfig, PermutationTransferRunSummary, ProtocolDifficultySummary,
-    ProtocolEpisodeMetrics, ProtocolSummary, SourceHoldoutConfig, SupportRewrite,
-    TrackingCorpusConfig, TtclProtocolConfig, TtclProtocolMode, TtclTrainingConfig,
-    derive_render_config, generate_permutation_transfer_data,
-    load_permutation_transfer_experiment_config, render_run_summary_markdown,
-    resolve_ttcl_output_dir, summarize_protocols, write_example_corpus,
-    write_generated_transfer_data,
-};

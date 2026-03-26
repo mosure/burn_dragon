@@ -1,0 +1,4 @@
+extends = ["cellular_full_bptt_k8_medium.toml"]
+
+[mode.memory]
+flow_backprop_steps = 4

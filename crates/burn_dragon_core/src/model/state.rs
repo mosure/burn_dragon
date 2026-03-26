@@ -1,15 +1,19 @@
 use burn::tensor::Tensor;
 use burn::tensor::backend::Backend;
 
+use crate::model::low_bit_runtime::{PackedRhoInt8DeviceState, PackedRhoInt8State};
+
 #[derive(Debug, Clone)]
 pub struct LayerState<B: Backend> {
     pub rho: Option<Tensor<B, 4>>,
+    pub packed_rho_int8: Option<PackedRhoInt8State>,
+    pub packed_rho_int8_device: Option<PackedRhoInt8DeviceState<B>>,
     pub rho_norm: Option<Tensor<B, 3>>,
     pub sequence_aux: Option<Tensor<B, 4>>,
     pub y_neuron_state: Option<Tensor<B, 3>>,
     pub clocked_slow_hidden: Option<Tensor<B, 4>>,
     pub summary_memory_hidden: Option<Tensor<B, 4>>,
-    #[cfg(feature = "viz")]
+    #[cfg(any(feature = "viz", feature = "probe"))]
     pub viz: Option<LayerVizState<B>>,
 }
 
@@ -19,7 +23,7 @@ pub struct ModelState<B: Backend> {
     pub position: usize,
 }
 
-#[cfg(feature = "viz")]
+#[cfg(any(feature = "viz", feature = "probe"))]
 #[derive(Debug, Clone)]
 pub struct LayerVizState<B: Backend> {
     pub x_neuron_last: Tensor<B, 2>,
@@ -34,12 +38,14 @@ impl<B: Backend> ModelState<B> {
             layers: (0..num_layers)
                 .map(|_| LayerState {
                     rho: None,
+                    packed_rho_int8: None,
+                    packed_rho_int8_device: None,
                     rho_norm: None,
                     sequence_aux: None,
                     y_neuron_state: None,
                     clocked_slow_hidden: None,
                     summary_memory_hidden: None,
-                    #[cfg(feature = "viz")]
+                    #[cfg(any(feature = "viz", feature = "probe"))]
                     viz: None,
                 })
                 .collect(),
@@ -50,6 +56,8 @@ impl<B: Backend> ModelState<B> {
     pub fn reset(&mut self) {
         for layer in &mut self.layers {
             layer.rho = None;
+            layer.packed_rho_int8 = None;
+            layer.packed_rho_int8_device = None;
             layer.rho_norm = None;
             layer.sequence_aux = None;
             layer.y_neuron_state = None;
@@ -74,6 +82,10 @@ impl<B: Backend> ModelState<B> {
     pub fn detach_in_place(&mut self) {
         for layer in &mut self.layers {
             layer.rho = layer.rho.take().map(|tensor| tensor.detach());
+            layer.packed_rho_int8_device = layer
+                .packed_rho_int8_device
+                .take()
+                .map(|state| state.detach());
             layer.rho_norm = layer.rho_norm.take().map(|tensor| tensor.detach());
             layer.sequence_aux = layer.sequence_aux.take().map(|tensor| tensor.detach());
             layer.y_neuron_state = layer.y_neuron_state.take().map(|tensor| tensor.detach());
@@ -88,7 +100,7 @@ impl<B: Backend> ModelState<B> {
         }
     }
 
-    #[cfg(feature = "viz")]
+    #[cfg(any(feature = "viz", feature = "probe"))]
     pub fn take_viz(&mut self) -> Vec<Option<LayerVizState<B>>> {
         self.layers
             .iter_mut()
@@ -96,7 +108,7 @@ impl<B: Backend> ModelState<B> {
             .collect()
     }
 
-    #[cfg(feature = "viz")]
+    #[cfg(any(feature = "viz", feature = "probe"))]
     pub fn clear_viz(&mut self) {
         for layer in &mut self.layers {
             layer.viz = None;
@@ -104,7 +116,7 @@ impl<B: Backend> ModelState<B> {
     }
 }
 
-#[cfg(feature = "viz")]
+#[cfg(any(feature = "viz", feature = "probe"))]
 impl<B: Backend> LayerState<B> {
     pub fn take_viz(&mut self) -> Option<LayerVizState<B>> {
         self.viz.take()

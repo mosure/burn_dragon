@@ -35,16 +35,20 @@ pub(crate) use pipeline::resolve_vision_rollout;
 pub use saccade::SaccadeFoveationSampler;
 #[cfg(all(feature = "benchmark", feature = "cuda"))]
 pub use vision::run_vision_distill_decode_probe_cuda_with_seed;
-pub use vision::train::train_vision_backend;
 #[cfg(feature = "integration_test")]
 pub use vision::train::train_vision_backend_for_test;
+pub use vision::train::{
+    train_vision_backend, train_vision_backend_with_config_paths,
+    train_vision_backend_with_planned_run,
+};
 pub use vision::{
     CifarBatch, CifarDataLoader, CifarDataset, CifarSplit, CifarType, DinoFeatureStore,
     ImageNetAugmentations, ImageNetBatch, ImageNetDataLoader, ImageNetDataset,
-    ImageNetDatasetConfig, ImageNetSplit, ImageNetTeacherTargetBatch, ImageTeacherTargetStore,
-    MovingMnistRenderedClip, MovingMnistSplit, MovingMnistVideoDataLoader, MovingMnistVideoDataset,
-    MovingMnistVideoDatasetConfig, VideoClipBatch, VideoTargetHorizonCurriculum, VisionNormalize,
-    VisionVideoTrainProfileSnapshot, video_train_profile_reset, video_train_profile_snapshot,
+    ImageNetDatasetConfig, ImageNetSplit, ImageNetTeacherTargetBatch, ImageNetVideoDataLoader,
+    ImageTeacherTargetStore, ImageTensorStore, MovingMnistRenderedClip, MovingMnistSplit,
+    MovingMnistVideoDataLoader, MovingMnistVideoDataset, MovingMnistVideoDatasetConfig,
+    VideoClipBatch, VideoTargetHorizonCurriculum, VisionNormalize, VisionVideoTrainProfileSnapshot,
+    video_train_profile_reset, video_train_profile_snapshot,
 };
 #[cfg(feature = "benchmark")]
 pub use vision::{
@@ -66,7 +70,10 @@ pub use vision::{
     run_vision_distill_linear_probe_for_teacher_with_seed,
     run_vision_distill_linear_probe_with_seed, run_vision_distill_serving_benchmark,
 };
-pub use vision::{VisionDistillCheckpointEvalSummary, eval_vision_distill_checkpoint_backend};
+pub use vision::{
+    VisionDistillCheckpointEvalSummary, VisionRacCheckpointEvalSummary,
+    eval_vision_distill_checkpoint_backend, eval_vision_rac_checkpoint_backend,
+};
 pub(crate) use vision::{
     VisionDistillModel, VisionLejepaInit, VisionLejepaModel, VisionReconstructionInit,
 };

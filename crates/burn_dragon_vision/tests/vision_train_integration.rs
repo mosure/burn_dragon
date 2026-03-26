@@ -25,15 +25,18 @@ use burn_autodiff::Autodiff;
 #[cfg(feature = "cuda")]
 use burn_cubecl::CubeBackend;
 #[cfg(feature = "train")]
+use burn_dragon_train::train::pipeline::{
+    resolve_latest_run_dir_in, resolve_run_root_for_config_paths,
+};
+#[cfg(feature = "train")]
 use burn_dragon_train::wgpu::init_runtime;
 use burn_dragon_vision::load_vision_training_config;
 #[cfg(feature = "cuda")]
 use burn_dragon_vision::train::{gdpo_cpu_fallbacks, loss_trace_len};
 use burn_dragon_vision::train::{
     gdpo_reset_cpu_fallbacks, loss_trace_reset, loss_trace_take, train_vision_backend_for_test,
+    train_vision_backend_with_config_paths,
 };
-#[cfg(feature = "train")]
-use burn_dragon_vision::train_vision_backend;
 use burn_ndarray::NdArray;
 #[cfg(feature = "train")]
 use burn_wgpu::Wgpu;
@@ -109,10 +112,11 @@ fn moving_mnist_trm_retention_check_path() -> PathBuf {
 }
 
 #[cfg(feature = "train")]
-fn vision_run_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("runs")
-        .join("vision")
+fn vision_run_root(
+    config: &burn_dragon_vision::VisionTrainingConfig,
+    paths: &[PathBuf],
+) -> PathBuf {
+    resolve_run_root_for_config_paths("vision", &config.run_layout, paths)
 }
 
 #[cfg(feature = "train")]
@@ -136,9 +140,8 @@ fn current_run_dirs(root: &std::path::Path) -> HashSet<PathBuf> {
 fn newest_added_run_dir(before: &HashSet<PathBuf>, root: &std::path::Path) -> PathBuf {
     let mut added: Vec<_> = current_run_dirs(root).difference(before).cloned().collect();
     if added.is_empty() {
-        let latest = root.join("latest");
-        if latest.exists() {
-            return fs::canonicalize(latest).expect("canonicalize latest run");
+        if let Some(latest_run_dir) = resolve_latest_run_dir_in(root) {
+            return latest_run_dir;
         }
         panic!("no new run directory created under {}", root.display());
     }
@@ -273,16 +276,17 @@ fn cpu_vision_identity_tiny_training_loss_decreases() {
 fn wgpu_video_trm_artifact_validation_memory_stays_bounded() {
     let config_path = moving_mnist_trm_retention_check_path();
     let config = load_vision_training_config(&[config_path]).expect("load retention config");
-
-    let run_root = vision_run_root();
+    let run_root = vision_run_root(&config, &[moving_mnist_trm_retention_check_path()]);
     fs::create_dir_all(&run_root).expect("create run root");
     let before = current_run_dirs(&run_root);
 
     type WgpuNoFusion = CubeBackend<WgpuRuntime, f32, i32, u32>;
-    let result =
-        train_vision_backend::<Autodiff<WgpuNoFusion>, _>(&config, "wgpu-nofusion", |device| {
-            init_runtime(device, &config.wgpu)
-        });
+    let result = train_vision_backend_with_config_paths::<Autodiff<WgpuNoFusion>, _>(
+        &config,
+        &[moving_mnist_trm_retention_check_path()],
+        "wgpu-nofusion",
+        |device| init_runtime(device, &config.wgpu),
+    );
     if let Err(err) = result {
         panic!("training failed: {err}");
     }

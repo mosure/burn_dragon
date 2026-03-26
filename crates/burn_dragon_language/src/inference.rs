@@ -31,6 +31,9 @@ pub fn build_model_config(overrides: &ModelOverrides, training_block_size: usize
         );
         model_config.mlp_internal_dim_multiplier = latent_total / model_config.n_embd;
     }
+    if let Some(initialization) = &overrides.initialization {
+        model_config.initialization = initialization.clone();
+    }
     if let Some(sequence_kernel) = overrides.sequence_kernel {
         model_config.sequence_kernel = sequence_kernel;
     }
@@ -85,6 +88,12 @@ pub fn build_model_config(overrides: &ModelOverrides, training_block_size: usize
     }
     if let Some(mhc) = &overrides.mhc {
         model_config.mhc = mhc.clone();
+    }
+    if let Some(quant) = &overrides.quant {
+        model_config.quant = quant.clone();
+    }
+    if let Some(rho) = &overrides.rho {
+        model_config.rho = rho.clone();
     }
 
     match overrides.residual_connector {
@@ -186,7 +195,9 @@ pub fn apply_wgpu_fused_core_override(
 mod tests {
     use super::{apply_wgpu_fused_core_override, build_model_config, is_wgpu_backend_name};
     use crate::ModelOverrides;
-    use burn_dragon_core::{BDHConfig, ResidualConnectorKind};
+    use burn_dragon_core::{
+        BDHConfig, BdhInitializationConfig, BdhInitializationKind, ResidualConnectorKind,
+    };
 
     #[test]
     fn backend_name_detection_accepts_wgpu_variants() {
@@ -242,6 +253,54 @@ mod tests {
         let config = build_model_config(&overrides, 32);
         assert_eq!(config.latent_total(), 32768);
         assert_eq!(config.mlp_internal_dim_multiplier, 128);
+    }
+
+    #[test]
+    fn model_override_applies_low_bit_quantization_and_rho_policy() {
+        let overrides = ModelOverrides {
+            quant: Some(burn_dragon_core::LowBitQuantizationConfig {
+                enable: true,
+                protocol: burn_dragon_core::BitNetLowBitProtocol::BitnetB158,
+                target_modules: vec![
+                    burn_dragon_core::LowBitTargetModule::Encoder,
+                    burn_dragon_core::LowBitTargetModule::DecoderY,
+                ],
+                ..Default::default()
+            }),
+            rho: Some(burn_dragon_core::LowBitRhoConfig {
+                precision: burn_dragon_core::RhoPrecisionConfig::Fp32,
+                ..Default::default()
+            }),
+            ..ModelOverrides::default()
+        };
+
+        let config = build_model_config(&overrides, 32);
+        assert!(config.quant.enable);
+        assert_eq!(
+            config.quant.protocol,
+            burn_dragon_core::BitNetLowBitProtocol::BitnetB158
+        );
+        assert_eq!(
+            config.rho.precision,
+            burn_dragon_core::RhoPrecisionConfig::Fp32
+        );
+    }
+
+    #[test]
+    fn model_override_applies_initialization_family() {
+        let overrides = ModelOverrides {
+            initialization: Some(BdhInitializationConfig {
+                kind: BdhInitializationKind::HeadwiseSemiOrthogonal,
+                ..Default::default()
+            }),
+            ..ModelOverrides::default()
+        };
+
+        let config = build_model_config(&overrides, 32);
+        assert_eq!(
+            config.initialization.kind,
+            BdhInitializationKind::HeadwiseSemiOrthogonal
+        );
     }
 
     #[test]

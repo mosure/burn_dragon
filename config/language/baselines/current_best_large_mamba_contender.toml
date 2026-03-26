@@ -9,8 +9,7 @@ name = "nca_prepretrain"
 type = "language_train"
 config = "current_best_large_mamba_contender/nca_stage_base.toml"
 backend = "cuda"
-resume_from_last_checkpoint = true
-
+launch_mode = "resume_latest_checkpoint_if_present"
 [[stages]]
 # Same 48h budget envelope as the promoted dense-score bundle, but with the tuned Mamba line.
 name = "climbmix_pretrain"
@@ -19,4 +18,4 @@ type = "language_train"
 config = "current_best_large_mamba_contender/climbmix_stage_48h.toml"
 backend = "cuda"
 init_checkpoint_from_stage = "nca_prepretrain"
-resume_from_last_checkpoint = true
+launch_mode = "resume_latest_checkpoint_if_present"

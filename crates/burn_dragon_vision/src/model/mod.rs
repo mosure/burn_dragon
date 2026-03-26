@@ -10,8 +10,9 @@ pub use vision::{
     PatchEmbed, PatchEmbedOutput, PatchGrid, SpatialPositionalEncodingKind,
     StageAwareHostProfileSnapshot, VisionAttentionMode, VisionBackboneKind, VisionCellularConfig,
     VisionCellularState, VisionDragon, VisionDragonConfig, VisionDragonMultiOutput,
-    VisionDragonOutput, VisionLatentActivation, VisionPatchEmbedMode, VisionPyramidConfig,
-    VisionRhoStreamConfig, VisionRolloutState, VisionTrmGraphConfig, VisionTrmGridMismatchPolicy,
+    VisionDragonOutput, VisionLatentActivation, VisionPatchEmbedMode, VisionProjectionHead,
+    VisionPyramidConfig, VisionRacVelocityBackbone, VisionRacVelocityOutput, VisionRhoStreamConfig,
+    VisionRolloutState, VisionTrmClsReadoutKind, VisionTrmGraphConfig, VisionTrmGridMismatchPolicy,
     VisionTrmPredictSubstepKind, patchify, pool_patch_tokens, stage_aware_host_profile_reset,
     stage_aware_host_profile_snapshot, unpatchify,
 };

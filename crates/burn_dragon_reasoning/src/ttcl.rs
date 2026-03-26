@@ -1,5 +1,3 @@
-#![cfg(feature = "train")]
-
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -45,6 +43,18 @@ fn default_adaptation_learning_rate() -> f64 {
 
 fn default_extra_clues() -> usize {
     1
+}
+
+fn default_source_checkpoint_selection() -> CheckpointSelectionMode {
+    CheckpointSelectionMode::SourceHoldoutAccuracy
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckpointSelectionMode {
+    Last,
+    #[default]
+    SourceHoldoutAccuracy,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -103,6 +113,8 @@ pub struct TtclTrainingConfig {
     pub checkpoint_interval_iters: usize,
     #[serde(default = "default_log_frequency")]
     pub log_frequency: usize,
+    #[serde(default = "default_source_checkpoint_selection")]
+    pub source_checkpoint_selection: CheckpointSelectionMode,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -144,6 +156,13 @@ pub struct TtclProtocolConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct SourceCheckpointConfig {
+    pub path: PathBuf,
+    #[serde(default)]
+    pub checkpoint_epoch: Option<usize>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct PermutationTransferExperimentConfig {
     pub name: String,
     pub output_dir: PathBuf,
@@ -151,6 +170,8 @@ pub struct PermutationTransferExperimentConfig {
     pub seed: u64,
     #[serde(default = "default_true")]
     pub train_source_stream: bool,
+    #[serde(default)]
+    pub source_checkpoint: Option<SourceCheckpointConfig>,
     pub model: ModelOverrides,
     pub training: TtclTrainingConfig,
     pub source_pretrain: TrackingCorpusConfig,
@@ -287,6 +308,15 @@ impl TtclProtocolConfig {
     }
 }
 
+impl SourceCheckpointConfig {
+    fn validate(&self) -> Result<()> {
+        if self.path.as_os_str().is_empty() {
+            return Err(anyhow!("source_checkpoint.path must not be empty"));
+        }
+        Ok(())
+    }
+}
+
 impl PermutationTransferExperimentConfig {
     pub fn validate(&self) -> Result<()> {
         if self.name.trim().is_empty() {
@@ -311,6 +341,14 @@ impl PermutationTransferExperimentConfig {
                     protocol.name,
                     protocol.support_examples,
                     self.target.support_pool_size
+                ));
+            }
+        }
+        if let Some(source_checkpoint) = &self.source_checkpoint {
+            source_checkpoint.validate()?;
+            if self.train_source_stream {
+                return Err(anyhow!(
+                    "train_source_stream must be false when source_checkpoint is provided"
                 ));
             }
         }
@@ -441,6 +479,30 @@ pub struct GeneratedPermutationTransferData {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct AccuracyByObjectCount {
+    pub object_count: usize,
+    pub examples: usize,
+    pub accuracy: f64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct CheckpointEvaluationSummary {
+    pub epoch: usize,
+    pub source_holdout_accuracy: f64,
+    pub source_holdout_by_object_count: Vec<AccuracyByObjectCount>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct CheckpointSelectionSummary {
+    pub stage_name: String,
+    pub mode: CheckpointSelectionMode,
+    pub selected_epoch: usize,
+    pub selected_source_holdout_accuracy: f64,
+    pub selected_source_holdout_by_object_count: Vec<AccuracyByObjectCount>,
+    pub candidates: Vec<CheckpointEvaluationSummary>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct ProtocolEpisodeMetrics {
     pub protocol_name: String,
     pub mode: TtclProtocolMode,
@@ -455,6 +517,9 @@ pub struct ProtocolEpisodeMetrics {
     pub source_accuracy_source_checkpoint: f64,
     pub source_accuracy_before: f64,
     pub source_accuracy_after: f64,
+    pub source_accuracy_by_object_count_source_checkpoint: Vec<AccuracyByObjectCount>,
+    pub source_accuracy_by_object_count_before: Vec<AccuracyByObjectCount>,
+    pub source_accuracy_by_object_count_after: Vec<AccuracyByObjectCount>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -500,6 +565,20 @@ pub struct ProtocolDifficultySummary {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct ProtocolSourceDifficultySummary {
+    pub protocol_name: String,
+    pub mode: TtclProtocolMode,
+    pub object_count: usize,
+    pub episodes: usize,
+    pub mean_source_accuracy_source_checkpoint: f64,
+    pub mean_source_accuracy_before: f64,
+    pub mean_source_accuracy_after: f64,
+    pub mean_source_delta: f64,
+    pub mean_source_delta_vs_source_checkpoint: f64,
+    pub max_source_forgetting_vs_source_checkpoint: f64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct PermutationTransferRunSummary {
     pub experiment_name: String,
     pub output_dir: PathBuf,
@@ -516,8 +595,11 @@ pub struct PermutationTransferRunSummary {
     pub source_pretrain_checkpoint_epoch: usize,
     pub source_stream_checkpoint_dir: PathBuf,
     pub source_stream_checkpoint_epoch: usize,
+    pub source_pretrain_selection: Option<CheckpointSelectionSummary>,
+    pub source_stream_selection: Option<CheckpointSelectionSummary>,
     pub protocol_summaries: Vec<ProtocolSummary>,
     pub difficulty_summaries: Vec<ProtocolDifficultySummary>,
+    pub source_difficulty_summaries: Vec<ProtocolSourceDifficultySummary>,
     pub episode_metrics: Vec<ProtocolEpisodeMetrics>,
 }
 
@@ -766,6 +848,87 @@ pub fn summarize_protocols(
                 .collect::<Vec<_>>()
         })
         .collect();
+    summary.source_difficulty_summaries = protocols
+        .iter()
+        .flat_map(|protocol| {
+            let mut object_counts = summary
+                .episode_metrics
+                .iter()
+                .filter(|row| row.protocol_name == protocol.name)
+                .flat_map(|row| {
+                    row.source_accuracy_by_object_count_after
+                        .iter()
+                        .map(|entry| entry.object_count)
+                })
+                .collect::<Vec<_>>();
+            object_counts.sort_unstable();
+            object_counts.dedup();
+            object_counts
+                .into_iter()
+                .map(|object_count| {
+                    let rows = summary
+                        .episode_metrics
+                        .iter()
+                        .filter(|row| row.protocol_name == protocol.name)
+                        .collect::<Vec<_>>();
+                    ProtocolSourceDifficultySummary {
+                        protocol_name: protocol.name.clone(),
+                        mode: protocol.mode,
+                        object_count,
+                        episodes: rows.len(),
+                        mean_source_accuracy_source_checkpoint: mean_metric(&rows, |row| {
+                            accuracy_for_object_count(
+                                &row.source_accuracy_by_object_count_source_checkpoint,
+                                object_count,
+                            )
+                        }),
+                        mean_source_accuracy_before: mean_metric(&rows, |row| {
+                            accuracy_for_object_count(
+                                &row.source_accuracy_by_object_count_before,
+                                object_count,
+                            )
+                        }),
+                        mean_source_accuracy_after: mean_metric(&rows, |row| {
+                            accuracy_for_object_count(
+                                &row.source_accuracy_by_object_count_after,
+                                object_count,
+                            )
+                        }),
+                        mean_source_delta: mean_metric(&rows, |row| {
+                            accuracy_for_object_count(
+                                &row.source_accuracy_by_object_count_after,
+                                object_count,
+                            ) - accuracy_for_object_count(
+                                &row.source_accuracy_by_object_count_before,
+                                object_count,
+                            )
+                        }),
+                        mean_source_delta_vs_source_checkpoint: mean_metric(&rows, |row| {
+                            accuracy_for_object_count(
+                                &row.source_accuracy_by_object_count_after,
+                                object_count,
+                            ) - accuracy_for_object_count(
+                                &row.source_accuracy_by_object_count_source_checkpoint,
+                                object_count,
+                            )
+                        }),
+                        max_source_forgetting_vs_source_checkpoint: rows
+                            .iter()
+                            .map(|row| {
+                                accuracy_for_object_count(
+                                    &row.source_accuracy_by_object_count_after,
+                                    object_count,
+                                ) - accuracy_for_object_count(
+                                    &row.source_accuracy_by_object_count_source_checkpoint,
+                                    object_count,
+                                )
+                            })
+                            .fold(0.0, |worst, delta| worst.min(delta)),
+                    }
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
 }
 
 pub fn render_run_summary_markdown(summary: &PermutationTransferRunSummary) -> String {
@@ -792,6 +955,16 @@ pub fn render_run_summary_markdown(summary: &PermutationTransferRunSummary) -> S
         summary.source_stream_checkpoint_dir.display(),
         summary.source_stream_checkpoint_epoch,
     ));
+    if let Some(selection) = &summary.source_pretrain_selection {
+        out.push_str("## Source Pretrain Selection\n\n");
+        out.push_str(&render_checkpoint_selection_markdown(selection));
+        out.push('\n');
+    }
+    if let Some(selection) = &summary.source_stream_selection {
+        out.push_str("## Source Stream Selection\n\n");
+        out.push_str(&render_checkpoint_selection_markdown(selection));
+        out.push('\n');
+    }
     out.push_str("## Protocols\n\n");
     out.push_str("| Protocol | Mode | Support | Steps | Episodes | Query Before | Query After | Query Delta | Query vs Src Ckpt | Source Before | Source After | Source Delta | Source vs Src Ckpt | Max Source Forget | Final Src Retention |\n");
     out.push_str("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n");
@@ -839,6 +1012,23 @@ pub fn render_run_summary_markdown(summary: &PermutationTransferRunSummary) -> S
             row.max_source_forgetting_vs_source_checkpoint,
         ));
     }
+    out.push_str("\n## Source Holdout Breakdown\n\n");
+    out.push_str("| Protocol | Source Objects | Episodes | Source Src Ckpt | Source Before | Source After | Source Delta | Source vs Src Ckpt | Max Source Forget |\n");
+    out.push_str("| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n");
+    for row in &summary.source_difficulty_summaries {
+        out.push_str(&format!(
+            "| {} | {} | {} | {:.4} | {:.4} | {:.4} | {:+.4} | {:+.4} | {:+.4} |\n",
+            row.protocol_name,
+            row.object_count,
+            row.episodes,
+            row.mean_source_accuracy_source_checkpoint,
+            row.mean_source_accuracy_before,
+            row.mean_source_accuracy_after,
+            row.mean_source_delta,
+            row.mean_source_delta_vs_source_checkpoint,
+            row.max_source_forgetting_vs_source_checkpoint,
+        ));
+    }
     out.push_str("\n## Episodes\n\n");
     out.push_str("| Protocol | Ep# | Episode | Objects | Support | Steps | Query Src Ckpt | Query Before | Query After | Source Src Ckpt | Source Before | Source After |\n");
     out.push_str("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n");
@@ -875,6 +1065,47 @@ fn mean_metric(
 
 fn retention_ratio(value: f64, anchor: f64) -> f64 {
     if anchor <= 0.0 { 0.0 } else { value / anchor }
+}
+
+fn accuracy_for_object_count(rows: &[AccuracyByObjectCount], object_count: usize) -> f64 {
+    rows.iter()
+        .find(|row| row.object_count == object_count)
+        .map(|row| row.accuracy)
+        .unwrap_or(0.0)
+}
+
+fn render_checkpoint_selection_markdown(summary: &CheckpointSelectionSummary) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "- mode: `{:?}`\n- selected_epoch: `{}`\n- selected_source_holdout_accuracy: `{:.4}`\n",
+        summary.mode, summary.selected_epoch, summary.selected_source_holdout_accuracy
+    ));
+    if !summary.selected_source_holdout_by_object_count.is_empty() {
+        let rung_summary = summary
+            .selected_source_holdout_by_object_count
+            .iter()
+            .map(|row| format!("n{}={:.4}", row.object_count, row.accuracy))
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push_str(&format!(
+            "- selected_source_holdout_by_object_count: `{rung_summary}`\n"
+        ));
+    }
+    out.push_str("\n| Epoch | Source Holdout | By Object Count |\n");
+    out.push_str("| --- | --- | --- |\n");
+    for candidate in &summary.candidates {
+        let rung_summary = candidate
+            .source_holdout_by_object_count
+            .iter()
+            .map(|row| format!("n{}={:.4}", row.object_count, row.accuracy))
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push_str(&format!(
+            "| {} | {:.4} | {} |\n",
+            candidate.epoch, candidate.source_holdout_accuracy, rung_summary
+        ));
+    }
+    out
 }
 
 fn generate_tracking_corpus(
@@ -1049,9 +1280,10 @@ mod tests {
     fn tiny_config() -> PermutationTransferExperimentConfig {
         PermutationTransferExperimentConfig {
             name: "perm_ttcl_smoke".to_string(),
-            output_dir: "artifacts/language/perm_ttcl_smoke".into(),
+            output_dir: "artifacts/reasoning/perm_ttcl_smoke".into(),
             seed: 7,
             train_source_stream: true,
+            source_checkpoint: None,
             model: ModelOverrides {
                 n_layer: Some(2),
                 n_embd: Some(32),
@@ -1069,6 +1301,7 @@ mod tests {
                 adaptation_learning_rate: 5e-4,
                 checkpoint_interval_iters: 1,
                 log_frequency: 1,
+                source_checkpoint_selection: CheckpointSelectionMode::SourceHoldoutAccuracy,
             },
             source_pretrain: TrackingCorpusConfig {
                 object_counts: vec![3, 5],
@@ -1178,7 +1411,7 @@ mod tests {
             .join("..")
             .join("..")
             .join("config")
-            .join("language")
+            .join("reasoning")
             .join("experiments")
             .join("permutation_state_transfer_ttcl_smoke.toml");
         let config = load_permutation_transfer_experiment_config(&path).expect("load smoke config");
@@ -1190,7 +1423,7 @@ mod tests {
     fn summarize_protocols_tracks_source_checkpoint_forgetting() {
         let mut summary = PermutationTransferRunSummary {
             experiment_name: "summary_smoke".to_string(),
-            output_dir: PathBuf::from("artifacts/language/summary_smoke"),
+            output_dir: PathBuf::from("artifacts/reasoning/summary_smoke"),
             seed: 7,
             backend: "ndarray".to_string(),
             train_source_stream: true,
@@ -1208,8 +1441,11 @@ mod tests {
             source_pretrain_checkpoint_epoch: 4,
             source_stream_checkpoint_dir: PathBuf::from("runs/source_stream/checkpoint"),
             source_stream_checkpoint_epoch: 2,
+            source_pretrain_selection: None,
+            source_stream_selection: None,
             protocol_summaries: Vec::new(),
             difficulty_summaries: Vec::new(),
+            source_difficulty_summaries: Vec::new(),
             episode_metrics: Vec::new(),
         };
         let protocols = vec![TtclProtocolConfig {
@@ -1236,6 +1472,42 @@ mod tests {
                     source_accuracy_source_checkpoint: 0.80,
                     source_accuracy_before: 0.80,
                     source_accuracy_after: 0.76,
+                    source_accuracy_by_object_count_source_checkpoint: vec![
+                        AccuracyByObjectCount {
+                            object_count: 3,
+                            examples: 2,
+                            accuracy: 0.90,
+                        },
+                        AccuracyByObjectCount {
+                            object_count: 5,
+                            examples: 2,
+                            accuracy: 0.70,
+                        },
+                    ],
+                    source_accuracy_by_object_count_before: vec![
+                        AccuracyByObjectCount {
+                            object_count: 3,
+                            examples: 2,
+                            accuracy: 0.90,
+                        },
+                        AccuracyByObjectCount {
+                            object_count: 5,
+                            examples: 2,
+                            accuracy: 0.70,
+                        },
+                    ],
+                    source_accuracy_by_object_count_after: vec![
+                        AccuracyByObjectCount {
+                            object_count: 3,
+                            examples: 2,
+                            accuracy: 0.85,
+                        },
+                        AccuracyByObjectCount {
+                            object_count: 5,
+                            examples: 2,
+                            accuracy: 0.67,
+                        },
+                    ],
                 },
                 ProtocolEpisodeMetrics {
                     protocol_name: "continual_16x1".to_string(),
@@ -1251,6 +1523,42 @@ mod tests {
                     source_accuracy_source_checkpoint: 0.80,
                     source_accuracy_before: 0.76,
                     source_accuracy_after: 0.64,
+                    source_accuracy_by_object_count_source_checkpoint: vec![
+                        AccuracyByObjectCount {
+                            object_count: 3,
+                            examples: 2,
+                            accuracy: 0.90,
+                        },
+                        AccuracyByObjectCount {
+                            object_count: 5,
+                            examples: 2,
+                            accuracy: 0.70,
+                        },
+                    ],
+                    source_accuracy_by_object_count_before: vec![
+                        AccuracyByObjectCount {
+                            object_count: 3,
+                            examples: 2,
+                            accuracy: 0.85,
+                        },
+                        AccuracyByObjectCount {
+                            object_count: 5,
+                            examples: 2,
+                            accuracy: 0.67,
+                        },
+                    ],
+                    source_accuracy_by_object_count_after: vec![
+                        AccuracyByObjectCount {
+                            object_count: 3,
+                            examples: 2,
+                            accuracy: 0.72,
+                        },
+                        AccuracyByObjectCount {
+                            object_count: 5,
+                            examples: 2,
+                            accuracy: 0.56,
+                        },
+                    ],
                 },
             ],
             &protocols,
@@ -1262,6 +1570,7 @@ mod tests {
         assert!((protocol.max_source_forgetting_vs_source_checkpoint + 0.16).abs() < 1e-9);
         assert!((protocol.final_source_retention_ratio - 0.80).abs() < 1e-9);
         assert_eq!(summary.difficulty_summaries.len(), 2);
+        assert_eq!(summary.source_difficulty_summaries.len(), 2);
         assert_eq!(summary.episode_metrics[0].episode_index, 0);
         assert_eq!(summary.episode_metrics[1].episode_index, 1);
     }

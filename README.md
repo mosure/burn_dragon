@@ -44,26 +44,30 @@ Framework status/tracking:
 
 - [x] cached inference
 - [x] training benchmarks and reporting
-- [x] [pope](https://arxiv.org/abs/2509.10534v1) positional embeddings
 - [x] wasm deployments
 - [x] burnpack multipart deployment + streamed web initialization
 - [x] native burnpack bootstrap/cache helpers
+- [x] payload-agnostic stream/TBPTT crate
+- [x] topology-agnostic structured recurrent state contracts
+- [x] fused recurrent, local-grid, structured-pyramid, and sparse-graph kernels
+- [x] [attention residuals](https://arxiv.org/abs/2603.15031) and block-attention-residual connectors
+- [x] graph recurrent adapters with compiled execution
+- [x] [pope](https://arxiv.org/abs/2509.10534v1) positional embeddings
+- [x] additive/reference [bitnet b1.58](https://arxiv.org/abs/2402.17764) low-bit training + packed artifact export
 - [x] sparsity metrics and visualization
+- [x] [mHC](https://arxiv.org/abs/2512.24880) core integration (experimental)
 - [x] vision dragon [cortical column/stack](https://arxiv.org/abs/2412.18354)
 - [x] recurrent, foveated saccade training and inference
+- [x] vision [v-jepa 2.1](https://arxiv.org/abs/2603.14482) training surface
+- [x] vision [rac](https://arxiv.org/abs/2603.05925) training family (experimental)
+- [x] multimodal [vl-jepa](https://arxiv.org/abs/2512.10942) composition foundation
 - [x] [GDPO](https://arxiv.org/abs/2601.05242)
-- [x] fused recurrent, local-grid, structured-pyramid, and sparse-graph kernels
-- [x] topology-agnostic structured recurrent state contracts
-- [x] graph recurrent adapters with compiled execution
-- [x] manifold constrained hyper-connections (experimental core integration)
 - [ ] adaptive tool discovery
 - [ ] conditional (deep) gating
 - [ ] document-coherent dataloading and scale mixup
 - [ ] episodic memory
 - [ ] hierarchical, memory-aware recurrent state
 - [ ] mixture-of-expert routing
-- [x] payload-agnostic stream/TBPTT crate
-- [x] multimodal VL-JEPA composition foundation
 - [ ] neuromorphic backend
 - [ ] streaming, sparse synaptic backpropagation
 - [ ] temporal neuron dampening

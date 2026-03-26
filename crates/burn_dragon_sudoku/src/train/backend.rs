@@ -7,6 +7,9 @@ use crate::train::schedule::{
 use crate::train::steps::SudokuTrainer;
 use crate::train::utils::{prepare_dataset, write_run_config};
 use burn_dragon_core::BDHConfig;
+use burn_dragon_train::train::pipeline::{
+    activate_planned_run, plan_run_artifacts, resolve_run_root_for_config_paths,
+};
 type TrainBackendResult<B> = (
     SudokuTrainer<ValidBackend<B>>,
     PathBuf,
@@ -18,6 +21,10 @@ fn resolved_core_config(config: &SudokuTrainingConfig, backend_name: &str) -> BD
     config
         .model
         .to_bdh_config_for_backend(backend_name, &config.wgpu)
+}
+
+fn resolve_sudoku_run_root(config: &SudokuTrainingConfig) -> PathBuf {
+    resolve_run_root_for_config_paths("sudoku", &config.run_layout, &[])
 }
 
 pub fn train_backend<B, Init>(
@@ -128,9 +135,11 @@ where
     let scheduler =
         resolve_lr_scheduler(optimizer_cfg, total_steps, scheduler_iters, &config.model)?;
 
-    let run_root = PathBuf::from("runs").join("sudoku");
-    let (run_dir, run_name) = create_run_dir(&run_root)?;
-    write_latest_run(&run_root, &run_name)?;
+    let run_root = resolve_sudoku_run_root(config);
+    let planned_run = plan_run_artifacts(&run_root, None)?;
+    activate_planned_run(&planned_run)?;
+    let run_dir = planned_run.run_dir;
+    let run_name = planned_run.run_name;
     if write_config {
         write_run_config(config, &run_dir, &run_name)?;
         write_training_snapshot(config, &run_dir)?;
@@ -172,6 +181,9 @@ where
         ResolvedLrScheduler::Noam(schedule) => {
             train_with_scheduler(&context, trainer, optimizer, schedule)?
         }
+        ResolvedLrScheduler::BitNetTwoStage(schedule) => {
+            train_with_scheduler(&context, trainer, optimizer, schedule)?
+        }
     };
 
     info!("Sudoku training complete on {backend_name}");
@@ -181,7 +193,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::resolved_core_config;
+    use super::{resolve_sudoku_run_root, resolved_core_config};
     use crate::config::{SudokuModelConfig, load_training_config};
     use std::path::PathBuf;
 
@@ -227,6 +239,18 @@ mod tests {
         assert_eq!(
             core.fused_kernels.wgpu_rollout_fused,
             baseline.fused_kernels.wgpu_rollout_fused
+        );
+    }
+
+    #[test]
+    fn resolve_sudoku_run_root_respects_run_layout_base_dir() {
+        let mut config = load_tiny_config();
+        config.run_layout.base_dir = Some(PathBuf::from("/tmp/custom-runs"));
+        config.run_layout.mirror_config_path = false;
+
+        assert_eq!(
+            resolve_sudoku_run_root(&config),
+            PathBuf::from("/tmp/custom-runs/sudoku")
         );
     }
 }

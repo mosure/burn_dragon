@@ -1,7 +1,13 @@
 use std::fmt;
 
 use burn::module::{Content, ModuleDisplay, ModuleDisplayDefault};
-pub use burn_dragon_core::SequenceKernelKind;
+pub use burn_dragon_core::{
+    BdhFiringTargetKind, BdhInitializationKind, BdhNeuronGainKind, BdhResidualScalingKind,
+    BdhTopologyPriorKind, BitNetLowBitProtocol, LowBitActivationFormat, LowBitActivationGrouping,
+    LowBitInferenceMode, LowBitSavedActivationMode, LowBitTargetModule, LowBitTrainingMode,
+    LowBitWeightFormat, LowBitWeightGrouping, RhoCompressionConfig, RhoPrecisionConfig,
+    SequenceKernelKind,
+};
 use serde::{Deserialize, Serialize};
 
 fn default_parallel_world_size() -> usize {
@@ -304,6 +310,23 @@ impl Default for ParallelConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct LowBitModelSpec {
+    pub enabled: bool,
+    pub protocol: BitNetLowBitProtocol,
+    pub training_mode: LowBitTrainingMode,
+    pub inference_mode: LowBitInferenceMode,
+    pub weight_format: LowBitWeightFormat,
+    pub activation_format: LowBitActivationFormat,
+    pub decoder_x_mode: LowBitWeightFormat,
+    pub activation_grouping: LowBitActivationGrouping,
+    pub weight_grouping: LowBitWeightGrouping,
+    pub strict_bitnet_reference: bool,
+    pub target_modules: Vec<LowBitTargetModule>,
+    pub rho_precision: RhoPrecisionConfig,
+    pub rho_compression: RhoCompressionConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ModelSpec {
     pub arch: String,
     pub n_embd: usize,
@@ -313,6 +336,18 @@ pub struct ModelSpec {
     pub latent_per_head: usize,
     pub shared_layer_weights: bool,
     pub sequence_kernel: SequenceKernelKind,
+    #[serde(default)]
+    pub bdh_initialization_kind: BdhInitializationKind,
+    #[serde(default)]
+    pub bdh_residual_scaling_kind: BdhResidualScalingKind,
+    #[serde(default)]
+    pub bdh_neuron_gain_kind: BdhNeuronGainKind,
+    #[serde(default)]
+    pub bdh_topology_prior_kind: BdhTopologyPriorKind,
+    #[serde(default)]
+    pub bdh_firing_target_kind: BdhFiringTargetKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub low_bit: Option<LowBitModelSpec>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -368,6 +403,58 @@ pub struct KernelSpec {
     pub rollout_fast_steps_per_slow_step: usize,
     pub wgpu_fused_core_recurrent: Option<bool>,
     pub wgpu_fused_core_rollout: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub low_bit_kernel_abi_version: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub low_bit_runtime: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub low_bit_saved_activation_mode: Option<LowBitSavedActivationMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub low_bit_saved_activation_format: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub low_bit_saved_activation_inventory: Option<LowBitSavedActivationInventorySpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub low_bit_native_supported: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub low_bit_memory: Option<LowBitMemorySpec>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct LowBitMemorySpec {
+    pub master_weight_bytes: u64,
+    pub execution_weight_bytes: u64,
+    pub activation_shell_bytes: u64,
+    pub saved_activation_bytes: u64,
+    pub rho_state_bytes: u64,
+    pub workspace_bytes: u64,
+    pub estimated_total_bytes: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct LowBitSavedActivationInventorySpec {
+    pub mode: LowBitSavedActivationMode,
+    pub format: String,
+    pub requires_rho_window_anchor: bool,
+    pub tensors: Vec<LowBitSavedActivationTensorSpec>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct LowBitSavedActivationTensorSpec {
+    pub name: String,
+    pub shape: Vec<usize>,
+    pub element_count: u64,
+    pub estimated_bytes: u64,
+    pub recompute_policy: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct OptimizerSpec {
+    pub name: super::optimizer::OptimizerKind,
+    pub learning_rate: f64,
+    pub weight_decay: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weight_decay_final: Option<f32>,
+    pub schedule_mode: super::optimizer::OptimizerScheduleMode,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]

@@ -2,7 +2,7 @@ use crate::loss::{
     WeightedClsDistillTarget, WeightedPatchDistillTarget, weighted_cls_cosine_loss,
     weighted_cls_mse_loss, weighted_patch_mse_loss,
 };
-use crate::model::vision::VisionDragonOutput;
+use crate::model::VisionDragonOutput;
 use crate::train::prelude::*;
 use burn::tensor::activation;
 use burn::tensor::module::{adaptive_avg_pool2d, interpolate};

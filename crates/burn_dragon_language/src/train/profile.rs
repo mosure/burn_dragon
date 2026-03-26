@@ -17,6 +17,12 @@ pub struct TrainProfileSnapshot {
     pub hidden_model_probe_ns: u128,
     pub detail_probe_steps: u64,
     pub train_steps: u64,
+    pub max_step_reserved_before_bytes: u64,
+    pub max_step_in_use_before_bytes: u64,
+    pub max_step_reserved_after_forward_bytes: u64,
+    pub max_step_in_use_after_forward_bytes: u64,
+    pub max_step_reserved_after_backward_bytes: u64,
+    pub max_step_in_use_after_backward_bytes: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -36,6 +42,12 @@ struct TrainProfileState {
     hidden_model_probe_ns: u128,
     detail_probe_steps: u64,
     train_steps: u64,
+    max_step_reserved_before_bytes: u64,
+    max_step_in_use_before_bytes: u64,
+    max_step_reserved_after_forward_bytes: u64,
+    max_step_in_use_after_forward_bytes: u64,
+    max_step_reserved_after_backward_bytes: u64,
+    max_step_in_use_after_backward_bytes: u64,
 }
 
 static TRAIN_PROFILE: OnceLock<Mutex<TrainProfileState>> = OnceLock::new();
@@ -46,6 +58,10 @@ pub fn enabled() -> bool {
 
 pub fn detail_enabled() -> bool {
     std::env::var_os("BDH_STAGE_PROFILE_DETAIL").is_some()
+}
+
+pub fn memory_enabled() -> bool {
+    std::env::var_os("BDH_STAGE_PROFILE_MEMORY").is_some()
 }
 
 fn state() -> &'static Mutex<TrainProfileState> {
@@ -82,6 +98,12 @@ pub fn snapshot() -> TrainProfileSnapshot {
             hidden_model_probe_ns: profile.hidden_model_probe_ns,
             detail_probe_steps: profile.detail_probe_steps,
             train_steps: profile.train_steps,
+            max_step_reserved_before_bytes: profile.max_step_reserved_before_bytes,
+            max_step_in_use_before_bytes: profile.max_step_in_use_before_bytes,
+            max_step_reserved_after_forward_bytes: profile.max_step_reserved_after_forward_bytes,
+            max_step_in_use_after_forward_bytes: profile.max_step_in_use_after_forward_bytes,
+            max_step_reserved_after_backward_bytes: profile.max_step_reserved_after_backward_bytes,
+            max_step_in_use_after_backward_bytes: profile.max_step_in_use_after_backward_bytes,
         };
     }
     TrainProfileSnapshot::default()
@@ -110,6 +132,36 @@ pub fn record_train_step(forward_ns: u128, loss_backward_ns: u128) {
         profile.forward_ns = profile.forward_ns.saturating_add(forward_ns);
         profile.loss_backward_ns = profile.loss_backward_ns.saturating_add(loss_backward_ns);
         profile.train_steps = profile.train_steps.saturating_add(1);
+    });
+}
+
+pub fn record_train_step_memory(
+    before_reserved_bytes: u64,
+    before_in_use_bytes: u64,
+    after_forward_reserved_bytes: u64,
+    after_forward_in_use_bytes: u64,
+    after_backward_reserved_bytes: u64,
+    after_backward_in_use_bytes: u64,
+) {
+    record(|profile| {
+        profile.max_step_reserved_before_bytes = profile
+            .max_step_reserved_before_bytes
+            .max(before_reserved_bytes);
+        profile.max_step_in_use_before_bytes = profile
+            .max_step_in_use_before_bytes
+            .max(before_in_use_bytes);
+        profile.max_step_reserved_after_forward_bytes = profile
+            .max_step_reserved_after_forward_bytes
+            .max(after_forward_reserved_bytes);
+        profile.max_step_in_use_after_forward_bytes = profile
+            .max_step_in_use_after_forward_bytes
+            .max(after_forward_in_use_bytes);
+        profile.max_step_reserved_after_backward_bytes = profile
+            .max_step_reserved_after_backward_bytes
+            .max(after_backward_reserved_bytes);
+        profile.max_step_in_use_after_backward_bytes = profile
+            .max_step_in_use_after_backward_bytes
+            .max(after_backward_in_use_bytes);
     });
 }
 

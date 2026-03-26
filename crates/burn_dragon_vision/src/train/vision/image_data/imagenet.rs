@@ -433,6 +433,11 @@ struct TeacherBatchData {
     patch: Option<Vec<f32>>,
 }
 
+#[derive(Debug)]
+struct ImageTensorBatchData {
+    tensor: Vec<f32>,
+}
+
 impl DinoFeatureStore {
     pub fn new(
         cls_path: &Path,
@@ -658,6 +663,127 @@ impl DinoFeatureStore {
     }
 }
 
+#[derive(Debug)]
+pub struct ImageTensorStore {
+    backing: DinoFeatureBacking,
+    channels: usize,
+    height: usize,
+    width: usize,
+    records: usize,
+}
+
+impl ImageTensorStore {
+    pub fn new_with_options(
+        path: &Path,
+        channels: usize,
+        height: usize,
+        width: usize,
+        expected_records: Option<usize>,
+        cache_in_memory: bool,
+    ) -> Result<Self> {
+        if channels == 0 || height == 0 || width == 0 {
+            return Err(anyhow!(
+                "image tensor store dimensions must be non-zero (got {channels}x{height}x{width})"
+            ));
+        }
+        let storage_dtype = infer_feature_storage_dtype(path)?;
+        let file =
+            File::open(path).map_err(|err| anyhow!("failed to open {}: {err}", path.display()))?;
+        let len = file
+            .metadata()
+            .map_err(|err| anyhow!("failed to read {} metadata: {err}", path.display()))?
+            .len();
+        let stride =
+            channels as u64 * height as u64 * width as u64 * storage_dtype.bytes_per_scalar();
+        if len % stride != 0 {
+            return Err(anyhow!(
+                "image tensor file size mismatch: {} bytes not divisible by {}",
+                len,
+                stride
+            ));
+        }
+        let records = (len / stride) as usize;
+        if let Some(expected) = expected_records.filter(|expected| *expected > records) {
+            return Err(anyhow!(
+                "image tensor records fewer than expected: expected={}, available={}",
+                expected,
+                records
+            ));
+        }
+        let scalars = records
+            .saturating_mul(channels)
+            .saturating_mul(height)
+            .saturating_mul(width);
+        let backing = if cache_in_memory {
+            match storage_dtype {
+                DinoFeatureDType::F32 => {
+                    DinoFeatureBacking::MemoryF32(load_f32_file_into_memory(path, scalars)?)
+                }
+                DinoFeatureDType::F16 => {
+                    DinoFeatureBacking::MemoryF16(load_f16_file_into_memory(path, scalars)?)
+                }
+            }
+        } else {
+            DinoFeatureBacking::File {
+                file: Mutex::new(file),
+                dtype: storage_dtype,
+            }
+        };
+        Ok(Self {
+            backing,
+            channels,
+            height,
+            width,
+            records,
+        })
+    }
+
+    pub fn channels(&self) -> usize {
+        self.channels
+    }
+
+    pub fn height(&self) -> usize {
+        self.height
+    }
+
+    pub fn width(&self) -> usize {
+        self.width
+    }
+
+    pub fn records(&self) -> usize {
+        self.records
+    }
+
+    fn load_batch_data(&self, indices: &[usize]) -> Result<ImageTensorBatchData> {
+        let batch = indices.len();
+        if batch == 0 {
+            return Err(anyhow!("image tensor batch is empty"));
+        }
+        let mut ordered = indices.iter().copied().enumerate().collect::<Vec<_>>();
+        ordered.sort_unstable_by_key(|(_, index)| *index);
+        let stride = self
+            .channels
+            .saturating_mul(self.height)
+            .saturating_mul(self.width);
+        let mut tensor = vec![0.0; batch.saturating_mul(stride)];
+        load_backing_batch(&self.backing, &ordered, stride, &mut tensor)?;
+        Ok(ImageTensorBatchData { tensor })
+    }
+
+    pub fn load_batch<B: Backend>(
+        &self,
+        indices: &[usize],
+        device: &B::Device,
+    ) -> Result<Tensor<B, 4>> {
+        let batch = indices.len();
+        let data = self.load_batch_data(indices)?;
+        Ok(Tensor::<B, 4>::from_data(
+            TensorData::new(data.tensor, [batch, self.channels, self.height, self.width]),
+            device,
+        ))
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ImageTeacherTargetStore {
     pub name: String,
@@ -675,6 +801,7 @@ pub struct ImageNetDatasetConfig {
     pub local_augmentations: Option<ImageNetAugmentations>,
     pub normalize: VisionNormalize,
     pub teacher: Option<Arc<DinoFeatureStore>>,
+    pub rac_teacher_latent: Option<Arc<ImageTensorStore>>,
     pub teacher_targets: Vec<ImageTeacherTargetStore>,
     pub views: usize,
     pub local_views: usize,
@@ -788,6 +915,7 @@ pub struct ImageNetDataset {
     local_augmentations: Option<ImageNetAugmentations>,
     normalize: VisionNormalize,
     teacher: Option<Arc<DinoFeatureStore>>,
+    rac_teacher_latent: Option<Arc<ImageTensorStore>>,
     teacher_targets: Vec<ImageTeacherTargetStore>,
     global_views: usize,
     local_views: usize,
@@ -832,6 +960,7 @@ impl ImageNetDataset {
             local_augmentations: config.local_augmentations,
             normalize: config.normalize,
             teacher: config.teacher,
+            rac_teacher_latent: config.rac_teacher_latent,
             teacher_targets: config.teacher_targets,
             global_views,
             local_views,
@@ -850,6 +979,11 @@ impl ImageNetDataset {
 
     pub fn with_teacher(mut self, teacher: Arc<DinoFeatureStore>) -> Self {
         self.teacher = Some(teacher);
+        self
+    }
+
+    pub fn with_rac_teacher_latent(mut self, teacher: Arc<ImageTensorStore>) -> Self {
+        self.rac_teacher_latent = Some(teacher);
         self
     }
 
@@ -1171,6 +1305,22 @@ impl ImageNetDataset {
             }
             None => (None, None, None, None),
         };
+        let (rac_teacher_latent, rac_teacher_shape) = match &self.rac_teacher_latent {
+            Some(store) => {
+                let teacher_load_start = profile_enabled.then(Instant::now);
+                let batch = store.load_batch_data(&teacher_indices)?;
+                profile.teacher_load_ns = profile.teacher_load_ns.saturating_add(
+                    teacher_load_start
+                        .map(|start| start.elapsed().as_nanos())
+                        .unwrap_or_default(),
+                );
+                (
+                    Some(batch.tensor),
+                    Some((store.channels(), store.height(), store.width())),
+                )
+            }
+            None => (None, None),
+        };
         let teacher_targets = if self.teacher_targets.is_empty() {
             Vec::new()
         } else {
@@ -1206,6 +1356,7 @@ impl ImageNetDataset {
                 labels,
                 teacher_patch,
                 teacher_cls,
+                rac_teacher_latent,
                 teacher_targets,
                 batch_size,
                 global_image_size,
@@ -1214,6 +1365,7 @@ impl ImageNetDataset {
                 local_views: self.local_views,
                 teacher_feature_dim: teacher_dim,
                 teacher_patch_tokens: teacher_tokens,
+                rac_teacher_shape,
             },
             profile,
         ))
@@ -1270,6 +1422,7 @@ struct ImageNetBatchData {
     labels: Vec<i64>,
     teacher_patch: Option<Vec<f32>>,
     teacher_cls: Option<Vec<f32>>,
+    rac_teacher_latent: Option<Vec<f32>>,
     teacher_targets: Vec<ImageNetTeacherTargetBatchData>,
     batch_size: usize,
     global_image_size: usize,
@@ -1278,6 +1431,7 @@ struct ImageNetBatchData {
     local_views: usize,
     teacher_feature_dim: Option<usize>,
     teacher_patch_tokens: Option<usize>,
+    rac_teacher_shape: Option<(usize, usize, usize)>,
 }
 
 struct ImageNetTeacherTargetBatchData {
@@ -1314,6 +1468,9 @@ impl ImageNetBatchData {
             bytes = bytes.saturating_add(buffer.len().saturating_mul(size_of::<f32>()));
         }
         if let Some(buffer) = self.teacher_cls.as_ref() {
+            bytes = bytes.saturating_add(buffer.len().saturating_mul(size_of::<f32>()));
+        }
+        if let Some(buffer) = self.rac_teacher_latent.as_ref() {
             bytes = bytes.saturating_add(buffer.len().saturating_mul(size_of::<f32>()));
         }
         for target in &self.teacher_targets {
@@ -1434,6 +1591,15 @@ impl ImageNetBatchData {
                 device,
             )
         });
+        let rac_teacher_latent = self.rac_teacher_latent.map(|data| {
+            let (channels, height, width) = self
+                .rac_teacher_shape
+                .expect("rac teacher latent shape required");
+            Tensor::<B, 4>::from_data(
+                TensorData::new(data, [self.batch_size, channels, height, width]),
+                device,
+            )
+        });
         let teacher_targets = self
             .teacher_targets
             .into_iter()
@@ -1476,6 +1642,7 @@ impl ImageNetBatchData {
             teacher_patch,
             teacher_cls,
         )
+        .with_rac_teacher_latent(rac_teacher_latent)
         .with_teacher_targets(teacher_targets)
     }
 }
@@ -1491,6 +1658,7 @@ pub struct ImageNetBatch<B: Backend> {
     pub labels: Tensor<B, 1, Int>,
     pub teacher_patch: Option<Tensor<B, 3>>,
     pub teacher_cls: Option<Tensor<B, 2>>,
+    pub rac_teacher_latent: Option<Tensor<B, 4>>,
     pub teacher_targets: Vec<ImageNetTeacherTargetBatch<B>>,
 }
 
@@ -1526,8 +1694,14 @@ impl<B: Backend> ImageNetBatch<B> {
             labels,
             teacher_patch,
             teacher_cls,
+            rac_teacher_latent: None,
             teacher_targets: Vec::new(),
         }
+    }
+
+    pub fn with_rac_teacher_latent(mut self, rac_teacher_latent: Option<Tensor<B, 4>>) -> Self {
+        self.rac_teacher_latent = rac_teacher_latent;
+        self
     }
 
     pub fn with_teacher_targets(
@@ -1572,6 +1746,10 @@ impl<B: Backend> ImageNetBatch<B> {
                 .map(|tensor| tensor.clone().repeat_dim(0, repeats)),
             teacher_cls: self
                 .teacher_cls
+                .as_ref()
+                .map(|tensor| tensor.clone().repeat_dim(0, repeats)),
+            rac_teacher_latent: self
+                .rac_teacher_latent
                 .as_ref()
                 .map(|tensor| tensor.clone().repeat_dim(0, repeats)),
             teacher_targets: self
@@ -2119,7 +2297,10 @@ fn infer_feature_storage_dtype(cls_path: &Path) -> Result<DinoFeatureDType> {
     let split_name = cls_path
         .file_stem()
         .and_then(|stem| stem.to_str())
-        .and_then(|stem| stem.strip_suffix("_cls"));
+        .and_then(|stem| {
+            stem.strip_suffix("_cls")
+                .or_else(|| stem.strip_suffix("_latent"))
+        });
     if let Some(split_name) = split_name {
         let split_meta_path = feature_dir.join(format!("{split_name}_meta.json"));
         if split_meta_path.is_file() {

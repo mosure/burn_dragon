@@ -66,6 +66,17 @@ impl CifarDataset {
         Ok(Self { images, labels })
     }
 
+    pub fn with_max_records(mut self, max_records: Option<usize>) -> Self {
+        let Some(limit) = max_records else {
+            return self;
+        };
+        let limit = limit.min(self.labels.len());
+        self.labels.truncate(limit);
+        self.images
+            .truncate(limit.saturating_mul(CIFAR_IMAGE_BYTES));
+        self
+    }
+
     pub fn len(&self) -> usize {
         self.labels.len()
     }

@@ -9,6 +9,7 @@ pub(crate) mod losses;
 pub(crate) mod models;
 #[cfg(feature = "benchmark")]
 pub(crate) mod probe;
+pub(crate) mod rac;
 #[cfg(feature = "benchmark")]
 pub(crate) mod serving;
 pub(crate) mod train;
@@ -18,7 +19,7 @@ pub use image_data::{
     CifarBatch, CifarDataLoader, CifarDataset, CifarSplit, CifarType, DinoFeatureStore,
     ImageNetAugmentations, ImageNetBatch, ImageNetDataLoader, ImageNetDataset,
     ImageNetDatasetConfig, ImageNetSplit, ImageNetTeacherTargetBatch, ImageTeacherTargetStore,
-    VisionNormalize,
+    ImageTensorStore, VisionNormalize,
 };
 
 #[cfg(feature = "benchmark")]
@@ -63,6 +64,8 @@ pub use probe::{
     run_vision_distill_linear_probe_for_teacher_with_seed,
     run_vision_distill_linear_probe_with_seed,
 };
+pub(crate) use rac::{VisionRacBatch, VisionRacModel, write_rac_best_checkpoint_report};
+pub use rac::{VisionRacCheckpointEvalSummary, eval_vision_rac_checkpoint_backend};
 #[cfg(feature = "benchmark")]
 pub use serving::{
     VisionDistillDeploySmokePrecision, VisionDistillDeploySmokeReport,
@@ -70,15 +73,17 @@ pub use serving::{
     VisionDistillServingBenchmarkReport, VisionDistillServingStepMetrics,
     run_vision_distill_deploy_smoke, run_vision_distill_serving_benchmark,
 };
+pub(crate) use train::VisionRacBatchLoader;
 pub(crate) use train::train_vision_backend;
 #[cfg(feature = "integration_test")]
 pub(crate) use train::train_vision_backend_for_test;
+pub(crate) use video::VisionVideoVjepa21Model;
 pub use video::dataset::{
-    MovingMnistRenderedClip, MovingMnistSplit, MovingMnistVideoDataLoader, MovingMnistVideoDataset,
-    MovingMnistVideoDatasetConfig, VideoClipBatch, VideoTargetHorizonCurriculum,
+    ImageNetVideoDataLoader, MovingMnistRenderedClip, MovingMnistSplit, MovingMnistVideoDataLoader,
+    MovingMnistVideoDataset, MovingMnistVideoDatasetConfig, VideoClipBatch,
+    VideoTargetHorizonCurriculum,
 };
-pub(crate) use video::models::{VisionVideoLejepaLosses, VisionVideoLejepaModel};
 pub use video::profile::{
     VisionVideoTrainProfileSnapshot, video_train_profile_reset, video_train_profile_snapshot,
 };
-pub(crate) use video::vjepa21::VisionVideoVjepa21Model;
+pub(crate) use video::{VisionVideoLejepaLosses, VisionVideoLejepaModel};

@@ -17,18 +17,27 @@ use burn_dragon::checkpoint::{
     candidate_burnpack_paths, try_load_model_from_burnpack_candidates,
 };
 use burn_dragon::core::BDH;
+use burn_dragon::core::{
+    logits_projection_profile_reset, logits_projection_profile_snapshot,
+    low_bit_native_decoder_tail_profile_snapshot, low_bit_native_lowrank_profile_snapshot,
+    low_bit_native_projection_profile_reset, lowrank_residual_profile_reset,
+    lowrank_residual_profile_snapshot,
+};
 #[cfg(feature = "viz")]
 use burn_dragon::language::build_model_config;
 use burn_dragon::language::{
     ContextStrategy, ContextStrategyConfig, GenerationConfig, GenerationOutputFormat,
     GenerationTokenizerSourceConfig, TrainingConfig, apply_wgpu_fused_core_override,
-    build_model_config_with_tokenizer, default_checkpoint_dir, generate_tokens,
-    generate_tokens_chunked, generation_profile_reset, generation_profile_snapshot,
-    load_training_config_for_checkpoint, prefill_state, resolve_context_strategy,
-    sample_next_token,
+    build_model_config_with_tokenizer, candidate_bitnet_artifact_paths, default_checkpoint_dir,
+    generate_tokens, generate_tokens_chunked, generation_profile_reset,
+    generation_profile_snapshot, load_bitnet_artifact_bundle, load_training_config_for_checkpoint,
+    prefill_state, resolve_context_strategy, sample_next_token,
 };
 use burn_dragon::train::WgpuGenerationExecutor;
 use burn_dragon::train::wgpu::init_runtime;
+use burn_dragon_kernel::api::projection::{
+    relu_lowrank_forward_profile_reset, relu_lowrank_forward_profile_snapshot,
+};
 use burn_dragon_kernel::api::recurrent::{recurrent_profile_reset, recurrent_profile_snapshot};
 use burn_dragon_language::tokenizer::{
     SharedTokenizer, Tokenizer, TokenizerConfig, pretokenized::PretokenizedTokenizer,
@@ -365,7 +374,7 @@ where
     let burnpack_policy =
         BurnpackLoadPolicy::default().with_precision(BurnpackPrecisionPreference::PreferF16);
     let burnpack_candidates = candidate_burnpack_paths(&checkpoint_base, burnpack_policy);
-    let (model, checkpoint_display) = if let Some((model, _result)) =
+    let (mut model, mut checkpoint_display) = if let Some((model, _result)) =
         try_load_model_from_burnpack_candidates(&burnpack_candidates, "BDH model", true, || {
             BDH::<B>::new(model_config.clone(), &device)
         })
@@ -386,6 +395,28 @@ where
         model = model.load_record(record);
         (model, format_checkpoint(&checkpoint_base))
     };
+    let bitnet_artifact_path = args.bitnet_artifact.clone().or_else(|| {
+        candidate_bitnet_artifact_paths(&checkpoint_base, epoch)
+            .into_iter()
+            .find(|candidate| candidate.is_file())
+    });
+    if let Some(artifact_path) = bitnet_artifact_path {
+        let artifact_bundle = load_bitnet_artifact_bundle(&artifact_path).with_context(|| {
+            format!("failed to load BitNet artifact {}", artifact_path.display())
+        })?;
+        model
+            .apply_bitnet_static_artifacts(&artifact_bundle.static_weights, &device)
+            .with_context(|| {
+                format!(
+                    "failed to apply BitNet artifact static weights from {}",
+                    artifact_path.display()
+                )
+            })?;
+        checkpoint_display = format!(
+            "{checkpoint_display} + BitNet artifact {}",
+            artifact_path.display()
+        );
+    }
 
     let mut generation = config.generation.clone();
     apply_generation_overrides(&mut generation, args, config.training.block_size);
@@ -402,6 +433,10 @@ where
     if stage_profile {
         generation_profile_reset();
         recurrent_profile_reset();
+        relu_lowrank_forward_profile_reset();
+        logits_projection_profile_reset();
+        low_bit_native_projection_profile_reset();
+        lowrank_residual_profile_reset();
     }
     let infer_wall_start = stage_profile.then(Instant::now);
 
@@ -698,6 +733,11 @@ where
         let elapsed_ns = start.elapsed().as_nanos();
         let generation = generation_profile_snapshot();
         let recurrent = recurrent_profile_snapshot();
+        let lowrank_forward = relu_lowrank_forward_profile_snapshot();
+        let logits_projection = logits_projection_profile_snapshot();
+        let low_bit_lowrank = low_bit_native_lowrank_profile_snapshot();
+        let low_bit_decoder_tail = low_bit_native_decoder_tail_profile_snapshot();
+        let residual = lowrank_residual_profile_snapshot();
         eprintln!(
             "[stage-profile][inference] total_ns={elapsed_ns} prefill_forward_ns={} token_forward_ns={} sample_host_transfer_ns={} sample_cpu_ns={} token_tensor_copy_ns={} chunk_flush_ns={} token_steps={} prefill_tokens={} host_sync_points={} chunk_flushes={} chunk_flushed_tokens={} host_to_device_copy_bytes={} device_to_host_copy_bytes={} recurrent_calls={} recurrent_total_ns={} recurrent_setup_ns={} recurrent_copy_ns={} recurrent_dispatch_ns={}",
             generation.prefill_forward_ns,
@@ -718,6 +758,47 @@ where
             recurrent.setup_ns,
             recurrent.copy_ns,
             recurrent.dispatch_ns,
+        );
+        eprintln!(
+            "[stage-profile][inference-lowrank-forward] calls={} launches={} total_ns={}",
+            lowrank_forward.calls, lowrank_forward.launches, lowrank_forward.total_ns,
+        );
+        eprintln!(
+            "[stage-profile][inference-lowbit-lowrank] calls={} total_ns={} quantize_ns={} prepacked_quantize_ns={} raw_cuda_ns={} fused_ns={} reference_ns={} dynamic_scale_calls={} cached_scale_hits={}",
+            low_bit_lowrank.calls,
+            low_bit_lowrank.total_ns,
+            low_bit_lowrank.quantize_ns,
+            low_bit_lowrank.prepacked_quantize_ns,
+            low_bit_lowrank.raw_cuda_ns,
+            low_bit_lowrank.fused_ns,
+            low_bit_lowrank.reference_ns,
+            low_bit_lowrank.dynamic_scale_calls,
+            low_bit_lowrank.cached_scale_hits,
+        );
+        eprintln!(
+            "[stage-profile][inference-lowbit-decoder-tail] calls={} total_ns={} quantize_ns={} prepacked_quantize_ns={} raw_cuda_ns={} fused_ns={} reference_ns={} dynamic_scale_calls={} cached_scale_hits={}",
+            low_bit_decoder_tail.calls,
+            low_bit_decoder_tail.total_ns,
+            low_bit_decoder_tail.quantize_ns,
+            low_bit_decoder_tail.prepacked_quantize_ns,
+            low_bit_decoder_tail.raw_cuda_ns,
+            low_bit_decoder_tail.fused_ns,
+            low_bit_decoder_tail.reference_ns,
+            low_bit_decoder_tail.dynamic_scale_calls,
+            low_bit_decoder_tail.cached_scale_hits,
+        );
+        eprintln!(
+            "[stage-profile][inference-logits-projection] calls={} total_ns={}",
+            logits_projection.calls, logits_projection.total_ns,
+        );
+        eprintln!(
+            "[stage-profile][inference-residual-step] calls={} total_ns={} attention_norm_ns={} decoder_tail_ns={} mlp_norm_ns={} residual_combine_ns={}",
+            residual.calls,
+            residual.total_ns,
+            residual.attention_norm_ns,
+            residual.decoder_tail_ns,
+            residual.mlp_norm_ns,
+            residual.residual_combine_ns,
         );
     }
 
@@ -1185,6 +1266,9 @@ struct Args {
     /// Specific checkpoint epoch to load.
     #[arg(long, value_name = "N")]
     epoch: Option<usize>,
+    /// Optional BitNet packed static-weight artifact override.
+    #[arg(long, value_name = "PATH")]
+    bitnet_artifact: Option<PathBuf>,
     /// Override the prompt used for generation.
     #[arg(long)]
     prompt: Option<String>,
@@ -1300,9 +1384,10 @@ fn resolve_chunked_generation_plan(
 #[cfg(test)]
 mod tests {
     use super::{
-        ResolvedGenerationOutputFormat, apply_wgpu_fused_core_override, parse_chunked_override,
-        render_output, render_token_ids, resolve_chunked_generation_plan_for_values,
-        resolve_generation_output_format, sanitize_display_text,
+        Args, ResolvedGenerationOutputFormat, apply_wgpu_fused_core_override,
+        parse_chunked_override, render_output, render_token_ids,
+        resolve_chunked_generation_plan_for_values, resolve_generation_output_format,
+        sanitize_display_text,
     };
     use burn_dragon::core::BDHConfig;
     use burn_dragon::train::WgpuGenerationExecutor;
@@ -1310,6 +1395,8 @@ mod tests {
         GenerationOutputFormat,
         tokenizer::{Tokenizer, byte::ByteTokenizer, pretokenized::PretokenizedTokenizer},
     };
+    use clap::Parser;
+    use std::path::PathBuf;
 
     #[test]
     fn wgpu_backend_override_enables_fused_recurrent_path() {
@@ -1424,6 +1511,21 @@ mod tests {
             Some("0"),
         );
         assert_eq!(disabled, None);
+    }
+
+    #[test]
+    fn bitnet_artifact_arg_parses() {
+        let args = Args::parse_from([
+            "infer",
+            "--bitnet-artifact",
+            "runs/example/deploy/model-3.bitnet_artifact.json",
+        ]);
+        assert_eq!(
+            args.bitnet_artifact,
+            Some(PathBuf::from(
+                "runs/example/deploy/model-3.bitnet_artifact.json"
+            ))
+        );
     }
 
     #[test]

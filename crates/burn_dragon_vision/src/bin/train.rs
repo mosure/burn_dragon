@@ -13,7 +13,7 @@ use burn_dragon_vision::VisionTrainingConfig;
 #[cfg(feature = "cli")]
 use burn_dragon_vision::config::load_vision_training_config;
 #[cfg(feature = "cli")]
-use burn_dragon_vision::train::train_vision_backend;
+use burn_dragon_vision::train::train_vision_backend_with_planned_run;
 
 #[cfg(feature = "cli")]
 use burn_autodiff::Autodiff;
@@ -22,6 +22,10 @@ use burn_ndarray::NdArray;
 #[cfg(feature = "cli")]
 use burn_wgpu::{CubeBackend, WgpuRuntime};
 
+#[cfg(feature = "cli")]
+use burn_dragon_train::cli::init_experiment_tracing;
+#[cfg(feature = "cli")]
+use burn_dragon_train::train::pipeline::{plan_run_artifacts, resolve_run_root_for_config_paths};
 #[cfg(feature = "cli")]
 use burn_dragon_train::wgpu::init_runtime;
 #[cfg(feature = "cli")]
@@ -65,10 +69,19 @@ fn main() -> Result<()> {
 #[cfg(feature = "cli")]
 fn run(args: Args) -> Result<()> {
     let config = load_vision_training_config(&args.config)?;
+    let run_root = resolve_run_root_for_config_paths("vision", &config.run_layout, &args.config);
+    let planned_run = plan_run_artifacts(&run_root, None)?;
+    let _log_guard = init_experiment_tracing(Some(&planned_run.run_dir.join("experiment.log")))?;
 
     match args.backend.as_str() {
         "cpu" | "ndarray" => {
-            train_vision_backend::<Autodiff<NdArray<f32>>, _>(&config, "cpu", |_| {})?;
+            train_vision_backend_with_planned_run::<Autodiff<NdArray<f32>>, _>(
+                &config,
+                &args.config,
+                planned_run.clone(),
+                "cpu",
+                |_| {},
+            )?;
         }
         "wgpu" => {
             let mut resolved = config.clone();
@@ -78,15 +91,21 @@ fn run(args: Args) -> Result<()> {
             } else {
                 "wgpu-nofusion"
             };
-            train_vision_backend::<Autodiff<WgpuNoFusion>, _>(&resolved, backend_name, |device| {
-                init_runtime(device, &resolved.wgpu)
-            })?;
+            train_vision_backend_with_planned_run::<Autodiff<WgpuNoFusion>, _>(
+                &resolved,
+                &args.config,
+                planned_run.clone(),
+                backend_name,
+                |device| init_runtime(device, &resolved.wgpu),
+            )?;
         }
         "wgpu-nofusion" | "wgpu-no-fusion" => {
             let mut resolved = config.clone();
             resolved.vision.fused_kernels = false;
-            train_vision_backend::<Autodiff<WgpuNoFusion>, _>(
+            train_vision_backend_with_planned_run::<Autodiff<WgpuNoFusion>, _>(
                 &resolved,
+                &args.config,
+                planned_run.clone(),
                 "wgpu-nofusion",
                 |device| init_runtime(device, &resolved.wgpu),
             )?;
@@ -94,7 +113,13 @@ fn run(args: Args) -> Result<()> {
         "cuda" => {
             #[cfg(feature = "cuda")]
             {
-                train_vision_backend::<Autodiff<Cuda<f32>>, _>(&config, "cuda", |_| {})?;
+                train_vision_backend_with_planned_run::<Autodiff<Cuda<f32>>, _>(
+                    &config,
+                    &args.config,
+                    planned_run.clone(),
+                    "cuda",
+                    |_| {},
+                )?;
             }
             #[cfg(not(feature = "cuda"))]
             {

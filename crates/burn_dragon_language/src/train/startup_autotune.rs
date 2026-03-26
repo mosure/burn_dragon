@@ -50,11 +50,13 @@ where
         .training
         .target_effective_batch_size
         .filter(|value| *value > 0);
+    let training_kernel_block_size =
+        crate::train::utils::effective_training_kernel_block_size(&config.training);
 
     let tokenizer = dataset.tokenizer();
     let mut model_config = build_model_config_with_tokenizer(
         &config.model,
-        config.training.block_size,
+        training_kernel_block_size,
         tokenizer.as_ref(),
     )?;
     apply_wgpu_fused_core_override(

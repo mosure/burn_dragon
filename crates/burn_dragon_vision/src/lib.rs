@@ -119,10 +119,11 @@ pub mod api {
             CifarBatch, CifarDataLoader, CifarDataset, CifarSplit, CifarType, DinoFeatureStore,
             ImageNetAugmentations, ImageNetBatch, ImageNetDataLoader, ImageNetDataset,
             ImageNetDatasetConfig, ImageNetSplit, ImageNetTeacherTargetBatch,
-            ImageTeacherTargetStore, MovingMnistRenderedClip, MovingMnistSplit,
-            MovingMnistVideoDataLoader, MovingMnistVideoDataset, MovingMnistVideoDatasetConfig,
-            VideoClipBatch, VisionNormalize, VisionVideoTrainProfileSnapshot,
-            video_train_profile_reset, video_train_profile_snapshot,
+            ImageNetVideoDataLoader, ImageTeacherTargetStore, ImageTensorStore,
+            MovingMnistRenderedClip, MovingMnistSplit, MovingMnistVideoDataLoader,
+            MovingMnistVideoDataset, MovingMnistVideoDatasetConfig, VideoClipBatch,
+            VisionNormalize, VisionVideoTrainProfileSnapshot, video_train_profile_reset,
+            video_train_profile_snapshot,
         };
     }
 
@@ -163,10 +164,11 @@ pub use train::run_vision_distill_decode_probe_cuda_with_seed;
 pub use train::{
     CifarBatch, CifarDataLoader, CifarDataset, CifarSplit, CifarType, DinoFeatureStore,
     ImageNetAugmentations, ImageNetBatch, ImageNetDataLoader, ImageNetDataset,
-    ImageNetDatasetConfig, ImageNetSplit, ImageNetTeacherTargetBatch, ImageTeacherTargetStore,
-    MovingMnistRenderedClip, MovingMnistSplit, MovingMnistVideoDataLoader, MovingMnistVideoDataset,
-    MovingMnistVideoDatasetConfig, VideoClipBatch, VisionNormalize,
-    VisionVideoTrainProfileSnapshot, video_train_profile_reset, video_train_profile_snapshot,
+    ImageNetDatasetConfig, ImageNetSplit, ImageNetTeacherTargetBatch, ImageNetVideoDataLoader,
+    ImageTeacherTargetStore, ImageTensorStore, MovingMnistRenderedClip, MovingMnistSplit,
+    MovingMnistVideoDataLoader, MovingMnistVideoDataset, MovingMnistVideoDatasetConfig,
+    VideoClipBatch, VisionNormalize, VisionVideoTrainProfileSnapshot, video_train_profile_reset,
+    video_train_profile_snapshot,
 };
 #[cfg(feature = "benchmark")]
 pub use train::{

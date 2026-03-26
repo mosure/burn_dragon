@@ -51,8 +51,9 @@ epochs = 30
 # When set, training uses full epochs and derives max_iters and lr_schedule.num_iters
 # from steps_per_epoch * epochs (training.max_iters is ignored).
 log_frequency = 100
-fast_train = false
-
+# Deprecated for language BDH.
+# This flag no longer selects a distinct fast path; use
+# `training.sequence_kernel_override` to choose the train-time kernel explicitly.
 [optimizer]
 learning_rate = 0.001
 weight_decay = 0.1
@@ -157,6 +158,8 @@ mlp_internal_dim_multiplier = 4
 # "rwkv8_state_space_experimental" for the experimental decayed normalized
 # recurrent kernel.
 # sequence_kernel = "bdh_linear_attention"
+# Training-only kernel override belongs under `[training]`:
+# sequence_kernel_override = "bdh_linear_dense_score_experimental"
 # Fast internal recurrent updates per emitted slow token.
 # Supported values: 1, 2, 4, 8, 16.
 rollout_fast_steps_per_slow_step = 1

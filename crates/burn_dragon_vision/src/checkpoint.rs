@@ -16,7 +16,10 @@ use burn_dragon_checkpoint::{
 use burn_ndarray::NdArray;
 
 use crate::VisionDragon;
-use crate::config::{VisionTrainingConfig, VisionTrainingModeConfig, load_vision_training_config};
+use crate::config::{
+    VisionDatasetSource, VisionTrainingConfig, VisionTrainingModeConfig,
+    load_vision_training_config,
+};
 use crate::train::vision::{VisionVideoLejepaModel, VisionVideoVjepa21Model};
 use crate::train::{
     VisionDistillModel, VisionLejepaInit, VisionLejepaModel, VisionReconstructionInit,
@@ -124,8 +127,13 @@ pub fn export_vision_encoder_checkpoint_to_burnpack(
         VisionTrainingModeConfig::VideoLejepa(video) => {
             let model = VisionDragon::<ExportBackend>::new(vision_config.clone(), &device);
             if video.is_vjepa21() {
-                let mut video_model =
-                    VisionVideoVjepa21Model::new(model, video.clone(), &vision_config, &device);
+                let mut video_model = VisionVideoVjepa21Model::new(
+                    model,
+                    video.clone(),
+                    &vision_config,
+                    infer_video_dataset_num_classes(&config)?,
+                    &device,
+                );
                 let record = BinFileRecorder::<FullPrecisionSettings>::new()
                     .load::<<VisionVideoVjepa21Model<ExportBackend> as Module<ExportBackend>>::Record>(
                         checkpoint_base.clone(),
@@ -231,8 +239,13 @@ pub fn load_vision_encoder_from_checkpoint<B: BackendTrait>(
         VisionTrainingModeConfig::VideoLejepa(video) => {
             let model = VisionDragon::<B>::new(vision_config.clone(), device);
             if video.is_vjepa21() {
-                let mut video_model =
-                    VisionVideoVjepa21Model::new(model, video.clone(), &vision_config, device);
+                let mut video_model = VisionVideoVjepa21Model::new(
+                    model,
+                    video.clone(),
+                    &vision_config,
+                    infer_video_dataset_num_classes(&config)?,
+                    device,
+                );
                 let record = BinFileRecorder::<FullPrecisionSettings>::new()
                     .load::<<VisionVideoVjepa21Model<B> as Module<B>>::Record>(
                         checkpoint_base.clone(),
@@ -281,7 +294,7 @@ pub(crate) fn resolve_checkpoint_base(
     resolve_checkpoint_base_shared(path, epoch)
 }
 
-fn infer_image_dataset_num_classes(config: &VisionTrainingConfig) -> Result<usize> {
+pub(crate) fn infer_image_dataset_num_classes(config: &VisionTrainingConfig) -> Result<usize> {
     crate::train::vision::maybe_download_vision_dataset(&config.dataset)?;
     let train_root = config.dataset.imagenet_root.join(&config.dataset.train_dir);
     let count = std::fs::read_dir(&train_root)
@@ -299,13 +312,19 @@ fn infer_image_dataset_num_classes(config: &VisionTrainingConfig) -> Result<usiz
     Ok(count)
 }
 
-fn infer_video_dataset_num_classes(config: &VisionTrainingConfig) -> Result<usize> {
+pub(crate) fn infer_video_dataset_num_classes(config: &VisionTrainingConfig) -> Result<usize> {
     if !matches!(config.mode, VisionTrainingModeConfig::VideoLejepa(_)) {
         return Err(anyhow!(
             "video dataset class inference requires mode.type = \"video_lejepa\""
         ));
     }
-    Ok(10)
+    match config.dataset.source {
+        VisionDatasetSource::MovingMnist => Ok(10),
+        VisionDatasetSource::Imagenet => infer_image_dataset_num_classes(config),
+        VisionDatasetSource::Cifar10 | VisionDatasetSource::Cifar100 => Err(anyhow!(
+            "video dataset class inference does not support cifar sources"
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -525,6 +544,7 @@ mod tests {
             dataset: VisionDatasetConfig {
                 source: VisionDatasetSource::Imagenet,
                 imagenet_root: PathBuf::from("data/imagenet"),
+                cifar_root: PathBuf::from("data/cifar"),
                 train_dir: "train".to_string(),
                 val_dir: "val".to_string(),
                 max_records: Some(1),
@@ -561,13 +581,18 @@ mod tests {
                 ffmpeg_path: None,
             },
             optimizer: OptimizerConfig {
+                name: burn_dragon_train::OptimizerKind::default(),
                 learning_rate: 1e-3,
                 weight_decay: 0.0,
+                weight_decay_final: None,
                 lr_schedule: None,
+                schedule_mode: burn_dragon_train::OptimizerScheduleMode::default(),
                 grad_clip_norm: None,
                 grad_clip_value: None,
+                muon: None,
             },
             wgpu: WgpuRuntimeConfig::default(),
+            run_layout: burn_dragon_train::RunLayoutConfig::default(),
             vision: VisionModelConfig {
                 image_size: 16,
                 patch_size: 4,

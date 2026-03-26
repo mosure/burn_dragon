@@ -50,12 +50,21 @@ pub struct OnlineNcaCorpus {
 
 impl OnlineNcaCorpus {
     pub fn new(config: NcaCorpusConfig) -> Result<Self> {
-        config.validate()?;
-        let tokenizer = Arc::new(CorpusTokenizer::from_config(&config.tokenization)?);
+        Self::new_with_min_logical_document_tokens(config, None)
+    }
+
+    pub fn new_with_min_logical_document_tokens(
+        config: NcaCorpusConfig,
+        min_logical_document_tokens: Option<usize>,
+    ) -> Result<Self> {
+        let adjusted_config =
+            adapt_config_for_min_logical_document_tokens(config, min_logical_document_tokens)?;
+        adjusted_config.validate()?;
+        let tokenizer = Arc::new(CorpusTokenizer::from_config(&adjusted_config.tokenization)?);
         let tokenizer_manifest = tokenizer.manifest();
-        let document_token_count = fixed_document_token_count(&config)?;
+        let document_token_count = fixed_document_token_count(&adjusted_config)?;
         Ok(Self {
-            config,
+            config: adjusted_config,
             tokenizer,
             tokenizer_manifest,
             document_token_count,
@@ -65,6 +74,14 @@ impl OnlineNcaCorpus {
     pub fn load(path: &std::path::Path) -> Result<Self> {
         let config = crate::load_nca_config(path)?;
         Self::new(config)
+    }
+
+    pub fn load_with_min_logical_document_tokens(
+        path: &std::path::Path,
+        min_logical_document_tokens: Option<usize>,
+    ) -> Result<Self> {
+        let config = crate::load_nca_config(path)?;
+        Self::new_with_min_logical_document_tokens(config, min_logical_document_tokens)
     }
 
     pub fn config(&self) -> &NcaCorpusConfig {
@@ -281,6 +298,76 @@ pub fn fixed_document_token_count(config: &NcaCorpusConfig) -> Result<usize> {
     }
 }
 
+fn adapt_config_for_min_logical_document_tokens(
+    mut config: NcaCorpusConfig,
+    min_logical_document_tokens: Option<usize>,
+) -> Result<NcaCorpusConfig> {
+    let Some(min_logical_document_tokens) = min_logical_document_tokens.filter(|value| *value > 0)
+    else {
+        return Ok(config);
+    };
+
+    let base_document_token_count = fixed_document_token_count(&config)?;
+    let eos_tokens = match &config.tokenization {
+        crate::config::NcaTokenizationConfig::PatchTokenIds { eos_id, .. } => {
+            usize::from(eos_id.is_some())
+        }
+        _ => {
+            return Ok(config);
+        }
+    };
+    let base_logical_document_tokens = base_document_token_count.saturating_sub(1);
+    if base_logical_document_tokens >= min_logical_document_tokens {
+        return Ok(config);
+    }
+
+    let desired_document_token_count = min_logical_document_tokens
+        .checked_add(1)
+        .ok_or_else(|| anyhow!("requested on-the-fly NCA logical document length overflow"))?;
+    let desired_payload_tokens = desired_document_token_count
+        .checked_sub(eos_tokens)
+        .ok_or_else(|| anyhow!("invalid on-the-fly NCA tokenization layout"))?;
+
+    let mut patches_per_frame = Vec::with_capacity(config.families.len());
+    let mut payload_alignment = 1usize;
+    for (index, family) in config.families.iter().enumerate() {
+        let grid = fixed_range_value(family.grid_size, &format!("families[{index}].grid_size"))?;
+        if grid % config.serialization.patch_size != 0 {
+            return Err(anyhow!(
+                "families[{index}].grid_size={} must be divisible by serialization.patch_size={}",
+                grid,
+                config.serialization.patch_size
+            ));
+        }
+        let patches =
+            (grid / config.serialization.patch_size) * (grid / config.serialization.patch_size);
+        payload_alignment = lcm_usize(payload_alignment, patches)
+            .ok_or_else(|| anyhow!("on-the-fly NCA payload alignment overflow"))?;
+        patches_per_frame.push(patches);
+    }
+
+    let target_payload_tokens = desired_payload_tokens
+        .div_ceil(payload_alignment)
+        .checked_mul(payload_alignment)
+        .ok_or_else(|| anyhow!("on-the-fly NCA target payload length overflow"))?;
+
+    for (family, patches) in config
+        .families
+        .iter_mut()
+        .zip(patches_per_frame.into_iter())
+    {
+        let steps = target_payload_tokens
+            .checked_div(patches)
+            .ok_or_else(|| anyhow!("invalid per-family on-the-fly NCA step layout"))?;
+        family.steps = Some(crate::config::UsizeRangeConfig {
+            min: steps,
+            max: steps,
+        });
+    }
+
+    Ok(config)
+}
+
 fn fixed_range_value(range: Option<crate::config::UsizeRangeConfig>, label: &str) -> Result<usize> {
     let Some(range) = range else {
         return Err(anyhow!(
@@ -293,6 +380,23 @@ fn fixed_range_value(range: Option<crate::config::UsizeRangeConfig>, label: &str
         ));
     }
     Ok(range.min)
+}
+
+fn gcd_usize(mut lhs: usize, mut rhs: usize) -> usize {
+    while rhs != 0 {
+        let remainder = lhs % rhs;
+        lhs = rhs;
+        rhs = remainder;
+    }
+    lhs
+}
+
+fn lcm_usize(lhs: usize, rhs: usize) -> Option<usize> {
+    if lhs == 0 || rhs == 0 {
+        return Some(0);
+    }
+    let gcd = gcd_usize(lhs, rhs);
+    lhs.checked_div(gcd)?.checked_mul(rhs)
 }
 
 fn choose_family<'a>(config: &'a NcaCorpusConfig, rng: &mut StdRng) -> &'a NcaFamilyConfig {
@@ -406,5 +510,22 @@ mod tests {
             .expect("val sample");
         assert_eq!(first.tokens, second.tokens);
         assert_ne!(first.tokens, val.tokens);
+    }
+
+    #[test]
+    fn online_corpus_can_adapt_document_length_for_large_logical_blocks() {
+        let config = fixed_patch_config();
+        let corpus = OnlineNcaCorpus::new_with_min_logical_document_tokens(config, Some(4096))
+            .expect("runtime corpus");
+        assert_eq!(corpus.document_token_count(), 4105);
+
+        let doc = corpus
+            .generate_document(SampleSplit::Train, 0)
+            .expect("train sample");
+        assert_eq!(doc.token_count, 4105);
+        assert_eq!(doc.stats.steps, 114);
+        assert!(doc.stats.mean_transition_rate.is_finite());
+        assert!(doc.stats.mean_transition_rate > 0.0);
+        assert!(doc.stats.unique_frames > 1);
     }
 }

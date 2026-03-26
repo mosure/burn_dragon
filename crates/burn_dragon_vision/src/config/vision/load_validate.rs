@@ -267,9 +267,11 @@ pub(super) fn validate_vision_mode(
             validate_recon_loss("mode.loss.recon", &lejepa.loss.recon)?;
         }
         VisionTrainingModeConfig::VideoLejepa(video) => {
-            if dataset.source != VisionDatasetSource::MovingMnist {
+            let imagenet_vjepa21 =
+                dataset.source == VisionDatasetSource::Imagenet && video.is_vjepa21();
+            if dataset.source != VisionDatasetSource::MovingMnist && !imagenet_vjepa21 {
                 return Err(anyhow!(
-                    "video LEJEPA requires dataset.source = \"moving_mnist\""
+                    "video LEJEPA requires dataset.source = \"moving_mnist\" unless mode.paradigm = \"vjepa_2_1\", which also supports dataset.source = \"imagenet\""
                 ));
             }
             if !vision.use_cls_token {
@@ -442,6 +444,185 @@ pub(super) fn validate_vision_mode(
                     moving.max_velocity,
                     moving.min_velocity
                 ));
+            }
+        }
+        VisionTrainingModeConfig::Rac(rac) => {
+            if dataset.source != VisionDatasetSource::Cifar10
+                && dataset.source != VisionDatasetSource::Cifar100
+                && dataset.source != VisionDatasetSource::Imagenet
+            {
+                return Err(anyhow!(
+                    "rac mode currently requires dataset.source = \"cifar10\", \"cifar100\", or \"imagenet\""
+                ));
+            }
+            if (dataset.source == VisionDatasetSource::Cifar10
+                || dataset.source == VisionDatasetSource::Cifar100)
+                && vision.image_size != 32
+            {
+                return Err(anyhow!(
+                    "rac mode currently requires vision.image_size = 32"
+                ));
+            }
+            if (dataset.source == VisionDatasetSource::Cifar10
+                || dataset.source == VisionDatasetSource::Cifar100)
+                && augment.image_size != 32
+            {
+                return Err(anyhow!(
+                    "rac mode currently requires augment.image_size = 32"
+                ));
+            }
+            if dataset.source == VisionDatasetSource::Imagenet && augment.image_size == 0 {
+                return Err(anyhow!(
+                    "rac mode requires augment.image_size > 0 for imagenet"
+                ));
+            }
+            if dataset.source == VisionDatasetSource::Imagenet
+                && augment.image_size != vision.image_size
+            {
+                return Err(anyhow!(
+                    "rac mode currently requires augment.image_size = vision.image_size for imagenet"
+                ));
+            }
+            if !vision.use_cls_token {
+                return Err(anyhow!("rac mode requires vision.use_cls_token = true"));
+            }
+            if rac.sample_steps == 0 {
+                return Err(anyhow!("mode.sample_steps must be > 0"));
+            }
+            if rac.state_channels < 3 {
+                return Err(anyhow!("mode.state_channels must be >= 3"));
+            }
+            match rac.teacher.kind {
+                VisionRacTeacherKind::PooledImage => {
+                    if rac.teacher.latent_downsample == 0 {
+                        return Err(anyhow!("mode.teacher.latent_downsample must be > 0"));
+                    }
+                    if rac.teacher.state_mapping == VisionRacStateMappingKind::CenteredSubpixel {
+                        if vision.image_size % rac.teacher.latent_downsample != 0 {
+                            return Err(anyhow!(
+                                "mode.teacher.state_mapping = \"centered_subpixel\" requires vision.image_size ({}) to be divisible by mode.teacher.latent_downsample ({})",
+                                vision.image_size,
+                                rac.teacher.latent_downsample
+                            ));
+                        }
+                    }
+                }
+                VisionRacTeacherKind::PrecomputedLatent => {
+                    if dataset.source != VisionDatasetSource::Imagenet {
+                        return Err(anyhow!(
+                            "mode.teacher.kind = \"precomputed_latent\" currently requires dataset.source = \"imagenet\""
+                        ));
+                    }
+                    if !distill_train_features_are_deterministic(augment) {
+                        return Err(anyhow!(
+                            "rac mode with mode.teacher.kind = \"precomputed_latent\" requires deterministic train augmentations so precomputed latent targets match the student view"
+                        ));
+                    }
+                    let Some(spec) = rac.teacher.precomputed_latent.as_ref() else {
+                        return Err(anyhow!(
+                            "mode.teacher.precomputed_latent is required when mode.teacher.kind = \"precomputed_latent\""
+                        ));
+                    };
+                    if spec.train_path.as_os_str().is_empty() {
+                        return Err(anyhow!(
+                            "mode.teacher.precomputed_latent.train_path must be set"
+                        ));
+                    }
+                    if spec.val_path.as_os_str().is_empty() {
+                        return Err(anyhow!(
+                            "mode.teacher.precomputed_latent.val_path must be set"
+                        ));
+                    }
+                    if spec.channels == 0 {
+                        return Err(anyhow!(
+                            "mode.teacher.precomputed_latent.channels must be > 0"
+                        ));
+                    }
+                    if spec.height == 0 || spec.width == 0 {
+                        return Err(anyhow!(
+                            "mode.teacher.precomputed_latent.height and width must be > 0"
+                        ));
+                    }
+                    if rac.state_channels < spec.channels {
+                        return Err(anyhow!(
+                            "mode.state_channels ({}) must be >= mode.teacher.precomputed_latent.channels ({})",
+                            rac.state_channels,
+                            spec.channels
+                        ));
+                    }
+                    if rac.teacher.state_mapping == VisionRacStateMappingKind::CenteredSubpixel {
+                        if vision.image_size % spec.height != 0
+                            || vision.image_size % spec.width != 0
+                        {
+                            return Err(anyhow!(
+                                "mode.teacher.state_mapping = \"centered_subpixel\" requires vision.image_size ({}) to be divisible by latent height/width ({}, {})",
+                                vision.image_size,
+                                spec.height,
+                                spec.width
+                            ));
+                        }
+                        if vision.image_size / spec.height != vision.image_size / spec.width {
+                            return Err(anyhow!(
+                                "mode.teacher.state_mapping = \"centered_subpixel\" requires square latent scaling; got image_size {} with latent {}x{}",
+                                vision.image_size,
+                                spec.height,
+                                spec.width
+                            ));
+                        }
+                    }
+                }
+            }
+            if rac.memory.observe_steps == 0 {
+                return Err(anyhow!("mode.memory.observe_steps must be > 0"));
+            }
+            if rac.memory.backprop_steps == 0 {
+                return Err(anyhow!("mode.memory.backprop_steps must be > 0"));
+            }
+            if rac.memory.backprop_steps > rac.memory.observe_steps {
+                return Err(anyhow!(
+                    "mode.memory.backprop_steps ({}) must be <= mode.memory.observe_steps ({})",
+                    rac.memory.backprop_steps,
+                    rac.memory.observe_steps
+                ));
+            }
+            if let Some(flow_backprop_steps) = rac.memory.flow_backprop_steps {
+                if flow_backprop_steps == 0 {
+                    return Err(anyhow!(
+                        "mode.memory.flow_backprop_steps must be > 0 when set"
+                    ));
+                }
+                if flow_backprop_steps > rac.sample_steps {
+                    return Err(anyhow!(
+                        "mode.memory.flow_backprop_steps ({flow_backprop_steps}) must be <= mode.sample_steps ({})",
+                        rac.sample_steps
+                    ));
+                }
+            }
+            if rac.memory.detach_each_step && rac.memory.flow_backprop_steps.is_some() {
+                return Err(anyhow!(
+                    "mode.memory.detach_each_step and mode.memory.flow_backprop_steps are mutually exclusive"
+                ));
+            }
+            if rac.loss.recon_weight < 0.0 {
+                return Err(anyhow!("mode.loss.recon_weight must be >= 0"));
+            }
+            if rac.loss.path_weight < 0.0 {
+                return Err(anyhow!("mode.loss.path_weight must be >= 0"));
+            }
+            if rac.loss.latent_weight < 0.0 {
+                return Err(anyhow!("mode.loss.latent_weight must be >= 0"));
+            }
+            if rac.loss.roundtrip_weight < 0.0 {
+                return Err(anyhow!("mode.loss.roundtrip_weight must be >= 0"));
+            }
+            if rac.loss.velocity_weight < 0.0 {
+                return Err(anyhow!("mode.loss.velocity_weight must be >= 0"));
+            }
+            if rac.loss.probe_weight < 0.0 {
+                return Err(anyhow!("mode.loss.probe_weight must be >= 0"));
+            }
+            if rac.artifact_upscale == 0 {
+                return Err(anyhow!("mode.artifact_upscale must be > 0"));
             }
         }
         VisionTrainingModeConfig::Mae(mae) => {

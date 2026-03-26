@@ -7,6 +7,9 @@
 //! - [`api::runtime`] for train-time memory helpers
 //! - [`api::wgpu`] for backend/device initialization helpers
 
+#[cfg(feature = "cli")]
+/// Shared CLI helpers for train binaries.
+pub mod cli;
 /// Shared training/runtime configuration helpers.
 pub mod config;
 /// Constants used across Dragon training/runtime adapters.
@@ -26,20 +29,22 @@ pub mod api {
     pub mod config {
         pub use crate::config::{
             FsdpMixedPrecisionKind, GdpoConfig, GdpoHardGate, KernelSpec, LayerStateSpec,
-            ModelSpec, ParallelCheckpointConfig, ParallelCheckpointFormat,
-            ParallelCommunicationBackend, ParallelConfig, ParallelDataConfig, ParallelFsdpConfig,
-            ParallelPipelineCacheConfig, ParallelPipelineConfig, ParallelSpec,
-            ParallelTensorConfig, ParallelismKind, PipelineCacheEvictionKind, PipelineCachePolicy,
-            PipelineCommunicationKind, PipelinePartitionKind, PipelineScheduleKind,
-            PipelineSharedWeightSyncKind, PipelineTransportDtype, SequenceKernelKind,
-            StateAxisSpec, StateLayout, StateTensorSpec, TensorParallelAxis,
-            TensorParallelPartitionKind, VisionTeacherVariant, WgpuBackend, WgpuGenerationExecutor,
-            WgpuInferenceConfig, WgpuMemoryConfig, WgpuRuntimeConfig, WgpuStartupAutotuneConfig,
-            WgpuTrainingConfig,
+            LowBitMemorySpec, LowBitModelSpec, LowBitSavedActivationInventorySpec,
+            LowBitSavedActivationTensorSpec, ModelSpec, OptimizerSpec, ParallelCheckpointConfig,
+            ParallelCheckpointFormat, ParallelCommunicationBackend, ParallelConfig,
+            ParallelDataConfig, ParallelFsdpConfig, ParallelPipelineCacheConfig,
+            ParallelPipelineConfig, ParallelSpec, ParallelTensorConfig, ParallelismKind,
+            PipelineCacheEvictionKind, PipelineCachePolicy, PipelineCommunicationKind,
+            PipelinePartitionKind, PipelineScheduleKind, PipelineSharedWeightSyncKind,
+            PipelineTransportDtype, RunLayoutConfig, SequenceKernelKind, StateAxisSpec,
+            StateLayout, StateTensorSpec, TensorParallelAxis, TensorParallelPartitionKind,
+            VisionTeacherVariant, WgpuBackend, WgpuGenerationExecutor, WgpuInferenceConfig,
+            WgpuMemoryConfig, WgpuRuntimeConfig, WgpuStartupAutotuneConfig, WgpuTrainingConfig,
         };
         #[cfg(feature = "train")]
         pub use crate::config::{
-            LearningRateScheduleConfig, OptimizerConfig, VisionArtifactOutputMode,
+            LearningRateScheduleConfig, MuonAdjustLrFn, MuonHybridConfig, OptimizerConfig,
+            OptimizerKind, OptimizerScheduleMode, VisionArtifactOutputMode,
         };
     }
 
@@ -68,16 +73,20 @@ pub mod api {
 }
 
 pub use config::{
-    FsdpMixedPrecisionKind, GdpoConfig, GdpoHardGate, KernelSpec, LayerStateSpec, ModelSpec,
-    ParallelCheckpointConfig, ParallelCheckpointFormat, ParallelCommunicationBackend,
-    ParallelConfig, ParallelDataConfig, ParallelFsdpConfig, ParallelPipelineCacheConfig,
-    ParallelPipelineConfig, ParallelSpec, ParallelTensorConfig, ParallelismKind,
-    PipelineCacheEvictionKind, PipelineCachePolicy, PipelineCommunicationKind,
+    FsdpMixedPrecisionKind, GdpoConfig, GdpoHardGate, KernelSpec, LayerStateSpec, LowBitMemorySpec,
+    LowBitModelSpec, LowBitSavedActivationInventorySpec, LowBitSavedActivationTensorSpec,
+    ModelSpec, OptimizerSpec, ParallelCheckpointConfig, ParallelCheckpointFormat,
+    ParallelCommunicationBackend, ParallelConfig, ParallelDataConfig, ParallelFsdpConfig,
+    ParallelPipelineCacheConfig, ParallelPipelineConfig, ParallelSpec, ParallelTensorConfig,
+    ParallelismKind, PipelineCacheEvictionKind, PipelineCachePolicy, PipelineCommunicationKind,
     PipelinePartitionKind, PipelineScheduleKind, PipelineSharedWeightSyncKind,
-    PipelineTransportDtype, SequenceKernelKind, StateAxisSpec, StateLayout, StateTensorSpec,
-    TensorParallelAxis, TensorParallelPartitionKind, VisionTeacherVariant, WgpuBackend,
-    WgpuGenerationExecutor, WgpuInferenceConfig, WgpuMemoryConfig, WgpuRuntimeConfig,
+    PipelineTransportDtype, RunLayoutConfig, SequenceKernelKind, StateAxisSpec, StateLayout,
+    StateTensorSpec, TensorParallelAxis, TensorParallelPartitionKind, VisionTeacherVariant,
+    WgpuBackend, WgpuGenerationExecutor, WgpuInferenceConfig, WgpuMemoryConfig, WgpuRuntimeConfig,
     WgpuStartupAutotuneConfig, WgpuTrainingConfig,
 };
 #[cfg(feature = "train")]
-pub use config::{LearningRateScheduleConfig, OptimizerConfig, VisionArtifactOutputMode};
+pub use config::{
+    LearningRateScheduleConfig, MuonAdjustLrFn, MuonHybridConfig, OptimizerConfig, OptimizerKind,
+    OptimizerScheduleMode, VisionArtifactOutputMode,
+};

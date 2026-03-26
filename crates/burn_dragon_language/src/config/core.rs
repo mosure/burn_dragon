@@ -4,10 +4,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::tokenizer::TokenizerConfig;
 use burn_dragon_core::{
-    AttentionResidualConfig, BlockAttentionResidualConfig, ClockedSlowMemoryConfig,
-    DragonNormConfig, LatentFanoutScheduleConfig, MambaSequenceConfig,
-    ManifoldHyperConnectionsConfig, ResidualConnectorKind, RotaryEmbedding, SequenceKernelKind,
-    SummaryMemoryConfig, YNeuronRecurrenceConfig,
+    AttentionResidualConfig, BdhInitializationConfig, BlockAttentionResidualConfig,
+    ClockedSlowMemoryConfig, DragonNormConfig, LatentFanoutScheduleConfig,
+    LowBitQuantizationConfig, LowBitRhoConfig, MambaSequenceConfig, ManifoldHyperConnectionsConfig,
+    ResidualConnectorKind, RotaryEmbedding, SequenceKernelKind, SummaryMemoryConfig,
+    YNeuronRecurrenceConfig,
 };
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -71,6 +72,8 @@ pub struct ModelOverrides {
     pub mlp_internal_dim_multiplier: Option<usize>,
     #[serde(alias = "neuron_space_dim")]
     pub latent_total: Option<usize>,
+    #[serde(alias = "init")]
+    pub initialization: Option<BdhInitializationConfig>,
     pub sequence_kernel: Option<SequenceKernelKind>,
     pub mamba: Option<MambaSequenceConfig>,
     pub residual_connector: Option<ResidualConnectorKind>,
@@ -90,6 +93,8 @@ pub struct ModelOverrides {
     pub clocked_slow_memory: Option<ClockedSlowMemoryConfig>,
     pub summary_memory: Option<SummaryMemoryConfig>,
     pub mhc: Option<ManifoldHyperConnectionsConfig>,
+    pub quant: Option<LowBitQuantizationConfig>,
+    pub rho: Option<LowBitRhoConfig>,
 }
 
 fn default_context_strategy() -> ContextStrategyConfig {

@@ -33,7 +33,7 @@ pub(crate) use burn::nn::{LayerNorm, LayerNormConfig, Linear, LinearConfig};
 pub(crate) use burn::optim::adaptor::OptimizerAdaptor;
 pub(crate) use burn::optim::grad_clipping::GradientClippingConfig;
 pub(crate) use burn::optim::{
-    AdamW, AdamWConfig, GradientsAccumulator, GradientsParams, LearningRate,
+    AdamW, AdamWConfig, GradientsAccumulator, GradientsParams, LearningRate, Optimizer,
 };
 pub(crate) use burn::tensor::Distribution as TensorDistribution;
 pub(crate) use burn::tensor::activation;
@@ -59,7 +59,7 @@ pub(crate) use tracing::info;
 #[cfg(all(feature = "cuda", any(feature = "cli", test)))]
 pub(crate) use burn_cuda::Cuda;
 
-pub(crate) use burn::record::{BinFileRecorder, FullPrecisionSettings};
+pub(crate) use burn::record::{BinFileRecorder, FullPrecisionSettings, Record};
 
 #[cfg(feature = "cli")]
 pub(crate) use crate::wgpu::init_runtime;

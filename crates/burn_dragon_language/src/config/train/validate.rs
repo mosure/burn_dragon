@@ -3,7 +3,7 @@ use anyhow::{Result, anyhow};
 use burn_dragon_core::{BDHConfig, ResidualConnectorKind};
 use burn_dragon_train::{
     GdpoHardGate, LearningRateScheduleConfig, ParallelismKind, PipelineCommunicationKind,
-    PipelineScheduleKind, TensorParallelPartitionKind,
+    PipelineScheduleKind, TensorParallelPartitionKind, train::pipeline::TrainingLaunchMode,
 };
 
 use super::{DatasetSourceConfig, TrainingConfig};
@@ -297,12 +297,6 @@ impl TrainingConfig {
         if self.training.log_frequency == 0 {
             return Err(anyhow!("training.log_frequency must be > 0"));
         }
-        if self.training.resume_checkpoint_epoch.is_some() && self.training.resume_run_dir.is_none()
-        {
-            return Err(anyhow!(
-                "training.resume_checkpoint_epoch requires training.resume_run_dir"
-            ));
-        }
         if self.training.init_checkpoint_epoch.is_some()
             && self.training.init_checkpoint_path.is_none()
         {
@@ -310,10 +304,58 @@ impl TrainingConfig {
                 "training.init_checkpoint_epoch requires training.init_checkpoint_path"
             ));
         }
-        if self.training.resume_run_dir.is_some() && self.training.init_checkpoint_path.is_some() {
-            return Err(anyhow!(
-                "training.resume_run_dir and training.init_checkpoint_path are mutually exclusive"
-            ));
+        match self.training.launch_mode {
+            TrainingLaunchMode::Fresh => {
+                if self.training.resume_run_dir.is_some()
+                    || self.training.resume_checkpoint_epoch.is_some()
+                    || self.training.init_checkpoint_path.is_some()
+                    || self.training.init_checkpoint_epoch.is_some()
+                {
+                    return Err(anyhow!(
+                        "training.launch_mode = \"fresh\" requires training.resume_run_dir, training.resume_checkpoint_epoch, training.init_checkpoint_path, and training.init_checkpoint_epoch to all be unset"
+                    ));
+                }
+            }
+            TrainingLaunchMode::ResumeExactRun => {
+                if self.training.resume_run_dir.is_none() {
+                    return Err(anyhow!(
+                        "training.launch_mode = \"resume_exact_run\" requires training.resume_run_dir"
+                    ));
+                }
+                if self.training.init_checkpoint_path.is_some()
+                    || self.training.init_checkpoint_epoch.is_some()
+                {
+                    return Err(anyhow!(
+                        "training.launch_mode = \"resume_exact_run\" cannot be combined with training.init_checkpoint_path or training.init_checkpoint_epoch"
+                    ));
+                }
+            }
+            TrainingLaunchMode::ResumeLatestCheckpointIfPresent => {
+                if self.training.resume_run_dir.is_some() {
+                    return Err(anyhow!(
+                        "training.launch_mode = \"resume_latest_checkpoint_if_present\" cannot be combined with training.resume_run_dir"
+                    ));
+                }
+                if self.training.resume_checkpoint_epoch.is_some() {
+                    return Err(anyhow!(
+                        "training.launch_mode = \"resume_latest_checkpoint_if_present\" cannot be combined with training.resume_checkpoint_epoch"
+                    ));
+                }
+            }
+            TrainingLaunchMode::InitFromCheckpoint => {
+                if self.training.init_checkpoint_path.is_none() {
+                    return Err(anyhow!(
+                        "training.launch_mode = \"init_from_checkpoint\" requires training.init_checkpoint_path"
+                    ));
+                }
+                if self.training.resume_run_dir.is_some()
+                    || self.training.resume_checkpoint_epoch.is_some()
+                {
+                    return Err(anyhow!(
+                        "training.launch_mode = \"init_from_checkpoint\" cannot be combined with training.resume_run_dir or training.resume_checkpoint_epoch"
+                    ));
+                }
+            }
         }
         if self.wgpu.training.startup_autotune.enabled {
             let autotune = &self.wgpu.training.startup_autotune;
@@ -493,6 +535,10 @@ impl TrainingConfig {
                 ));
             }
             resolved_model.mlp_internal_dim_multiplier = latent_total / resolved_model.n_embd;
+        }
+        if let Some(initialization) = &self.model.initialization {
+            initialization.validate().map_err(anyhow::Error::msg)?;
+            resolved_model.initialization = initialization.clone();
         }
         if resolved_model.latent_total() % self.parallel.tensor.size != 0 {
             return Err(anyhow!(
@@ -718,6 +764,17 @@ impl TrainingConfig {
                 ));
             }
         }
+        if let Some(quant) = &self.model.quant {
+            quant.validate()?;
+        }
+        if let Some(rho) = &self.model.rho {
+            rho.validate()?;
+            if !rho.carry_across_tbptt && !rho.detach_between_windows {
+                return Err(anyhow!(
+                    "model.rho.detach_between_windows must remain true when model.rho.carry_across_tbptt = false"
+                ));
+            }
+        }
         if let Some(mhc) = self.model.mhc.as_ref()
             && mhc.enabled
             && self.model.residual_connector != Some(ResidualConnectorKind::Mhc)
@@ -935,7 +992,9 @@ mod tests {
         ModelOverrides, TrainingHyperparameters,
     };
     use crate::tokenizer::TokenizerConfig;
-    use burn_dragon_core::LatentFanoutScheduleConfig;
+    use burn_dragon_core::{
+        BdhInitializationConfig, BdhInitializationKind, LatentFanoutScheduleConfig,
+    };
     use burn_dragon_train::{OptimizerConfig, ParallelConfig};
 
     #[test]
@@ -961,7 +1020,7 @@ mod tests {
                 max_iters: 4,
                 checkpoint_interval_iters: 2000,
                 log_frequency: 1,
-                fast_train: false,
+                launch_mode: burn_dragon_train::train::pipeline::TrainingLaunchMode::Fresh,
                 resume_run_dir: None,
                 resume_checkpoint_epoch: None,
                 init_checkpoint_path: None,
@@ -971,11 +1030,15 @@ mod tests {
                 gdpo: None,
             },
             optimizer: OptimizerConfig {
+                name: burn_dragon_train::OptimizerKind::default(),
                 learning_rate: 1.0e-3,
                 weight_decay: 0.0,
+                weight_decay_final: None,
                 lr_schedule: None,
+                schedule_mode: burn_dragon_train::OptimizerScheduleMode::default(),
                 grad_clip_norm: None,
                 grad_clip_value: None,
+                muon: None,
             },
             parallel: ParallelConfig::default(),
             generation: GenerationConfig {
@@ -990,6 +1053,7 @@ mod tests {
                 output_format: Default::default(),
             },
             wgpu: Default::default(),
+            run_layout: burn_dragon_train::RunLayoutConfig::default(),
             model: ModelOverrides {
                 n_layer: Some(8),
                 n_embd: Some(256),
@@ -1004,6 +1068,79 @@ mod tests {
         };
 
         config.validate().expect("valid latent fanout schedule");
+    }
+
+    #[test]
+    fn validate_rejects_invalid_initialization_override() {
+        let config = TrainingConfig {
+            dataset: DatasetConfig {
+                cache_dir: "data".into(),
+                train_split_ratio: 0.9,
+                validation: None,
+                source: DatasetSourceConfig::Shakespeare { url: None },
+                tokenizer: TokenizerConfig::default(),
+            },
+            training: TrainingHyperparameters {
+                block_size: 32,
+                tbptt_chunk_size: None,
+                tbptt_persist_across_steps: false,
+                min_logical_block_size: None,
+                batch_size: 2,
+                seed: 1337,
+                gradient_accumulation_steps: 1,
+                target_effective_batch_size: None,
+                epochs: None,
+                max_iters: 4,
+                checkpoint_interval_iters: 2000,
+                log_frequency: 1,
+                launch_mode: burn_dragon_train::train::pipeline::TrainingLaunchMode::Fresh,
+                resume_run_dir: None,
+                resume_checkpoint_epoch: None,
+                init_checkpoint_path: None,
+                init_checkpoint_epoch: None,
+                context_strategy: ContextStrategyConfig::Infinite,
+                sequence_kernel_override: None,
+                gdpo: None,
+            },
+            optimizer: OptimizerConfig {
+                name: burn_dragon_train::OptimizerKind::default(),
+                learning_rate: 1.0e-3,
+                weight_decay: 0.0,
+                weight_decay_final: None,
+                lr_schedule: None,
+                schedule_mode: burn_dragon_train::OptimizerScheduleMode::default(),
+                grad_clip_norm: None,
+                grad_clip_value: None,
+                muon: None,
+            },
+            parallel: ParallelConfig::default(),
+            generation: GenerationConfig {
+                prompt: "abc".to_string(),
+                max_tokens: Some(4),
+                max_chars: None,
+                temperature: 1.0,
+                top_k: None,
+                context_strategy: ContextStrategyConfig::Infinite,
+                prompt_tokenizer: Default::default(),
+                decode_tokenizer: Default::default(),
+                output_format: Default::default(),
+            },
+            wgpu: Default::default(),
+            run_layout: burn_dragon_train::RunLayoutConfig::default(),
+            model: ModelOverrides {
+                initialization: Some(BdhInitializationConfig {
+                    kind: BdhInitializationKind::SimpleNormal,
+                    simple_normal_std: 0.0,
+                    ..Default::default()
+                }),
+                ..ModelOverrides::default()
+            },
+        };
+
+        let err = config
+            .validate()
+            .expect_err("simple normal init with non-positive std should be rejected");
+        assert!(err.to_string().contains("simple_normal_std"));
     }
 
     #[test]
@@ -1029,7 +1166,7 @@ mod tests {
                 max_iters: 4,
                 checkpoint_interval_iters: 2000,
                 log_frequency: 1,
-                fast_train: false,
+                launch_mode: burn_dragon_train::train::pipeline::TrainingLaunchMode::Fresh,
                 resume_run_dir: None,
                 resume_checkpoint_epoch: Some(1),
                 init_checkpoint_path: None,
@@ -1039,11 +1176,15 @@ mod tests {
                 gdpo: None,
             },
             optimizer: OptimizerConfig {
+                name: burn_dragon_train::OptimizerKind::default(),
                 learning_rate: 1.0e-3,
                 weight_decay: 0.0,
+                weight_decay_final: None,
                 lr_schedule: None,
+                schedule_mode: burn_dragon_train::OptimizerScheduleMode::default(),
                 grad_clip_norm: None,
                 grad_clip_value: None,
+                muon: None,
             },
             parallel: ParallelConfig::default(),
             generation: GenerationConfig {
@@ -1058,6 +1199,7 @@ mod tests {
                 output_format: Default::default(),
             },
             wgpu: Default::default(),
+            run_layout: burn_dragon_train::RunLayoutConfig::default(),
             model: ModelOverrides::default(),
         };
 
@@ -1091,7 +1233,7 @@ mod tests {
                 max_iters: 4,
                 checkpoint_interval_iters: 2000,
                 log_frequency: 1,
-                fast_train: false,
+                launch_mode: burn_dragon_train::train::pipeline::TrainingLaunchMode::Fresh,
                 resume_run_dir: None,
                 resume_checkpoint_epoch: None,
                 init_checkpoint_path: None,
@@ -1101,11 +1243,15 @@ mod tests {
                 gdpo: None,
             },
             optimizer: OptimizerConfig {
+                name: burn_dragon_train::OptimizerKind::default(),
                 learning_rate: 1.0e-3,
                 weight_decay: 0.0,
+                weight_decay_final: None,
                 lr_schedule: None,
+                schedule_mode: burn_dragon_train::OptimizerScheduleMode::default(),
                 grad_clip_norm: None,
                 grad_clip_value: None,
+                muon: None,
             },
             parallel: ParallelConfig::default(),
             generation: GenerationConfig {
@@ -1120,6 +1266,7 @@ mod tests {
                 output_format: Default::default(),
             },
             wgpu: Default::default(),
+            run_layout: burn_dragon_train::RunLayoutConfig::default(),
             model: ModelOverrides::default(),
         };
 
@@ -1155,7 +1302,7 @@ mod tests {
                 max_iters: 4,
                 checkpoint_interval_iters: 2000,
                 log_frequency: 1,
-                fast_train: false,
+                launch_mode: burn_dragon_train::train::pipeline::TrainingLaunchMode::Fresh,
                 resume_run_dir: None,
                 resume_checkpoint_epoch: None,
                 init_checkpoint_path: None,
@@ -1165,11 +1312,15 @@ mod tests {
                 gdpo: None,
             },
             optimizer: OptimizerConfig {
+                name: burn_dragon_train::OptimizerKind::default(),
                 learning_rate: 1.0e-3,
                 weight_decay: 0.0,
+                weight_decay_final: None,
                 lr_schedule: None,
+                schedule_mode: burn_dragon_train::OptimizerScheduleMode::default(),
                 grad_clip_norm: None,
                 grad_clip_value: None,
+                muon: None,
             },
             parallel: ParallelConfig::default(),
             generation: GenerationConfig {
@@ -1184,6 +1335,7 @@ mod tests {
                 output_format: Default::default(),
             },
             wgpu: Default::default(),
+            run_layout: burn_dragon_train::RunLayoutConfig::default(),
             model: ModelOverrides::default(),
         };
 

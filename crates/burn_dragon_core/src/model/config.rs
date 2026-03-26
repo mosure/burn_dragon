@@ -10,6 +10,8 @@ use crate::kernel::{BlockPattern1d, BlockPattern2d, BlockSparseConfig};
 use crate::model::attention_residual::{
     AttentionResidualConfig, BlockAttentionResidualConfig, ResidualConnectorKind,
 };
+use crate::model::init::BdhInitializationConfig;
+use crate::model::low_bit::{LowBitQuantizationConfig, LowBitRhoConfig};
 use crate::model::mhc::ManifoldHyperConnectionsConfig;
 use crate::model::norm::DragonNormConfig;
 use crate::model::sequence::MambaSequenceConfig;
@@ -617,6 +619,8 @@ pub struct BDHConfig {
     pub n_head: usize,
     pub mlp_internal_dim_multiplier: usize,
     #[serde(default)]
+    pub initialization: BdhInitializationConfig,
+    #[serde(default)]
     pub sequence_kernel: SequenceKernelKind,
     #[serde(default)]
     pub latent_fanout_schedule: Option<LatentFanoutScheduleConfig>,
@@ -631,6 +635,10 @@ pub struct BDHConfig {
     pub normalization: DragonNormConfig,
     #[serde(default)]
     pub residual_connector: ResidualConnectorKind,
+    #[serde(default)]
+    pub quant: LowBitQuantizationConfig,
+    #[serde(default)]
+    pub rho: LowBitRhoConfig,
     pub mhc: ManifoldHyperConnectionsConfig,
     #[serde(default)]
     pub attention_residual: AttentionResidualConfig,
@@ -649,6 +657,7 @@ impl Default for BDHConfig {
             dropout: 0.1,
             n_head: 4,
             mlp_internal_dim_multiplier: 4,
+            initialization: BdhInitializationConfig::default(),
             sequence_kernel: SequenceKernelKind::default(),
             latent_fanout_schedule: None,
             mamba: MambaSequenceConfig::default(),
@@ -658,6 +667,8 @@ impl Default for BDHConfig {
             fused_kernels: FusedKernelConfig::default(),
             normalization: DragonNormConfig::default(),
             residual_connector: ResidualConnectorKind::default(),
+            quant: LowBitQuantizationConfig::default(),
+            rho: LowBitRhoConfig::default(),
             mhc: ManifoldHyperConnectionsConfig::default(),
             attention_residual: AttentionResidualConfig::default(),
             block_attention_residual: BlockAttentionResidualConfig::default(),

@@ -622,6 +622,7 @@ fn build_validation_probe_batch<B: BackendTrait>(
         local_augmentations: None,
         normalize,
         teacher: None,
+        rac_teacher_latent: None,
         teacher_targets: Vec::new(),
         views: 1,
         local_views: 0,

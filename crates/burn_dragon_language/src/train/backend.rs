@@ -6,7 +6,7 @@ use crate::train::schedule::{
 use crate::train::startup_autotune::{
     resolve_gradient_accumulation_steps, resolve_startup_batch_size,
 };
-use crate::train::utils::write_run_config;
+use crate::train::utils::{build_training_execution_form, write_run_config};
 use crate::write_training_snapshot;
 use std::time::Instant;
 use tracing::warn;
@@ -164,6 +164,40 @@ fn initialize_model_from_checkpoint<B: BackendTrait>(
     Ok(())
 }
 
+fn train_with_resolved_scheduler<B, O>(
+    context: &TrainEnvironment<'_, B>,
+    model: LanguageTrainModel<B>,
+    optimizer: O,
+    scheduler: ResolvedLrScheduler,
+) -> Result<BDH<ValidBackend<B>>>
+where
+    B: AutodiffBackend + Clone + 'static,
+    B::Device: Clone,
+    O: Optimizer<LanguageTrainModel<B>, B> + 'static,
+{
+    match scheduler {
+        ResolvedLrScheduler::Constant(lr) => train_with_scheduler(context, model, optimizer, lr),
+        ResolvedLrScheduler::Cosine(scheduler) => {
+            train_with_scheduler(context, model, optimizer, scheduler)
+        }
+        ResolvedLrScheduler::Linear(scheduler) => {
+            train_with_scheduler(context, model, optimizer, scheduler)
+        }
+        ResolvedLrScheduler::Exponential(scheduler) => {
+            train_with_scheduler(context, model, optimizer, scheduler)
+        }
+        ResolvedLrScheduler::Step(scheduler) => {
+            train_with_scheduler(context, model, optimizer, scheduler)
+        }
+        ResolvedLrScheduler::Noam(scheduler) => {
+            train_with_scheduler(context, model, optimizer, scheduler)
+        }
+        ResolvedLrScheduler::BitNetTwoStage(scheduler) => {
+            train_with_scheduler(context, model, optimizer, scheduler)
+        }
+    }
+}
+
 pub fn train_backend<B, Init>(
     config: &TrainingConfig,
     dataset: Arc<Dataset>,
@@ -223,11 +257,13 @@ where
 
     let training = &resolved_config.training;
     let optimizer_cfg = &config.optimizer;
+    let training_kernel_block_size =
+        crate::train::utils::effective_training_kernel_block_size(training);
 
     let tokenizer = datasets.train.tokenizer();
     let mut model_config = build_model_config_with_tokenizer(
         &resolved_config.model,
-        training.block_size,
+        training_kernel_block_size,
         tokenizer.as_ref(),
     )?;
     if let Some(sequence_kernel) = training.sequence_kernel_override {
@@ -238,6 +274,17 @@ where
         backend_name,
         resolved_config.wgpu.training.fused_core_recurrent,
         resolved_config.wgpu.training.fused_core_rollout,
+    );
+    info!(
+        "training path fingerprint: backend={} execution_form={} launch_mode={:?} effective_sequence_kernel={:?} sequence_kernel_override={:?} tbptt_chunk_size={:?} kernel_block_size={} pipeline_enabled={}",
+        backend_name,
+        build_training_execution_form(&resolved_config),
+        training.launch_mode,
+        model_config.sequence_kernel,
+        training.sequence_kernel_override,
+        training.tbptt_chunk_size,
+        training_kernel_block_size,
+        resolved_config.parallel.pipeline.enabled,
     );
     if backend_name.eq_ignore_ascii_case("cuda") && model_config.fused_kernels.enabled {
         warn!(
@@ -280,6 +327,11 @@ where
                 communication.backward_reuse_hits,
                 communication.cache_hit_rate(),
             );
+            if parallel_runtime.mode != ParallelismKind::Single {
+                warn!(
+                    "parallel.pipeline.communication=block_residual_cache currently reports simulated savings, but live distributed pipeline transport still sends full pipeline states until compressed block-residual transport is implemented"
+                );
+            }
         }
         if parallel_runtime.mode != ParallelismKind::Single {
             let layout =
@@ -309,12 +361,6 @@ where
             {
                 return Err(anyhow!(
                     "parallel.pipeline.enabled distributed execution currently requires a process-group DDP launch"
-                ));
-            }
-            if layout.data_parallel_size > 1 {
-                return Err(anyhow!(
-                    "parallel.pipeline.enabled process-group execution is currently implemented for layer pipeline parallelism with parallel.data.size = 1; resolved {}",
-                    layout.summary(),
                 ));
             }
         }
@@ -405,8 +451,10 @@ where
             .with_tbptt_chunk_size(training.tbptt_chunk_size)
             .with_tbptt_persist_across_steps(training.tbptt_persist_across_steps),
     );
-    let mut optim =
-        Some(adamw_config_from_optimizer(optimizer_cfg).init::<B, LanguageTrainModel<B>>());
+    let mut optim = Some(resolve_optimizer::<B, LanguageTrainModel<B>>(
+        optimizer_cfg,
+        total_steps,
+    )?);
     let scheduler_iters = match schedule.source {
         ScheduleSource::Epochs => Some(total_steps),
         ScheduleSource::MaxIters => None,
@@ -472,6 +520,14 @@ where
             .map(|value| value.to_string())
             .unwrap_or_else(|| "disabled".to_string())
     );
+    info!(
+        "optimizer fingerprint: name={:?} schedule_mode={:?} learning_rate={} weight_decay={} weight_decay_final={:?}",
+        optimizer_cfg.name,
+        optimizer_cfg.schedule_mode,
+        optimizer_cfg.learning_rate,
+        optimizer_cfg.weight_decay,
+        optimizer_cfg.weight_decay_final,
+    );
     let context = TrainEnvironment {
         parallel_runtime: &parallel_runtime,
         parallel_config: &resolved_config.parallel,
@@ -487,41 +543,23 @@ where
         valid_loader,
         epochs: total_epochs,
     };
-    let _model = match scheduler {
-        ResolvedLrScheduler::Constant(lr) => train_with_scheduler(
+    let _model = match optim.take().expect("optimizer initialized") {
+        ResolvedOptimizer::AdamW(optimizer) => train_with_resolved_scheduler(
             &context,
             model.take().expect("model initialized"),
-            optim.take().expect("optimizer initialized"),
-            lr,
-        )?,
-        ResolvedLrScheduler::Cosine(scheduler) => train_with_scheduler(
-            &context,
-            model.take().expect("model initialized"),
-            optim.take().expect("optimizer initialized"),
+            optimizer,
             scheduler,
         )?,
-        ResolvedLrScheduler::Linear(scheduler) => train_with_scheduler(
+        ResolvedOptimizer::BitNetAdamW(optimizer) => train_with_resolved_scheduler(
             &context,
             model.take().expect("model initialized"),
-            optim.take().expect("optimizer initialized"),
+            optimizer,
             scheduler,
         )?,
-        ResolvedLrScheduler::Exponential(scheduler) => train_with_scheduler(
+        ResolvedOptimizer::MuonHybrid(optimizer) => train_with_resolved_scheduler(
             &context,
             model.take().expect("model initialized"),
-            optim.take().expect("optimizer initialized"),
-            scheduler,
-        )?,
-        ResolvedLrScheduler::Step(scheduler) => train_with_scheduler(
-            &context,
-            model.take().expect("model initialized"),
-            optim.take().expect("optimizer initialized"),
-            scheduler,
-        )?,
-        ResolvedLrScheduler::Noam(scheduler) => train_with_scheduler(
-            &context,
-            model.take().expect("model initialized"),
-            optim.take().expect("optimizer initialized"),
+            optimizer,
             scheduler,
         )?,
     };
@@ -532,7 +570,7 @@ where
         let elapsed_ns = start.elapsed().as_nanos();
         let snapshot = crate::train::profile::snapshot();
         info!(
-            "[stage-profile][training] total_ns={elapsed_ns} dataloader_cpu_ns={} dataloader_tensor_copy_ns={} dataloader_host_to_device_copy_bytes={} host_sync_points={} forward_ns={} loss_backward_ns={} embed_probe_ns={} first_layer_forward_probe_ns={} first_layer_probe_ns={} logits_loss_probe_ns={} hidden_logits_loss_probe_ns={} hidden_model_forward_probe_ns={} hidden_model_probe_ns={} detail_probe_steps={} train_steps={}",
+            "[stage-profile][training] total_ns={elapsed_ns} dataloader_cpu_ns={} dataloader_tensor_copy_ns={} dataloader_host_to_device_copy_bytes={} host_sync_points={} forward_ns={} loss_backward_ns={} embed_probe_ns={} first_layer_forward_probe_ns={} first_layer_probe_ns={} logits_loss_probe_ns={} hidden_logits_loss_probe_ns={} hidden_model_forward_probe_ns={} hidden_model_probe_ns={} detail_probe_steps={} train_steps={} max_step_reserved_before_bytes={} max_step_in_use_before_bytes={} max_step_reserved_after_forward_bytes={} max_step_in_use_after_forward_bytes={} max_step_reserved_after_backward_bytes={} max_step_in_use_after_backward_bytes={}",
             snapshot.dataloader_cpu_ns,
             snapshot.dataloader_tensor_copy_ns,
             snapshot.dataloader_host_to_device_copy_bytes,
@@ -548,9 +586,15 @@ where
             snapshot.hidden_model_probe_ns,
             snapshot.detail_probe_steps,
             snapshot.train_steps,
+            snapshot.max_step_reserved_before_bytes,
+            snapshot.max_step_in_use_before_bytes,
+            snapshot.max_step_reserved_after_forward_bytes,
+            snapshot.max_step_in_use_after_forward_bytes,
+            snapshot.max_step_reserved_after_backward_bytes,
+            snapshot.max_step_in_use_after_backward_bytes,
         );
         eprintln!(
-            "[stage-profile][training] total_ns={elapsed_ns} dataloader_cpu_ns={} dataloader_tensor_copy_ns={} dataloader_host_to_device_copy_bytes={} host_sync_points={} forward_ns={} loss_backward_ns={} embed_probe_ns={} first_layer_forward_probe_ns={} first_layer_probe_ns={} logits_loss_probe_ns={} hidden_logits_loss_probe_ns={} hidden_model_forward_probe_ns={} hidden_model_probe_ns={} detail_probe_steps={} train_steps={}",
+            "[stage-profile][training] total_ns={elapsed_ns} dataloader_cpu_ns={} dataloader_tensor_copy_ns={} dataloader_host_to_device_copy_bytes={} host_sync_points={} forward_ns={} loss_backward_ns={} embed_probe_ns={} first_layer_forward_probe_ns={} first_layer_probe_ns={} logits_loss_probe_ns={} hidden_logits_loss_probe_ns={} hidden_model_forward_probe_ns={} hidden_model_probe_ns={} detail_probe_steps={} train_steps={} max_step_reserved_before_bytes={} max_step_in_use_before_bytes={} max_step_reserved_after_forward_bytes={} max_step_in_use_after_forward_bytes={} max_step_reserved_after_backward_bytes={} max_step_in_use_after_backward_bytes={}",
             snapshot.dataloader_cpu_ns,
             snapshot.dataloader_tensor_copy_ns,
             snapshot.dataloader_host_to_device_copy_bytes,
@@ -566,6 +610,12 @@ where
             snapshot.hidden_model_probe_ns,
             snapshot.detail_probe_steps,
             snapshot.train_steps,
+            snapshot.max_step_reserved_before_bytes,
+            snapshot.max_step_in_use_before_bytes,
+            snapshot.max_step_reserved_after_forward_bytes,
+            snapshot.max_step_in_use_after_forward_bytes,
+            snapshot.max_step_reserved_after_backward_bytes,
+            snapshot.max_step_in_use_after_backward_bytes,
         );
     }
 
@@ -637,7 +687,7 @@ mod tests {
                 max_iters: 1,
                 checkpoint_interval_iters: 2000,
                 log_frequency: 1,
-                fast_train: false,
+                launch_mode: burn_dragon_train::train::pipeline::TrainingLaunchMode::Fresh,
                 resume_run_dir: None,
                 resume_checkpoint_epoch: None,
                 init_checkpoint_path: None,
@@ -647,11 +697,15 @@ mod tests {
                 gdpo: None,
             },
             optimizer: OptimizerConfig {
+                name: OptimizerKind::default(),
                 learning_rate: 1e-3,
                 weight_decay: 0.0,
+                weight_decay_final: None,
                 lr_schedule: None,
+                schedule_mode: OptimizerScheduleMode::default(),
                 grad_clip_norm: None,
                 grad_clip_value: None,
+                muon: None,
             },
             parallel: burn_dragon_train::ParallelConfig {
                 mode: ParallelismKind::Ddp,
@@ -674,6 +728,7 @@ mod tests {
                 output_format: Default::default(),
             },
             wgpu: WgpuRuntimeConfig::default(),
+            run_layout: burn_dragon_train::RunLayoutConfig::default(),
             model: ModelOverrides {
                 n_layer: Some(1),
                 n_embd: Some(8),
@@ -700,7 +755,7 @@ mod tests {
             max_iters: 6_000,
             checkpoint_interval_iters: 2_000,
             log_frequency: 100,
-            fast_train: false,
+            launch_mode: burn_dragon_train::train::pipeline::TrainingLaunchMode::Fresh,
             resume_run_dir: None,
             resume_checkpoint_epoch: None,
             init_checkpoint_path: None,
@@ -731,7 +786,7 @@ mod tests {
             max_iters: 6_000,
             checkpoint_interval_iters: 2_000,
             log_frequency: 100,
-            fast_train: false,
+            launch_mode: burn_dragon_train::train::pipeline::TrainingLaunchMode::Fresh,
             resume_run_dir: None,
             resume_checkpoint_epoch: None,
             init_checkpoint_path: None,

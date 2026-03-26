@@ -21,6 +21,8 @@ cli = [
   "dep:burn-train",
   "dep:clap",
   "dep:names",
+  "dep:tracing-appender",
+  "dep:tracing-subscriber",
 ]
 train = [
   "burn/dataset",
@@ -30,6 +32,7 @@ train = [
   "dep:names",
   "dep:tracing",
   "dep:image",
+  "dep:toml",
 ]
 cuda = ["burn-cuda"]
 integration_test = ["train"]
@@ -40,11 +43,15 @@ anyhow = "1"
 rand = "0.8"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+hashbrown = "0.16"
+toml = { version = "0.9", optional = true }
 clap = { version = "4.5", features = ["derive"], optional = true }
 names = { version = "0.14", optional = true }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"], optional = true }
 burn_dino = { version = "0.7", default-features = false, optional = true }
 tracing = { version = "0.1", optional = true }
+tracing-appender = { version = "0.2", optional = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
 
 burn = { version = "0.21.0-pre.2", default-features = false, features = ["fusion", "ndarray", "std", "wgpu"] }
 burn-wgpu = { version = "0.21.0-pre.2", default-features = false, features = ["fusion", "std"] }

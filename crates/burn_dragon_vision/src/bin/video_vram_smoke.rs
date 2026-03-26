@@ -12,9 +12,15 @@ use anyhow::{Context, Result, anyhow};
 #[cfg(feature = "cli")]
 use burn_autodiff::Autodiff;
 #[cfg(feature = "cli")]
+use burn_dragon_train::train::pipeline::{
+    plan_run_artifacts, resolve_latest_run_dir_in, resolve_run_root_for_config_paths,
+};
+#[cfg(feature = "cli")]
 use burn_dragon_train::wgpu::init_runtime;
 #[cfg(feature = "cli")]
-use burn_dragon_vision::{config::load_vision_training_config, train::train_vision_backend};
+use burn_dragon_vision::{
+    config::load_vision_training_config, train::train_vision_backend_with_planned_run,
+};
 #[cfg(feature = "cli")]
 use burn_wgpu::Wgpu;
 #[cfg(feature = "cli")]
@@ -39,15 +45,6 @@ struct Args {
 }
 
 #[cfg(feature = "cli")]
-fn vision_run_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .join("runs")
-        .join("vision")
-}
-
-#[cfg(feature = "cli")]
 fn current_run_dirs(root: &Path) -> HashSet<PathBuf> {
     fs::read_dir(root)
         .ok()
@@ -68,9 +65,8 @@ fn current_run_dirs(root: &Path) -> HashSet<PathBuf> {
 fn newest_added_run_dir(before: &HashSet<PathBuf>, root: &Path) -> Result<PathBuf> {
     let mut added: Vec<_> = current_run_dirs(root).difference(before).cloned().collect();
     if added.is_empty() {
-        let latest = root.join("latest");
-        if latest.exists() {
-            return fs::canonicalize(latest).context("canonicalize latest run");
+        if let Some(latest_run_dir) = resolve_latest_run_dir_in(root) {
+            return Ok(latest_run_dir);
         }
         return Err(anyhow!(
             "no new run directory created under {}",
@@ -143,21 +139,28 @@ fn main() -> Result<()> {
         ));
     }
 
-    let run_root = vision_run_root();
+    let run_root = resolve_run_root_for_config_paths("vision", &config.run_layout, &args.config);
     fs::create_dir_all(&run_root).context("create vision run root")?;
     let before = current_run_dirs(&run_root);
+    let planned_run = plan_run_artifacts(&run_root, None)?;
 
     match args.backend.as_str() {
         "wgpu" => {
-            train_vision_backend::<Autodiff<Wgpu<f32>>, _>(&config, "wgpu", |device| {
-                init_runtime(device, &config.wgpu)
-            })?;
+            train_vision_backend_with_planned_run::<Autodiff<Wgpu<f32>>, _>(
+                &config,
+                &args.config,
+                planned_run.clone(),
+                "wgpu",
+                |device| init_runtime(device, &config.wgpu),
+            )?;
         }
         "wgpu-nofusion" => {
             use burn_wgpu::{CubeBackend, WgpuRuntime};
             type WgpuNoFusion = CubeBackend<WgpuRuntime, f32, i32, u32>;
-            train_vision_backend::<Autodiff<WgpuNoFusion>, _>(
+            train_vision_backend_with_planned_run::<Autodiff<WgpuNoFusion>, _>(
                 &config,
+                &args.config,
+                planned_run.clone(),
                 "wgpu-nofusion",
                 |device| init_runtime(device, &config.wgpu),
             )?;
@@ -169,7 +172,7 @@ fn main() -> Result<()> {
         }
     }
 
-    let run_dir = newest_added_run_dir(&before, &run_root)?;
+    let run_dir = newest_added_run_dir(&before, &run_root).unwrap_or(planned_run.run_dir);
     let previous_epoch = total_epochs - 1;
     let last_epoch = total_epochs;
     let valid_previous = parse_device_memory_log(

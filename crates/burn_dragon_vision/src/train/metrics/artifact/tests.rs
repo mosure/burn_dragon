@@ -115,6 +115,56 @@ fn artifact_images_respects_epoch_budget() {
 }
 
 #[test]
+fn artifact_images_write_temporal_contact_sheet_png() {
+    type Backend = NdArray<f32>;
+
+    let output_dir = tempdir_path();
+    let frames = Tensor::<Backend, 5>::zeros([1, 3, 3, 4, 4], &Default::default());
+    let debug = Tensor::<Backend, 5>::zeros([1, 3, 3, 4, 4], &Default::default());
+    let posterior_patch = Tensor::<Backend, 4>::ones([1, 3, 2, 2], &Default::default());
+    let posterior_pca = Tensor::<Backend, 5>::ones([1, 3, 3, 2, 2], &Default::default());
+    let debug_patch = Tensor::<Backend, 4>::ones([1, 3, 2, 2], &Default::default());
+    let mut input = VisionArtifactInput::empty();
+    input.frames = Some(frames);
+    input.debug_recon_frames = Some(debug);
+    input.posterior_patch_norms_steps = Some(posterior_patch);
+    input.posterior_pca_rgb_steps = Some(posterior_pca);
+    input.debug_patch_norms_steps = Some(debug_patch);
+    input.legend = Some(vec![
+        "solver_state_x_t".to_string(),
+        "velocity_patch_norm_v_t".to_string(),
+        "solver_patch_pca_z_t".to_string(),
+        "reference_path_x_star_t".to_string(),
+        "trajectory_error_patch_norm".to_string(),
+    ]);
+    input.sidecar_json = Some("{\"schema\":\"test\"}".to_string());
+
+    let mut metric = VisionArtifactMetric::<Backend>::new(
+        output_dir.clone(),
+        1,
+        VisionArtifactOutputMode::Images,
+        4,
+        8,
+        [0.5; 3],
+        [0.5; 3],
+        false,
+        None,
+    );
+
+    let entry = metric.update(&input, &test_metadata(1));
+    assert_eq!(entry.serialized, "1");
+    let sample = output_dir.join("iter_000001_sample_00.png");
+    assert!(sample.exists(), "expected {}", sample.display());
+    let legend_path = output_dir.join("vision_artifacts_key.txt");
+    let legend = fs::read_to_string(legend_path).expect("legend");
+    assert!(legend.contains("Rows correspond to solver steps 0-2"));
+    assert!(legend.contains("solver_state_x_t"));
+    let sidecar_path = output_dir.join("iter_000001_vision_artifacts.json");
+    let sidecar = fs::read_to_string(sidecar_path).expect("sidecar");
+    assert!(sidecar.contains("\"schema\":\"test\""));
+}
+
+#[test]
 fn artifact_avi_write_video() {
     type Backend = NdArray<f32>;
 

@@ -44,7 +44,7 @@ fn make_training(max_iters: usize, epochs: Option<usize>) -> TrainingHyperparame
         max_iters,
         checkpoint_interval_iters: 0,
         log_frequency: 10,
-        fast_train: false,
+        launch_mode: burn_dragon_train::train::pipeline::TrainingLaunchMode::Fresh,
         resume_run_dir: None,
         resume_checkpoint_epoch: None,
         init_checkpoint_path: None,

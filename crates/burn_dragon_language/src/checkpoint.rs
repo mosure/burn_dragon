@@ -15,9 +15,15 @@ use burn_dragon_checkpoint::{
     write_json_snapshot,
 };
 use burn_dragon_train::train::metrics::MetricsSinkSpec;
-use burn_dragon_train::{KernelSpec, ModelSpec, ParallelSpec, StateLayout};
+use burn_dragon_train::train::pipeline::resolve_latest_run_dir_in as resolve_latest_run_dir_shared;
+use burn_dragon_train::{KernelSpec, ModelSpec, OptimizerSpec, ParallelSpec, StateLayout};
 use burn_ndarray::NdArray;
+use flate2::Compression;
+use flate2::read::GzDecoder;
+use flate2::write::GzEncoder;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::io::{Read, Write};
 
 use crate::config::load_training_config;
 use crate::tokenizer::{SharedTokenizer, Tokenizer};
@@ -39,6 +45,13 @@ pub struct LanguageRunConfigSnapshot {
     #[serde(default)]
     pub seed: Option<u64>,
     #[serde(default)]
+    pub training_execution_form: Option<String>,
+    #[serde(default)]
+    pub training_launch_mode_requested:
+        Option<burn_dragon_train::train::pipeline::TrainingLaunchMode>,
+    #[serde(default)]
+    pub training_sequence_kernel_override: Option<burn_dragon_core::SequenceKernelKind>,
+    #[serde(default)]
     pub arch_version: Option<String>,
     #[serde(default)]
     pub shard_layout_version: Option<u32>,
@@ -46,6 +59,8 @@ pub struct LanguageRunConfigSnapshot {
     pub overrides: ModelOverrides,
     #[serde(default)]
     pub model_spec: Option<ModelSpec>,
+    #[serde(default)]
+    pub optimizer_spec: Option<OptimizerSpec>,
     #[serde(default)]
     pub parallel_spec: Option<ParallelSpec>,
     #[serde(default)]
@@ -65,6 +80,29 @@ pub struct LanguageBurnpackExportReport {
     pub bundle: BurnpackBundleExportReport,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct LanguageBitNetArtifactBundle {
+    pub schema_version: u32,
+    pub source_checkpoint_epoch: usize,
+    pub source_training_config_sha256: String,
+    #[serde(default)]
+    pub source_run_dir: Option<PathBuf>,
+    #[serde(default)]
+    pub kernel_abi_version: Option<u32>,
+    pub quant: burn_dragon_core::LowBitQuantizationConfig,
+    pub rho: burn_dragon_core::LowBitRhoConfig,
+    pub static_weights: burn_dragon_core::experimental::bitnet_reference::BdhBitNetStaticArtifacts,
+}
+
+#[derive(Debug, Clone)]
+pub struct LanguageBitNetArtifactExportReport {
+    pub checkpoint_base: PathBuf,
+    pub epoch: usize,
+    pub run_dir: Option<PathBuf>,
+    pub artifact_path: PathBuf,
+    pub bundle: LanguageBitNetArtifactBundle,
+}
+
 pub fn write_training_snapshot(
     config: &TrainingConfig,
     run_dir: &Path,
@@ -81,16 +119,31 @@ pub fn write_training_snapshot(
         .is_some()
     {
         let tokenizer_path = tokenizer_snapshot_path(run_dir);
-        snapshot
+        let source_tokenizer_path = snapshot
             .dataset
             .tokenizer
-            .save(tokenizer, &tokenizer_path)
-            .with_context(|| {
-                format!(
-                    "failed to save tokenizer snapshot {}",
-                    tokenizer_path.display()
-                )
-            })?;
+            .storage_path(&snapshot.dataset.cache_dir);
+        if let Err(error) = snapshot.dataset.tokenizer.save(tokenizer, &tokenizer_path) {
+            let copied = source_tokenizer_path
+                .as_ref()
+                .filter(|path| path.is_file())
+                .and_then(|source_path| {
+                    if fs::copy(source_path, &tokenizer_path).is_ok() {
+                        Some(())
+                    } else {
+                        None
+                    }
+                })
+                .is_some();
+            if !copied {
+                return Err(error).with_context(|| {
+                    format!(
+                        "failed to save tokenizer snapshot {}",
+                        tokenizer_path.display()
+                    )
+                });
+            }
+        }
         snapshot.dataset.cache_dir = PathBuf::from(".");
         snapshot.dataset.tokenizer.vocab_path = Some(PathBuf::from(TOKENIZER_SNAPSHOT_FILE_NAME));
     }
@@ -201,6 +254,122 @@ pub fn export_language_checkpoint_to_burnpack(
     })
 }
 
+pub fn export_language_checkpoint_to_bitnet_artifact(
+    checkpoint: &Path,
+    epoch: Option<usize>,
+    config_paths: &[PathBuf],
+    backend_name: &str,
+    output_path: &Path,
+) -> Result<LanguageBitNetArtifactExportReport> {
+    let (checkpoint_base, epoch) = resolve_checkpoint_base(checkpoint, epoch)?;
+    let checkpoint_path = checkpoint.to_path_buf();
+    let config =
+        load_training_config_for_checkpoint(config_paths, Some(&checkpoint_path), backend_name)?;
+    let run_dir = resolve_checkpoint_run_dir(Some(&checkpoint_path), backend_name);
+    let config_hash = sha256_json(&config).context("hash training config for bitnet artifact")?;
+
+    let tokenizer =
+        load_tokenizer_for_checkpoint(config_paths, Some(&checkpoint_path), backend_name)?;
+    let model_config = build_model_config_with_tokenizer(
+        &config.model,
+        config.training.block_size,
+        tokenizer.as_ref(),
+    )?;
+    if !model_config.quant.enable {
+        return Err(anyhow!(
+            "language BitNet export requires model.quant.enable = true"
+        ));
+    }
+    if !matches!(
+        model_config.quant.inference_mode,
+        burn_dragon_core::LowBitInferenceMode::OfflinePack
+    ) {
+        return Err(anyhow!(
+            "language BitNet export currently requires model.quant.inference_mode = \"offline_pack\""
+        ));
+    }
+
+    let device = <ExportBackend as BackendTrait>::Device::default();
+    ExportBackend::seed(&device, 1337);
+    let mut model = BDH::<ExportBackend>::new(model_config.clone(), &device);
+    let record = BinFileRecorder::<FullPrecisionSettings>::new()
+        .load::<<BDH<ExportBackend> as Module<ExportBackend>>::Record>(
+            checkpoint_base.clone(),
+            &device,
+        )
+        .map_err(|err| anyhow!(format_checkpoint_load_error(&checkpoint_base, err)))?;
+    model = model.load_record(record);
+
+    let static_weights = model.export_bitnet_static_artifacts();
+    if static_weights.decoder_x.is_none()
+        && static_weights.decoder_y.is_none()
+        && static_weights.encoder.is_none()
+    {
+        return Err(anyhow!(
+            "language BitNet export found no quantized static matrices to pack"
+        ));
+    }
+
+    let bundle = LanguageBitNetArtifactBundle {
+        schema_version: 1,
+        source_checkpoint_epoch: epoch,
+        source_training_config_sha256: config_hash,
+        source_run_dir: run_dir.clone(),
+        kernel_abi_version: model_config.quant.enable.then_some(1),
+        quant: model_config.quant,
+        rho: model_config.rho,
+        static_weights,
+    };
+
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    if output_path.extension().is_some_and(|ext| ext == "gz") {
+        let file = fs::File::create(output_path)
+            .with_context(|| format!("failed to create {}", output_path.display()))?;
+        let mut encoder = GzEncoder::new(file, Compression::best());
+        let json = serde_json::to_vec(&bundle).context("serialize bitnet artifact")?;
+        encoder
+            .write_all(&json)
+            .with_context(|| format!("failed to write {}", output_path.display()))?;
+        encoder
+            .finish()
+            .with_context(|| format!("failed to finalize {}", output_path.display()))?;
+    } else {
+        let json = serde_json::to_string_pretty(&bundle).context("serialize bitnet artifact")?;
+        fs::write(output_path, json)
+            .with_context(|| format!("failed to write {}", output_path.display()))?;
+    }
+
+    Ok(LanguageBitNetArtifactExportReport {
+        checkpoint_base,
+        epoch,
+        run_dir,
+        artifact_path: output_path.to_path_buf(),
+        bundle,
+    })
+}
+
+pub fn load_bitnet_artifact_bundle(path: &Path) -> Result<LanguageBitNetArtifactBundle> {
+    if path.extension().is_some_and(|ext| ext == "gz") {
+        let file =
+            fs::File::open(path).with_context(|| format!("failed to read {}", path.display()))?;
+        let mut decoder = GzDecoder::new(file);
+        let mut contents = Vec::new();
+        decoder
+            .read_to_end(&mut contents)
+            .with_context(|| format!("failed to decompress {}", path.display()))?;
+        serde_json::from_slice(&contents)
+            .with_context(|| format!("failed to parse {}", path.display()))
+    } else {
+        let contents = fs::read_to_string(path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        serde_json::from_str(&contents)
+            .with_context(|| format!("failed to parse {}", path.display()))
+    }
+}
+
 pub fn load_tokenizer_for_checkpoint(
     config_paths: &[PathBuf],
     checkpoint: Option<&PathBuf>,
@@ -251,6 +420,23 @@ pub fn load_language_core_from_checkpoint<B: BackendTrait>(
     Ok(model)
 }
 
+pub fn load_language_core_from_checkpoint_with_bitnet_artifact<B: BackendTrait>(
+    checkpoint: &Path,
+    epoch: Option<usize>,
+    config_paths: &[PathBuf],
+    backend_name: &str,
+    artifact_path: &Path,
+    device: &B::Device,
+) -> Result<BDH<B>> {
+    let mut model =
+        load_language_core_from_checkpoint(checkpoint, epoch, config_paths, backend_name, device)?;
+    let artifact_bundle = load_bitnet_artifact_bundle(artifact_path)?;
+    model
+        .apply_bitnet_static_artifacts(&artifact_bundle.static_weights, device)
+        .context("apply bitnet static artifacts")?;
+    Ok(model)
+}
+
 pub fn apply_run_config(config: &mut TrainingConfig, run_config: &LanguageRunConfigSnapshot) {
     let block_override = run_config
         .block_size
@@ -258,6 +444,12 @@ pub fn apply_run_config(config: &mut TrainingConfig, run_config: &LanguageRunCon
         .map(|value| value.max(1));
     if let Some(block_size) = block_override {
         config.training.block_size = block_size;
+    }
+    if let Some(sequence_kernel_override) = run_config.training_sequence_kernel_override {
+        config.training.sequence_kernel_override = Some(sequence_kernel_override);
+    }
+    if let Some(launch_mode) = run_config.training_launch_mode_requested {
+        config.training.launch_mode = launch_mode;
     }
     merge_model_overrides(&mut config.model, &run_config.overrides);
 }
@@ -277,6 +469,9 @@ pub fn merge_model_overrides(base: &mut ModelOverrides, incoming: &ModelOverride
     }
     if let Some(value) = incoming.latent_total {
         base.latent_total = Some(value);
+    }
+    if let Some(value) = &incoming.initialization {
+        base.initialization = Some(value.clone());
     }
     if let Some(value) = incoming.sequence_kernel {
         base.sequence_kernel = Some(value);
@@ -329,6 +524,41 @@ pub fn merge_model_overrides(base: &mut ModelOverrides, incoming: &ModelOverride
     if let Some(value) = &incoming.mhc {
         base.mhc = Some(value.clone());
     }
+    if let Some(value) = &incoming.quant {
+        base.quant = Some(value.clone());
+    }
+    if let Some(value) = &incoming.rho {
+        base.rho = Some(value.clone());
+    }
+}
+
+pub fn default_bitnet_artifact_path(checkpoint_base: &Path, epoch: usize) -> PathBuf {
+    let checkpoint_dir = checkpoint_base
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let run_dir = checkpoint_dir
+        .file_name()
+        .is_some_and(|name| name == "checkpoint")
+        .then(|| checkpoint_dir.parent().map(Path::to_path_buf))
+        .flatten()
+        .unwrap_or(checkpoint_dir);
+    run_dir
+        .join("deploy")
+        .join(format!("model-{epoch}.bitnet_artifact.json.gz"))
+}
+
+pub fn candidate_bitnet_artifact_paths(checkpoint_base: &Path, epoch: usize) -> [PathBuf; 2] {
+    let preferred = default_bitnet_artifact_path(checkpoint_base, epoch);
+    let legacy = preferred.with_extension("").with_extension("json");
+    [preferred, legacy]
+}
+
+fn sha256_json<T: Serialize>(value: &T) -> Result<String> {
+    let json = serde_json::to_vec(value).context("serialize json for sha256")?;
+    let mut hasher = Sha256::new();
+    hasher.update(json.as_slice());
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 pub fn resolve_run_config_path(
@@ -359,14 +589,14 @@ pub fn default_checkpoint_dir(backend_name: &str) -> PathBuf {
 
 pub fn resolve_latest_run_dir(backend_name: &str) -> Option<PathBuf> {
     let run_root = resolve_run_root();
-    resolve_latest_run_dir_from(&run_root).or_else(|| {
+    resolve_latest_run_dir_shared(&run_root).or_else(|| {
         let device_root = run_root.join(backend_name);
-        resolve_latest_run_dir_from(&device_root)
+        resolve_latest_run_dir_shared(&device_root)
     })
 }
 
 pub fn resolve_latest_run_dir_in(run_root: &Path) -> Option<PathBuf> {
-    resolve_latest_run_dir_from(run_root)
+    resolve_latest_run_dir_shared(run_root)
 }
 
 pub fn resolve_run_root() -> PathBuf {
@@ -422,23 +652,16 @@ fn absolutize_snapshot_cache_dir(config: &mut TrainingConfig, run_dir: &Path) {
     }
 }
 
-fn resolve_latest_run_dir_from(run_root: &Path) -> Option<PathBuf> {
-    let latest_path = run_root.join("latest");
-    let contents = fs::read_to_string(&latest_path).ok()?;
-    let name = contents.trim();
-    if name.is_empty() {
-        return None;
-    }
-    Some(run_root.join(name))
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
         BurnpackBundleExportOptions, ExportBackend, LanguageRunConfigSnapshot, apply_run_config,
-        export_language_checkpoint_to_burnpack, load_training_config_for_checkpoint,
-        resolve_checkpoint_base, tokenizer_snapshot_path, training_snapshot_path,
-        write_training_snapshot,
+        candidate_bitnet_artifact_paths, default_bitnet_artifact_path,
+        export_language_checkpoint_to_bitnet_artifact, export_language_checkpoint_to_burnpack,
+        load_bitnet_artifact_bundle, load_language_core_from_checkpoint,
+        load_language_core_from_checkpoint_with_bitnet_artifact,
+        load_training_config_for_checkpoint, resolve_checkpoint_base, tokenizer_snapshot_path,
+        training_snapshot_path, write_training_snapshot,
     };
     use crate::BDH;
     use crate::config::{
@@ -449,10 +672,13 @@ mod tests {
     use burn::module::Module;
     use burn::record::{BinFileRecorder, FullPrecisionSettings, Recorder};
     use burn::tensor::backend::Backend as BackendTrait;
+    use burn::tensor::{Int, Tensor};
     use burn_dragon_checkpoint::{
         BurnpackFloatPrecision, burnpack_parts_manifest_path, manifest_is_complete,
     };
-    use burn_dragon_train::{OptimizerConfig, WgpuRuntimeConfig};
+    use burn_dragon_train::{
+        OptimizerConfig, OptimizerKind, OptimizerScheduleMode, WgpuRuntimeConfig,
+    };
     use std::fs;
     use std::path::{Path, PathBuf};
     use tempfile::tempdir;
@@ -541,6 +767,160 @@ mod tests {
         assert_eq!(report.vocab_size, tokenizer.len());
     }
 
+    #[test]
+    fn exports_language_checkpoint_to_bitnet_artifact_bundle() {
+        let dir = tempdir().expect("tempdir");
+        let run_dir = dir.path().join("run");
+        let checkpoint_dir = run_dir.join("checkpoint");
+        fs::create_dir_all(&checkpoint_dir).expect("create checkpoint dir");
+        let mut config = test_config(dir.path().join("cache"));
+        config.model.quant = Some(burn_dragon_core::LowBitQuantizationConfig {
+            enable: true,
+            protocol: burn_dragon_core::BitNetLowBitProtocol::BitnetB158,
+            weight_format: burn_dragon_core::LowBitWeightFormat::Ternary158,
+            act_format: burn_dragon_core::LowBitActivationFormat::Int8,
+            target_modules: vec![
+                burn_dragon_core::LowBitTargetModule::Encoder,
+                burn_dragon_core::LowBitTargetModule::DecoderY,
+            ],
+            decoder_x_mode: burn_dragon_core::LowBitWeightFormat::Int8,
+            ..Default::default()
+        });
+        let tokenizer = config
+            .dataset
+            .tokenizer
+            .fit(["All the world's a stage"].into_iter())
+            .expect("fit tokenizer");
+
+        write_training_snapshot(&config, &run_dir, tokenizer.as_ref()).expect("write snapshot");
+
+        let device = <ExportBackend as BackendTrait>::Device::default();
+        ExportBackend::seed(&device, 1337);
+        let model_config = crate::build_model_config_with_tokenizer(
+            &config.model,
+            config.training.block_size,
+            tokenizer.as_ref(),
+        )
+        .expect("build model config with tokenizer");
+        let model = BDH::<ExportBackend>::new(model_config, &device);
+        BinFileRecorder::<FullPrecisionSettings>::new()
+            .record(model.into_record(), checkpoint_dir.join("model-0"))
+            .expect("write bin checkpoint");
+
+        let artifact_path = run_dir.join("deploy/model-0.bitnet_artifact.json");
+        let report = export_language_checkpoint_to_bitnet_artifact(
+            &checkpoint_dir,
+            Some(0),
+            &[],
+            "wgpu",
+            &artifact_path,
+        )
+        .expect("export bitnet artifact");
+
+        assert_eq!(report.epoch, 0);
+        assert_eq!(report.artifact_path, artifact_path);
+        assert!(report.bundle.static_weights.decoder_x.is_none());
+        assert!(report.bundle.static_weights.decoder_y.is_some());
+        assert!(report.bundle.static_weights.encoder.is_some());
+        assert_eq!(report.bundle.kernel_abi_version, Some(1));
+        assert!(report.artifact_path.is_file());
+    }
+
+    #[test]
+    fn loaded_bitnet_artifact_model_matches_fake_quant_checkpoint_logits() {
+        let dir = tempdir().expect("tempdir");
+        let run_dir = dir.path().join("run");
+        let checkpoint_dir = run_dir.join("checkpoint");
+        fs::create_dir_all(&checkpoint_dir).expect("create checkpoint dir");
+        let mut config = test_config(dir.path().join("cache"));
+        config.model.quant = Some(burn_dragon_core::LowBitQuantizationConfig {
+            enable: true,
+            protocol: burn_dragon_core::BitNetLowBitProtocol::BitnetB158,
+            weight_format: burn_dragon_core::LowBitWeightFormat::Ternary158,
+            act_format: burn_dragon_core::LowBitActivationFormat::Int8,
+            target_modules: vec![
+                burn_dragon_core::LowBitTargetModule::Encoder,
+                burn_dragon_core::LowBitTargetModule::DecoderX,
+                burn_dragon_core::LowBitTargetModule::DecoderY,
+            ],
+            decoder_x_mode: burn_dragon_core::LowBitWeightFormat::Sign1,
+            ..Default::default()
+        });
+        let tokenizer = config
+            .dataset
+            .tokenizer
+            .fit(["All the world's a stage"].into_iter())
+            .expect("fit tokenizer");
+        write_training_snapshot(&config, &run_dir, tokenizer.as_ref()).expect("write snapshot");
+
+        let device = <ExportBackend as BackendTrait>::Device::default();
+        ExportBackend::seed(&device, 1337);
+        let model_config = crate::build_model_config_with_tokenizer(
+            &config.model,
+            config.training.block_size,
+            tokenizer.as_ref(),
+        )
+        .expect("build model config with tokenizer");
+        let model = BDH::<ExportBackend>::new(model_config, &device);
+        BinFileRecorder::<FullPrecisionSettings>::new()
+            .record(model.into_record(), checkpoint_dir.join("model-0"))
+            .expect("write bin checkpoint");
+
+        let artifact_path = run_dir.join("deploy/model-0.bitnet_artifact.json");
+        export_language_checkpoint_to_bitnet_artifact(
+            &checkpoint_dir,
+            Some(0),
+            &[],
+            "wgpu",
+            &artifact_path,
+        )
+        .expect("export bitnet artifact");
+
+        let reference_model = load_language_core_from_checkpoint::<ExportBackend>(
+            &checkpoint_dir,
+            Some(0),
+            &[],
+            "wgpu",
+            &device,
+        )
+        .expect("load reference model");
+        let packed_model =
+            load_language_core_from_checkpoint_with_bitnet_artifact::<ExportBackend>(
+                &checkpoint_dir,
+                Some(0),
+                &[],
+                "wgpu",
+                &artifact_path,
+                &device,
+            )
+            .expect("load packed model");
+        let tokens = Tensor::<ExportBackend, 2, Int>::from_data(
+            burn::tensor::TensorData::new(vec![0i64, 1, 2, 3, 4, 5, 6, 7], [1, 8]),
+            &device,
+        );
+        let reference_logits = reference_model.forward(tokens.clone());
+        let packed_logits = packed_model.forward(tokens);
+        let reference = reference_logits
+            .to_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .expect("reference vec");
+        let packed = packed_logits
+            .to_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .expect("packed vec");
+        let max_diff = reference
+            .iter()
+            .zip(packed.iter())
+            .map(|(lhs, rhs)| (lhs - rhs).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            max_diff <= 1.0e-4,
+            "expected packed bitnet artifact model to match fake-quant logits, max diff {max_diff}"
+        );
+    }
+
     fn test_config(cache_dir: PathBuf) -> TrainingConfig {
         TrainingConfig {
             dataset: DatasetConfig {
@@ -563,7 +943,7 @@ mod tests {
                 max_iters: 1,
                 checkpoint_interval_iters: 2000,
                 log_frequency: 1,
-                fast_train: true,
+                launch_mode: burn_dragon_train::train::pipeline::TrainingLaunchMode::Fresh,
                 resume_run_dir: None,
                 resume_checkpoint_epoch: None,
                 init_checkpoint_path: None,
@@ -573,11 +953,15 @@ mod tests {
                 gdpo: None,
             },
             optimizer: OptimizerConfig {
+                name: OptimizerKind::default(),
                 learning_rate: 1e-3,
                 weight_decay: 0.0,
+                weight_decay_final: None,
                 lr_schedule: None,
+                schedule_mode: OptimizerScheduleMode::default(),
                 grad_clip_norm: None,
                 grad_clip_value: None,
+                muon: None,
             },
             parallel: Default::default(),
             generation: GenerationConfig {
@@ -592,6 +976,7 @@ mod tests {
                 output_format: Default::default(),
             },
             wgpu: WgpuRuntimeConfig::default(),
+            run_layout: burn_dragon_train::RunLayoutConfig::default(),
             model: ModelOverrides::default(),
         }
     }
@@ -704,6 +1089,13 @@ mod tests {
     fn apply_run_config_merges_sequence_kernel_override() {
         let mut config = test_config(PathBuf::from("data"));
         let snapshot = LanguageRunConfigSnapshot {
+            training_execution_form: Some("default_stateful".to_string()),
+            training_launch_mode_requested: Some(
+                burn_dragon_train::train::pipeline::TrainingLaunchMode::Fresh,
+            ),
+            training_sequence_kernel_override: Some(
+                burn_dragon_core::SequenceKernelKind::BdhLinearDenseScoreExperimental,
+            ),
             overrides: ModelOverrides {
                 sequence_kernel: Some(
                     burn_dragon_core::SequenceKernelKind::BdhLinearDenseScoreExperimental,
@@ -716,8 +1108,113 @@ mod tests {
         apply_run_config(&mut config, &snapshot);
 
         assert_eq!(
+            config.training.sequence_kernel_override,
+            Some(burn_dragon_core::SequenceKernelKind::BdhLinearDenseScoreExperimental)
+        );
+        assert_eq!(
             config.model.sequence_kernel,
             Some(burn_dragon_core::SequenceKernelKind::BdhLinearDenseScoreExperimental)
         );
+    }
+
+    #[test]
+    fn apply_run_config_merges_initialization_override() {
+        let mut config = test_config(PathBuf::from("data"));
+        let snapshot = LanguageRunConfigSnapshot {
+            overrides: ModelOverrides {
+                initialization: Some(burn_dragon_core::BdhInitializationConfig {
+                    kind: burn_dragon_core::BdhInitializationKind::SimpleNormal,
+                    simple_normal_std: 0.015,
+                    ..Default::default()
+                }),
+                ..ModelOverrides::default()
+            },
+            ..LanguageRunConfigSnapshot::default()
+        };
+
+        apply_run_config(&mut config, &snapshot);
+
+        assert_eq!(
+            config.model.initialization,
+            Some(burn_dragon_core::BdhInitializationConfig {
+                kind: burn_dragon_core::BdhInitializationKind::SimpleNormal,
+                simple_normal_std: 0.015,
+                ..Default::default()
+            })
+        );
+    }
+
+    #[test]
+    fn default_bitnet_artifact_path_uses_run_deploy_layout() {
+        let path = default_bitnet_artifact_path(Path::new("runs/example/checkpoint/model-3"), 3);
+        assert_eq!(
+            path,
+            PathBuf::from("runs/example/deploy/model-3.bitnet_artifact.json.gz")
+        );
+        assert_eq!(
+            candidate_bitnet_artifact_paths(Path::new("runs/example/checkpoint/model-3"), 3),
+            [
+                PathBuf::from("runs/example/deploy/model-3.bitnet_artifact.json.gz"),
+                PathBuf::from("runs/example/deploy/model-3.bitnet_artifact.json"),
+            ]
+        );
+    }
+
+    #[test]
+    fn loads_gzip_bitnet_artifact_bundle() {
+        let dir = tempdir().expect("tempdir");
+        let run_dir = dir.path().join("run");
+        let checkpoint_dir = run_dir.join("checkpoint");
+        fs::create_dir_all(&checkpoint_dir).expect("create checkpoint dir");
+        let mut config = test_config(dir.path().join("cache"));
+        config.model.quant = Some(burn_dragon_core::LowBitQuantizationConfig {
+            enable: true,
+            protocol: burn_dragon_core::BitNetLowBitProtocol::BitnetB158,
+            weight_format: burn_dragon_core::LowBitWeightFormat::Ternary158,
+            act_format: burn_dragon_core::LowBitActivationFormat::Int8,
+            target_modules: vec![
+                burn_dragon_core::LowBitTargetModule::Encoder,
+                burn_dragon_core::LowBitTargetModule::DecoderY,
+            ],
+            decoder_x_mode: burn_dragon_core::LowBitWeightFormat::Int8,
+            ..Default::default()
+        });
+        let tokenizer = config
+            .dataset
+            .tokenizer
+            .fit(["All the world's a stage"].into_iter())
+            .expect("fit tokenizer");
+
+        write_training_snapshot(&config, &run_dir, tokenizer.as_ref()).expect("write snapshot");
+
+        let device = <ExportBackend as BackendTrait>::Device::default();
+        ExportBackend::seed(&device, 1337);
+        let model_config = crate::build_model_config_with_tokenizer(
+            &config.model,
+            config.training.block_size,
+            tokenizer.as_ref(),
+        )
+        .expect("build model config with tokenizer");
+        let model = BDH::<ExportBackend>::new(model_config, &device);
+        BinFileRecorder::<FullPrecisionSettings>::new()
+            .record(model.into_record(), checkpoint_dir.join("model-0"))
+            .expect("write bin checkpoint");
+
+        let artifact_path = default_bitnet_artifact_path(&checkpoint_dir, 0);
+        let report = export_language_checkpoint_to_bitnet_artifact(
+            &checkpoint_dir,
+            Some(0),
+            &[],
+            "wgpu",
+            &artifact_path,
+        )
+        .expect("export bitnet artifact");
+        let loaded = load_bitnet_artifact_bundle(&artifact_path).expect("load gzip artifact");
+
+        assert_eq!(report.artifact_path, artifact_path);
+        assert!(artifact_path.is_file());
+        assert_eq!(loaded.kernel_abi_version, Some(1));
+        assert!(loaded.static_weights.encoder.is_some());
+        assert!(loaded.static_weights.decoder_y.is_some());
     }
 }

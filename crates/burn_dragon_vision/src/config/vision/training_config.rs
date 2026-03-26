@@ -15,6 +15,8 @@ pub struct VisionTrainingConfig {
     pub optimizer: OptimizerConfig,
     #[serde(default)]
     pub wgpu: WgpuRuntimeConfig,
+    #[serde(default)]
+    pub run_layout: burn_dragon_train::RunLayoutConfig,
     pub vision: VisionModelConfig,
     #[serde(default)]
     pub augment: VisionAugmentationConfig,
@@ -110,11 +112,15 @@ impl VisionTrainingConfig {
             ..VisionTrainingHyperparameters::default()
         };
         let optimizer = OptimizerConfig {
+            name: burn_dragon_train::OptimizerKind::default(),
             learning_rate: 5e-4,
             weight_decay: 0.05,
+            weight_decay_final: None,
             lr_schedule: Some(LearningRateScheduleConfig::Constant { initial_lr: None }),
+            schedule_mode: burn_dragon_train::OptimizerScheduleMode::default(),
             grad_clip_norm: Some(1.0),
             grad_clip_value: None,
+            muon: None,
         };
         let mode = VisionTrainingModeConfig::Lejepa(VisionLejepaConfig {
             views: 4,
@@ -150,6 +156,7 @@ impl VisionTrainingConfig {
             training,
             optimizer,
             wgpu: WgpuRuntimeConfig::default(),
+            run_layout: burn_dragon_train::RunLayoutConfig::default(),
             vision,
             augment: VisionAugmentationConfig::default(),
             mode,
@@ -193,15 +200,19 @@ impl VisionTrainingConfig {
             ..VisionTrainingHyperparameters::default()
         };
         let optimizer = OptimizerConfig {
+            name: burn_dragon_train::OptimizerKind::default(),
             learning_rate: 3e-4,
             weight_decay: 0.05,
+            weight_decay_final: None,
             lr_schedule: Some(LearningRateScheduleConfig::Cosine {
                 initial_lr: None,
                 min_lr: Some(3e-5),
                 num_iters: Some(max_iters),
             }),
+            schedule_mode: burn_dragon_train::OptimizerScheduleMode::default(),
             grad_clip_norm: Some(1.0),
             grad_clip_value: None,
+            muon: None,
         };
         let siglip_target = match siglip_surface {
             SiglipTeacherSurface::GlobalOnly224 => VisionTeacherTargetConfig {
@@ -317,6 +328,7 @@ impl VisionTrainingConfig {
             training,
             optimizer,
             wgpu: WgpuRuntimeConfig::default(),
+            run_layout: burn_dragon_train::RunLayoutConfig::default(),
             vision,
             augment,
             mode,

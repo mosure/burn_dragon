@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::{fs, path::Path};
 
@@ -8,7 +9,28 @@ use tempfile::tempdir;
 
 use super::train::{TrainingConfig, load_training_config};
 use crate::config::train::DatasetSourceConfig;
+use crate::stages::load_experiment_bundle_config;
 use crate::tokenizer::TokenizerKind;
+
+#[derive(serde::Deserialize)]
+struct PromotedBaselineRegistry {
+    entries: Vec<PromotedBaselineRegistryEntry>,
+}
+
+#[derive(serde::Deserialize)]
+struct PromotedBaselineRegistryEntry {
+    name: String,
+    kind: PromotedBaselineKind,
+    family: String,
+    path: PathBuf,
+}
+
+#[derive(Clone, Copy, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum PromotedBaselineKind {
+    TrainingConfig,
+    BundleConfig,
+}
 
 fn config_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -44,6 +66,8 @@ fn language_configs_parse_serialize_validate() {
         "baselines/current_best_large/nca_stage_base.toml",
         "baselines/current_best_large/climbmix_stage_base.toml",
         "baselines/current_best_large/climbmix_stage_48h.toml",
+        "baselines/shakespeare_deployed_repro.toml",
+        "baselines/shakespeare_deployed_dense_score_train.toml",
         "baselines/smoke.toml",
         "baselines/tiny.toml",
         "baselines/small.toml",
@@ -219,7 +243,6 @@ fn language_loader_supports_relative_extends() {
         max_iters = 16
         epochs = 1
         log_frequency = 4
-        fast_train = false
 
         [optimizer]
         learning_rate = 0.001
@@ -321,6 +344,62 @@ fn baseline_configs_do_not_extend_ambiguous_sibling_base_toml() {
 }
 
 #[test]
+fn promoted_baseline_registry_entries_exist_and_load() {
+    let baselines_root = config_root().join("baselines");
+    let registry_path = baselines_root.join("registry.toml");
+    let registry: PromotedBaselineRegistry =
+        toml::from_str(&fs::read_to_string(&registry_path).expect("read registry"))
+            .expect("parse promoted baseline registry");
+
+    let mut seen_names = BTreeSet::new();
+    let mut seen_paths = BTreeSet::new();
+    assert!(
+        !registry.entries.is_empty(),
+        "promoted baseline registry must not be empty"
+    );
+
+    for entry in registry.entries {
+        assert!(
+            seen_names.insert(entry.name.clone()),
+            "duplicate promoted baseline name `{}`",
+            entry.name
+        );
+        assert!(
+            seen_paths.insert(entry.path.clone()),
+            "duplicate promoted baseline path `{}`",
+            entry.path.display()
+        );
+        assert!(
+            !entry.family.trim().is_empty(),
+            "promoted baseline `{}` must declare a family",
+            entry.name
+        );
+        let full_path = baselines_root.join(&entry.path);
+        assert!(
+            full_path.is_file(),
+            "promoted baseline `{}` points to missing file {}",
+            entry.name,
+            full_path.display()
+        );
+        match entry.kind {
+            PromotedBaselineKind::TrainingConfig => {
+                let config = load_training_config(&[full_path.clone()]).unwrap_or_else(|err| {
+                    panic!("load training config {}: {err}", full_path.display())
+                });
+                config.validate().unwrap_or_else(|err| {
+                    panic!("validate training config {}: {err}", full_path.display())
+                });
+            }
+            PromotedBaselineKind::BundleConfig => {
+                load_experiment_bundle_config(&full_path).unwrap_or_else(|err| {
+                    panic!("load bundle config {}: {err}", full_path.display())
+                });
+            }
+        }
+    }
+}
+
+#[test]
 fn shakespeare_deployed_repro_resolves_to_the_old_shakespeare_recipe() {
     let config = load_config_from_root("baselines/shakespeare_deployed_repro.toml");
     config.validate().expect("validate shakespeare repro");
@@ -340,6 +419,7 @@ fn shakespeare_deployed_repro_resolves_to_the_old_shakespeare_recipe() {
     assert_eq!(config.model.n_layer, Some(4));
     assert_eq!(config.model.n_embd, Some(128));
     assert_eq!(config.model.n_head, Some(4));
+    assert_eq!(config.training.sequence_kernel_override, None);
     assert_eq!(
         config.model.residual_connector,
         Some(ResidualConnectorKind::Vanilla)
@@ -352,6 +432,42 @@ fn shakespeare_deployed_repro_resolves_to_the_old_shakespeare_recipe() {
         config.model.attention_residual.as_ref(),
         Some(attn) if !attn.enabled
     ));
+}
+
+#[test]
+fn shakespeare_deployed_dense_score_train_only_differs_by_training_kernel_override() {
+    let repro = load_config_from_root("baselines/shakespeare_deployed_repro.toml");
+    repro.validate().expect("validate shakespeare repro");
+
+    let dense = load_config_from_root("baselines/shakespeare_deployed_dense_score_train.toml");
+    dense
+        .validate()
+        .expect("validate shakespeare dense-score training baseline");
+
+    assert!(matches!(
+        dense.dataset.source,
+        DatasetSourceConfig::Shakespeare { .. }
+    ));
+    assert!(matches!(
+        dense.dataset.tokenizer.kind,
+        TokenizerKind::Char(_)
+    ));
+    assert_eq!(dense.training.block_size, repro.training.block_size);
+    assert_eq!(dense.training.batch_size, repro.training.batch_size);
+    assert_eq!(dense.training.epochs, repro.training.epochs);
+    assert_eq!(dense.training.max_iters, repro.training.max_iters);
+    assert_eq!(dense.model.n_layer, repro.model.n_layer);
+    assert_eq!(dense.model.n_embd, repro.model.n_embd);
+    assert_eq!(dense.model.n_head, repro.model.n_head);
+    assert_eq!(
+        dense.model.residual_connector,
+        repro.model.residual_connector
+    );
+    assert_eq!(
+        dense.training.sequence_kernel_override,
+        Some(burn_dragon_core::SequenceKernelKind::BdhLinearDenseScoreExperimental)
+    );
+    assert_eq!(repro.training.sequence_kernel_override, None);
 }
 
 #[test]

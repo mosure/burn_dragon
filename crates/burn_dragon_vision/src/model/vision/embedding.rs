@@ -294,11 +294,11 @@ impl<B: Backend> PatchEmbed<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::vision::{
-        FusedKernelConfig, VisionAttentionMode, VisionBackboneKind, VisionDragonConfig,
-        VisionLatentActivation,
+    use crate::model::{
+        VisionAttentionMode, VisionBackboneKind, VisionDragonConfig, VisionLatentActivation,
     };
     use burn::backend::NdArray;
+    use burn_dragon_core::FusedKernelConfig;
     use burn_dragon_core::ManifoldHyperConnectionsConfig;
 
     fn test_config(mode: VisionPatchEmbedMode) -> VisionDragonConfig {

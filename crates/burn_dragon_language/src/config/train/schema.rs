@@ -149,7 +149,7 @@ pub struct TrainingHyperparameters {
     pub checkpoint_interval_iters: usize,
     pub log_frequency: usize,
     #[serde(default)]
-    pub fast_train: bool,
+    pub launch_mode: burn_dragon_train::train::pipeline::TrainingLaunchMode,
     #[serde(default)]
     pub resume_run_dir: Option<PathBuf>,
     #[serde(default)]
@@ -176,6 +176,8 @@ pub struct TrainingConfig {
     pub generation: GenerationConfig,
     #[serde(default)]
     pub wgpu: burn_dragon_train::WgpuRuntimeConfig,
+    #[serde(default)]
+    pub run_layout: burn_dragon_train::RunLayoutConfig,
     #[serde(default)]
     pub model: ModelOverrides,
 }

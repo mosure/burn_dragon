@@ -1,0 +1,29 @@
+[[entries]]
+name = "current_best_single_stage"
+kind = "training_config"
+family = "operational_dense_score"
+path = "current_best.toml"
+
+[[entries]]
+name = "current_best_large_bundle"
+kind = "bundle_config"
+family = "operational_dense_score"
+path = "current_best_large.toml"
+
+[[entries]]
+name = "current_best_large_mamba_contender"
+kind = "bundle_config"
+family = "mamba_contender"
+path = "current_best_large_mamba_contender.toml"
+
+[[entries]]
+name = "shakespeare_deployed_repro"
+kind = "training_config"
+family = "shakespeare_exact"
+path = "shakespeare_deployed_repro.toml"
+
+[[entries]]
+name = "shakespeare_deployed_dense_score_train"
+kind = "training_config"
+family = "shakespeare_dense_score"
+path = "shakespeare_deployed_dense_score_train.toml"

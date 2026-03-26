@@ -18,6 +18,14 @@ mod ema;
 #[cfg(feature = "train")]
 pub mod runtime;
 #[cfg(feature = "train")]
+mod runtime_config;
+#[cfg(feature = "train")]
+mod runtime_data;
+#[cfg(feature = "train")]
+mod runtime_init;
+#[cfg(feature = "train")]
+mod runtime_metrics;
+#[cfg(feature = "train")]
 pub mod train;
 
 pub mod api {

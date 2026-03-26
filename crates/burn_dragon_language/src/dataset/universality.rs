@@ -161,11 +161,19 @@ impl UniversalityDataset {
         config_path: impl AsRef<Path>,
         block_size: usize,
         batch_size: usize,
+        min_logical_document_tokens: Option<usize>,
         tokenizer_cfg: &TokenizerConfig,
     ) -> io::Result<Self> {
         let tokenizer = validate_pretokenized_tokenizer(tokenizer_cfg)?;
         let config_path = config_path.as_ref().to_path_buf();
-        let corpus = burn_dragon_universality::OnlineNcaCorpus::load(&config_path)
+        let target_logical_document_tokens = min_logical_document_tokens
+            .unwrap_or(block_size)
+            .max(block_size);
+        let corpus =
+            burn_dragon_universality::OnlineNcaCorpus::load_with_min_logical_document_tokens(
+                &config_path,
+                Some(target_logical_document_tokens),
+            )
             .map_err(io::Error::other)?;
         validate_tokenizer_against_manifest(tokenizer.as_ref(), corpus.tokenizer_manifest())?;
         let document_token_count = corpus.document_token_count();
@@ -180,7 +188,7 @@ impl UniversalityDataset {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!(
-                    "training.block_size={} exceeds fixed on-the-fly NCA logical document length {}",
+                    "training.block_size={} exceeds adapted on-the-fly NCA logical document length {}",
                     block_size, logical_document_tokens
                 ),
             ));
@@ -695,9 +703,14 @@ mod tests {
         let config = fixed_runtime_config();
         fs::write(&config_path, toml::to_string_pretty(&config).expect("toml"))
             .expect("write config");
-        let dataset =
-            UniversalityDataset::new_on_the_fly(&config_path, 32, 2, &pretokenized_tokenizer())
-                .expect("load on-the-fly dataset");
+        let dataset = UniversalityDataset::new_on_the_fly(
+            &config_path,
+            32,
+            2,
+            None,
+            &pretokenized_tokenizer(),
+        )
+        .expect("load on-the-fly dataset");
         assert_eq!(
             dataset.preferred_logical_document_tokens(DatasetSplit::Train),
             Some(360)
@@ -719,9 +732,14 @@ mod tests {
             burn_dragon_universality::fixed_document_token_count(&config).expect("doc tokens");
         fs::write(&config_path, toml::to_string_pretty(&config).expect("toml"))
             .expect("write config");
-        let dataset =
-            UniversalityDataset::new_on_the_fly(&config_path, 32, 2, &pretokenized_tokenizer())
-                .expect("load on-the-fly dataset");
+        let dataset = UniversalityDataset::new_on_the_fly(
+            &config_path,
+            32,
+            2,
+            None,
+            &pretokenized_tokenizer(),
+        )
+        .expect("load on-the-fly dataset");
         let mut buffer = vec![0u32; 48];
         dataset.copy_token_range(document_token_count.saturating_sub(24), &mut buffer);
         assert!(buffer.iter().any(|value| *value != 0));
@@ -729,5 +747,32 @@ mod tests {
             dataset.train_len(),
             config.train_samples * document_token_count
         );
+    }
+
+    #[test]
+    fn on_the_fly_universality_dataset_adapts_document_length_for_large_block_size() {
+        let dir = tempdir().expect("tempdir");
+        let config_path = dir.path().join("nca.toml");
+        let config = fixed_runtime_config();
+        fs::write(&config_path, toml::to_string_pretty(&config).expect("toml"))
+            .expect("write config");
+
+        let dataset = UniversalityDataset::new_on_the_fly(
+            &config_path,
+            4096,
+            16,
+            Some(4096),
+            &pretokenized_tokenizer(),
+        )
+        .expect("load adapted on-the-fly dataset");
+
+        assert!(dataset.block_size() == 4096);
+        assert_eq!(
+            dataset.preferred_logical_document_tokens(DatasetSplit::Train),
+            Some(4104)
+        );
+        let mut buffer = vec![0u32; 4097];
+        dataset.copy_token_range(0, &mut buffer);
+        assert!(buffer.iter().any(|value| *value != 0));
     }
 }

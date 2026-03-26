@@ -3,15 +3,17 @@ pub mod artifacts;
 pub mod core;
 #[cfg(feature = "train")]
 pub mod optimizer;
+pub mod run_layout;
 
 #[cfg(feature = "train")]
 pub use artifacts::VisionArtifactOutputMode;
 pub use core::{
-    FsdpMixedPrecisionKind, GdpoConfig, GdpoHardGate, KernelSpec, LayerStateSpec, ModelSpec,
-    ParallelCheckpointConfig, ParallelCheckpointFormat, ParallelCommunicationBackend,
-    ParallelConfig, ParallelDataConfig, ParallelFsdpConfig, ParallelPipelineCacheConfig,
-    ParallelPipelineConfig, ParallelSpec, ParallelTensorConfig, ParallelismKind,
-    PipelineCacheEvictionKind, PipelineCachePolicy, PipelineCommunicationKind,
+    FsdpMixedPrecisionKind, GdpoConfig, GdpoHardGate, KernelSpec, LayerStateSpec, LowBitMemorySpec,
+    LowBitModelSpec, LowBitSavedActivationInventorySpec, LowBitSavedActivationTensorSpec,
+    ModelSpec, OptimizerSpec, ParallelCheckpointConfig, ParallelCheckpointFormat,
+    ParallelCommunicationBackend, ParallelConfig, ParallelDataConfig, ParallelFsdpConfig,
+    ParallelPipelineCacheConfig, ParallelPipelineConfig, ParallelSpec, ParallelTensorConfig,
+    ParallelismKind, PipelineCacheEvictionKind, PipelineCachePolicy, PipelineCommunicationKind,
     PipelinePartitionKind, PipelineScheduleKind, PipelineSharedWeightSyncKind,
     PipelineTransportDtype, SequenceKernelKind, StateAxisSpec, StateLayout, StateTensorSpec,
     TensorParallelAxis, TensorParallelPartitionKind, VisionTeacherVariant, WgpuBackend,
@@ -19,4 +21,8 @@ pub use core::{
     WgpuStartupAutotuneConfig, WgpuTrainingConfig,
 };
 #[cfg(feature = "train")]
-pub use optimizer::{LearningRateScheduleConfig, OptimizerConfig};
+pub use optimizer::{
+    LearningRateScheduleConfig, MuonAdjustLrFn, MuonHybridConfig, OptimizerConfig, OptimizerKind,
+    OptimizerScheduleMode,
+};
+pub use run_layout::RunLayoutConfig;

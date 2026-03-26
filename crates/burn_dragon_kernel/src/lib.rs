@@ -6,6 +6,7 @@
 //! - [`api::recurrent`]
 //! - [`api::spatial`]
 //! - [`api::graph`]
+//! - [`api::low_bit`]
 //! - [`api::expert`] for lower-level kernel-plan access
 
 mod dense_attention;
@@ -13,6 +14,7 @@ mod dense_causal_attention;
 mod dense_scores;
 mod fusion_compat;
 mod local_grid_rho;
+mod low_bit;
 mod profiling;
 mod recurrent;
 mod relu_lowrank;
@@ -26,7 +28,7 @@ pub mod api {
     //!
     //! This mirrors the active kernel families instead of exposing the entire file/module layout.
 
-    pub use crate::kernels::{attention, graph, projection, recurrent, spatial};
+    pub use crate::kernels::{attention, graph, low_bit, projection, recurrent, spatial};
 
     pub mod expert {
         //! Lower-level fused-kernel surface for advanced callers.
@@ -87,6 +89,42 @@ pub mod kernels {
             relu_lowrank_grad_weight_profile_reset, relu_lowrank_grad_weight_profile_snapshot,
             supports_relu_lowrank_projection_backend, try_fused_relu_lowrank_projection_wgpu,
             try_fused_relu_lowrank_projection_wgpu_with_executor,
+        };
+    }
+
+    /// Device-executed low-bit helpers for packed/static BitNet-style paths.
+    pub mod low_bit {
+        pub use crate::low_bit::{
+            PackedRhoInt8BlockDeviceTensors, diagnose_wgpu_packed_dot_decoder_tail,
+            diagnose_wgpu_packed_dot_lowrank_projection, pack_decoder_input_codes_i8x4,
+            pack_decoder_weight_codes_i8x4, pack_lowrank_input_codes_i8x4,
+            pack_lowrank_weight_codes_i8x4, pack_rho_int8_block_device_reference,
+            packed_decoder_tail_device_reference, packed_decoder_tail_grad_input_device_reference,
+            packed_decoder_tail_grad_weight_device_reference,
+            packed_lowrank_grad_input_device_reference,
+            packed_lowrank_grad_weight_device_reference,
+            packed_lowrank_projection_device_reference, supports_packed_low_bit_device_backend,
+            supports_packed_rho_int8_block_device_backend, try_cube_fused_packed_decoder_tail_wgpu,
+            try_cube_fused_packed_lowrank_projection_wgpu, try_fused_packed_decoder_tail,
+            try_fused_packed_decoder_tail_grad_input, try_fused_packed_decoder_tail_grad_weight,
+            try_fused_packed_decoder_tail_training_autodiff, try_fused_packed_lowrank_grad_input,
+            try_fused_packed_lowrank_grad_weight, try_fused_packed_lowrank_projection,
+            try_fused_packed_lowrank_training_autodiff, try_raw_cuda_packed_decoder_tail,
+            try_raw_cuda_packed_decoder_tail_grad_input,
+            try_raw_cuda_packed_decoder_tail_grad_weight,
+            try_raw_cuda_packed_decoder_tail_prepacked_input,
+            try_raw_cuda_packed_lowrank_grad_input, try_raw_cuda_packed_lowrank_grad_weight,
+            try_raw_cuda_packed_lowrank_projection,
+            try_raw_cuda_packed_lowrank_projection_device_scale,
+            try_raw_cuda_packed_lowrank_projection_prepacked_input,
+            try_wgpu_packed_dot_decoder_tail, try_wgpu_packed_dot_lowrank_projection,
+            unpack_rho_int8_block_device_reference,
+        };
+        #[cfg(feature = "cuda")]
+        pub use crate::low_bit::{
+            packed_decoder_tail_grad_input_from_float_decoder_cuda,
+            packed_lowrank_grad_input_from_float_weight_cuda,
+            packed_lowrank_grad_input_from_transposed_float_weight_cuda,
         };
     }
 

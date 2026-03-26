@@ -1,0 +1,61 @@
+name = "permutation_state_transfer_ttcl_phase1_a1"
+output_dir = "artifacts/reasoning/permutation_ttcl/phase1_a1"
+seed = 1337
+train_source_stream = false
+
+[model]
+n_layer = 2
+n_embd = 64
+n_head = 4
+mlp_internal_dim_multiplier = 2
+dropout = 0.0
+
+[training]
+base_batch_size = 32
+adaptation_batch_size = 16
+base_max_iters = 128
+source_stream_max_iters = 64
+base_learning_rate = 0.001
+adaptation_learning_rate = 0.0005
+checkpoint_interval_iters = 32
+log_frequency = 32
+source_checkpoint_selection = "source_holdout_accuracy"
+
+[source_pretrain]
+object_counts = [3, 5]
+examples_per_count = 192
+min_swaps = 2
+max_swaps = 5
+
+[source_stream]
+object_counts = [5, 7]
+examples_per_count = 128
+min_swaps = 3
+max_swaps = 5
+
+[source_holdout]
+object_counts = [3, 5, 7]
+examples_per_count = 48
+min_swaps = 2
+max_swaps = 5
+
+[target]
+object_counts = [3, 5, 7]
+episodes_per_count = 2
+support_pool_size = 64
+query_examples_per_episode = 16
+extra_clues = 2
+
+[[protocols]]
+name = "zero_shot"
+mode = "zero_shot"
+support_examples = 0
+gradient_steps = 0
+rewrite = "none"
+
+[[protocols]]
+name = "in_context_16"
+mode = "in_context_only"
+support_examples = 16
+gradient_steps = 0
+rewrite = "none"

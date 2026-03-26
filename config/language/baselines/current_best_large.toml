@@ -12,15 +12,14 @@ name = "nca_prepretrain"
 type = "language_train"
 config = "current_best_large/nca_stage_base.toml"
 backend = "cuda"
-resume_from_last_checkpoint = true
-
+launch_mode = "resume_latest_checkpoint_if_present"
 [[stages]]
 # Expected wall-clock with the promoted large ClimbMix rung:
-# ~43-45 hours at roughly ~3.0-3.1k steps/hour, for an end-to-end bundle near 48 hours.
+# roughly ~48h end to end on the current dense-score batch12/block256 geometry.
 name = "climbmix_pretrain"
 depends_on = ["nca_prepretrain"]
 type = "language_train"
 config = "current_best_large/climbmix_stage_48h.toml"
 backend = "cuda"
 init_checkpoint_from_stage = "nca_prepretrain"
-resume_from_last_checkpoint = true
+launch_mode = "resume_latest_checkpoint_if_present"

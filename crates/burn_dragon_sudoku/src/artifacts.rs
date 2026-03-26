@@ -158,6 +158,7 @@ fn write_validation_artifacts_with_grids<B: BackendTrait>(
             output_mode,
             config.overwrite,
             epoch,
+            0,
             sample_idx,
             &sample_frames,
             config.fps,

@@ -6,6 +6,9 @@
 
 pub(crate) mod dataset;
 pub(crate) mod dynamics;
-pub(crate) mod models;
+pub(crate) mod lejepa;
 pub mod profile;
 pub(crate) mod vjepa21;
+
+pub(crate) use lejepa::{VisionVideoLejepaLosses, VisionVideoLejepaModel};
+pub(crate) use vjepa21::VisionVideoVjepa21Model;

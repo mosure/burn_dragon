@@ -12,6 +12,8 @@ readme = "../../README.md"
 
 [features]
 default = []
+probe = ["burn_dragon_core/probe"]
+viz = ["burn_dragon_core/viz"]
 train = [
   "dep:burn_dragon_checkpoint",
   "dep:burn_dragon_train",

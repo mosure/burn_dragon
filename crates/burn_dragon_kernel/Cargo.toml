@@ -14,7 +14,7 @@ readme = "../../README.md"
 
 [features]
 default = []
-cuda = ["dep:burn-cuda"]
+cuda = ["dep:burn-cuda", "dep:cudarc"]
 
 [dependencies]
 burn = { version = "0.21.0-pre.2", default-features = false, features = ["fusion", "ndarray", "std", "wgpu"] }
@@ -29,6 +29,7 @@ pollster = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 wgpu = "26"
+cudarc = { version = "0.17.8", features = ["cuda-version-from-build-system"], optional = true }
 
 [dev-dependencies]
 burn-ndarray = "0.21.0-pre.2"

@@ -50,5 +50,7 @@ pub struct SudokuTrainingConfig {
     #[serde(default)]
     pub wgpu: WgpuRuntimeConfig,
     #[serde(default)]
+    pub run_layout: burn_dragon_train::RunLayoutConfig,
+    #[serde(default)]
     pub model: SudokuModelConfig,
 }

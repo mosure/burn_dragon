@@ -117,6 +117,22 @@ impl<B: BackendTrait> VisionArtifactMetric<B> {
         self.write_legend_with_notes(legend, &[]);
     }
 
+    fn write_sidecar_json(&self, json: &str, epoch: usize, iteration: usize) {
+        if json.is_empty() {
+            return;
+        }
+        if fs::create_dir_all(&self.output_dir).is_err() {
+            return;
+        }
+        let filename = if self.overwrite {
+            "vision_artifacts.json".to_string()
+        } else {
+            format!("epoch_{epoch:03}_iter_{iteration:06}_vision_artifacts.json")
+        };
+        let path = self.output_dir.join(filename);
+        let _ = fs::write(path, json);
+    }
+
     fn maybe_upscale_frame(&self, frame: ArtifactFrame, scale: usize) -> ArtifactFrame {
         frame.upscale_nearest(scale.max(1))
     }
@@ -147,10 +163,10 @@ impl<B: BackendTrait> Metric for VisionArtifactMetric<B> {
         }
 
         if self.output_mode != VisionArtifactOutputMode::Images {
-            return self.update_video_artifacts(item, iteration);
+            return self.update_video_artifacts(item, epoch, iteration);
         }
 
-        self.update_image_artifacts(item, iteration)
+        self.update_image_artifacts(item, epoch, iteration)
     }
 
     fn clear(&mut self) {}

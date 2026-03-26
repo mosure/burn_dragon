@@ -93,6 +93,7 @@ pub fn write_video(
     output_dir: &Path,
     output_mode: VisionArtifactOutputMode,
     overwrite: bool,
+    epoch: usize,
     iteration: usize,
     sample_idx: usize,
     frames: &[ArtifactFrame],
@@ -106,7 +107,7 @@ pub fn write_video(
     let fps = if fps == 0 { ARTIFACT_DEFAULT_FPS } else { fps };
     match output_mode {
         VisionArtifactOutputMode::Avi => {
-            let filename = video_filename(output_mode, overwrite, iteration, sample_idx);
+            let filename = video_filename(output_mode, overwrite, epoch, iteration, sample_idx);
             let path = output_dir.join(filename);
             write_avi(&path, frames, fps, ffmpeg_path)?;
             Ok(ArtifactWriteOutcome {
@@ -116,7 +117,7 @@ pub fn write_video(
             })
         }
         VisionArtifactOutputMode::Mp4 => {
-            let filename = video_filename(output_mode, overwrite, iteration, sample_idx);
+            let filename = video_filename(output_mode, overwrite, epoch, iteration, sample_idx);
             let path = output_dir.join(filename);
             match write_mp4(&path, frames, fps, ffmpeg_path) {
                 Ok(()) => Ok(ArtifactWriteOutcome {
@@ -128,6 +129,7 @@ pub fn write_video(
                     let fallback_name = video_filename(
                         VisionArtifactOutputMode::Avi,
                         overwrite,
+                        epoch,
                         iteration,
                         sample_idx,
                     );
@@ -154,6 +156,7 @@ fn denormalize(value: f32, channel: usize, mean: [f32; 3], std: [f32; 3]) -> u8 
 fn video_filename(
     mode: VisionArtifactOutputMode,
     overwrite: bool,
+    epoch: usize,
     iteration: usize,
     sample_idx: usize,
 ) -> String {
@@ -165,7 +168,7 @@ fn video_filename(
     if overwrite {
         format!("sample_{:02}.{extension}", sample_idx)
     } else {
-        format!("iter_{:06}_sample_{:02}.{extension}", iteration, sample_idx)
+        format!("epoch_{epoch:03}_iter_{iteration:06}_sample_{sample_idx:02}.{extension}")
     }
 }
 

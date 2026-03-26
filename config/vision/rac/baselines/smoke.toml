@@ -1,0 +1,24 @@
+extends = ["tiny.toml"]
+
+[dataset]
+max_records = 512
+
+[training]
+batch_size = 16
+epochs = 1
+max_iters = 32
+log_frequency = 4
+rollout_min_steps = 2
+rollout_max_steps = 2
+rollout_backprop_steps = 2
+
+[vision]
+embed_dim = 48
+steps = 2
+n_head = 3
+projection_dim = 64
+projection_hidden_dim = 128
+
+[mode]
+sample_steps = 2
+velocity_hidden_dim = 64

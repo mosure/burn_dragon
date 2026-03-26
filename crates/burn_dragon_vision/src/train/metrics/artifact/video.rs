@@ -4,10 +4,11 @@ use super::*;
 
 impl<B: BackendTrait> VisionArtifactMetric<B> {
     #[allow(clippy::too_many_arguments)]
-    fn build_video_feature_frame(
+    pub(super) fn build_video_feature_frame(
         &self,
         frames_vec: &[f32],
         debug_recon_vec: Option<&[f32]>,
+        aux_frames_vec: Option<&[f32]>,
         posterior_patch_steps_vec: Option<&[f32]>,
         posterior_pca_steps_vec: Option<&[f32]>,
         reference_patch_steps_vec: Option<&[f32]>,
@@ -48,6 +49,9 @@ impl<B: BackendTrait> VisionArtifactMetric<B> {
             extra_cols += 1;
         }
         if debug_recon_vec.is_some() {
+            extra_cols += 1;
+        }
+        if aux_frames_vec.is_some() {
             extra_cols += 1;
         }
         if debug_patch_steps_vec.is_some() {
@@ -154,6 +158,21 @@ impl<B: BackendTrait> VisionArtifactMetric<B> {
             }
             column_idx += 1;
         }
+        if let Some(aux_frames_vec) = aux_frames_vec {
+            for y in 0..height {
+                for x in 0..width {
+                    let idx = frame_base + y * width + x;
+                    let out_x = column_idx * width + x;
+                    let offset = (y * width_total + out_x) * 3;
+                    canvas[offset] = self.denormalize_channel(aux_frames_vec[idx], 0);
+                    canvas[offset + 1] =
+                        self.denormalize_channel(aux_frames_vec[idx + channel_stride], 1);
+                    canvas[offset + 2] =
+                        self.denormalize_channel(aux_frames_vec[idx + 2 * channel_stride], 2);
+                }
+            }
+            column_idx += 1;
+        }
         if let Some(debug_patch_steps_vec) = debug_patch_steps_vec {
             let frame_stride = grid_h * grid_w;
             let patch_base = (batch_idx * frame_count + frame_idx) * frame_stride;
@@ -198,6 +217,7 @@ impl<B: BackendTrait> VisionArtifactMetric<B> {
     pub(super) fn update_video_artifacts(
         &mut self,
         item: &VisionArtifactInput<B>,
+        epoch: usize,
         iteration: usize,
     ) -> SerializedEntry {
         if let Some(frames_tensor) = &item.frames {
@@ -213,6 +233,24 @@ impl<B: BackendTrait> VisionArtifactMetric<B> {
                         .saturating_mul(width);
                     if dims == [batch, frame_count, channels, height, width] {
                         match debug_frames.to_data().convert::<f32>().into_vec::<f32>() {
+                            Ok(vec) if vec.len() >= expected => Some(vec),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                let aux_frames_vec = if let Some(aux_frames) = &item.aux_frames {
+                    let dims = aux_frames.shape().dims::<5>();
+                    let expected = batch
+                        .saturating_mul(frame_count)
+                        .saturating_mul(channels)
+                        .saturating_mul(height)
+                        .saturating_mul(width);
+                    if dims == [batch, frame_count, channels, height, width] {
+                        match aux_frames.to_data().convert::<f32>().into_vec::<f32>() {
                             Ok(vec) if vec.len() >= expected => Some(vec),
                             _ => None,
                         }
@@ -515,6 +553,9 @@ impl<B: BackendTrait> VisionArtifactMetric<B> {
                         }
                         self.write_legend_with_notes(legend, &notes);
                     }
+                    if let Some(sidecar_json) = item.sidecar_json.as_deref() {
+                        self.write_sidecar_json(sidecar_json, epoch, iteration);
+                    }
                     let frames_vec =
                         match frames_tensor.to_data().convert::<f32>().into_vec::<f32>() {
                             Ok(vec) => vec,
@@ -551,18 +592,45 @@ impl<B: BackendTrait> VisionArtifactMetric<B> {
                     let probe_slices = probe_preds
                         .as_ref()
                         .map(|(preds, labels)| (preds.as_slice(), labels.as_slice()));
+                    let debug_recon_frames_ref = debug_recon_vec.as_deref();
+                    let aux_frames_ref = aux_frames_vec.as_deref();
+                    let posterior_patch_steps_ref = posterior_patch_meta
+                        .is_some()
+                        .then(|| posterior_patch_steps_vec.as_deref())
+                        .flatten();
+                    let posterior_pca_steps_ref = posterior_pca_meta
+                        .is_some()
+                        .then(|| posterior_pca_steps_vec.as_deref())
+                        .flatten();
+                    let patch_steps_ref = patch_meta
+                        .is_some()
+                        .then(|| patch_steps_vec.as_deref())
+                        .flatten();
+                    let pca_steps_ref = pca_meta
+                        .is_some()
+                        .then(|| pca_steps_vec.as_deref())
+                        .flatten();
+                    let debug_patch_steps_ref = debug_patch_meta
+                        .is_some()
+                        .then(|| debug_patch_steps_vec.as_deref())
+                        .flatten();
+                    let debug_pca_steps_ref = debug_pca_meta
+                        .is_some()
+                        .then(|| debug_pca_steps_vec.as_deref())
+                        .flatten();
                     for batch_idx in 0..batch_limit {
                         let mut frames = Vec::with_capacity(frame_count);
                         for frame_idx in 0..frame_count {
                             if let Some(frame) = self.build_video_feature_frame(
                                 &frames_vec,
-                                debug_recon_vec.as_deref(),
-                                posterior_patch_steps_vec.as_deref(),
-                                posterior_pca_steps_vec.as_deref(),
-                                patch_steps_vec.as_deref(),
-                                pca_steps_vec.as_deref(),
-                                debug_patch_steps_vec.as_deref(),
-                                debug_pca_steps_vec.as_deref(),
+                                debug_recon_frames_ref,
+                                aux_frames_ref,
+                                posterior_patch_steps_ref,
+                                posterior_pca_steps_ref,
+                                patch_steps_ref,
+                                pca_steps_ref,
+                                debug_patch_steps_ref,
+                                debug_pca_steps_ref,
                                 batch_idx,
                                 frame_idx,
                                 frame_count,
@@ -585,6 +653,7 @@ impl<B: BackendTrait> VisionArtifactMetric<B> {
                             &self.output_dir,
                             self.output_mode,
                             self.overwrite,
+                            epoch,
                             iteration,
                             batch_idx,
                             &frames,
@@ -620,6 +689,9 @@ impl<B: BackendTrait> VisionArtifactMetric<B> {
         {
             if let Some(legend) = item.legend.as_ref() {
                 self.write_legend(legend);
+            }
+            if let Some(sidecar_json) = item.sidecar_json.as_deref() {
+                self.write_sidecar_json(sidecar_json, epoch, iteration);
             }
             let [batch, view_count, channels, height, width] = views.shape().dims::<5>();
             if batch == 0 || view_count == 0 || channels == 0 || height == 0 || width == 0 {
@@ -899,6 +971,7 @@ impl<B: BackendTrait> VisionArtifactMetric<B> {
                     &self.output_dir,
                     self.output_mode,
                     self.overwrite,
+                    epoch,
                     iteration,
                     batch_idx,
                     &frames,
@@ -960,6 +1033,7 @@ impl<B: BackendTrait> VisionArtifactMetric<B> {
                 &self.output_dir,
                 self.output_mode,
                 self.overwrite,
+                epoch,
                 iteration,
                 batch_idx,
                 &frames,

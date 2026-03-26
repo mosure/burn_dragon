@@ -7,6 +7,7 @@ use std::process::{Command, Output};
 
 use burn::tensor::{Int, Tensor, TensorData};
 use burn_dragon_language::checkpoint::load_language_core_from_checkpoint;
+use burn_dragon_train::train::pipeline::resolve_latest_run_dir_in;
 use burn_ndarray::NdArray;
 use tempfile::tempdir;
 
@@ -59,7 +60,6 @@ seed = 1337
 gradient_accumulation_steps = 1
 max_iters = {max_iters}
 log_frequency = 1
-fast_train = false
 "#,
         toml_escape_path(cache_dir)
     );
@@ -120,8 +120,7 @@ fn run_train(cwd: &Path, run_root: &Path, args: &[String]) -> Output {
 }
 
 fn latest_run_dir(run_root: &Path) -> PathBuf {
-    let run_name = fs::read_to_string(run_root.join("latest")).expect("latest run name");
-    run_root.join(run_name.trim())
+    resolve_latest_run_dir_in(run_root).expect("latest run dir")
 }
 
 fn parse_single_valid_loss(stdout: &str) -> f64 {

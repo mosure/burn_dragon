@@ -54,6 +54,7 @@ pub struct VisionDiagnostics {
     pub rollout_horizon_metrics: bool,
     pub sigreg: bool,
     pub recon: bool,
+    pub directional: bool,
     pub policy: bool,
     pub probe: bool,
     pub artifact_every: usize,
@@ -102,6 +103,7 @@ where
         Arc::clone(&env.train_loader),
         Arc::clone(&env.valid_loader),
     )
+    .with_application_logger(None)
     .num_epochs(env.epochs)
     .grads_accumulation(env.training.gradient_accumulation_steps.max(1))
     .with_training_strategy(LearningStrategy::SingleDevice(env.device.clone()));
@@ -921,6 +923,109 @@ where
                 >::new_every(
                     psnr_full.as_str(), metric_every
                 ));
+        }
+        if diagnostics.directional {
+            let forward_path = format!("{prefix}_forward_path_loss");
+            let reverse_path = format!("{prefix}_reverse_path_loss");
+            let forward_velocity = format!("{prefix}_forward_velocity_loss");
+            let reverse_latent = format!("{prefix}_reverse_latent_loss");
+            let reverse_to_init = format!("{prefix}_reverse_to_init_loss");
+            let roundtrip_state = format!("{prefix}_roundtrip_state_loss");
+            let block_const = format!("{prefix}_block_const_loss");
+            let semantic = format!("{prefix}_semantic_loss");
+            builder = builder
+                .metric_train_numeric(OptionalScalarMetric::<
+                    MetricsBackend,
+                    ForwardPathLossInput<MetricsBackend>,
+                >::new_every(
+                    forward_path.as_str(), metric_every
+                ))
+                .metric_valid_numeric(OptionalScalarMetric::<
+                    MetricsBackend,
+                    ForwardPathLossInput<MetricsBackend>,
+                >::new_every(
+                    forward_path.as_str(), metric_every
+                ))
+                .metric_train_numeric(OptionalScalarMetric::<
+                    MetricsBackend,
+                    ReversePathLossInput<MetricsBackend>,
+                >::new_every(
+                    reverse_path.as_str(), metric_every
+                ))
+                .metric_valid_numeric(OptionalScalarMetric::<
+                    MetricsBackend,
+                    ReversePathLossInput<MetricsBackend>,
+                >::new_every(
+                    reverse_path.as_str(), metric_every
+                ))
+                .metric_train_numeric(OptionalScalarMetric::<
+                    MetricsBackend,
+                    ForwardVelocityLossInput<MetricsBackend>,
+                >::new_every(
+                    forward_velocity.as_str(), metric_every
+                ))
+                .metric_valid_numeric(OptionalScalarMetric::<
+                    MetricsBackend,
+                    ForwardVelocityLossInput<MetricsBackend>,
+                >::new_every(
+                    forward_velocity.as_str(), metric_every
+                ))
+                .metric_train_numeric(OptionalScalarMetric::<
+                    MetricsBackend,
+                    ReverseLatentLossInput<MetricsBackend>,
+                >::new_every(
+                    reverse_latent.as_str(), metric_every
+                ))
+                .metric_valid_numeric(OptionalScalarMetric::<
+                    MetricsBackend,
+                    ReverseLatentLossInput<MetricsBackend>,
+                >::new_every(
+                    reverse_latent.as_str(), metric_every
+                ))
+                .metric_train_numeric(OptionalScalarMetric::<
+                    MetricsBackend,
+                    ReverseToInitLossInput<MetricsBackend>,
+                >::new_every(
+                    reverse_to_init.as_str(), metric_every
+                ))
+                .metric_valid_numeric(OptionalScalarMetric::<
+                    MetricsBackend,
+                    ReverseToInitLossInput<MetricsBackend>,
+                >::new_every(
+                    reverse_to_init.as_str(), metric_every
+                ))
+                .metric_train_numeric(OptionalScalarMetric::<
+                    MetricsBackend,
+                    RoundtripStateLossInput<MetricsBackend>,
+                >::new_every(
+                    roundtrip_state.as_str(), metric_every
+                ))
+                .metric_valid_numeric(OptionalScalarMetric::<
+                    MetricsBackend,
+                    RoundtripStateLossInput<MetricsBackend>,
+                >::new_every(
+                    roundtrip_state.as_str(), metric_every
+                ))
+                .metric_train_numeric(OptionalScalarMetric::<
+                    MetricsBackend,
+                    BlockConstLossInput<MetricsBackend>,
+                >::new_every(
+                    block_const.as_str(), metric_every
+                ))
+                .metric_valid_numeric(OptionalScalarMetric::<
+                    MetricsBackend,
+                    BlockConstLossInput<MetricsBackend>,
+                >::new_every(
+                    block_const.as_str(), metric_every
+                ))
+                .metric_train_numeric(OptionalScalarMetric::<
+                    MetricsBackend,
+                    SemanticLossInput<MetricsBackend>,
+                >::new_every(semantic.as_str(), metric_every))
+                .metric_valid_numeric(OptionalScalarMetric::<
+                    MetricsBackend,
+                    SemanticLossInput<MetricsBackend>,
+                >::new_every(semantic.as_str(), metric_every));
         }
         if diagnostics.policy {
             let name = format!("{prefix}_policy_loss");

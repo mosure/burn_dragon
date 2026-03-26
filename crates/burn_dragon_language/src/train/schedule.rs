@@ -181,15 +181,16 @@ where
     pub epochs: usize,
 }
 
-pub(crate) fn train_with_scheduler<B, S>(
+pub(crate) fn train_with_scheduler<B, O, S>(
     env: &TrainEnvironment<'_, B>,
     model: LanguageTrainModel<B>,
-    optimizer: OptimizerAdaptor<AdamW, LanguageTrainModel<B>, B>,
+    optimizer: O,
     scheduler: S,
 ) -> Result<BDH<ValidBackend<B>>>
 where
     B: AutodiffBackend + Clone + 'static,
     B::Device: Clone,
+    O: Optimizer<LanguageTrainModel<B>, B> + 'static,
     S: LrScheduler + 'static,
 {
     fs::create_dir_all(env.run_dir)?;
@@ -893,20 +894,16 @@ struct DistributedPipelineForwardCache<B: AutodiffBackend> {
 }
 
 #[cfg(feature = "ddp")]
-fn save_process_group_checkpoint<B, S>(
+fn save_process_group_checkpoint<B, O, S>(
     run_dir: &Path,
     epoch: usize,
     learner: &burn_train::Learner<
-        burn_train::LearningComponentsMarker<
-            B,
-            S,
-            LanguageTrainModel<B>,
-            OptimizerAdaptor<AdamW, LanguageTrainModel<B>, B>,
-        >,
+        burn_train::LearningComponentsMarker<B, S, LanguageTrainModel<B>, O>,
     >,
 ) -> Result<()>
 where
     B: AutodiffBackend + Clone + 'static,
+    O: Optimizer<LanguageTrainModel<B>, B> + 'static,
     S: LrScheduler + 'static,
 {
     let checkpoint_dir = run_dir.join("checkpoint");
@@ -923,31 +920,18 @@ where
 }
 
 #[cfg(feature = "ddp")]
-fn load_process_group_checkpoint<B, S>(
+fn load_process_group_checkpoint<B, O, S>(
     run_dir: &Path,
     epoch: usize,
     device: &B::Device,
     mut learner: burn_train::Learner<
-        burn_train::LearningComponentsMarker<
-            B,
-            S,
-            LanguageTrainModel<B>,
-            OptimizerAdaptor<AdamW, LanguageTrainModel<B>, B>,
-        >,
+        burn_train::LearningComponentsMarker<B, S, LanguageTrainModel<B>, O>,
     >,
-) -> Result<
-    burn_train::Learner<
-        burn_train::LearningComponentsMarker<
-            B,
-            S,
-            LanguageTrainModel<B>,
-            OptimizerAdaptor<AdamW, LanguageTrainModel<B>, B>,
-        >,
-    >,
->
+) -> Result<burn_train::Learner<burn_train::LearningComponentsMarker<B, S, LanguageTrainModel<B>, O>>>
 where
     B: AutodiffBackend + Clone + 'static,
     B::Device: Clone,
+    O: Optimizer<LanguageTrainModel<B>, B> + 'static,
     S: LrScheduler + 'static,
 {
     let checkpoint_dir = run_dir.join("checkpoint");
@@ -992,20 +976,16 @@ where
 }
 
 #[cfg(feature = "ddp")]
-fn run_process_group_validation<B, S>(
+fn run_process_group_validation<B, O, S>(
     env: &TrainEnvironment<'_, B>,
     learner: &burn_train::Learner<
-        burn_train::LearningComponentsMarker<
-            B,
-            S,
-            LanguageTrainModel<B>,
-            OptimizerAdaptor<AdamW, LanguageTrainModel<B>, B>,
-        >,
+        burn_train::LearningComponentsMarker<B, S, LanguageTrainModel<B>, O>,
     >,
 ) -> Option<f64>
 where
     B: AutodiffBackend + Clone + 'static,
     B::Device: Clone,
+    O: Optimizer<LanguageTrainModel<B>, B> + 'static,
     S: LrScheduler + 'static,
 {
     if !env.parallel_runtime.is_primary() {
@@ -1046,13 +1026,6 @@ where
     B: AutodiffBackend + Clone + 'static,
     B::Device: Clone,
 {
-    if layout.data_parallel_size != 1 {
-        return Err(anyhow!(
-            "distributed pipeline execution currently requires parallel.data.size = 1 (got {})",
-            layout.data_parallel_size
-        ));
-    }
-
     let plan = model
         .pipeline_plan
         .as_ref()
@@ -1090,7 +1063,6 @@ where
     let mut local_accumulator = GradientsAccumulator::new();
     let mut local_loss: Option<Tensor<B::InnerBackend, 1>> = None;
     let last_virtual_stage_id = plan.total_virtual_stages.saturating_sub(1);
-    let last_stage_rank = global_rank_for_virtual_stage(plan, layout, 0, last_virtual_stage_id);
 
     for event in &plan.events {
         let microbatch_id = event.microbatch_id;
@@ -1160,19 +1132,50 @@ where
         if event.kind == burn_dragon_train::train::pipeline::PipelineEventKind::Forward
             && event.virtual_stage_id < last_virtual_stage_id
         {
-            let sender_rank =
-                global_rank_for_virtual_stage(plan, layout, 0, event.virtual_stage_id);
-            let receiver_rank =
-                global_rank_for_virtual_stage(plan, layout, 0, event.virtual_stage_id + 1);
-            let broadcasted = broadcast_pipeline_state_rooted(
-                peer_id,
-                assignment.global_rank,
-                sender_rank,
-                device,
-                local_forward_output.as_ref(),
-            )?;
-            if assignment.global_rank == receiver_rank {
-                incoming_forward.insert((event.virtual_stage_id + 1, microbatch_id), broadcasted);
+            for replica_id in 0..layout.data_parallel_size {
+                let sender_rank =
+                    global_rank_for_virtual_stage(plan, layout, replica_id, event.virtual_stage_id);
+                let receiver_rank = global_rank_for_virtual_stage(
+                    plan,
+                    layout,
+                    replica_id,
+                    event.virtual_stage_id + 1,
+                );
+
+                if sender_rank == receiver_rank {
+                    if assignment.data_parallel_rank == replica_id
+                        && assignment.global_rank == receiver_rank
+                    {
+                        let forwarded = detach_pipeline_state_to_inner(
+                            local_forward_output.as_ref().ok_or_else(|| {
+                                anyhow!(
+                                    "missing local forward state for virtual_stage={} microbatch={microbatch_id}",
+                                    event.virtual_stage_id
+                                )
+                            })?,
+                        );
+                        incoming_forward
+                            .insert((event.virtual_stage_id + 1, microbatch_id), forwarded);
+                    }
+                    continue;
+                }
+
+                let broadcasted = broadcast_pipeline_state_rooted(
+                    peer_id,
+                    assignment.global_rank,
+                    sender_rank,
+                    device,
+                    (assignment.data_parallel_rank == replica_id
+                        && assignment.global_rank == sender_rank)
+                        .then_some(local_forward_output.as_ref())
+                        .flatten(),
+                )?;
+                if assignment.data_parallel_rank == replica_id
+                    && assignment.global_rank == receiver_rank
+                {
+                    incoming_forward
+                        .insert((event.virtual_stage_id + 1, microbatch_id), broadcasted);
+                }
             }
         }
 
@@ -1230,26 +1233,55 @@ where
         if event.kind == burn_dragon_train::train::pipeline::PipelineEventKind::Backward
             && event.virtual_stage_id > 0
         {
-            let sender_rank =
-                global_rank_for_virtual_stage(plan, layout, 0, event.virtual_stage_id);
-            let receiver_rank =
-                global_rank_for_virtual_stage(plan, layout, 0, event.virtual_stage_id - 1);
-            let broadcasted = broadcast_pipeline_state_inner_rooted::<B::InnerBackend>(
-                peer_id,
-                assignment.global_rank,
-                sender_rank,
-                device,
-                local_backward_grad.as_ref(),
-            )?;
-            if assignment.global_rank == receiver_rank {
-                incoming_backward.insert((event.virtual_stage_id - 1, microbatch_id), broadcasted);
+            for replica_id in 0..layout.data_parallel_size {
+                let sender_rank =
+                    global_rank_for_virtual_stage(plan, layout, replica_id, event.virtual_stage_id);
+                let receiver_rank = global_rank_for_virtual_stage(
+                    plan,
+                    layout,
+                    replica_id,
+                    event.virtual_stage_id - 1,
+                );
+
+                if sender_rank == receiver_rank {
+                    if assignment.data_parallel_rank == replica_id
+                        && assignment.global_rank == receiver_rank
+                    {
+                        let grad_state = local_backward_grad.clone().ok_or_else(|| {
+                            anyhow!(
+                                "missing local backward gradient for virtual_stage={} microbatch={microbatch_id}",
+                                event.virtual_stage_id
+                            )
+                        })?;
+                        incoming_backward
+                            .insert((event.virtual_stage_id - 1, microbatch_id), grad_state);
+                    }
+                    continue;
+                }
+
+                let broadcasted = broadcast_pipeline_state_inner_rooted::<B::InnerBackend>(
+                    peer_id,
+                    assignment.global_rank,
+                    sender_rank,
+                    device,
+                    (assignment.data_parallel_rank == replica_id
+                        && assignment.global_rank == sender_rank)
+                        .then_some(local_backward_grad.as_ref())
+                        .flatten(),
+                )?;
+                if assignment.data_parallel_rank == replica_id
+                    && assignment.global_rank == receiver_rank
+                {
+                    incoming_backward
+                        .insert((event.virtual_stage_id - 1, microbatch_id), broadcasted);
+                }
             }
         }
     }
 
     let reduced_loss = reduce_sum_scalar::<B::InnerBackend>(
         peer_id,
-        if assignment.global_rank == last_stage_rank {
+        if assignment.is_last_stage() {
             local_loss.unwrap_or_else(|| Tensor::<B::InnerBackend, 1>::zeros([1], device))
         } else {
             Tensor::<B::InnerBackend, 1>::zeros([1], device)
@@ -1258,7 +1290,7 @@ where
 
     Ok(DistributedPipelineTrainStepResult {
         grads: local_accumulator.grads(),
-        mean_train_loss: reduced_loss,
+        mean_train_loss: reduced_loss / layout.data_parallel_size as f64,
     })
 }
 
@@ -1283,14 +1315,25 @@ where
     B::Device: Clone,
     S: LrScheduler + 'static,
 {
-    if layout.data_parallel_size != 1 {
+    let global_train_steps = env.train_loader.num_items();
+    if global_train_steps % layout.data_parallel_size != 0 {
         return Err(anyhow!(
-            "parallel.pipeline.enabled process-group execution currently supports only parallel.data.size = 1 (got {})",
+            "parallel.pipeline.enabled process-group execution requires env.train_loader.num_items() divisible by parallel.data.size so every replica executes the same number of collectives (got {} steps across {} replicas)",
+            global_train_steps,
             layout.data_parallel_size
         ));
     }
 
     let local_train_steps = local_train_loader.num_items();
+    let expected_local_train_steps = global_train_steps / layout.data_parallel_size;
+    if local_train_steps != expected_local_train_steps {
+        return Err(anyhow!(
+            "parallel.pipeline.enabled process-group execution expected {} local steps for dp_rank={} but resolved {}",
+            expected_local_train_steps,
+            assignment.data_parallel_rank,
+            local_train_steps
+        ));
+    }
     let metric_every = env.training.log_frequency.max(1);
     let grad_accumulation = env.training.gradient_accumulation_steps.max(1);
     let logical_replica_count = layout.data_parallel_size;
@@ -1298,12 +1341,14 @@ where
         .resume_checkpoint_epoch
         .map(|epoch| epoch + 1)
         .unwrap_or(1);
-    let batch_root_rank = pipeline_replica_root_rank(&layout, assignment.data_parallel_rank);
 
     for epoch in start_epoch..=env.epochs {
         info!(
-            "Executing process-group pipeline epoch {} on global_rank={} stage={}",
-            epoch, assignment.global_rank, assignment.pipeline_stage_id
+            "Executing process-group pipeline epoch {} on global_rank={} stage={} dp_rank={}",
+            epoch,
+            assignment.global_rank,
+            assignment.pipeline_stage_id,
+            assignment.data_parallel_rank
         );
 
         let mut iterator = local_train_loader.iter();
@@ -1312,18 +1357,33 @@ where
         let mut accumulation_current = 0usize;
 
         while iteration < local_train_steps {
-            let local_batch = if assignment.global_rank == batch_root_rank {
-                iterator.next()
-            } else {
-                None
-            };
-            let batch = broadcast_sequence_batch_rooted(
-                peer_id,
-                assignment.global_rank,
-                batch_root_rank,
-                env.device,
-                local_batch,
-            )?;
+            let mut batch = None;
+            for replica_id in 0..layout.data_parallel_size {
+                let batch_root_rank = pipeline_replica_root_rank(&layout, replica_id);
+                let replica_root_batch = if assignment.data_parallel_rank == replica_id
+                    && assignment.global_rank == batch_root_rank
+                {
+                    iterator.next()
+                } else {
+                    None
+                };
+                let replica_batch = broadcast_sequence_batch_rooted(
+                    peer_id,
+                    assignment.global_rank,
+                    batch_root_rank,
+                    env.device,
+                    replica_root_batch,
+                )?;
+                if assignment.data_parallel_rank == replica_id {
+                    batch = Some(replica_batch);
+                }
+            }
+            let batch = batch.ok_or_else(|| {
+                anyhow!(
+                    "missing local replica batch for dp_rank={} at iteration={iteration}",
+                    assignment.data_parallel_rank
+                )
+            })?;
 
             iteration += 1;
             for _ in 0..logical_replica_count {
@@ -1350,6 +1410,11 @@ where
                     peer_id,
                     ReduceOperation::Sum,
                 )?;
+                scale_gradients_in_module_order::<B, _>(
+                    &learner.model(),
+                    &mut grads,
+                    1.0 / layout.data_parallel_size as f32,
+                );
                 learner.optimizer_step(grads);
                 accumulation_current = 0;
             }
@@ -1377,10 +1442,10 @@ where
         }
 
         if env.parallel_runtime.is_primary() {
-            if let Some(valid_loss) = run_process_group_validation(env, &learner) {
+            if let Some(valid_loss) = run_process_group_validation::<B, O, S>(env, &learner) {
                 info!("valid epoch={} loss={valid_loss:.4}", epoch);
             }
-            save_process_group_checkpoint::<B, S>(env.run_dir, epoch, &learner)?;
+            save_process_group_checkpoint::<B, O, S>(env.run_dir, epoch, &learner)?;
         }
     }
 
@@ -1388,10 +1453,10 @@ where
 }
 
 #[cfg(feature = "ddp")]
-fn train_with_collective_scheduler<B, S>(
+fn train_with_collective_scheduler<B, O, S>(
     env: &TrainEnvironment<'_, B>,
     model: LanguageTrainModel<B>,
-    optimizer: OptimizerAdaptor<AdamW, LanguageTrainModel<B>, B>,
+    optimizer: O,
     scheduler: S,
     collective: burn_collective::CollectiveConfig,
     peer_id: PeerId,
@@ -1399,6 +1464,7 @@ fn train_with_collective_scheduler<B, S>(
 where
     B: AutodiffBackend + Clone + 'static,
     B::Device: Clone,
+    O: Optimizer<LanguageTrainModel<B>, B> + 'static,
     S: LrScheduler + 'static,
 {
     let _session = CollectiveSessionGuard::<B::InnerBackend>::register(
@@ -1423,7 +1489,7 @@ where
     let mut learner = burn_train::Learner::new(model, optimizer, scheduler);
     if let Some(checkpoint) = env.resume_checkpoint_epoch {
         learner =
-            load_process_group_checkpoint::<B, S>(env.run_dir, checkpoint, env.device, learner)?;
+            load_process_group_checkpoint::<B, O, S>(env.run_dir, checkpoint, env.device, learner)?;
     }
     let start_epoch = env
         .resume_checkpoint_epoch
@@ -1544,10 +1610,10 @@ where
         }
 
         if env.parallel_runtime.is_primary() {
-            if let Some(valid_loss) = run_process_group_validation(env, &learner) {
+            if let Some(valid_loss) = run_process_group_validation::<B, O, S>(env, &learner) {
                 info!("valid epoch={} loss={valid_loss:.4}", epoch);
             }
-            save_process_group_checkpoint::<B, S>(env.run_dir, epoch, &learner)?;
+            save_process_group_checkpoint::<B, O, S>(env.run_dir, epoch, &learner)?;
         }
     }
 
@@ -1555,19 +1621,20 @@ where
 }
 
 #[cfg(feature = "ddp")]
-fn train_with_process_group_scheduler<B, S>(
+fn train_with_process_group_scheduler<B, O, S>(
     env: &TrainEnvironment<'_, B>,
     model: LanguageTrainModel<B>,
-    optimizer: OptimizerAdaptor<AdamW, LanguageTrainModel<B>, B>,
+    optimizer: O,
     scheduler: S,
 ) -> Result<BDH<ValidBackend<B>>>
 where
     B: AutodiffBackend + Clone + 'static,
     B::Device: Clone,
+    O: Optimizer<LanguageTrainModel<B>, B> + 'static,
     S: LrScheduler + 'static,
 {
     let collective = resolve_collective_config(env.parallel_runtime, env.parallel_config)?;
-    train_with_collective_scheduler(
+    train_with_collective_scheduler::<B, O, S>(
         env,
         model,
         optimizer,
@@ -1933,7 +2000,7 @@ mod tests {
             max_iters: 2,
             checkpoint_interval_iters: 2000,
             log_frequency: 1,
-            fast_train: false,
+            launch_mode: burn_dragon_train::train::pipeline::TrainingLaunchMode::Fresh,
             resume_run_dir: None,
             resume_checkpoint_epoch: None,
             init_checkpoint_path: None,
@@ -2012,6 +2079,89 @@ mod tests {
     #[cfg(feature = "ddp")]
     fn l2_norm(values: &[f32]) -> f32 {
         values.iter().map(|value| value * value).sum::<f32>().sqrt()
+    }
+
+    #[cfg(feature = "ddp")]
+    fn stage_split_surrogate_gradients(
+        split_model: LanguageTrainModel<TestBackend>,
+        plan: &PipelinePlan,
+        batch: SequenceBatch<TestBackend>,
+    ) -> Vec<f32> {
+        let [batch_size, _] = batch.inputs.shape().dims();
+        let ranges = split_microbatch_ranges(batch_size, plan.microbatches).expect("ranges");
+        let chunk_inputs = ranges
+            .iter()
+            .cloned()
+            .map(|range| slice_batch_int(batch.inputs.clone(), range))
+            .collect::<Vec<_>>();
+        let chunk_targets = ranges
+            .iter()
+            .cloned()
+            .map(|range| slice_batch_int(batch.targets.clone(), range))
+            .collect::<Vec<_>>();
+        let chunk_masks = ranges
+            .iter()
+            .cloned()
+            .map(|range| {
+                batch
+                    .summary_event_mask
+                    .clone()
+                    .map(|mask| slice_batch_int(mask, range))
+            })
+            .collect::<Vec<_>>();
+        let mut chunk_states = (0..plan.microbatches)
+            .map(|_| split_model.model.init_state())
+            .collect::<Vec<_>>();
+        let mut accumulator = GradientsAccumulator::new();
+        let last_virtual_stage_id = plan.total_virtual_stages.saturating_sub(1);
+
+        for microbatch_id in 0..plan.microbatches {
+            let stage0_output = split_model
+                .model
+                .forward_language_pipeline_stage_with_state(
+                    split_model
+                        .model
+                        .begin_language_pipeline(chunk_inputs[microbatch_id].clone()),
+                    &mut chunk_states[microbatch_id],
+                    plan.assignment(0).layer_range.clone(),
+                    chunk_masks[microbatch_id].clone(),
+                );
+            let stage1_input = attach_pipeline_state_require_grad::<TestBackend>(
+                detach_pipeline_state_to_inner(&stage0_output),
+            );
+            let stage1_input_for_grad = stage1_input.clone();
+            let stage1_output = split_model
+                .model
+                .forward_language_pipeline_stage_with_state(
+                    stage1_input,
+                    &mut chunk_states[microbatch_id],
+                    plan.assignment(last_virtual_stage_id).layer_range.clone(),
+                    chunk_masks[microbatch_id].clone(),
+                );
+            let (_hidden, logits) = split_model.model.finish_language_pipeline_with_state(
+                stage1_output,
+                &mut chunk_states[microbatch_id],
+            );
+            let weight = ranges[microbatch_id].len() as f32 / batch_size as f32;
+            let loss =
+                language_model_loss::<TestBackend>(logits, chunk_targets[microbatch_id].clone())
+                    .mul_scalar(weight);
+            let mut stage1_grads = loss.backward();
+            let grad_to_stage0 =
+                pipeline_input_grad_state(&stage1_input_for_grad, &mut stage1_grads);
+            accumulator.accumulate(
+                &split_model,
+                GradientsParams::from_grads(stage1_grads, &split_model),
+            );
+
+            let stage0_surrogate = pipeline_surrogate_loss(&stage0_output, grad_to_stage0);
+            accumulator.accumulate(
+                &split_model,
+                GradientsParams::from_grads(stage0_surrogate.backward(), &split_model),
+            );
+        }
+
+        flatten_gradients_in_module_order::<TestBackend, _>(&split_model, accumulator.grads())
     }
 
     #[cfg(feature = "ddp")]
@@ -2542,72 +2692,7 @@ mod tests {
             &reference_model,
             burn_train::TrainStep::step(&reference_model, batch.clone()).grads,
         );
-
-        let [batch_size, _] = batch.inputs.shape().dims();
-        let ranges = split_microbatch_ranges(batch_size, plan.microbatches).expect("ranges");
-        let chunk_inputs = ranges
-            .iter()
-            .cloned()
-            .map(|range| slice_batch_int(batch.inputs.clone(), range))
-            .collect::<Vec<_>>();
-        let chunk_targets = ranges
-            .iter()
-            .cloned()
-            .map(|range| slice_batch_int(batch.targets.clone(), range))
-            .collect::<Vec<_>>();
-        let mut chunk_states = (0..plan.microbatches)
-            .map(|_| split_model.model.init_state())
-            .collect::<Vec<_>>();
-        let mut accumulator = GradientsAccumulator::new();
-
-        for microbatch_id in 0..plan.microbatches {
-            let stage0_output = split_model
-                .model
-                .forward_language_pipeline_stage_with_state(
-                    split_model
-                        .model
-                        .begin_language_pipeline(chunk_inputs[microbatch_id].clone()),
-                    &mut chunk_states[microbatch_id],
-                    plan.assignment(0).layer_range.clone(),
-                    None,
-                );
-            let stage1_input = attach_pipeline_state_require_grad::<TestBackend>(
-                detach_pipeline_state_to_inner(&stage0_output),
-            );
-            let stage1_input_for_grad = stage1_input.clone();
-            let stage1_output = split_model
-                .model
-                .forward_language_pipeline_stage_with_state(
-                    stage1_input,
-                    &mut chunk_states[microbatch_id],
-                    plan.assignment(1).layer_range.clone(),
-                    None,
-                );
-            let (_hidden, logits) = split_model.model.finish_language_pipeline_with_state(
-                stage1_output,
-                &mut chunk_states[microbatch_id],
-            );
-            let weight = ranges[microbatch_id].len() as f32 / batch_size as f32;
-            let loss =
-                language_model_loss::<TestBackend>(logits, chunk_targets[microbatch_id].clone())
-                    .mul_scalar(weight);
-            let mut stage1_grads = loss.backward();
-            let grad_to_stage0 =
-                pipeline_input_grad_state(&stage1_input_for_grad, &mut stage1_grads);
-            accumulator.accumulate(
-                &split_model,
-                GradientsParams::from_grads(stage1_grads, &split_model),
-            );
-
-            let stage0_surrogate = pipeline_surrogate_loss(&stage0_output, grad_to_stage0);
-            accumulator.accumulate(
-                &split_model,
-                GradientsParams::from_grads(stage0_surrogate.backward(), &split_model),
-            );
-        }
-
-        let split_grads =
-            flatten_gradients_in_module_order::<TestBackend, _>(&split_model, accumulator.grads());
+        let split_grads = stage_split_surrogate_gradients(split_model, &plan, batch);
         let mean_abs = mean_abs_diff(&reference_grads, &split_grads);
         let reference_norm = l2_norm(&reference_grads);
         let split_norm = l2_norm(&split_grads);
@@ -2619,6 +2704,72 @@ mod tests {
         assert!(
             (reference_norm - split_norm).abs() <= 1.0e-5,
             "split pipeline gradient norm drifted from reference: reference_norm={reference_norm} split_norm={split_norm}"
+        );
+    }
+
+    #[cfg(feature = "ddp")]
+    #[test]
+    fn pipeline_stage_surrogate_mean_across_replicas_matches_full_batch_gradients() {
+        let device = <TestBackend as BackendTrait>::Device::default();
+        let mut config = tiny_model_config();
+        config.n_layer = 2;
+        let pipeline = burn_dragon_train::ParallelPipelineConfig {
+            enabled: true,
+            stage_count: 2,
+            virtual_stages_per_rank: 1,
+            schedule: burn_dragon_train::PipelineScheduleKind::Interleaved1f1b,
+            microbatches: 2,
+            ..Default::default()
+        };
+        let plan = build_pipeline_plan(config.n_layer, &pipeline).expect("plan");
+        let reference_model =
+            LanguageTrainModel::new(BDH::<TestBackend>::new(config.clone(), &device))
+                .with_pipeline_plan(Some(plan.clone()));
+
+        let replica_a = make_batch::<TestBackend>(
+            &device,
+            &[0, 1, 2, 3, 4, 5, 6, 7],
+            &[1, 2, 3, 4, 5, 6, 7, 0],
+            [2, 4],
+        );
+        let replica_b = make_batch::<TestBackend>(
+            &device,
+            &[7, 6, 5, 4, 3, 2, 1, 0],
+            &[6, 5, 4, 3, 2, 1, 0, 7],
+            [2, 4],
+        );
+        let combined = make_batch::<TestBackend>(
+            &device,
+            &[0, 1, 2, 3, 4, 5, 6, 7, 7, 6, 5, 4, 3, 2, 1, 0],
+            &[1, 2, 3, 4, 5, 6, 7, 0, 6, 5, 4, 3, 2, 1, 0, 7],
+            [4, 4],
+        );
+
+        let combined_grads = flatten_gradients_in_module_order::<TestBackend, _>(
+            &reference_model,
+            burn_train::TrainStep::step(&reference_model, combined).grads,
+        );
+        let replica_a_grads =
+            stage_split_surrogate_gradients(reference_model.clone(), &plan, replica_a);
+        let replica_b_grads =
+            stage_split_surrogate_gradients(reference_model.clone(), &plan, replica_b);
+        let averaged_grads = replica_a_grads
+            .iter()
+            .zip(replica_b_grads.iter())
+            .map(|(lhs, rhs)| (lhs + rhs) * 0.5)
+            .collect::<Vec<_>>();
+
+        let mean_abs = mean_abs_diff(&combined_grads, &averaged_grads);
+        let combined_norm = l2_norm(&combined_grads);
+        let averaged_norm = l2_norm(&averaged_grads);
+
+        assert!(
+            mean_abs <= 1.0e-5,
+            "replica-averaged split pipeline gradients drifted from combined-batch reference: mean_abs_diff={mean_abs}"
+        );
+        assert!(
+            (combined_norm - averaged_norm).abs() <= 1.0e-5,
+            "replica-averaged split pipeline gradient norm drifted from combined-batch reference: combined_norm={combined_norm} averaged_norm={averaged_norm}"
         );
     }
 

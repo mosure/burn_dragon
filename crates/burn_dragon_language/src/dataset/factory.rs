@@ -171,6 +171,9 @@ pub fn build_dataset(
                 config,
                 training.block_size,
                 training.batch_size,
+                training
+                    .min_logical_block_size
+                    .map(|value| value.max(training.block_size)),
                 &cfg.tokenizer,
             )
             .with_context(|| {

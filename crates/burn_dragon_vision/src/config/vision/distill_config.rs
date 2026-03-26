@@ -5,7 +5,10 @@ use serde::{Deserialize, Serialize};
 use crate::loss::VisionDistillationLossConfig;
 use burn_dragon_train::VisionTeacherVariant;
 
-use super::{VisionLejepaConfig, VisionMaeConfig, VisionSaccadeConfig, VisionVideoLejepaConfig};
+use super::{
+    VisionLejepaConfig, VisionMaeConfig, VisionRacConfig, VisionSaccadeConfig,
+    VisionVideoLejepaConfig,
+};
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -13,6 +16,7 @@ pub enum VisionTrainingModeConfig {
     Distill(VisionDistillConfig),
     Lejepa(VisionLejepaConfig),
     VideoLejepa(VisionVideoLejepaConfig),
+    Rac(Box<VisionRacConfig>),
     Mae(VisionMaeConfig),
     Saccade(Box<VisionSaccadeConfig>),
 }

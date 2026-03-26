@@ -24,7 +24,32 @@ where
         merge_values(&mut value, overlay);
     }
 
+    reject_removed_training_fast_train(&value)?;
     value.try_into::<T>().map_err(|err| anyhow!(err))
+}
+
+fn reject_removed_training_fast_train(value: &Value) -> Result<()> {
+    match value {
+        Value::Table(table) => {
+            if let Some(Value::Table(training)) = table.get("training")
+                && training.contains_key("fast_train")
+            {
+                return Err(anyhow!(
+                    "training.fast_train has been removed from the language config schema; use training.launch_mode and training.sequence_kernel_override explicitly"
+                ));
+            }
+            for child in table.values() {
+                reject_removed_training_fast_train(child)?;
+            }
+        }
+        Value::Array(values) => {
+            for child in values {
+                reject_removed_training_fast_train(child)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 fn load_value(path: &Path) -> Result<Value> {

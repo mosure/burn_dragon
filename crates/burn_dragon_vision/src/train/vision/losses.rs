@@ -604,6 +604,7 @@ pub(crate) fn build_lejepa_artifacts<B: BackendTrait>(
         views: Some(views_tensor),
         frames,
         debug_recon_frames: None,
+        aux_frames: None,
         patch_norms,
         pca_rgb,
         posterior_patch_norms_steps: None,
@@ -615,6 +616,7 @@ pub(crate) fn build_lejepa_artifacts<B: BackendTrait>(
         probe_logits,
         labels,
         legend,
+        sidecar_json: None,
         artifact_scale: 1,
         prediction_start: None,
     })

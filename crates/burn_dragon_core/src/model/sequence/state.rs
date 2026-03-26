@@ -4,11 +4,6 @@ use burn::tensor::backend::Backend;
 use crate::model::state::LayerState;
 
 #[derive(Debug, Clone)]
-pub struct LinearAttentionState<B: Backend> {
-    pub rho: Option<Tensor<B, 4>>,
-}
-
-#[derive(Debug, Clone)]
 pub struct Rwkv8State<B: Backend> {
     pub rho: Option<Tensor<B, 4>>,
     pub rho_norm: Tensor<B, 3>,
@@ -18,49 +13,6 @@ pub struct Rwkv8State<B: Backend> {
 pub struct MambaState<B: Backend> {
     pub ssm: Tensor<B, 4>,
     pub conv: Tensor<B, 4>,
-}
-
-pub fn linear_attention_state<B: Backend>(layer_state: &LayerState<B>) -> LinearAttentionState<B> {
-    LinearAttentionState {
-        rho: layer_state.rho.as_ref().cloned(),
-    }
-}
-
-pub fn write_linear_attention_state<B: Backend>(
-    layer_state: &mut LayerState<B>,
-    rho: Tensor<B, 4>,
-) {
-    layer_state.rho = Some(rho);
-    layer_state.rho_norm = None;
-    layer_state.sequence_aux = None;
-}
-
-pub fn rwkv8_state<B: Backend>(
-    layer_state: &LayerState<B>,
-    batch: usize,
-    heads: usize,
-    latent: usize,
-    device: &B::Device,
-) -> Rwkv8State<B> {
-    let rho_norm = match layer_state.rho_norm.as_ref() {
-        Some(state) if state.shape().dims::<3>() == [batch, heads, latent] => state.clone(),
-        _ => Tensor::<B, 3>::zeros([batch, heads, latent], device),
-    };
-
-    Rwkv8State {
-        rho: layer_state.rho.as_ref().cloned(),
-        rho_norm,
-    }
-}
-
-pub fn write_rwkv8_state<B: Backend>(
-    layer_state: &mut LayerState<B>,
-    rho: Tensor<B, 4>,
-    rho_norm: Tensor<B, 3>,
-) {
-    layer_state.rho = Some(rho);
-    layer_state.rho_norm = Some(rho_norm);
-    layer_state.sequence_aux = None;
 }
 
 pub fn mamba_state<B: Backend>(
@@ -88,6 +40,8 @@ pub fn write_mamba_state<B: Backend>(
     conv: Tensor<B, 4>,
 ) {
     layer_state.rho = Some(ssm);
+    layer_state.packed_rho_int8 = None;
+    layer_state.packed_rho_int8_device = None;
     layer_state.rho_norm = None;
     layer_state.sequence_aux = Some(conv);
 }

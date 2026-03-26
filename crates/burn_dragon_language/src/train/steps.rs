@@ -283,11 +283,16 @@ impl<B: AutodiffBackend> TrainStep for LanguageTrainModel<B> {
     fn step(&self, batch: SequenceBatch<B>) -> TrainOutput<LanguageModelTrainItem<B>> {
         let prof_enabled = crate::train::profile::enabled();
         let detail_prof_enabled = crate::train::profile::detail_enabled();
+        let memory_prof_enabled = prof_enabled && crate::train::profile::memory_enabled();
         let forward_start = prof_enabled.then(Instant::now);
         let inputs = batch.inputs;
         let targets = batch.targets;
         let summary_event_mask = batch.summary_event_mask;
         let reset_stream_state = batch.reset_stream_state;
+        let step_device = memory_prof_enabled.then(|| inputs.device());
+        let step_memory_before = step_device
+            .as_ref()
+            .and_then(|device| device_memory_usage_safe::<B>(device));
         let [_batch_size, block_size] = inputs.shape().dims();
         let tbptt_chunk_size = self.effective_tbptt_chunk_size(block_size);
         let probe_inputs = detail_prof_enabled.then(|| inputs.clone());
@@ -342,14 +347,82 @@ impl<B: AutodiffBackend> TrainStep for LanguageTrainModel<B> {
                 let loss = language_model_loss::<B>(logits.clone(), targets.clone());
                 (loss, Some(hidden), Some(logits), total_forward_ns)
             } else {
-                let (loss, total_forward_ns) = self.forward_loss_with_tbptt(
-                    inputs,
-                    targets.clone(),
-                    summary_event_mask,
-                    chunk_size,
-                    &mut step_state,
-                );
-                (loss, None, None, total_forward_ns)
+                let [batch_size, block_size] = inputs.shape().dims();
+                let mut total_forward_ns = 0u128;
+                let mut total_backward_ns = 0u128;
+                let mut total_loss: Option<Tensor<B, 1>> = None;
+                let mut accumulator = GradientsAccumulator::new();
+
+                for start in (0..block_size).step_by(chunk_size) {
+                    let end = (start + chunk_size).min(block_size);
+                    let chunk_inputs = Self::slice_tokens(inputs.clone(), batch_size, start, end);
+                    let chunk_targets = Self::slice_tokens(targets.clone(), batch_size, start, end);
+                    let chunk_summary_event_mask = summary_event_mask
+                        .clone()
+                        .map(|mask| Self::slice_tokens(mask, batch_size, start, end));
+
+                    let chunk_forward_start = Instant::now();
+                    let logits = if let Some(mask) = chunk_summary_event_mask {
+                        self.model.forward_with_state_and_summary_event_mask(
+                            chunk_inputs,
+                            mask,
+                            &mut step_state,
+                        )
+                    } else {
+                        self.model.forward_with_state(chunk_inputs, &mut step_state)
+                    };
+                    total_forward_ns += chunk_forward_start.elapsed().as_nanos();
+
+                    let chunk_weight = (end - start) as f32 / block_size as f32;
+                    let chunk_loss =
+                        language_model_loss::<B>(logits, chunk_targets).mul_scalar(chunk_weight);
+                    total_loss = Some(match total_loss {
+                        Some(accumulated) => accumulated + chunk_loss.clone().detach(),
+                        None => chunk_loss.clone().detach(),
+                    });
+
+                    let chunk_backward_start = Instant::now();
+                    let chunk_grads = chunk_loss.backward();
+                    total_backward_ns += chunk_backward_start.elapsed().as_nanos();
+                    accumulator.accumulate(self, GradientsParams::from_grads(chunk_grads, self));
+
+                    if end < block_size {
+                        step_state.detach_in_place();
+                    }
+                }
+
+                self.store_step_state(step_state);
+
+                let step_memory_after_forward = step_device
+                    .as_ref()
+                    .and_then(|device| device_memory_usage_safe::<B>(device));
+                if prof_enabled {
+                    crate::train::profile::record_train_step(total_forward_ns, total_backward_ns);
+                    if let (Some(before), Some(after_forward), Some(device)) = (
+                        step_memory_before,
+                        step_memory_after_forward,
+                        step_device.as_ref(),
+                    ) {
+                        let after_backward =
+                            device_memory_usage_safe::<B>(device).unwrap_or(after_forward);
+                        crate::train::profile::record_train_step_memory(
+                            before.reserved_bytes,
+                            before.in_use_bytes,
+                            after_forward.reserved_bytes,
+                            after_forward.in_use_bytes,
+                            after_backward.reserved_bytes,
+                            after_backward.in_use_bytes,
+                        );
+                    }
+                }
+
+                return TrainOutput {
+                    grads: accumulator.grads(),
+                    item: LanguageModelTrainItem::new(
+                        total_loss
+                            .expect("tbptt train step should produce at least one loss chunk"),
+                    ),
+                };
             }
         } else if detail_prof_enabled {
             if let Some(summary_event_mask) = summary_event_mask {
@@ -392,6 +465,9 @@ impl<B: AutodiffBackend> TrainStep for LanguageTrainModel<B> {
             (loss, None, Some(logits), forward_ns)
         };
         self.store_step_state(step_state);
+        let step_memory_after_forward = step_device
+            .as_ref()
+            .and_then(|device| device_memory_usage_safe::<B>(device));
 
         let probe_targets = (prof_enabled && detail_prof_enabled).then(|| targets.clone());
         let probe_logits = (prof_enabled && detail_prof_enabled)
@@ -406,6 +482,21 @@ impl<B: AutodiffBackend> TrainStep for LanguageTrainModel<B> {
 
         if prof_enabled {
             crate::train::profile::record_train_step(forward_ns, loss_backward_ns);
+            if let (Some(before), Some(after_forward), Some(device)) = (
+                step_memory_before,
+                step_memory_after_forward,
+                step_device.as_ref(),
+            ) {
+                let after_backward = device_memory_usage_safe::<B>(device).unwrap_or(after_forward);
+                crate::train::profile::record_train_step_memory(
+                    before.reserved_bytes,
+                    before.in_use_bytes,
+                    after_forward.reserved_bytes,
+                    after_forward.in_use_bytes,
+                    after_backward.reserved_bytes,
+                    after_backward.in_use_bytes,
+                );
+            }
             if detail_prof_enabled {
                 let mut embed_probe_ns = 0;
                 let mut first_layer_forward_probe_ns = 0;
@@ -535,7 +626,10 @@ impl<B: AutodiffBackend> TrainStep for LanguageTrainModel<B> {
             }
         }
 
-        TrainOutput::new(self, grads, LanguageModelTrainItem::new(loss))
+        TrainOutput {
+            grads: GradientsParams::from_grads(grads, self),
+            item: LanguageModelTrainItem::new(loss),
+        }
     }
 }
 
@@ -583,9 +677,6 @@ impl<B: BackendTrait> ValidStep for LanguageTrainModel<B> {
                 return LanguageModelOutput::new(
                     loss.expect("tbptt valid step should produce at least one loss chunk"),
                 );
-            } else if fast_train_enabled() {
-                self.model
-                    .forward_fast_with_summary_event_mask(batch.inputs, summary_event_mask)
             } else {
                 self.model
                     .forward_with_summary_event_mask(batch.inputs, summary_event_mask)
@@ -613,8 +704,6 @@ impl<B: BackendTrait> ValidStep for LanguageTrainModel<B> {
             return LanguageModelOutput::new(
                 loss.expect("tbptt valid step should produce at least one loss chunk"),
             );
-        } else if fast_train_enabled() {
-            self.model.forward_fast(batch.inputs)
         } else {
             self.model.forward(batch.inputs)
         };
@@ -628,6 +717,11 @@ mod tests {
     use super::*;
     use burn::tensor::TensorData;
     use burn_autodiff::Autodiff;
+    use burn_dragon_core::{
+        BitNetLowBitProtocol, LowBitActivationFormat, LowBitQuantizationConfig,
+        LowBitSavedActivationConfig, LowBitSavedActivationMode, LowBitTargetModule,
+        LowBitTrainingMode, LowBitWeightFormat,
+    };
     use burn_ndarray::NdArray;
 
     type TestBackend = Autodiff<NdArray<f32>>;
@@ -656,6 +750,36 @@ mod tests {
             vocab_size: 16,
             ..Default::default()
         }
+    }
+
+    fn tiny_low_bit_model_config() -> BDHConfig {
+        BDHConfig {
+            quant: LowBitQuantizationConfig {
+                enable: true,
+                protocol: BitNetLowBitProtocol::BitnetB158,
+                weight_format: LowBitWeightFormat::Ternary158,
+                act_format: LowBitActivationFormat::Int8,
+                target_modules: vec![LowBitTargetModule::Encoder, LowBitTargetModule::DecoderY],
+                decoder_x_mode: LowBitWeightFormat::Fp16,
+                ..Default::default()
+            },
+            ..tiny_model_config()
+        }
+    }
+
+    fn tiny_low_bit_train_kernel_model_config() -> BDHConfig {
+        let mut config = tiny_low_bit_model_config();
+        config.quant.training_mode = LowBitTrainingMode::TrainKernelExp;
+        config
+    }
+
+    fn tiny_low_bit_train_kernel_saved_activation_model_config() -> BDHConfig {
+        let mut config = tiny_low_bit_train_kernel_model_config();
+        config.quant.saved_activations = LowBitSavedActivationConfig {
+            mode: LowBitSavedActivationMode::QuantizedCacheRecomputeExp,
+            format: LowBitActivationFormat::Int8,
+        };
+        config
     }
 
     fn pipeline_plan_for_tiny_model() -> PipelinePlan {
@@ -757,6 +881,75 @@ mod tests {
         let synced = output.item.sync();
         let loss = loss_scalar(synced);
         assert!(loss.is_finite(), "pipeline train loss must be finite");
+    }
+
+    #[test]
+    fn low_bit_partial_safe_train_step_runs_and_emits_finite_loss() {
+        let device = <TestBackend as BackendTrait>::Device::default();
+        let model = LanguageTrainModel::new(BDH::<TestBackend>::new(
+            tiny_low_bit_model_config(),
+            &device,
+        ))
+        .with_tbptt_chunk_size(Some(2));
+        let batch = make_batch::<TestBackend>(
+            &device,
+            &[0, 1, 2, 3, 7, 6, 5, 4],
+            &[1, 2, 3, 4, 6, 5, 4, 3],
+            [2, 4],
+        );
+
+        let output = TrainStep::step(&model, batch);
+        let synced = output.item.sync();
+        let loss = loss_scalar(synced);
+        assert!(
+            loss.is_finite(),
+            "low-bit partial-safe train loss must be finite"
+        );
+    }
+
+    #[test]
+    fn low_bit_train_kernel_train_step_runs_and_emits_finite_loss() {
+        let device = <TestBackend as BackendTrait>::Device::default();
+        let model = LanguageTrainModel::new(BDH::<TestBackend>::new(
+            tiny_low_bit_train_kernel_model_config(),
+            &device,
+        ))
+        .with_tbptt_chunk_size(Some(2));
+        let batch = make_batch::<TestBackend>(
+            &device,
+            &[0, 1, 2, 3, 7, 6, 5, 4],
+            &[1, 2, 3, 4, 6, 5, 4, 3],
+            [2, 4],
+        );
+
+        let output = TrainStep::step(&model, batch);
+        let synced = output.item.sync();
+        let loss = loss_scalar(synced);
+        assert!(loss.is_finite(), "low-bit train-kernel loss must be finite");
+    }
+
+    #[test]
+    fn low_bit_train_kernel_saved_activation_recompute_train_step_runs_and_emits_finite_loss() {
+        let device = <TestBackend as BackendTrait>::Device::default();
+        let model = LanguageTrainModel::new(BDH::<TestBackend>::new(
+            tiny_low_bit_train_kernel_saved_activation_model_config(),
+            &device,
+        ))
+        .with_tbptt_chunk_size(Some(2));
+        let batch = make_batch::<TestBackend>(
+            &device,
+            &[0, 1, 2, 3, 7, 6, 5, 4],
+            &[1, 2, 3, 4, 6, 5, 4, 3],
+            [2, 4],
+        );
+
+        let output = TrainStep::step(&model, batch);
+        let synced = output.item.sync();
+        let loss = loss_scalar(synced);
+        assert!(
+            loss.is_finite(),
+            "low-bit train-kernel saved-activation recompute loss must be finite"
+        );
     }
 
     #[test]

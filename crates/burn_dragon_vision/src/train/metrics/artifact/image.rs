@@ -214,11 +214,538 @@ impl<B: BackendTrait> VisionArtifactMetric<B> {
         })
     }
 
+    fn stack_temporal_rows(&self, rows: &[ArtifactFrame]) -> Option<ArtifactFrame> {
+        let first = rows.first()?;
+        if rows
+            .iter()
+            .any(|row| row.width != first.width || row.height != first.height)
+        {
+            return None;
+        }
+        let width = first.width;
+        let row_height = first.height;
+        let separator = 1usize;
+        let height = rows.len().saturating_mul(row_height)
+            + rows.len().saturating_sub(1).saturating_mul(separator);
+        let mut canvas = vec![0u8; width.saturating_mul(height).saturating_mul(3)];
+        for (row_idx, row) in rows.iter().enumerate() {
+            let dst_y = row_idx.saturating_mul(row_height + separator);
+            for y in 0..row_height {
+                let dst_offset = (dst_y + y).saturating_mul(width).saturating_mul(3);
+                let src_offset = y.saturating_mul(width).saturating_mul(3);
+                canvas[dst_offset..dst_offset + width * 3]
+                    .copy_from_slice(&row.rgb[src_offset..src_offset + width * 3]);
+            }
+            if row_idx + 1 < rows.len() {
+                let sep_y = dst_y + row_height;
+                for x in 0..width {
+                    let offset = (sep_y * width + x) * 3;
+                    canvas[offset] = 24;
+                    canvas[offset + 1] = 24;
+                    canvas[offset + 2] = 24;
+                }
+            }
+        }
+
+        Some(ArtifactFrame {
+            width,
+            height,
+            rgb: canvas,
+        })
+    }
+
     pub(super) fn update_image_artifacts(
         &mut self,
         item: &VisionArtifactInput<B>,
+        epoch: usize,
         iteration: usize,
     ) -> SerializedEntry {
+        if let Some(frames_tensor) = &item.frames {
+            let [batch, frame_count, channels, height, width] = frames_tensor.shape().dims::<5>();
+            if batch > 0 && frame_count > 0 && channels > 0 && height > 0 && width > 0 {
+                let artifact_scale = item.artifact_scale.max(1);
+                let debug_recon_vec = if let Some(debug_frames) = &item.debug_recon_frames {
+                    let dims = debug_frames.shape().dims::<5>();
+                    let expected = batch
+                        .saturating_mul(frame_count)
+                        .saturating_mul(channels)
+                        .saturating_mul(height)
+                        .saturating_mul(width);
+                    if dims == [batch, frame_count, channels, height, width] {
+                        match debug_frames.to_data().convert::<f32>().into_vec::<f32>() {
+                            Ok(vec) if vec.len() >= expected => Some(vec),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                let aux_frames_vec = if let Some(aux_frames) = &item.aux_frames {
+                    let dims = aux_frames.shape().dims::<5>();
+                    let expected = batch
+                        .saturating_mul(frame_count)
+                        .saturating_mul(channels)
+                        .saturating_mul(height)
+                        .saturating_mul(width);
+                    if dims == [batch, frame_count, channels, height, width] {
+                        match aux_frames.to_data().convert::<f32>().into_vec::<f32>() {
+                            Ok(vec) if vec.len() >= expected => Some(vec),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                let patch_steps_dims = item
+                    .patch_norms_steps
+                    .as_ref()
+                    .map(|maps| maps.shape().dims::<4>());
+                let posterior_patch_steps_dims = item
+                    .posterior_patch_norms_steps
+                    .as_ref()
+                    .map(|maps| maps.shape().dims::<4>());
+                let patch_steps_vec = if let Some(maps) = &item.patch_norms_steps {
+                    match maps.to_data().convert::<f32>().into_vec::<f32>() {
+                        Ok(vec) => Some(vec),
+                        Err(_) => {
+                            return serialized_entry(
+                                "patch_steps_copy_failed".to_string(),
+                                "0".to_string(),
+                            );
+                        }
+                    }
+                } else {
+                    None
+                };
+                let posterior_patch_steps_vec =
+                    if let Some(maps) = &item.posterior_patch_norms_steps {
+                        match maps.to_data().convert::<f32>().into_vec::<f32>() {
+                            Ok(vec) => Some(vec),
+                            Err(_) => {
+                                return serialized_entry(
+                                    "posterior_patch_steps_copy_failed".to_string(),
+                                    "0".to_string(),
+                                );
+                            }
+                        }
+                    } else {
+                        None
+                    };
+                let pca_steps_dims = item
+                    .pca_rgb_steps
+                    .as_ref()
+                    .map(|maps| maps.shape().dims::<5>());
+                let posterior_pca_steps_dims = item
+                    .posterior_pca_rgb_steps
+                    .as_ref()
+                    .map(|maps| maps.shape().dims::<5>());
+                let pca_steps_vec = if let Some(maps) = &item.pca_rgb_steps {
+                    match maps.to_data().convert::<f32>().into_vec::<f32>() {
+                        Ok(vec) => Some(vec),
+                        Err(_) => {
+                            return serialized_entry(
+                                "pca_steps_copy_failed".to_string(),
+                                "0".to_string(),
+                            );
+                        }
+                    }
+                } else {
+                    None
+                };
+                let posterior_pca_steps_vec = if let Some(maps) = &item.posterior_pca_rgb_steps {
+                    match maps.to_data().convert::<f32>().into_vec::<f32>() {
+                        Ok(vec) => Some(vec),
+                        Err(_) => {
+                            return serialized_entry(
+                                "posterior_pca_steps_copy_failed".to_string(),
+                                "0".to_string(),
+                            );
+                        }
+                    }
+                } else {
+                    None
+                };
+                let debug_patch_steps_dims = item
+                    .debug_patch_norms_steps
+                    .as_ref()
+                    .map(|maps| maps.shape().dims::<4>());
+                let debug_patch_steps_vec = if let Some(maps) = &item.debug_patch_norms_steps {
+                    match maps.to_data().convert::<f32>().into_vec::<f32>() {
+                        Ok(vec) => Some(vec),
+                        Err(_) => {
+                            return serialized_entry(
+                                "debug_patch_steps_copy_failed".to_string(),
+                                "0".to_string(),
+                            );
+                        }
+                    }
+                } else {
+                    None
+                };
+                let debug_pca_steps_dims = item
+                    .debug_pca_rgb_steps
+                    .as_ref()
+                    .map(|maps| maps.shape().dims::<5>());
+                let debug_pca_steps_vec = if let Some(maps) = &item.debug_pca_rgb_steps {
+                    match maps.to_data().convert::<f32>().into_vec::<f32>() {
+                        Ok(vec) => Some(vec),
+                        Err(_) => {
+                            return serialized_entry(
+                                "debug_pca_steps_copy_failed".to_string(),
+                                "0".to_string(),
+                            );
+                        }
+                    }
+                } else {
+                    None
+                };
+
+                let patch_meta =
+                    if let (Some([norm_batch, patch_frames, grid_h, grid_w]), Some(vec)) =
+                        (patch_steps_dims, patch_steps_vec.as_ref())
+                    {
+                        let expected = norm_batch
+                            .saturating_mul(patch_frames)
+                            .saturating_mul(grid_h)
+                            .saturating_mul(grid_w);
+                        if norm_batch == batch
+                            && patch_frames == frame_count
+                            && grid_h > 0
+                            && grid_w > 0
+                            && vec.len() >= expected
+                        {
+                            Some((grid_h, grid_w))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                let posterior_patch_meta =
+                    if let (Some([norm_batch, patch_frames, grid_h, grid_w]), Some(vec)) = (
+                        posterior_patch_steps_dims,
+                        posterior_patch_steps_vec.as_ref(),
+                    ) {
+                        let expected = norm_batch
+                            .saturating_mul(patch_frames)
+                            .saturating_mul(grid_h)
+                            .saturating_mul(grid_w);
+                        if norm_batch == batch
+                            && patch_frames == frame_count
+                            && grid_h > 0
+                            && grid_w > 0
+                            && vec.len() >= expected
+                        {
+                            Some((grid_h, grid_w))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                let pca_meta = if let (
+                    Some([pca_batch, pca_frames, pca_channels, grid_h, grid_w]),
+                    Some(vec),
+                ) = (pca_steps_dims, pca_steps_vec.as_ref())
+                {
+                    let expected = pca_batch
+                        .saturating_mul(pca_frames)
+                        .saturating_mul(pca_channels)
+                        .saturating_mul(grid_h)
+                        .saturating_mul(grid_w);
+                    if pca_batch == batch
+                        && pca_frames == frame_count
+                        && pca_channels >= 3
+                        && grid_h > 0
+                        && grid_w > 0
+                        && vec.len() >= expected
+                    {
+                        Some((grid_h, grid_w, pca_channels))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                let posterior_pca_meta = if let (
+                    Some([pca_batch, pca_frames, pca_channels, grid_h, grid_w]),
+                    Some(vec),
+                ) =
+                    (posterior_pca_steps_dims, posterior_pca_steps_vec.as_ref())
+                {
+                    let expected = pca_batch
+                        .saturating_mul(pca_frames)
+                        .saturating_mul(pca_channels)
+                        .saturating_mul(grid_h)
+                        .saturating_mul(grid_w);
+                    if pca_batch == batch
+                        && pca_frames == frame_count
+                        && pca_channels >= 3
+                        && grid_h > 0
+                        && grid_w > 0
+                        && vec.len() >= expected
+                    {
+                        Some((grid_h, grid_w, pca_channels))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                let debug_patch_meta =
+                    if let (Some([norm_batch, patch_frames, grid_h, grid_w]), Some(vec)) =
+                        (debug_patch_steps_dims, debug_patch_steps_vec.as_ref())
+                    {
+                        let expected = norm_batch
+                            .saturating_mul(patch_frames)
+                            .saturating_mul(grid_h)
+                            .saturating_mul(grid_w);
+                        if norm_batch == batch
+                            && patch_frames == frame_count
+                            && grid_h > 0
+                            && grid_w > 0
+                            && vec.len() >= expected
+                        {
+                            Some((grid_h, grid_w))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                let debug_pca_meta = if let (
+                    Some([pca_batch, pca_frames, pca_channels, grid_h, grid_w]),
+                    Some(vec),
+                ) = (debug_pca_steps_dims, debug_pca_steps_vec.as_ref())
+                {
+                    let expected = pca_batch
+                        .saturating_mul(pca_frames)
+                        .saturating_mul(pca_channels)
+                        .saturating_mul(grid_h)
+                        .saturating_mul(grid_w);
+                    if pca_batch == batch
+                        && pca_frames == frame_count
+                        && pca_channels >= 3
+                        && grid_h > 0
+                        && grid_w > 0
+                        && vec.len() >= expected
+                    {
+                        Some((grid_h, grid_w, pca_channels))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                let mut grid = patch_meta
+                    .or_else(|| pca_meta.map(|(h, w, _)| (h, w)))
+                    .or(posterior_patch_meta)
+                    .or_else(|| posterior_pca_meta.map(|(h, w, _)| (h, w)));
+                if grid.is_none() {
+                    grid = debug_patch_meta.or_else(|| debug_pca_meta.map(|(h, w, _)| (h, w)));
+                }
+                let pca_channels = pca_meta
+                    .map(|(_, _, channels)| channels)
+                    .or_else(|| posterior_pca_meta.map(|(_, _, channels)| channels))
+                    .or_else(|| debug_pca_meta.map(|(_, _, channels)| channels))
+                    .unwrap_or(0);
+                let grid = grid.and_then(|(grid_h, grid_w)| {
+                    let refs_match = patch_meta.is_none_or(|(h, w)| h == grid_h && w == grid_w)
+                        && posterior_patch_meta.is_none_or(|(h, w)| h == grid_h && w == grid_w)
+                        && pca_meta.is_none_or(|(h, w, _)| h == grid_h && w == grid_w)
+                        && posterior_pca_meta.is_none_or(|(h, w, _)| h == grid_h && w == grid_w)
+                        && debug_patch_meta.is_none_or(|(h, w)| h == grid_h && w == grid_w)
+                        && debug_pca_meta.is_none_or(|(h, w, _)| h == grid_h && w == grid_w);
+                    refs_match.then_some((grid_h, grid_w, pca_channels))
+                });
+
+                if let Some((grid_h, grid_w, pca_channels)) = grid {
+                    let mut notes = vec![format!(
+                        "Rows correspond to solver steps 0-{}, top to bottom.",
+                        frame_count.saturating_sub(1)
+                    )];
+                    if let Some(start) = item.prediction_start {
+                        if start > 0 {
+                            notes.push(format!(
+                                "Rows 0-{}: observed context; posterior columns show the post-merge state, while state columns show the refined recurrent state.",
+                                start.saturating_sub(1)
+                            ));
+                        }
+                        if frame_count > start {
+                            notes.push(format!(
+                                "Rows {}-{}: predictive future; posterior columns are not applicable, and state columns show open-loop recurrent rollout.",
+                                start,
+                                frame_count - 1
+                            ));
+                        }
+                    }
+                    if item.debug_recon_frames.is_some()
+                        && (item.debug_patch_norms_steps.is_some()
+                            || item.debug_pca_rgb_steps.is_some())
+                    {
+                        notes.push(
+                            "Final columns are encoder maps of the decoded clip, not direct latent-state maps."
+                                .to_string(),
+                        );
+                    }
+                    if let Some(legend) = item.legend.as_ref() {
+                        self.write_legend_with_notes(legend, &notes);
+                    }
+                    if let Some(sidecar_json) = item.sidecar_json.as_deref() {
+                        self.write_sidecar_json(sidecar_json, epoch, iteration);
+                    }
+                    let frames_vec =
+                        match frames_tensor.to_data().convert::<f32>().into_vec::<f32>() {
+                            Ok(vec) => vec,
+                            Err(_) => {
+                                return serialized_entry(
+                                    "frame_copy_failed".to_string(),
+                                    "0".to_string(),
+                                );
+                            }
+                        };
+                    let probe_preds =
+                        if let (Some(logits), Some(labels)) = (&item.probe_logits, &item.labels) {
+                            let preds = logits
+                                .clone()
+                                .argmax(1)
+                                .to_data()
+                                .convert::<i64>()
+                                .into_vec::<i64>()
+                                .ok();
+                            let labels = labels
+                                .clone()
+                                .to_data()
+                                .convert::<i64>()
+                                .into_vec::<i64>()
+                                .ok();
+                            preds.zip(labels)
+                        } else {
+                            None
+                        };
+                    if let Err(err) = fs::create_dir_all(&self.output_dir) {
+                        return serialized_entry(format!("mkdir_failed: {err}"), "0".to_string());
+                    }
+                    let mut saved = 0usize;
+                    let mut log_lines = Vec::new();
+                    let batch_limit = batch.min(self.remaining_images);
+                    let probe_slices = probe_preds
+                        .as_ref()
+                        .map(|(preds, labels)| (preds.as_slice(), labels.as_slice()));
+                    let debug_recon_frames_ref = debug_recon_vec.as_deref();
+                    let aux_frames_ref = aux_frames_vec.as_deref();
+                    let posterior_patch_steps_ref = posterior_patch_meta
+                        .is_some()
+                        .then(|| posterior_patch_steps_vec.as_deref())
+                        .flatten();
+                    let posterior_pca_steps_ref = posterior_pca_meta
+                        .is_some()
+                        .then(|| posterior_pca_steps_vec.as_deref())
+                        .flatten();
+                    let patch_steps_ref = patch_meta
+                        .is_some()
+                        .then(|| patch_steps_vec.as_deref())
+                        .flatten();
+                    let pca_steps_ref = pca_meta
+                        .is_some()
+                        .then(|| pca_steps_vec.as_deref())
+                        .flatten();
+                    let debug_patch_steps_ref = debug_patch_meta
+                        .is_some()
+                        .then(|| debug_patch_steps_vec.as_deref())
+                        .flatten();
+                    let debug_pca_steps_ref = debug_pca_meta
+                        .is_some()
+                        .then(|| debug_pca_steps_vec.as_deref())
+                        .flatten();
+                    for batch_idx in 0..batch_limit {
+                        let mut rows = Vec::with_capacity(frame_count);
+                        for frame_idx in 0..frame_count {
+                            if let Some(frame) = self.build_video_feature_frame(
+                                &frames_vec,
+                                debug_recon_frames_ref,
+                                aux_frames_ref,
+                                posterior_patch_steps_ref,
+                                posterior_pca_steps_ref,
+                                patch_steps_ref,
+                                pca_steps_ref,
+                                debug_patch_steps_ref,
+                                debug_pca_steps_ref,
+                                batch_idx,
+                                frame_idx,
+                                frame_count,
+                                channels,
+                                height,
+                                width,
+                                grid_h,
+                                grid_w,
+                                pca_channels,
+                                item.prediction_start,
+                                probe_slices,
+                            ) {
+                                rows.push(self.maybe_upscale_frame(frame, artifact_scale));
+                            }
+                        }
+                        let Some(sheet) = self.stack_temporal_rows(&rows) else {
+                            continue;
+                        };
+                        if let Some(image) =
+                            RgbImage::from_vec(sheet.width as u32, sheet.height as u32, sheet.rgb)
+                        {
+                            let filename = if self.overwrite {
+                                format!("sample_{:02}.png", batch_idx)
+                            } else if let Some((preds, labels)) = &probe_preds {
+                                let pred = preds.get(batch_idx).copied().unwrap_or(-1);
+                                let label = labels.get(batch_idx).copied().unwrap_or(-1);
+                                format!(
+                                    "epoch_{epoch:03}_iter_{iteration:06}_sample_{batch_idx:02}_pred_{pred}_label_{label}.png",
+                                )
+                            } else {
+                                format!(
+                                    "epoch_{epoch:03}_iter_{iteration:06}_sample_{batch_idx:02}.png"
+                                )
+                            };
+                            let path = self.output_dir.join(filename);
+                            if image.save(path).is_ok() {
+                                saved += 1;
+                            }
+                        }
+                        if let Some((preds, labels)) = &probe_preds {
+                            let pred = preds.get(batch_idx).copied().unwrap_or(-1);
+                            let label = labels.get(batch_idx).copied().unwrap_or(-1);
+                            let correct = if pred == label { "1" } else { "0" };
+                            log_lines.push(format!(
+                                "{},{},{},{},{}",
+                                iteration, batch_idx, pred, label, correct
+                            ));
+                        }
+                    }
+                    if !log_lines.is_empty() {
+                        let log_path = self.output_dir.join("vision_artifacts.log");
+                        let mut contents = String::new();
+                        contents.push_str("iteration,batch_idx,pred,label,correct\n");
+                        contents.push_str(&log_lines.join("\n"));
+                        if self.overwrite {
+                            let _ = fs::write(log_path, contents);
+                        } else if let Ok(mut file) = fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(log_path)
+                        {
+                            let _ = writeln!(file, "{contents}");
+                        }
+                    }
+                    self.remaining_images = self.remaining_images.saturating_sub(batch_limit);
+                    return serialized_entry(format!("saved={saved}"), saved.to_string());
+                }
+            }
+        }
+
         let Some(views) = &item.views else {
             return serialized_entry("no_views".to_string(), "0".to_string());
         };
@@ -227,6 +754,9 @@ impl<B: BackendTrait> VisionArtifactMetric<B> {
         }
         if let Some(legend) = item.legend.as_ref() {
             self.write_legend(legend);
+        }
+        if let Some(sidecar_json) = item.sidecar_json.as_deref() {
+            self.write_sidecar_json(sidecar_json, epoch, iteration);
         }
 
         let [batch, view_count, channels, height, width] = views.shape().dims::<5>();
@@ -349,11 +879,10 @@ impl<B: BackendTrait> VisionArtifactMetric<B> {
                     let pred = preds.get(batch_idx).copied().unwrap_or(-1);
                     let label = labels.get(batch_idx).copied().unwrap_or(-1);
                     format!(
-                        "lejepa_iter_{:06}_sample_{:02}_pred_{pred}_label_{label}.png",
-                        iteration, batch_idx
+                        "epoch_{epoch:03}_lejepa_iter_{iteration:06}_sample_{batch_idx:02}_pred_{pred}_label_{label}.png",
                     )
                 } else {
-                    format!("lejepa_iter_{:06}_sample_{:02}.png", iteration, batch_idx)
+                    format!("epoch_{epoch:03}_lejepa_iter_{iteration:06}_sample_{batch_idx:02}.png")
                 };
                 let path = self.output_dir.join(filename);
                 if image.save(path).is_ok() {

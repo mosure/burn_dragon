@@ -1,0 +1,14 @@
+extends = ["cellular_short.toml"]
+
+[vision]
+backbone = "dense"
+
+[vision.rho_stream]
+enabled = false
+local_radius = 1
+local_diagonals = true
+local_self = true
+decay = 0.985
+mode_embeddings = false
+wgpu_forward_kernel = false
+wgpu_rollout_fused = false

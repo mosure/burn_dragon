@@ -4,13 +4,12 @@ use std::process::Command;
 
 use anyhow::{Context, Result, anyhow};
 use burn_dragon_language::{
-    ExperimentStageArtifact, ExperimentStageKind, ExperimentStageState, ExperimentStageStatus,
-    build_bundle_state, bundle_state_path, load_experiment_bundle_config,
+    ExperimentStageArtifact, ExperimentStageKind, bundle_state_path, load_experiment_bundle_config,
     prepare_language_stage_config, prepare_universality_stage_config, resolve_bundle_root,
-    resolve_stage_dependency_artifacts, resolve_stage_dir, resolve_training_stage_artifact,
-    resolved_stage_config_path, unix_timestamp_now, write_bundle_state, write_resolved_config,
-    write_stage_state,
+    resolve_stage_dir, resolve_training_stage_artifact, resolved_stage_config_path,
+    write_resolved_config,
 };
+use burn_dragon_train::train::pipeline::{BundleExecutionOptions, execute_bundle};
 use burn_dragon_universality::generate_nca_corpus;
 use clap::Parser;
 
@@ -31,113 +30,28 @@ struct Args {
 fn main() -> Result<()> {
     let args = Args::parse();
     let config = load_experiment_bundle_config(&args.config)?;
-    let bundle_root = resolve_bundle_root(&args.config, &config);
-    let resume_from_last_completed_stage =
-        config.resume_from_last_completed_stage && !args.no_resume_from_last_completed_stage;
+    let bundle_root = resolve_bundle_root(&config);
 
     std::fs::create_dir_all(&bundle_root)
         .with_context(|| format!("failed to create {}", bundle_root.display()))?;
 
-    let mut dependency_artifacts = resolve_stage_dependency_artifacts(&config, &bundle_root)?;
-    let mut stage_states = Vec::with_capacity(config.stages.len());
+    let bundle_state = execute_bundle(
+        &config.name,
+        &bundle_root,
+        &config.stages,
+        &BundleExecutionOptions {
+            resume_from_last_completed_stage: config.resume_from_last_completed_stage
+                && !args.no_resume_from_last_completed_stage,
+            stop_after_stage: args.stop_after_stage.clone(),
+        },
+        |stage| stage.name.as_str(),
+        resolve_stage_dir,
+        |stage, dependency_artifacts| validate_stage_dependencies(stage, dependency_artifacts),
+        |_, stage, stage_dir, dependency_artifacts| {
+            run_stage(&args.config, stage_dir, stage, dependency_artifacts)
+        },
+    )?;
 
-    for (index, stage) in config.stages.iter().enumerate() {
-        let stage_dir = resolve_stage_dir(&bundle_root, index, stage);
-        let prior_state = burn_dragon_language::load_stage_state(&stage_dir)?;
-        if resume_from_last_completed_stage
-            && matches!(
-                prior_state.as_ref().map(|state| state.status),
-                Some(ExperimentStageStatus::Completed)
-            )
-        {
-            let state = prior_state.expect("completed state");
-            dependency_artifacts.insert(stage.name.clone(), state.artifact.clone());
-            stage_states.push(state);
-            if args.stop_after_stage.as_deref() == Some(stage.name.as_str()) {
-                break;
-            }
-            continue;
-        }
-
-        for dependency in &stage.depends_on {
-            let Some(artifact) = dependency_artifacts.get(dependency) else {
-                return Err(anyhow!(
-                    "stage `{}` requires dependency `{dependency}` to be completed first",
-                    stage.name
-                ));
-            };
-            if artifact.manifest_path.is_none()
-                && artifact.latest_checkpoint_dir.is_none()
-                && artifact.latest_run_dir.is_none()
-            {
-                return Err(anyhow!(
-                    "dependency `{dependency}` for stage `{}` has no usable artifact",
-                    stage.name
-                ));
-            }
-        }
-
-        let started_at = unix_timestamp_now();
-        let running_state = ExperimentStageState {
-            stage_name: stage.name.clone(),
-            status: ExperimentStageStatus::Running,
-            started_at_unix_secs: Some(started_at),
-            completed_at_unix_secs: None,
-            last_error: None,
-            artifact: ExperimentStageArtifact::default(),
-        };
-        write_stage_state(&stage_dir, &running_state)?;
-
-        let stage_result = run_stage(
-            &args.config,
-            &bundle_root,
-            &stage_dir,
-            stage,
-            &dependency_artifacts,
-        );
-        let state = match stage_result {
-            Ok(artifact) => ExperimentStageState {
-                stage_name: stage.name.clone(),
-                status: ExperimentStageStatus::Completed,
-                started_at_unix_secs: Some(started_at),
-                completed_at_unix_secs: Some(unix_timestamp_now()),
-                last_error: None,
-                artifact,
-            },
-            Err(err) => {
-                let state = ExperimentStageState {
-                    stage_name: stage.name.clone(),
-                    status: ExperimentStageStatus::Failed,
-                    started_at_unix_secs: Some(started_at),
-                    completed_at_unix_secs: Some(unix_timestamp_now()),
-                    last_error: Some(err.to_string()),
-                    artifact: ExperimentStageArtifact::default(),
-                };
-                write_stage_state(&stage_dir, &state)?;
-                stage_states.push(state.clone());
-                write_bundle_state(
-                    &bundle_root,
-                    &build_bundle_state(&config, &bundle_root, stage_states.clone()),
-                )?;
-                return Err(err);
-            }
-        };
-
-        write_stage_state(&stage_dir, &state)?;
-        dependency_artifacts.insert(stage.name.clone(), state.artifact.clone());
-        stage_states.push(state);
-        write_bundle_state(
-            &bundle_root,
-            &build_bundle_state(&config, &bundle_root, stage_states.clone()),
-        )?;
-
-        if args.stop_after_stage.as_deref() == Some(stage.name.as_str()) {
-            break;
-        }
-    }
-
-    let bundle_state = build_bundle_state(&config, &bundle_root, stage_states.clone());
-    write_bundle_state(&bundle_root, &bundle_state)?;
     println!("bundle: {}", config.name);
     println!("root: {}", bundle_root.display());
     println!("state: {}", bundle_state_path(&bundle_root).display());
@@ -159,9 +73,32 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+fn validate_stage_dependencies(
+    stage: &burn_dragon_language::ExperimentStageConfig,
+    dependency_artifacts: &BTreeMap<String, ExperimentStageArtifact>,
+) -> Result<()> {
+    for dependency in &stage.depends_on {
+        let Some(artifact) = dependency_artifacts.get(dependency) else {
+            return Err(anyhow!(
+                "stage `{}` requires dependency `{dependency}` to be completed first",
+                stage.name
+            ));
+        };
+        if artifact.manifest_path.is_none()
+            && artifact.latest_checkpoint_dir.is_none()
+            && artifact.latest_run_dir.is_none()
+        {
+            return Err(anyhow!(
+                "dependency `{dependency}` for stage `{}` has no usable artifact",
+                stage.name
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn run_stage(
     bundle_config_path: &Path,
-    bundle_root: &Path,
     stage_dir: &Path,
     stage: &burn_dragon_language::ExperimentStageConfig,
     dependency_artifacts: &BTreeMap<String, ExperimentStageArtifact>,
@@ -197,7 +134,6 @@ fn run_stage(
             run_language_train_child(stage_dir, &resolved_path, *backend)?;
             let mut artifact = resolve_training_stage_artifact(stage_dir)?;
             artifact.resolved_config_path = Some(resolved_path);
-            let _ = bundle_root;
             Ok(artifact)
         }
     }

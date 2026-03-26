@@ -1,5 +1,5 @@
 use super::*;
-use crate::model::vision::VisionTrmPredictSubstepKind;
+use crate::model::VisionTrmPredictSubstepKind;
 use burn_dragon_train::LearningRateScheduleConfig;
 use std::path::PathBuf;
 
@@ -185,6 +185,192 @@ fn distill_mode_parses_auxiliary_teacher_targets() {
 }
 
 #[test]
+fn rac_mode_parses_and_validates() {
+    let text = r#"
+            [dataset]
+            source = "cifar10"
+            cifar_root = "data/cifar"
+            train_dir = "train"
+            val_dir = "test"
+
+            [training]
+            batch_size = 8
+            max_iters = 16
+            log_frequency = 4
+
+            [optimizer]
+            learning_rate = 0.001
+            weight_decay = 0.01
+
+            [vision]
+            image_size = 32
+            patch_size = 4
+            backbone = "cellular"
+            in_channels = 3
+            embed_dim = 48
+            steps = 3
+            n_head = 3
+            mlp_internal_dim_multiplier = 3
+            dropout = 0.0
+            projection_dim = 32
+            projection_hidden_dim = 64
+            use_cls_token = true
+            token_state_norm = true
+            pos_encoding = "rope"
+            attention_mode = "row_l1"
+            fused_kernels = false
+            relu_threshold = 0.0
+
+            [vision.rho_stream]
+            enabled = true
+            local_radius = 1
+            local_diagonals = true
+            local_self = true
+
+            [mode]
+            type = "rac"
+            sample_steps = 3
+            random_time_grid = false
+            state_channels = 3
+            velocity_hidden_dim = 64
+            artifact_output = "images"
+            artifact_every = 1
+            artifact_max_images = 2
+            artifact_upscale = 2
+
+            [mode.teacher]
+            kind = "pooled_image"
+            latent_downsample = 4
+
+            [mode.memory]
+            observe_steps = 2
+            backprop_steps = 2
+            flow_backprop_steps = 2
+            reset_each_step = false
+            detach_each_step = false
+            eval_wipe_after_step = 2
+
+            [augment]
+            image_size = 32
+            resize_short = 32
+            min_scale = 1.0
+            max_scale = 1.0
+            min_aspect_ratio = 1.0
+            max_aspect_ratio = 1.0
+            normalize_mean = [0.0, 0.0, 0.0]
+            normalize_std = [1.0, 1.0, 1.0]
+        "#;
+
+    let config: VisionTrainingConfig = toml::from_str(text).expect("parse rac config");
+    config.validate().expect("rac config should validate");
+
+    match config.mode {
+        VisionTrainingModeConfig::Rac(rac) => {
+            assert_eq!(rac.sample_steps, 3);
+            assert!(!rac.random_time_grid);
+            assert_eq!(rac.state_channels, 3);
+            assert_eq!(rac.teacher.kind, VisionRacTeacherKind::PooledImage);
+            assert_eq!(rac.memory.observe_steps, 2);
+            assert_eq!(rac.memory.backprop_steps, 2);
+            assert_eq!(rac.memory.flow_backprop_steps, Some(2));
+            assert!(!rac.memory.detach_each_step);
+            assert_eq!(rac.memory.eval_wipe_after_step, Some(2));
+        }
+        other => panic!("unexpected mode: {other:?}"),
+    }
+}
+
+#[test]
+fn rac_mode_imagenet_parses_and_validates() {
+    let text = r#"
+            [dataset]
+            source = "imagenet"
+            imagenet_root = "data/imagenet1k"
+            train_dir = "train"
+            val_dir = "val"
+            max_records = 1024
+
+            [training]
+            batch_size = 8
+            max_iters = 16
+            log_frequency = 4
+
+            [optimizer]
+            learning_rate = 0.001
+            weight_decay = 0.01
+
+            [vision]
+            image_size = 128
+            patch_size = 8
+            backbone = "dense"
+            in_channels = 3
+            embed_dim = 64
+            steps = 4
+            n_head = 4
+            mlp_internal_dim_multiplier = 4
+            dropout = 0.0
+            projection_dim = 96
+            projection_hidden_dim = 192
+            use_cls_token = true
+            token_state_norm = true
+            pos_encoding = "rope"
+            attention_mode = "row_l1"
+            fused_kernels = false
+            relu_threshold = 0.0
+
+            [vision.rho_stream]
+            enabled = false
+            mode_embeddings = false
+
+            [mode]
+            type = "rac"
+            sample_steps = 8
+            random_time_grid = true
+            state_channels = 3
+            velocity_hidden_dim = 96
+            artifact_output = "images"
+            artifact_every = 1
+            artifact_max_images = 2
+            artifact_upscale = 1
+            artifact_overwrite = false
+
+            [mode.teacher]
+            kind = "pooled_image"
+            latent_downsample = 8
+            state_mapping = "expand_nearest"
+
+            [mode.memory]
+            observe_steps = 2
+            backprop_steps = 2
+
+            [augment]
+            image_size = 128
+            resize_short = 128
+            min_scale = 1.0
+            max_scale = 1.0
+            min_aspect_ratio = 1.0
+            max_aspect_ratio = 1.0
+            normalize_mean = [0.0, 0.0, 0.0]
+            normalize_std = [1.0, 1.0, 1.0]
+        "#;
+
+    let config: VisionTrainingConfig = toml::from_str(text).expect("parse rac imagenet config");
+    config
+        .validate()
+        .expect("rac imagenet config should validate");
+
+    match config.mode {
+        VisionTrainingModeConfig::Rac(rac) => {
+            assert_eq!(rac.sample_steps, 8);
+            assert!(rac.random_time_grid);
+            assert_eq!(rac.teacher.latent_downsample, 8);
+            assert!(!rac.artifact_overwrite);
+        }
+        other => panic!("unexpected mode: {other:?}"),
+    }
+}
+
+#[test]
 fn distill_mode_validates_dedicated_spatial_auxiliary_teacher_targets() {
     let text = r#"
             [dataset]
@@ -291,6 +477,116 @@ fn distill_mode_validates_dedicated_spatial_auxiliary_teacher_targets() {
                 }
                 other => panic!("unexpected teacher target config: {other:?}"),
             }
+        }
+        other => panic!("unexpected mode: {other:?}"),
+    }
+}
+
+#[test]
+fn rac_mode_imagenet_precomputed_latent_parses_and_validates() {
+    let text = r#"
+            [dataset]
+            source = "imagenet"
+            imagenet_root = "data/imagenet1k"
+            train_dir = "train"
+            val_dir = "val"
+            max_records = 1024
+
+            [training]
+            batch_size = 8
+            max_iters = 16
+            log_frequency = 4
+
+            [optimizer]
+            learning_rate = 0.001
+            weight_decay = 0.01
+
+            [vision]
+            image_size = 128
+            patch_size = 8
+            backbone = "dense"
+            in_channels = 3
+            embed_dim = 64
+            steps = 4
+            n_head = 4
+            mlp_internal_dim_multiplier = 4
+            dropout = 0.0
+            projection_dim = 96
+            projection_hidden_dim = 192
+            use_cls_token = true
+            token_state_norm = true
+            pos_encoding = "rope"
+            attention_mode = "row_l1"
+            fused_kernels = false
+            relu_threshold = 0.0
+
+            [vision.rho_stream]
+            enabled = false
+            mode_embeddings = false
+
+            [mode]
+            type = "rac"
+            sample_steps = 8
+            random_time_grid = true
+            state_channels = 4
+            velocity_hidden_dim = 96
+            artifact_output = "images"
+            artifact_every = 1
+            artifact_max_images = 2
+            artifact_upscale = 1
+            artifact_overwrite = false
+
+            [mode.teacher]
+            kind = "precomputed_latent"
+            state_mapping = "centered_subpixel"
+
+            [mode.teacher.precomputed_latent]
+            train_path = "taesd/train_latent.bin"
+            val_path = "taesd/val_latent.bin"
+            channels = 4
+            height = 16
+            width = 16
+
+            [mode.memory]
+            observe_steps = 2
+            backprop_steps = 2
+
+            [augment]
+            image_size = 128
+            resize_short = 128
+            min_scale = 1.0
+            max_scale = 1.0
+            min_aspect_ratio = 1.0
+            max_aspect_ratio = 1.0
+            flip_prob = 0.0
+            color_jitter_prob = 0.0
+            grayscale_prob = 0.0
+            blur_prob = 0.0
+            solarize_prob = 0.0
+            normalize_mean = [0.0, 0.0, 0.0]
+            normalize_std = [1.0, 1.0, 1.0]
+        "#;
+
+    let config: VisionTrainingConfig =
+        toml::from_str(text).expect("parse rac precomputed latent config");
+    config
+        .validate()
+        .expect("rac precomputed latent config should validate");
+
+    match config.mode {
+        VisionTrainingModeConfig::Rac(rac) => {
+            assert_eq!(rac.teacher.kind, VisionRacTeacherKind::PrecomputedLatent);
+            assert_eq!(
+                rac.teacher.state_mapping,
+                VisionRacStateMappingKind::CenteredSubpixel
+            );
+            let spec = rac
+                .teacher
+                .precomputed_latent
+                .expect("precomputed latent spec");
+            assert_eq!(spec.channels, 4);
+            assert_eq!(spec.height, 16);
+            assert_eq!(spec.width, 16);
         }
         other => panic!("unexpected mode: {other:?}"),
     }
@@ -893,13 +1189,18 @@ fn video_lejepa_requires_moving_mnist_source() {
         dataset: VisionDatasetConfig::default(),
         training: VisionTrainingHyperparameters::default(),
         optimizer: burn_dragon_train::OptimizerConfig {
+            name: burn_dragon_train::OptimizerKind::default(),
             learning_rate: 1e-3,
             weight_decay: 0.0,
+            weight_decay_final: None,
             lr_schedule: None,
+            schedule_mode: burn_dragon_train::OptimizerScheduleMode::default(),
             grad_clip_norm: None,
             grad_clip_value: None,
+            muon: None,
         },
         wgpu: burn_dragon_train::WgpuRuntimeConfig::default(),
+        run_layout: burn_dragon_train::RunLayoutConfig::default(),
         vision: VisionModelConfig::default(),
         augment: VisionAugmentationConfig::default(),
         mode: VisionTrainingModeConfig::VideoLejepa(VisionVideoLejepaConfig::default()),
@@ -924,18 +1225,72 @@ fn video_lejepa_requires_moving_mnist_source() {
 }
 
 #[test]
+fn video_vjepa21_allows_imagenet_source() {
+    let mut config = VisionTrainingConfig {
+        dataset: VisionDatasetConfig::default(),
+        training: VisionTrainingHyperparameters::default(),
+        optimizer: burn_dragon_train::OptimizerConfig {
+            name: burn_dragon_train::OptimizerKind::default(),
+            learning_rate: 1e-3,
+            weight_decay: 0.0,
+            weight_decay_final: None,
+            lr_schedule: None,
+            schedule_mode: burn_dragon_train::OptimizerScheduleMode::default(),
+            grad_clip_norm: None,
+            grad_clip_value: None,
+            muon: None,
+        },
+        wgpu: burn_dragon_train::WgpuRuntimeConfig::default(),
+        run_layout: burn_dragon_train::RunLayoutConfig::default(),
+        vision: VisionModelConfig::default(),
+        augment: VisionAugmentationConfig::default(),
+        mode: VisionTrainingModeConfig::VideoLejepa(VisionVideoLejepaConfig::default()),
+    };
+    config.dataset.source = VisionDatasetSource::Imagenet;
+    config.vision.image_size = 224;
+    config.vision.patch_size = 16;
+    config.vision.in_channels = 3;
+    config.vision.embed_dim = 192;
+    config.vision.steps = 8;
+    config.vision.n_head = 6;
+    config.vision.mlp_internal_dim_multiplier = 4;
+    config.vision.projection_dim = 96;
+    config.vision.projection_hidden_dim = 256;
+    config.vision.use_cls_token = true;
+    config.vision.pos_encoding = crate::SpatialPositionalEncodingKind::Rope;
+    config.augment.image_size = 224;
+    config.training.batch_size = 2;
+    config.training.max_iters = 2;
+    if let VisionTrainingModeConfig::VideoLejepa(video) = &mut config.mode {
+        video.paradigm = VisionVideoParadigmKind::Vjepa21;
+        video.vjepa21.clip_frames = 2;
+        video.loss.probe_weight = 0.0;
+        video.loss.debug_recon_weight = 0.0;
+    }
+
+    config
+        .validate()
+        .expect("V-JEPA 2.1 should accept ImageNet clips");
+}
+
+#[test]
 fn video_lejepa_artifact_future_must_cover_training_target() {
     let mut config = VisionTrainingConfig {
         dataset: VisionDatasetConfig::default(),
         training: VisionTrainingHyperparameters::default(),
         optimizer: burn_dragon_train::OptimizerConfig {
+            name: burn_dragon_train::OptimizerKind::default(),
             learning_rate: 1e-3,
             weight_decay: 0.0,
+            weight_decay_final: None,
             lr_schedule: None,
+            schedule_mode: burn_dragon_train::OptimizerScheduleMode::default(),
             grad_clip_norm: None,
             grad_clip_value: None,
+            muon: None,
         },
         wgpu: burn_dragon_train::WgpuRuntimeConfig::default(),
+        run_layout: burn_dragon_train::RunLayoutConfig::default(),
         vision: VisionModelConfig::default(),
         augment: VisionAugmentationConfig::default(),
         mode: VisionTrainingModeConfig::VideoLejepa(VisionVideoLejepaConfig::default()),
@@ -971,13 +1326,18 @@ fn video_lejepa_train_target_frame_range_must_be_ordered() {
         dataset: VisionDatasetConfig::default(),
         training: VisionTrainingHyperparameters::default(),
         optimizer: burn_dragon_train::OptimizerConfig {
+            name: burn_dragon_train::OptimizerKind::default(),
             learning_rate: 1e-3,
             weight_decay: 0.0,
+            weight_decay_final: None,
             lr_schedule: None,
+            schedule_mode: burn_dragon_train::OptimizerScheduleMode::default(),
             grad_clip_norm: None,
             grad_clip_value: None,
+            muon: None,
         },
         wgpu: burn_dragon_train::WgpuRuntimeConfig::default(),
+        run_layout: burn_dragon_train::RunLayoutConfig::default(),
         vision: VisionModelConfig::default(),
         augment: VisionAugmentationConfig::default(),
         mode: VisionTrainingModeConfig::VideoLejepa(VisionVideoLejepaConfig::default()),
@@ -1013,13 +1373,18 @@ fn video_lejepa_observe_weight_must_be_non_negative() {
         dataset: VisionDatasetConfig::default(),
         training: VisionTrainingHyperparameters::default(),
         optimizer: burn_dragon_train::OptimizerConfig {
+            name: burn_dragon_train::OptimizerKind::default(),
             learning_rate: 1e-3,
             weight_decay: 0.0,
+            weight_decay_final: None,
             lr_schedule: None,
+            schedule_mode: burn_dragon_train::OptimizerScheduleMode::default(),
             grad_clip_norm: None,
             grad_clip_value: None,
+            muon: None,
         },
         wgpu: burn_dragon_train::WgpuRuntimeConfig::default(),
+        run_layout: burn_dragon_train::RunLayoutConfig::default(),
         vision: VisionModelConfig::default(),
         augment: VisionAugmentationConfig::default(),
         mode: VisionTrainingModeConfig::VideoLejepa(VisionVideoLejepaConfig::default()),
@@ -1054,13 +1419,18 @@ fn lejepa_teacher_ema_decay_must_be_below_one() {
         dataset: VisionDatasetConfig::default(),
         training: VisionTrainingHyperparameters::default(),
         optimizer: burn_dragon_train::OptimizerConfig {
+            name: burn_dragon_train::OptimizerKind::default(),
             learning_rate: 1e-3,
             weight_decay: 0.0,
+            weight_decay_final: None,
             lr_schedule: None,
+            schedule_mode: burn_dragon_train::OptimizerScheduleMode::default(),
             grad_clip_norm: None,
             grad_clip_value: None,
+            muon: None,
         },
         wgpu: burn_dragon_train::WgpuRuntimeConfig::default(),
+        run_layout: burn_dragon_train::RunLayoutConfig::default(),
         vision: VisionModelConfig::default(),
         augment: VisionAugmentationConfig::default(),
         mode: VisionTrainingModeConfig::Lejepa(VisionLejepaConfig::default()),

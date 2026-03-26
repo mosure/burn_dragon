@@ -108,7 +108,7 @@ fn load_merges_in_order() {
             max_iters: 2000,
             checkpoint_interval_iters: 2000,
             log_frequency: 50,
-            fast_train: false,
+            launch_mode: burn_dragon_train::train::pipeline::TrainingLaunchMode::Fresh,
             resume_run_dir: None,
             resume_checkpoint_epoch: None,
             init_checkpoint_path: None,
@@ -252,6 +252,41 @@ fn validate_accepts_training_sequence_kernel_override() {
     assert_eq!(
         config.model.sequence_kernel,
         Some(burn_dragon_core::SequenceKernelKind::BdhLinearAttention)
+    );
+}
+
+#[test]
+fn load_training_config_rejects_removed_fast_train_key() {
+    let text = r#"
+        [dataset]
+        cache_dir = "data"
+        type = "shakespeare"
+
+        [training]
+        block_size = 32
+        batch_size = 2
+        max_iters = 4
+        log_frequency = 1
+        fast_train = true
+
+        [optimizer]
+        learning_rate = 0.001
+        weight_decay = 0.0
+
+        [generation]
+        prompt = "abc"
+
+        [model]
+        sequence_kernel = "bdh_linear_attention"
+    "#;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("removed-fast-train.toml");
+    std::fs::write(&path, text).expect("write config");
+    let err = load_training_config(&[path]).expect_err("fast_train should be rejected");
+    assert!(
+        err.to_string()
+            .contains("training.fast_train has been removed"),
+        "unexpected load error: {err}"
     );
 }
 
@@ -447,6 +482,7 @@ fn validate_accepts_init_checkpoint_path_with_optional_epoch() {
         batch_size = 2
         max_iters = 4
         log_frequency = 1
+        launch_mode = "init_from_checkpoint"
         init_checkpoint_path = "runs/example/checkpoint"
         init_checkpoint_epoch = 3
 
@@ -508,6 +544,7 @@ fn validate_accepts_resume_run_dir_with_optional_epoch() {
         batch_size = 2
         max_iters = 4
         log_frequency = 1
+        launch_mode = "resume_exact_run"
         resume_run_dir = "runs/example"
         resume_checkpoint_epoch = 3
 

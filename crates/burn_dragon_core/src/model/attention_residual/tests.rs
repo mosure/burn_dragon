@@ -65,6 +65,72 @@ fn attention_residual_history_window_limits_candidates() {
 }
 
 #[test]
+fn attention_residual_zero_init_gate_is_exact_identity_with_multi_history() {
+    let device = Default::default();
+    let config = AttentionResidualConfig {
+        enabled: true,
+        num_heads: 2,
+        history_window: None,
+        ..AttentionResidualConfig::default()
+    };
+    let connector = AttentionResidual::<TestBackend>::new(&config, 4, &device);
+    let anchor = Tensor::<TestBackend, 4>::from_data(
+        TensorData::new(vec![1.0, 0.0, 0.0, 1.0], [1, 1, 1, 4]),
+        &device,
+    );
+    let delta = Tensor::<TestBackend, 4>::from_data(
+        TensorData::new(vec![0.25, 0.5, 0.75, 1.0], [1, 1, 1, 4]),
+        &device,
+    );
+    let current = Tensor::<TestBackend, 4>::from_data(
+        TensorData::new(vec![1.5, 2.0, 2.5, 3.0], [1, 1, 1, 4]),
+        &device,
+    );
+    let branch_input = connector.branch_input(current.clone(), &[anchor, delta]);
+    branch_input
+        .into_data()
+        .assert_eq(&current.into_data(), false);
+}
+
+#[test]
+fn attention_residual_nonzero_gate_uses_history_mix() {
+    let device = Default::default();
+    let config = AttentionResidualConfig {
+        enabled: true,
+        num_heads: 2,
+        history_window: None,
+        ..AttentionResidualConfig::default()
+    };
+    let mut connector = AttentionResidual::<TestBackend>::new(&config, 4, &device);
+    connector.debug_set_mix_gate_raw(4.0, &device);
+    let anchor = Tensor::<TestBackend, 4>::from_data(
+        TensorData::new(vec![1.0, 0.0, 0.0, 1.0], [1, 1, 1, 4]),
+        &device,
+    );
+    let delta = Tensor::<TestBackend, 4>::from_data(
+        TensorData::new(vec![0.25, 0.5, 0.75, 1.0], [1, 1, 1, 4]),
+        &device,
+    );
+    let current = Tensor::<TestBackend, 4>::from_data(
+        TensorData::new(vec![1.5, 2.0, 2.5, 3.0], [1, 1, 1, 4]),
+        &device,
+    );
+    let branch_input = connector.branch_input(current.clone(), &[anchor, delta]);
+    assert_ne!(
+        branch_input
+            .into_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .expect("branch vec"),
+        current
+            .into_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .expect("current vec")
+    );
+}
+
+#[test]
 fn block_attention_residual_single_history_element_is_identity() {
     let device = Default::default();
     let config = BlockAttentionResidualConfig {
@@ -79,6 +145,36 @@ fn block_attention_residual_single_history_element_is_identity() {
         &device,
     );
     let branch_input = connector.branch_input(current.clone(), std::slice::from_ref(&current));
+    branch_input
+        .into_data()
+        .assert_eq(&current.into_data(), false);
+}
+
+#[test]
+fn block_attention_residual_zero_init_gate_is_exact_identity_with_multi_history() {
+    let device = Default::default();
+    let config = BlockAttentionResidualConfig {
+        enabled: true,
+        num_heads: 2,
+        layers_per_block: 2,
+        ..BlockAttentionResidualConfig::default()
+    };
+    let connector = BlockAttentionResidual::<TestBackend>::new(&config, 4, &device);
+    let history = vec![
+        Tensor::<TestBackend, 4>::from_data(
+            TensorData::new(vec![1.0, 0.0, 0.0, 1.0], [1, 1, 1, 4]),
+            &device,
+        ),
+        Tensor::<TestBackend, 4>::from_data(
+            TensorData::new(vec![0.5, 0.5, 0.5, 0.5], [1, 1, 1, 4]),
+            &device,
+        ),
+    ];
+    let current = Tensor::<TestBackend, 4>::from_data(
+        TensorData::new(vec![1.5, 2.0, 2.5, 3.0], [1, 1, 1, 4]),
+        &device,
+    );
+    let branch_input = connector.branch_input(current.clone(), &history);
     branch_input
         .into_data()
         .assert_eq(&current.into_data(), false);

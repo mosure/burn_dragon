@@ -5,5 +5,5 @@ pub use cifar::{CifarBatch, CifarDataLoader, CifarDataset, CifarSplit, CifarType
 pub use imagenet::{
     DinoFeatureStore, ImageNetAugmentations, ImageNetBatch, ImageNetDataLoader, ImageNetDataset,
     ImageNetDatasetConfig, ImageNetSplit, ImageNetTeacherTargetBatch, ImageTeacherTargetStore,
-    VisionNormalize,
+    ImageTensorStore, VisionNormalize,
 };

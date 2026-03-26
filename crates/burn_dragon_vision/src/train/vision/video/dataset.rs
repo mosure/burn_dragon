@@ -78,6 +78,137 @@ impl<B: BackendTrait> VideoClipBatch<B> {
     }
 }
 
+#[derive(Clone)]
+pub struct ImageNetVideoDataLoader<B: BackendTrait> {
+    inner: Arc<dyn DataLoader<B, ImageNetBatch<B>>>,
+    clip_frames: usize,
+    artifact_capture_every: usize,
+    artifact_capture_images: usize,
+}
+
+impl<B: BackendTrait> ImageNetVideoDataLoader<B> {
+    pub fn new(
+        inner: Arc<dyn DataLoader<B, ImageNetBatch<B>>>,
+        clip_frames: usize,
+        artifact_capture_every: usize,
+        artifact_capture_images: usize,
+    ) -> Self {
+        Self {
+            inner,
+            clip_frames: clip_frames.max(1),
+            artifact_capture_every,
+            artifact_capture_images,
+        }
+    }
+}
+
+fn imagenet_batch_to_video_clip_batch<B: BackendTrait>(
+    batch: ImageNetBatch<B>,
+    clip_frames: usize,
+) -> VideoClipBatch<B> {
+    let ImageNetBatch {
+        images,
+        target_images: _,
+        view_images,
+        view_crops: _,
+        global_view_images,
+        local_view_images: _,
+        labels,
+        teacher_patch: _,
+        teacher_cls: _,
+        teacher_targets: _,
+        rac_teacher_latent: _,
+    } = batch;
+
+    let clip_frames = clip_frames.max(1);
+    let clip = if let Some(views) = view_images {
+        views
+    } else if let Some(views) = global_view_images {
+        views
+    } else {
+        images.unsqueeze_dim::<5>(1).repeat_dim(1, clip_frames)
+    };
+    let context_len = clip.shape().dims::<5>()[1].max(1);
+    VideoClipBatch::new(clip, labels, context_len, 0)
+}
+
+pub struct ImageNetVideoIterator<'a, B: BackendTrait> {
+    inner: Box<dyn DataLoaderIterator<ImageNetBatch<B>> + 'a>,
+    clip_frames: usize,
+    step: usize,
+    artifact_capture_every: usize,
+    artifact_capture_images: usize,
+    artifact_images_emitted: usize,
+}
+
+impl<B: BackendTrait> Iterator for ImageNetVideoIterator<'_, B> {
+    type Item = VideoClipBatch<B>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let mut batch = imagenet_batch_to_video_clip_batch(self.inner.next()?, self.clip_frames);
+        self.step += 1;
+        let capture_artifacts = self.artifact_capture_every > 0
+            && self.artifact_capture_images > self.artifact_images_emitted
+            && self.step % self.artifact_capture_every == 0;
+        if capture_artifacts {
+            let batch_size = batch.clip_frames.shape().dims::<5>()[0];
+            let remaining = self
+                .artifact_capture_images
+                .saturating_sub(self.artifact_images_emitted);
+            self.artifact_images_emitted += remaining.min(batch_size);
+            batch = batch.with_capture_artifacts(true);
+        }
+        Some(batch)
+    }
+}
+
+impl<B: BackendTrait> DataLoaderIterator<VideoClipBatch<B>> for ImageNetVideoIterator<'_, B> {
+    fn progress(&self) -> Progress {
+        self.inner.progress()
+    }
+}
+
+impl<B> DataLoader<B, VideoClipBatch<B>> for ImageNetVideoDataLoader<B>
+where
+    B: BackendTrait + 'static,
+    B::Device: Clone + Send + Sync + 'static,
+    ImageNetBatch<B>: Send,
+    VideoClipBatch<B>: Send,
+{
+    fn iter<'a>(&'a self) -> Box<dyn DataLoaderIterator<VideoClipBatch<B>> + 'a> {
+        Box::new(ImageNetVideoIterator {
+            inner: self.inner.iter(),
+            clip_frames: self.clip_frames,
+            step: 0,
+            artifact_capture_every: self.artifact_capture_every,
+            artifact_capture_images: self.artifact_capture_images,
+            artifact_images_emitted: 0,
+        })
+    }
+
+    fn num_items(&self) -> usize {
+        self.inner.num_items()
+    }
+
+    fn to_device(&self, device: &B::Device) -> Arc<dyn DataLoader<B, VideoClipBatch<B>>> {
+        Arc::new(Self {
+            inner: self.inner.to_device(device),
+            clip_frames: self.clip_frames,
+            artifact_capture_every: self.artifact_capture_every,
+            artifact_capture_images: self.artifact_capture_images,
+        })
+    }
+
+    fn slice(&self, start: usize, end: usize) -> Arc<dyn DataLoader<B, VideoClipBatch<B>>> {
+        Arc::new(Self {
+            inner: self.inner.slice(start, end),
+            clip_frames: self.clip_frames,
+            artifact_capture_every: self.artifact_capture_every,
+            artifact_capture_images: self.artifact_capture_images,
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MovingMnistSplit {
     Train,
@@ -972,6 +1103,31 @@ fn resize_mnist_digit(item: &MnistItem, digit_size: usize) -> Vec<f32> {
 mod tests {
     use super::*;
     use burn_ndarray::NdArray;
+
+    #[test]
+    fn imagenet_batch_adapter_uses_multiview_axis_as_clip() {
+        type Backend = NdArray<f32>;
+        let device = <Backend as BackendTrait>::Device::default();
+        let labels =
+            Tensor::<Backend, 1, Int>::from_data(TensorData::new(vec![1_i64, 7_i64], [2]), &device);
+        let batch = ImageNetBatch::new(
+            Tensor::<Backend, 4>::zeros([2, 3, 4, 4], &device),
+            None,
+            Some(Tensor::<Backend, 5>::zeros([2, 3, 3, 4, 4], &device)),
+            None,
+            None,
+            None,
+            labels,
+            None,
+            None,
+        );
+
+        let clip = imagenet_batch_to_video_clip_batch(batch, 3);
+        assert_eq!(clip.clip_frames.shape().dims::<5>(), [2, 3, 3, 4, 4]);
+        assert_eq!(clip.context_len, 3);
+        assert_eq!(clip.target_len, 0);
+        assert_eq!(clip.labels.shape().dims::<1>(), [2]);
+    }
 
     #[test]
     fn moving_mnist_batch_shapes_and_split_lengths() {

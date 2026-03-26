@@ -1,0 +1,132 @@
+# RAC Phase-0/1 baseline on CIFAR-10 using the Dragon cellular BDH core.
+#
+# This family is intentionally BDH-first: flow-time recurrence is carried by the
+# recurrent `rho` state, and there is no transformer-only baseline checked in yet.
+
+[dataset]
+source = "cifar10"
+cifar_root = "data/cifar"
+train_dir = "train"
+val_dir = "test"
+prefetch_batches = 2
+prefetch_workers = 2
+prefetch_to_device = false
+cache_decoded = false
+cache_capacity = 64
+cache_preprocessed = false
+
+[dataset.download]
+type = "cifar"
+
+[training]
+batch_size = 64
+epochs = 20
+max_iters = 20000
+log_frequency = 100
+device_memory_check_every = 25
+max_device_memory_mb = 92160
+rollout_min_steps = 4
+rollout_max_steps = 4
+rollout_backprop_steps = 2
+
+[optimizer]
+learning_rate = 0.0003
+weight_decay = 0.02
+grad_clip_norm = 1.0
+
+[optimizer.lr_schedule]
+type = "cosine"
+min_lr = 0.00003
+num_iters = 20000
+
+[wgpu]
+backend = "auto"
+memory = "subslices"
+
+[run_layout]
+mirror_config_path = true
+
+[vision]
+image_size = 32
+patch_size = 4
+patch_embed_mode = "conv"
+backbone = "cellular"
+in_channels = 3
+embed_dim = 96
+steps = 4
+n_head = 4
+mlp_internal_dim_multiplier = 4
+dropout = 0.0
+projection_dim = 128
+projection_hidden_dim = 256
+use_cls_token = true
+cls_sync_alpha = 0.1
+token_state_norm = true
+latent_activation = "relu"
+pos_encoding = "rope"
+attention_mode = "row_l1"
+use_alibi = true
+fused_kernels = true
+relu_threshold = 0.0
+
+[vision.rho_stream]
+enabled = true
+local_radius = 1
+local_diagonals = true
+local_self = true
+decay = 0.985
+mode_embeddings = true
+wgpu_forward_kernel = true
+wgpu_rollout_fused = true
+
+[mode]
+type = "rac"
+sample_steps = 4
+random_time_grid = true
+state_channels = 3
+velocity_hidden_dim = 128
+artifact_output = "mp4"
+artifact_fps = 6
+artifact_every = 1
+artifact_max_images = 4
+artifact_upscale = 4
+artifact_overwrite = true
+
+[mode.teacher]
+kind = "pooled_image"
+latent_downsample = 4
+
+[mode.memory]
+observe_steps = 2
+backprop_steps = 2
+reset_each_step = false
+
+[mode.loss]
+recon_weight = 1.0
+path_weight = 0.25
+latent_weight = 0.5
+roundtrip_weight = 0.5
+velocity_weight = 0.1
+probe_weight = 0.25
+
+[augment]
+image_size = 32
+resize_short = 32
+min_scale = 1.0
+max_scale = 1.0
+min_aspect_ratio = 1.0
+max_aspect_ratio = 1.0
+flip_prob = 0.5
+color_jitter_prob = 0.0
+brightness = 0.0
+contrast = 0.0
+saturation = 0.0
+hue = 0.0
+grayscale_prob = 0.0
+blur_prob = 0.0
+blur_sigma_min = 0.1
+blur_sigma_max = 2.0
+solarize_prob = 0.0
+solarize_threshold = 128
+normalize_mean = [0.0, 0.0, 0.0]
+normalize_std = [1.0, 1.0, 1.0]

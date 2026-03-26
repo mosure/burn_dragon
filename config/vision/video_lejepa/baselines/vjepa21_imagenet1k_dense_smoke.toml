@@ -1,0 +1,11 @@
+extends = ["vjepa21_imagenet1k_dense_long.toml"]
+
+[dataset]
+max_records = 32
+cache_capacity = 64
+
+[training]
+batch_size = 4
+max_iters = 2
+log_frequency = 1
+enable_checkpoints = false

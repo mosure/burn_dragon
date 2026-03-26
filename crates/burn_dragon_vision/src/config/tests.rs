@@ -45,10 +45,32 @@ fn vision_configs_parse_serialize_validate() {
         "vision/distill/frontier/graph_bridge_multimode_spatial_base_336.toml",
         "vision/trm/baselines/graph_scene_slots_imagenette.toml",
         "vision/trm/baselines/graph_bridge_imagenette.toml",
+        "vision/rac/base.toml",
+        "vision/rac/baselines/tiny.toml",
+        "vision/rac/baselines/smoke.toml",
+        "vision/rac/cifar10_artifact_validate.toml",
+        "vision/rac/experiments/cifar10/cellular_short.toml",
+        "vision/rac/experiments/cifar10/dense_short.toml",
+        "vision/rac/experiments/cifar10/cellular_reset_short.toml",
+        "vision/rac/experiments/cifar10/cellular_write_disabled_short.toml",
+        "vision/rac/experiments/cifar10/cellular_phase2_k8_64.toml",
+        "vision/rac/experiments/cifar10/dense_sequential_phase2_k8_64.toml",
+        "vision/rac/experiments/cifar10/cellular_full_bptt_k8_medium.toml",
+        "vision/rac/experiments/cifar10/cellular_tbptt_k8_medium.toml",
+        "vision/rac/experiments/cifar10/dense_sequential_k8_medium.toml",
+        "vision/rac/experiments/imagenet1k/dense_subset_smoke.toml",
+        "vision/rac/experiments/imagenet1k/dense_subset_long.toml",
+        "vision/rac/experiments/imagenet1k/dense_subset_precomputed_taesd_smoke.toml",
+        "vision/rac/experiments/imagenet1k/dense_subset_precomputed_taesd_smoke_subset.toml",
+        "vision/rac/experiments/imagenet1k/dense_subset_precomputed_taesd_medium_subset.toml",
+        "vision/rac/experiments/imagenet1k/dense_subset_precomputed_taesd_long_subset.toml",
         "vision/video_lejepa/baselines/smoke.toml",
         "vision/video_lejepa/baselines/tiny.toml",
         "vision/video_lejepa/baselines/small.toml",
         "vision/video_lejepa/baselines/base.toml",
+        "vision/video_lejepa/baselines/vjepa21_dense_promoted.toml",
+        "vision/video_lejepa/baselines/vjepa21_imagenet1k_dense_smoke.toml",
+        "vision/video_lejepa/baselines/vjepa21_imagenet1k_dense_long.toml",
         "vision/video_lejepa/moving_mnist_trm_artifact_validate.toml",
     ];
 
@@ -166,6 +188,150 @@ fn scene_slot_graph_bridge_multimode_spatial_base_programmatic_baseline_matches_
 }
 
 #[test]
+fn rac_configs_parse_serialize_validate() {
+    let root = config_root().join("vision").join("rac");
+    let mut files = fs::read_dir(&root)
+        .unwrap_or_else(|err| panic!("failed to read {}: {err}", root.display()))
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("toml"))
+        .collect::<Vec<_>>();
+    files.sort();
+
+    assert!(
+        !files.is_empty(),
+        "expected at least one rac overlay config in {}",
+        root.display()
+    );
+
+    for path in files {
+        let config: VisionTrainingConfig = load_vision_training_config(std::slice::from_ref(&path))
+            .unwrap_or_else(|err| {
+                panic!("failed to load rac config {}: {err}", path.display());
+            });
+        config
+            .validate()
+            .unwrap_or_else(|err| panic!("rac config validation failed: {err}"));
+
+        let roundtripped: VisionTrainingConfig = roundtrip_config(&config);
+        roundtripped.validate().unwrap_or_else(|err| {
+            panic!(
+                "roundtripped rac config validation failed for {}: {err}",
+                path.display()
+            )
+        });
+    }
+}
+
+#[test]
+fn rac_experiment_configs_parse_serialize_validate() {
+    let root = config_root()
+        .join("vision")
+        .join("rac")
+        .join("experiments")
+        .join("cifar10");
+    let mut files = fs::read_dir(&root)
+        .unwrap_or_else(|err| panic!("failed to read {}: {err}", root.display()))
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("toml"))
+        .collect::<Vec<_>>();
+    files.sort();
+
+    assert!(
+        !files.is_empty(),
+        "expected at least one rac experiment config in {}",
+        root.display()
+    );
+
+    for path in files {
+        let config: VisionTrainingConfig = load_vision_training_config(std::slice::from_ref(&path))
+            .unwrap_or_else(|err| {
+                panic!(
+                    "failed to load rac experiment config {}: {err}",
+                    path.display()
+                );
+            });
+        config
+            .validate()
+            .unwrap_or_else(|err| panic!("rac experiment config validation failed: {err}"));
+
+        let roundtripped: VisionTrainingConfig = roundtrip_config(&config);
+        roundtripped.validate().unwrap_or_else(|err| {
+            panic!(
+                "roundtripped rac experiment config validation failed for {}: {err}",
+                path.display()
+            )
+        });
+    }
+}
+
+#[test]
+fn rac_cifar10_experiment_configs_stay_curated() {
+    let root = config_root()
+        .join("vision")
+        .join("rac")
+        .join("experiments")
+        .join("cifar10");
+    let mut files = fs::read_dir(&root)
+        .unwrap_or_else(|err| panic!("failed to read {}: {err}", root.display()))
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("toml"))
+        .filter_map(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_string)
+        })
+        .collect::<Vec<_>>();
+    files.sort();
+
+    assert_eq!(
+        files,
+        vec![
+            "cellular_full_bptt_k8_medium.toml".to_string(),
+            "cellular_phase2_k8_64.toml".to_string(),
+            "cellular_reset_short.toml".to_string(),
+            "cellular_short.toml".to_string(),
+            "cellular_tbptt_k8_medium.toml".to_string(),
+            "cellular_write_disabled_short.toml".to_string(),
+            "dense_sequential_k8_medium.toml".to_string(),
+            "dense_sequential_phase2_k8_64.toml".to_string(),
+            "dense_short.toml".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn rac_imagenet1k_experiment_configs_stay_curated() {
+    let root = config_root()
+        .join("vision")
+        .join("rac")
+        .join("experiments")
+        .join("imagenet1k");
+    let mut files = fs::read_dir(&root)
+        .unwrap_or_else(|err| panic!("failed to read {}: {err}", root.display()))
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("toml"))
+        .filter_map(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_string)
+        })
+        .collect::<Vec<_>>();
+    files.sort();
+
+    assert_eq!(
+        files,
+        vec![
+            "dense_subset_long.toml".to_string(),
+            "dense_subset_precomputed_taesd_long_subset.toml".to_string(),
+            "dense_subset_precomputed_taesd_medium_subset.toml".to_string(),
+            "dense_subset_precomputed_taesd_smoke.toml".to_string(),
+            "dense_subset_precomputed_taesd_smoke_subset.toml".to_string(),
+            "dense_subset_smoke.toml".to_string(),
+        ]
+    );
+}
+
+#[test]
 fn video_lejepa_configs_parse_serialize_validate() {
     let root = config_root().join("vision").join("video_lejepa");
     let mut files = fs::read_dir(&root)
@@ -201,6 +367,26 @@ fn video_lejepa_configs_parse_serialize_validate() {
             )
         });
     }
+}
+
+#[test]
+fn moving_mnist_vjepa21_dense_promoted_baseline_matches_latest_wide_recipe() {
+    let root = config_root().join("vision").join("video_lejepa");
+    let baseline_path = root.join("baselines").join("vjepa21_dense_promoted.toml");
+    let latest_path =
+        root.join("moving_mnist_vjepa21_dense_wgpu_diag_probe025_recon1_256_wide.toml");
+
+    let baseline: VisionTrainingConfig =
+        load_vision_training_config(std::slice::from_ref(&baseline_path))
+            .unwrap_or_else(|err| panic!("failed to load {}: {err}", baseline_path.display()));
+    let latest: VisionTrainingConfig =
+        load_vision_training_config(std::slice::from_ref(&latest_path))
+            .unwrap_or_else(|err| panic!("failed to load {}: {err}", latest_path.display()));
+
+    assert_eq!(baseline, latest);
+    baseline
+        .validate()
+        .expect("promoted dense V-JEPA 2.1 baseline should validate");
 }
 
 fn write_config(dir: &Path, name: &str, contents: &str) -> PathBuf {

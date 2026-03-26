@@ -1,4 +1,4 @@
-//! Intermediate `video_lejepa` training model surface.
+//! Intermediate `video_lejepa` training surface.
 //!
 //! `VisionVideoLejepaModel` remains crate-private on purpose while the video stack is still in the
 //! hybrid/intermediate phase. Shared-core TRM migration work should treat this module as the
@@ -840,6 +840,7 @@ impl<B: BackendTrait> VisionVideoLejepaModel<B> {
                         views: Some(views),
                         frames: None,
                         debug_recon_frames: None,
+                        aux_frames: None,
                         patch_norms: None,
                         pca_rgb,
                         posterior_patch_norms_steps: None,
@@ -861,6 +862,7 @@ impl<B: BackendTrait> VisionVideoLejepaModel<B> {
                             "decoded_spatiotemporal_latent_last".to_string(),
                             "state_pca_rgb_last".to_string(),
                         ]),
+                        sidecar_json: None,
                         artifact_scale: self.config.artifact_upscale.max(1),
                         prediction_start: None,
                     })
@@ -869,6 +871,7 @@ impl<B: BackendTrait> VisionVideoLejepaModel<B> {
                         views: None,
                         frames: Some(forward.clip_frames.clone().slice_dim(0, 0..image_count)),
                         debug_recon_frames: debug_recon.clip.clone(),
+                        aux_frames: None,
                         patch_norms: None,
                         pca_rgb: None,
                         posterior_patch_norms_steps: None,
@@ -892,6 +895,7 @@ impl<B: BackendTrait> VisionVideoLejepaModel<B> {
                             "decoded_spatiotemporal_latent".to_string(),
                             "reencoded_decoded_latent_pca_rgb".to_string(),
                         ]),
+                        sidecar_json: None,
                         artifact_scale: self.config.artifact_upscale.max(1),
                         prediction_start: Some(forward.context_len),
                     })

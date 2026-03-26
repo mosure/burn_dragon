@@ -522,6 +522,9 @@ where
     B::Device: 'static,
 {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if std::env::var_os("BDH_STAGE_PROFILE_MEMORY_SYNC").is_some() {
+            let _ = B::sync(device);
+        }
         device_memory_usage::<B>(device)
     }))
     .ok()

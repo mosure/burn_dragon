@@ -1,15 +1,171 @@
 use super::distill_runtime::{DistillDatasetRequest, build_distill_datasets_and_teacher};
 use super::video::dataset::MovingMnistVideoLoaderConfig;
+use super::write_rac_best_checkpoint_report;
 use crate::model::{stage_aware_host_profile_reset, stage_aware_host_profile_snapshot};
 use crate::train::prelude::*;
+use burn::data::dataloader::{DataLoaderIterator, Progress};
 use burn::record::Recorder;
 use burn_dragon_kernel::api::spatial::{
     structured_pyramid_profile_reset, structured_pyramid_profile_snapshot,
 };
+use burn_dragon_train::train::pipeline::activate_planned_run;
 use std::time::Instant;
+
+mod rac_backend;
+mod video_lejepa_backend;
+mod video_vjepa21_backend;
+
+use rac_backend::train_rac_backend;
+use video_lejepa_backend::train_video_lejepa_backend;
+use video_vjepa21_backend::train_video_vjepa21_backend;
+
+pub(crate) struct VisionRacBatchLoader<B, SrcBatch>
+where
+    B: BackendTrait + 'static,
+    B::Device: Clone,
+    SrcBatch: Send + 'static,
+{
+    inner: Arc<dyn DataLoader<B, SrcBatch>>,
+    map: fn(SrcBatch) -> VisionRacBatch<B>,
+}
+
+impl<B, SrcBatch> VisionRacBatchLoader<B, SrcBatch>
+where
+    B: BackendTrait + 'static,
+    B::Device: Clone,
+    SrcBatch: Send + 'static,
+{
+    pub(crate) fn new(
+        inner: Arc<dyn DataLoader<B, SrcBatch>>,
+        map: fn(SrcBatch) -> VisionRacBatch<B>,
+    ) -> Self {
+        Self { inner, map }
+    }
+}
+
+struct VisionRacBatchIterator<'a, B, SrcBatch>
+where
+    B: BackendTrait + 'static,
+    SrcBatch: Send + 'static,
+{
+    inner: Box<dyn DataLoaderIterator<SrcBatch> + 'a>,
+    map: fn(SrcBatch) -> VisionRacBatch<B>,
+}
+
+impl<B, SrcBatch> Iterator for VisionRacBatchIterator<'_, B, SrcBatch>
+where
+    B: BackendTrait + 'static,
+    SrcBatch: Send + 'static,
+{
+    type Item = VisionRacBatch<B>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next().map(self.map)
+    }
+}
+
+impl<B, SrcBatch> DataLoaderIterator<VisionRacBatch<B>> for VisionRacBatchIterator<'_, B, SrcBatch>
+where
+    B: BackendTrait + 'static,
+    SrcBatch: Send + 'static,
+{
+    fn progress(&self) -> Progress {
+        self.inner.progress()
+    }
+}
+
+impl<B, SrcBatch> DataLoader<B, VisionRacBatch<B>> for VisionRacBatchLoader<B, SrcBatch>
+where
+    B: BackendTrait + 'static,
+    B::Device: Clone,
+    SrcBatch: Send + 'static,
+{
+    fn iter<'a>(&'a self) -> Box<dyn DataLoaderIterator<VisionRacBatch<B>> + 'a> {
+        Box::new(VisionRacBatchIterator {
+            inner: self.inner.iter(),
+            map: self.map,
+        })
+    }
+
+    fn num_items(&self) -> usize {
+        self.inner.num_items()
+    }
+
+    fn to_device(&self, device: &B::Device) -> Arc<dyn DataLoader<B, VisionRacBatch<B>>> {
+        Arc::new(Self::new(self.inner.to_device(device), self.map))
+    }
+
+    fn slice(&self, start: usize, end: usize) -> Arc<dyn DataLoader<B, VisionRacBatch<B>>> {
+        Arc::new(Self::new(self.inner.slice(start, end), self.map))
+    }
+}
+
+fn rac_batch_from_cifar<B: BackendTrait>(batch: CifarBatch<B>) -> VisionRacBatch<B> {
+    batch.into()
+}
+
+fn rac_batch_from_imagenet<B: BackendTrait>(batch: ImageNetBatch<B>) -> VisionRacBatch<B> {
+    batch.into()
+}
 
 pub fn train_vision_backend<B, Init>(
     config: &VisionTrainingConfig,
+    backend_name: &str,
+    init_backend: Init,
+) -> Result<()>
+where
+    B: AutodiffBackend + Clone + 'static,
+    B::Device: Clone,
+    Init: Fn(&B::Device),
+{
+    train_vision_backend_with_context::<B, Init>(config, &[], None, backend_name, init_backend)
+}
+
+pub fn train_vision_backend_with_config_paths<B, Init>(
+    config: &VisionTrainingConfig,
+    config_paths: &[PathBuf],
+    backend_name: &str,
+    init_backend: Init,
+) -> Result<()>
+where
+    B: AutodiffBackend + Clone + 'static,
+    B::Device: Clone,
+    Init: Fn(&B::Device),
+{
+    train_vision_backend_with_context::<B, Init>(
+        config,
+        config_paths,
+        None,
+        backend_name,
+        init_backend,
+    )
+}
+
+pub fn train_vision_backend_with_planned_run<B, Init>(
+    config: &VisionTrainingConfig,
+    config_paths: &[PathBuf],
+    planned_run: PlannedRunArtifacts,
+    backend_name: &str,
+    init_backend: Init,
+) -> Result<()>
+where
+    B: AutodiffBackend + Clone + 'static,
+    B::Device: Clone,
+    Init: Fn(&B::Device),
+{
+    train_vision_backend_with_context::<B, Init>(
+        config,
+        config_paths,
+        Some(planned_run),
+        backend_name,
+        init_backend,
+    )
+}
+
+fn train_vision_backend_with_context<B, Init>(
+    config: &VisionTrainingConfig,
+    config_paths: &[PathBuf],
+    planned_run: Option<PlannedRunArtifacts>,
     backend_name: &str,
     init_backend: Init,
 ) -> Result<()>
@@ -55,10 +211,25 @@ where
 
     maybe_download_vision_dataset(&config.dataset)?;
 
+    if let VisionTrainingModeConfig::Rac(rac) = &config.mode {
+        return train_rac_backend::<B>(
+            config,
+            config_paths,
+            planned_run,
+            backend_name,
+            &device,
+            &vision_config,
+            rac,
+            optimizer_cfg,
+        );
+    }
+
     if let VisionTrainingModeConfig::VideoLejepa(video) = &config.mode {
         if video.is_vjepa21() {
             return train_video_vjepa21_backend::<B>(
                 config,
+                config_paths,
+                planned_run.clone(),
                 backend_name,
                 &device,
                 &vision_config,
@@ -68,6 +239,8 @@ where
         }
         return train_video_lejepa_backend::<B>(
             config,
+            config_paths,
+            planned_run,
             backend_name,
             &device,
             &vision_config,
@@ -282,6 +455,7 @@ where
                 local_augmentations: local_train_aug.clone(),
                 normalize,
                 teacher: None,
+                rac_teacher_latent: None,
                 teacher_targets: Vec::new(),
                 views: global_views,
                 local_views,
@@ -299,6 +473,7 @@ where
                 local_augmentations: local_val_aug.clone(),
                 normalize,
                 teacher: None,
+                rac_teacher_latent: None,
                 teacher_targets: Vec::new(),
                 views: global_views,
                 local_views,
@@ -353,6 +528,7 @@ where
                 local_augmentations: None,
                 normalize,
                 teacher: None,
+                rac_teacher_latent: None,
                 teacher_targets: Vec::new(),
                 views,
                 local_views: 0,
@@ -370,6 +546,7 @@ where
                 local_augmentations: None,
                 normalize,
                 teacher: None,
+                rac_teacher_latent: None,
                 teacher_targets: Vec::new(),
                 views,
                 local_views: 0,
@@ -387,6 +564,9 @@ where
                     config: mae.clone(),
                 },
             )
+        }
+        VisionTrainingModeConfig::Rac(_) => {
+            unreachable!("rac mode should be dispatched before the generic image trainer");
         }
         VisionTrainingModeConfig::Saccade(saccade) => {
             let mut saccade = (**saccade).clone();
@@ -504,6 +684,7 @@ where
                 local_augmentations: None,
                 normalize,
                 teacher: None,
+                rac_teacher_latent: None,
                 teacher_targets: Vec::new(),
                 views,
                 local_views: 0,
@@ -521,6 +702,7 @@ where
                 local_augmentations: None,
                 normalize,
                 teacher: None,
+                rac_teacher_latent: None,
                 teacher_targets: Vec::new(),
                 views,
                 local_views: 0,
@@ -593,9 +775,10 @@ where
     let scheduler =
         resolve_vision_lr_scheduler(optimizer_cfg, total_steps, scheduler_iters, &vision_config)?;
 
-    let run_root = PathBuf::from("runs").join("vision");
-    let (run_dir, run_name) = create_run_dir(&run_root)?;
-    write_latest_run(&run_root, &run_name)?;
+    let planned_run = resolve_vision_run_artifacts(config, config_paths, planned_run)?;
+    activate_planned_run(&planned_run)?;
+    let run_dir = planned_run.run_dir;
+    let run_name = planned_run.run_name;
     crate::write_training_snapshot(config, &run_dir)?;
     info!("vision run name: {run_name}");
     info!(
@@ -659,6 +842,7 @@ where
                 rollout_horizon_metrics: false,
                 sigreg: false,
                 recon: false,
+                directional: false,
                 policy: false,
                 probe: false,
                 distill: true,
@@ -715,6 +899,13 @@ where
                     scheduler,
                     diagnostics,
                 )?,
+                ResolvedLrScheduler::BitNetTwoStage(scheduler) => train_vision_with_scheduler(
+                    &context,
+                    model.take().expect("model initialized"),
+                    optim.take().expect("optimizer initialized"),
+                    scheduler,
+                    diagnostics,
+                )?,
             }
         }
         VisionMode::Lejepa { config: lejepa } => {
@@ -753,6 +944,7 @@ where
                 rollout_horizon_metrics: false,
                 sigreg: model.as_ref().expect("model").config.loss.lejepa.enabled,
                 recon: model.as_ref().expect("model").config.loss.recon.weight > 0.0,
+                directional: false,
                 policy: false,
                 probe: true,
                 artifact_every: model.as_ref().expect("model").config.artifact_every,
@@ -807,6 +999,13 @@ where
                     scheduler,
                     diagnostics.clone(),
                 )?,
+                ResolvedLrScheduler::BitNetTwoStage(scheduler) => train_vision_with_scheduler(
+                    &context,
+                    model.take().expect("model initialized"),
+                    optim.take().expect("optimizer initialized"),
+                    scheduler,
+                    diagnostics.clone(),
+                )?,
             }
         }
         VisionMode::Mae { config: mae } => {
@@ -845,6 +1044,7 @@ where
                 rollout_horizon_metrics: false,
                 sigreg: false,
                 recon: model_ref.config.loss.recon.weight > 0.0,
+                directional: false,
                 policy: false,
                 probe: false,
                 artifact_every: model_ref.config.artifact_every,
@@ -899,6 +1099,13 @@ where
                     scheduler,
                     diagnostics.clone(),
                 )?,
+                ResolvedLrScheduler::BitNetTwoStage(scheduler) => train_vision_with_scheduler(
+                    &context,
+                    model.take().expect("model initialized"),
+                    optim.take().expect("optimizer initialized"),
+                    scheduler,
+                    diagnostics.clone(),
+                )?,
             }
         }
         VisionMode::Saccade { config: saccade } => {
@@ -930,6 +1137,7 @@ where
                 rollout_horizon_metrics: false,
                 sigreg: model_ref.config.loss.lejepa.enabled,
                 recon: model_ref.config.loss.recon.weight > 0.0,
+                directional: false,
                 policy: model_ref.config.policy.gdpo.enabled,
                 probe: false,
                 artifact_every: model_ref.config.artifact_every,
@@ -978,6 +1186,13 @@ where
                     diagnostics.clone(),
                 )?,
                 ResolvedLrScheduler::Noam(scheduler) => train_vision_with_scheduler(
+                    &context,
+                    model.take().expect("model initialized"),
+                    optim.take().expect("optimizer initialized"),
+                    scheduler,
+                    diagnostics.clone(),
+                )?,
+                ResolvedLrScheduler::BitNetTwoStage(scheduler) => train_vision_with_scheduler(
                     &context,
                     model.take().expect("model initialized"),
                     optim.take().expect("optimizer initialized"),
@@ -1039,475 +1254,19 @@ where
     Ok(())
 }
 
-fn train_video_lejepa_backend<B>(
+fn resolve_vision_run_artifacts(
     config: &VisionTrainingConfig,
-    backend_name: &str,
-    device: &B::Device,
-    vision_config: &VisionDragonConfig,
-    video: &VisionVideoLejepaConfig,
-    rollout: VisionRollout,
-    optimizer_cfg: &OptimizerConfig,
-) -> Result<()>
-where
-    B: AutodiffBackend + Clone + 'static,
-    B::Device: Clone,
-{
-    crate::device::pin_stream_zero();
-    let training = &config.training;
-    let normalize =
-        VisionNormalize::new(config.augment.normalize_mean, config.augment.normalize_std);
-    let train_target_frames_min = video.effective_train_target_frames_min();
-    let train_target_frames_max = video.effective_train_target_frames_max();
-    let target_horizon_curriculum = Some(VideoTargetHorizonCurriculum {
-        min_target_len: train_target_frames_min,
-        max_target_len: train_target_frames_max,
-        warmup_steps: video.train_target_warmup_steps,
-        seed: config.dataset.moving_mnist.train_seed ^ 0xA11B_1C0E_5EED_u64,
-    });
-    let train_dataset = Arc::new(MovingMnistVideoDataset::new_from_mnist(
-        MovingMnistVideoDatasetConfig {
-            split: MovingMnistSplit::Train,
-            frame_size: vision_config.image_size,
-            digit_size: config.dataset.moving_mnist.digit_size,
-            in_channels: vision_config.in_channels,
-            context_len: video.context_frames,
-            target_len: train_target_frames_max,
-            extra_future_frames: 0,
-            frame_stride: video.frame_stride,
-            max_records: config.dataset.max_records,
-            normalize,
-            min_velocity: config.dataset.moving_mnist.min_velocity,
-            max_velocity: config.dataset.moving_mnist.max_velocity,
-            seed: config.dataset.moving_mnist.train_seed,
-        },
-    )?);
-    let val_extra_future_frames = video
-        .artifact_future_frames
-        .saturating_sub(video.target_frames);
-    let val_dataset = Arc::new(MovingMnistVideoDataset::new_from_mnist(
-        MovingMnistVideoDatasetConfig {
-            split: MovingMnistSplit::Val,
-            frame_size: vision_config.image_size,
-            digit_size: config.dataset.moving_mnist.digit_size,
-            in_channels: vision_config.in_channels,
-            context_len: video.context_frames,
-            target_len: video.target_frames,
-            extra_future_frames: val_extra_future_frames,
-            frame_stride: video.frame_stride,
-            max_records: config.dataset.max_records,
-            normalize,
-            min_velocity: config.dataset.moving_mnist.min_velocity,
-            max_velocity: config.dataset.moving_mnist.max_velocity,
-            seed: config.dataset.moving_mnist.val_seed,
-        },
-    )?);
-
-    let steps_per_epoch = train_dataset.steps_per_epoch(training.batch_size);
-    let schedule = resolve_vision_train_schedule(training, steps_per_epoch)?;
-    let steps_per_epoch = schedule.steps_per_epoch;
-    let total_epochs = schedule.total_epochs;
-    let total_steps = schedule.total_steps;
-
-    info!(
-        "vision video schedule: steps_per_epoch={steps_per_epoch}, total_steps={total_steps}, epochs={total_epochs}, source={}",
-        schedule.source.as_str()
-    );
-    info!(
-        "video train target horizon: min={}, max={}, warmup_steps={}",
-        train_target_frames_min, train_target_frames_max, video.train_target_warmup_steps
-    );
-
-    let train_loader: Arc<dyn DataLoader<B, VideoClipBatch<B>>> =
-        Arc::new(MovingMnistVideoDataLoader::<B>::new(
-            Arc::clone(&train_dataset),
-            device,
-            MovingMnistVideoLoaderConfig {
-                batch_size: training.batch_size,
-                steps_per_epoch,
-                total_steps: Some(total_steps),
-                target_horizon_curriculum,
-                prefetch_batches: config.dataset.prefetch_batches,
-                prefetch_workers: config.dataset.prefetch_workers,
-                prefetch_to_device: config.dataset.prefetch_to_device,
-                sequential: false,
-                artifact_capture_every: 0,
-                artifact_capture_images: 0,
-                artifact_extra_future_frames: 0,
-            },
-        ));
-
-    let long_rollout_validation =
-        video.artifact_future_frames > video.max_supervised_target_frames();
-    let valid_batch_size = if long_rollout_validation {
-        training.batch_size.min(video.artifact_max_images.max(1))
-    } else {
-        training.batch_size
-    };
-    let val_steps_per_epoch = val_dataset.steps_per_epoch(valid_batch_size);
-    let valid_steps =
-        resolve_valid_steps_per_epoch(total_steps, training.log_frequency, val_steps_per_epoch);
-    let valid_device = device.clone();
-    let artifact_capture_every = if video.artifact_every > 0 && video.artifact_max_images > 0 {
-        video.artifact_every
-    } else {
-        0
-    };
-    let artifact_capture_images = if artifact_capture_every > 0 {
-        video.artifact_max_images
-    } else {
-        0
-    };
-    let artifact_extra_future_frames = if artifact_capture_every > 0 {
-        val_extra_future_frames
-    } else {
-        0
-    };
-    let valid_loader: Arc<dyn DataLoader<ValidBackend<B>, VideoClipBatch<ValidBackend<B>>>> =
-        Arc::new(MovingMnistVideoDataLoader::<ValidBackend<B>>::new(
-            Arc::clone(&val_dataset),
-            &valid_device,
-            MovingMnistVideoLoaderConfig {
-                batch_size: valid_batch_size,
-                steps_per_epoch: valid_steps,
-                total_steps: None,
-                target_horizon_curriculum: None,
-                prefetch_batches: config.dataset.prefetch_batches,
-                prefetch_workers: config.dataset.prefetch_workers,
-                prefetch_to_device: false,
-                sequential: true,
-                artifact_capture_every,
-                artifact_capture_images,
-                artifact_extra_future_frames,
-            },
-        ));
-    info!(
-        "video valid loader: batch_size={valid_batch_size}, steps_per_epoch={val_steps_per_epoch}, long_rollout_validation={long_rollout_validation}"
-    );
-
-    let scheduler_iters = match schedule.source {
-        ScheduleSource::Epochs => Some(total_steps),
-        ScheduleSource::MaxIters => None,
-    };
-    let scheduler =
-        resolve_vision_lr_scheduler(optimizer_cfg, total_steps, scheduler_iters, vision_config)?;
-
-    let run_root = PathBuf::from("runs").join("vision");
-    let (run_dir, run_name) = create_run_dir(&run_root)?;
-    write_latest_run(&run_root, &run_name)?;
-    crate::write_training_snapshot(config, &run_dir)?;
-    info!("vision run name: {run_name}");
-
-    let context = VisionTrainEnvironment {
-        run_dir: &run_dir,
-        run_name: &run_name,
-        backend_name,
-        training,
-        device,
-        train_loader,
-        valid_loader,
-        epochs: total_epochs,
-    };
-
-    let model = VisionDragon::<B>::new(vision_config.clone(), device);
-    let mut model = Some(VisionVideoLejepaModel::new(
-        model,
-        video.clone(),
-        vision_config,
-        rollout,
-        train_dataset.num_classes(),
-        device,
-    ));
-    let mut optim =
-        Some(adamw_config_from_optimizer(optimizer_cfg).init::<B, VisionVideoLejepaModel<B>>());
-    let diagnostics = Some(VisionDiagnostics {
-        metric_prefix: "video_lejepa".to_string(),
-        distill: false,
-        distill_rollout: false,
-        inv: true,
-        observe: model.as_ref().expect("model").config.loss.observe_weight > 0.0,
-        mode_separation: true,
-        rollout_horizon_metrics: true,
-        sigreg: model.as_ref().expect("model").config.loss.sigreg.enabled,
-        recon: model
-            .as_ref()
-            .expect("model")
-            .config
-            .loss
-            .debug_recon_weight
-            > 0.0,
-        policy: false,
-        probe: true,
-        artifact_every: model.as_ref().expect("model").config.artifact_every,
-        artifact_output: model.as_ref().expect("model").config.artifact_output,
-        artifact_overwrite: model.as_ref().expect("model").config.artifact_overwrite,
-        artifact_max_images: model.as_ref().expect("model").config.artifact_max_images,
-        artifact_fps: model.as_ref().expect("model").config.artifact_fps,
-        normalize_mean: config.augment.normalize_mean,
-        normalize_std: config.augment.normalize_std,
-        ffmpeg_path: training.ffmpeg_path.clone(),
-    });
-
-    match scheduler {
-        ResolvedLrScheduler::Constant(lr) => train_vision_with_scheduler(
-            &context,
-            model.take().expect("model initialized"),
-            optim.take().expect("optimizer initialized"),
-            lr,
-            diagnostics,
-        )?,
-        ResolvedLrScheduler::Cosine(scheduler) => train_vision_with_scheduler(
-            &context,
-            model.take().expect("model initialized"),
-            optim.take().expect("optimizer initialized"),
-            scheduler,
-            diagnostics,
-        )?,
-        ResolvedLrScheduler::Linear(scheduler) => train_vision_with_scheduler(
-            &context,
-            model.take().expect("model initialized"),
-            optim.take().expect("optimizer initialized"),
-            scheduler,
-            diagnostics,
-        )?,
-        ResolvedLrScheduler::Exponential(scheduler) => train_vision_with_scheduler(
-            &context,
-            model.take().expect("model initialized"),
-            optim.take().expect("optimizer initialized"),
-            scheduler,
-            diagnostics,
-        )?,
-        ResolvedLrScheduler::Step(scheduler) => train_vision_with_scheduler(
-            &context,
-            model.take().expect("model initialized"),
-            optim.take().expect("optimizer initialized"),
-            scheduler,
-            diagnostics,
-        )?,
-        ResolvedLrScheduler::Noam(scheduler) => train_vision_with_scheduler(
-            &context,
-            model.take().expect("model initialized"),
-            optim.take().expect("optimizer initialized"),
-            scheduler,
-            diagnostics,
-        )?,
+    config_paths: &[PathBuf],
+    planned_run: Option<PlannedRunArtifacts>,
+) -> Result<PlannedRunArtifacts> {
+    match planned_run {
+        Some(planned_run) => Ok(planned_run),
+        None => {
+            let run_root =
+                resolve_run_root_for_config_paths("vision", &config.run_layout, config_paths);
+            plan_run_artifacts(&run_root, None)
+        }
     }
-
-    info!("Vision video LEJEPA training complete on {backend_name}");
-
-    Ok(())
-}
-
-fn train_video_vjepa21_backend<B>(
-    config: &VisionTrainingConfig,
-    backend_name: &str,
-    device: &B::Device,
-    vision_config: &VisionDragonConfig,
-    video: &VisionVideoLejepaConfig,
-    optimizer_cfg: &OptimizerConfig,
-) -> Result<()>
-where
-    B: AutodiffBackend + Clone + 'static,
-    B::Device: Clone,
-{
-    crate::device::pin_stream_zero();
-    let training = &config.training;
-    let normalize =
-        VisionNormalize::new(config.augment.normalize_mean, config.augment.normalize_std);
-    let clip_frames = video.vjepa21.clip_frames.max(1);
-    let train_dataset = Arc::new(MovingMnistVideoDataset::new_from_mnist(
-        MovingMnistVideoDatasetConfig {
-            split: MovingMnistSplit::Train,
-            frame_size: vision_config.image_size,
-            digit_size: config.dataset.moving_mnist.digit_size,
-            in_channels: vision_config.in_channels,
-            context_len: clip_frames,
-            target_len: 0,
-            extra_future_frames: 0,
-            frame_stride: video.frame_stride.max(1),
-            max_records: config.dataset.max_records,
-            normalize,
-            min_velocity: config.dataset.moving_mnist.min_velocity,
-            max_velocity: config.dataset.moving_mnist.max_velocity,
-            seed: config.dataset.moving_mnist.train_seed,
-        },
-    )?);
-    let val_dataset = Arc::new(MovingMnistVideoDataset::new_from_mnist(
-        MovingMnistVideoDatasetConfig {
-            split: MovingMnistSplit::Val,
-            frame_size: vision_config.image_size,
-            digit_size: config.dataset.moving_mnist.digit_size,
-            in_channels: vision_config.in_channels,
-            context_len: clip_frames,
-            target_len: 0,
-            extra_future_frames: 0,
-            frame_stride: video.frame_stride.max(1),
-            max_records: config.dataset.max_records,
-            normalize,
-            min_velocity: config.dataset.moving_mnist.min_velocity,
-            max_velocity: config.dataset.moving_mnist.max_velocity,
-            seed: config.dataset.moving_mnist.val_seed,
-        },
-    )?);
-
-    let steps_per_epoch = train_dataset.steps_per_epoch(training.batch_size);
-    let schedule = resolve_vision_train_schedule(training, steps_per_epoch)?;
-    let steps_per_epoch = schedule.steps_per_epoch;
-    let total_epochs = schedule.total_epochs;
-    let total_steps = schedule.total_steps;
-
-    info!(
-        "vision vjepa21 schedule: steps_per_epoch={steps_per_epoch}, total_steps={total_steps}, epochs={total_epochs}, source={}",
-        schedule.source.as_str()
-    );
-    info!(
-        "video vjepa21 moving mnist: clip_frames={}, frame_stride={}",
-        clip_frames,
-        video.frame_stride.max(1)
-    );
-
-    let train_loader: Arc<dyn DataLoader<B, VideoClipBatch<B>>> =
-        Arc::new(MovingMnistVideoDataLoader::<B>::new(
-            Arc::clone(&train_dataset),
-            device,
-            MovingMnistVideoLoaderConfig {
-                batch_size: training.batch_size,
-                steps_per_epoch,
-                total_steps: Some(total_steps),
-                target_horizon_curriculum: None,
-                prefetch_batches: config.dataset.prefetch_batches,
-                prefetch_workers: config.dataset.prefetch_workers,
-                prefetch_to_device: config.dataset.prefetch_to_device,
-                sequential: false,
-                artifact_capture_every: 0,
-                artifact_capture_images: 0,
-                artifact_extra_future_frames: 0,
-            },
-        ));
-
-    let val_steps_per_epoch = val_dataset.steps_per_epoch(training.batch_size);
-    let valid_steps =
-        resolve_valid_steps_per_epoch(total_steps, training.log_frequency, val_steps_per_epoch);
-    let valid_loader: Arc<dyn DataLoader<ValidBackend<B>, VideoClipBatch<ValidBackend<B>>>> =
-        Arc::new(MovingMnistVideoDataLoader::<ValidBackend<B>>::new(
-            Arc::clone(&val_dataset),
-            device,
-            MovingMnistVideoLoaderConfig {
-                batch_size: training.batch_size,
-                steps_per_epoch: valid_steps,
-                total_steps: None,
-                target_horizon_curriculum: None,
-                prefetch_batches: config.dataset.prefetch_batches,
-                prefetch_workers: config.dataset.prefetch_workers,
-                prefetch_to_device: false,
-                sequential: true,
-                artifact_capture_every: 0,
-                artifact_capture_images: 0,
-                artifact_extra_future_frames: 0,
-            },
-        ));
-
-    let scheduler_iters = match schedule.source {
-        ScheduleSource::Epochs => Some(total_steps),
-        ScheduleSource::MaxIters => None,
-    };
-    let scheduler =
-        resolve_vision_lr_scheduler(optimizer_cfg, total_steps, scheduler_iters, vision_config)?;
-
-    let run_root = PathBuf::from("runs").join("vision");
-    let (run_dir, run_name) = create_run_dir(&run_root)?;
-    write_latest_run(&run_root, &run_name)?;
-    crate::write_training_snapshot(config, &run_dir)?;
-    info!("vision run name: {run_name}");
-
-    let context = VisionTrainEnvironment {
-        run_dir: &run_dir,
-        run_name: &run_name,
-        backend_name,
-        training,
-        device,
-        train_loader,
-        valid_loader,
-        epochs: total_epochs,
-    };
-
-    let model = VisionDragon::<B>::new(vision_config.clone(), device);
-    let mut model = Some(VisionVideoVjepa21Model::new(
-        model,
-        video.clone(),
-        vision_config,
-        device,
-    ));
-    let mut optim =
-        Some(adamw_config_from_optimizer(optimizer_cfg).init::<B, VisionVideoVjepa21Model<B>>());
-    let diagnostics = Some(VisionDiagnostics {
-        metric_prefix: "video_vjepa21".to_string(),
-        distill: false,
-        distill_rollout: false,
-        inv: true,
-        observe: video.vjepa21.loss.predict_all && video.vjepa21.loss.context_weight > 0.0,
-        mode_separation: true,
-        rollout_horizon_metrics: false,
-        sigreg: false,
-        recon: false,
-        policy: false,
-        probe: false,
-        artifact_every: 0,
-        artifact_output: video.artifact_output,
-        artifact_overwrite: video.artifact_overwrite,
-        artifact_max_images: 0,
-        artifact_fps: video.artifact_fps,
-        normalize_mean: config.augment.normalize_mean,
-        normalize_std: config.augment.normalize_std,
-        ffmpeg_path: training.ffmpeg_path.clone(),
-    });
-
-    match scheduler {
-        ResolvedLrScheduler::Constant(lr) => train_vision_with_scheduler(
-            &context,
-            model.take().expect("model initialized"),
-            optim.take().expect("optimizer initialized"),
-            lr,
-            diagnostics,
-        )?,
-        ResolvedLrScheduler::Cosine(scheduler) => train_vision_with_scheduler(
-            &context,
-            model.take().expect("model initialized"),
-            optim.take().expect("optimizer initialized"),
-            scheduler,
-            diagnostics,
-        )?,
-        ResolvedLrScheduler::Linear(scheduler) => train_vision_with_scheduler(
-            &context,
-            model.take().expect("model initialized"),
-            optim.take().expect("optimizer initialized"),
-            scheduler,
-            diagnostics,
-        )?,
-        ResolvedLrScheduler::Exponential(scheduler) => train_vision_with_scheduler(
-            &context,
-            model.take().expect("model initialized"),
-            optim.take().expect("optimizer initialized"),
-            scheduler,
-            diagnostics,
-        )?,
-        ResolvedLrScheduler::Step(scheduler) => train_vision_with_scheduler(
-            &context,
-            model.take().expect("model initialized"),
-            optim.take().expect("optimizer initialized"),
-            scheduler,
-            diagnostics,
-        )?,
-        ResolvedLrScheduler::Noam(scheduler) => train_vision_with_scheduler(
-            &context,
-            model.take().expect("model initialized"),
-            optim.take().expect("optimizer initialized"),
-            scheduler,
-            diagnostics,
-        )?,
-    }
-
-    info!("Vision video V-JEPA 2.1 training complete on {backend_name}");
-    Ok(())
 }
 
 #[cfg(feature = "integration_test")]

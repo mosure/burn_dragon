@@ -1,0 +1,37 @@
+extends = ["dense_subset_smoke.toml"]
+
+# Public RAC nano-compat path:
+# - compact TAESD-style latent teacher
+# - centered latent<->state mapping
+# - deterministic student views so precomputed latents match inputs
+# This is intentionally not labeled as full paper-faithful RAC.
+
+[training]
+max_iters = 16
+batch_size = 8
+
+[mode]
+state_channels = 4
+
+[mode.teacher]
+kind = "precomputed_latent"
+state_mapping = "centered_subpixel"
+
+[mode.teacher.precomputed_latent]
+train_path = "artifacts/rac_teacher_latents/train_latent.bin"
+val_path = "artifacts/rac_teacher_latents/val_latent.bin"
+channels = 4
+height = 16
+width = 16
+
+[mode.loss]
+velocity_weight = 0.0
+
+[augment]
+image_size = 128
+resize_short = 128
+min_scale = 1.0
+max_scale = 1.0
+min_aspect_ratio = 1.0
+max_aspect_ratio = 1.0
+flip_prob = 0.0

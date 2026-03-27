@@ -4,6 +4,7 @@ mod diagnostics;
 mod language_pipeline;
 mod low_bit_export;
 mod sequence_dispatch;
+pub use low_bit_export::BdhBitNetDeployScaffold;
 
 use burn::module::{Ignored, Module, Param};
 use burn::nn::{Dropout, DropoutConfig, Embedding, EmbeddingConfig};
@@ -54,11 +55,11 @@ use super::low_bit::{
 };
 use super::low_bit_runtime::{
     LowBitKernelRuntimeKind, LowBitProjectionPlan, PackedLowBitProjectionArtifacts,
-    fake_quantize_activation_ste, fake_quantize_weight_ste, pack_rho_int8_block_state,
+    fake_quantize_activation_ste, fake_quantize_weight_ste, pack_rho_block_state,
     pack_rho_int8_block_state_device, packed_decoder_tail_native, packed_decoder_tail_reference,
     packed_decoder_tail_training_native, packed_lowrank_projection_native,
     packed_lowrank_projection_reference, packed_lowrank_projection_training_native,
-    resolve_low_bit_kernel_plan, unpack_rho_int8_block_state, unpack_rho_int8_block_state_device,
+    resolve_low_bit_kernel_plan, unpack_rho_block_state, unpack_rho_int8_block_state_device,
 };
 use super::norm::DragonNorm;
 #[cfg(any(feature = "probe", test))]
@@ -70,7 +71,6 @@ use super::residual_stream::lowrank_residual_step_with_metrics_branch_thresholds
 use super::residual_stream::{
     lowrank_residual_step_branch_thresholds_relu_native,
     lowrank_residual_step_next_branch_thresholds,
-    lowrank_residual_step_next_branch_thresholds_relu_native,
 };
 use super::sequence::linear::{
     recurrent_attention_dense_score_final_rho_reference,
@@ -135,6 +135,29 @@ pub struct BDH<B: Backend> {
     mamba_config: Ignored<ResolvedMambaSequenceConfig>,
     mamba: Option<MambaSequenceParameters<B>>,
     lm_head: Param<Tensor<B, 2>>,
+}
+
+/// Named inputs for a single low-rank positive projection.
+///
+/// This keeps projection call sites declarative while preserving the exact runtime behavior for
+/// low-bit artifacts, fake-quant formats, and fused execution selection.
+struct LowrankProjectionRequest<'a, B: Backend> {
+    dense: Tensor<B, 4>,
+    projector: Tensor<B, 4>,
+    scale_cache_kind: &'static str,
+    packed_weight_artifact: Option<&'a PackedWeightArtifact>,
+    weight_format: Option<LowBitWeightFormat>,
+    activation_format: Option<LowBitActivationFormat>,
+    relu_threshold: f32,
+    use_fused: bool,
+    latent_pattern: &'a crate::kernel::BlockPattern1d,
+    sparse_mask: Option<Tensor<B, 4>>,
+}
+
+impl<'a, B: Backend> LowrankProjectionRequest<'a, B> {
+    fn latent_out(&self) -> usize {
+        self.projector.shape().dims::<4>()[3]
+    }
 }
 
 impl<B: Backend> BDH<B> {
@@ -630,11 +653,13 @@ impl<B: Backend> BDH<B> {
         plan
     }
 
-    fn rho_chunk_compression_enabled(&self) -> bool {
-        matches!(
-            self.low_bit_rho.0.compression,
+    fn rho_chunk_compression(&self) -> Option<RhoCompressionConfig> {
+        match self.low_bit_rho.0.compression {
             RhoCompressionConfig::Int8BlockExp
-        )
+            | RhoCompressionConfig::TernaryBlockExp
+            | RhoCompressionConfig::BinaryBlockExp => Some(self.low_bit_rho.0.compression),
+            _ => None,
+        }
     }
 
     fn resolve_linear_attention_rho_state(
@@ -645,37 +670,38 @@ impl<B: Backend> BDH<B> {
         if let Some(rho) = layer_state.rho.as_ref() {
             return Some(rho.clone());
         }
-        if self.rho_chunk_compression_enabled() {
+        if self.rho_chunk_compression().is_some() {
             if let Some(packed) = layer_state.packed_rho_int8_device.as_ref() {
                 return Some(unpack_rho_int8_block_state_device(packed));
             }
             return layer_state
-                .packed_rho_int8
+                .packed_rho
                 .as_ref()
-                .map(|packed| unpack_rho_int8_block_state::<B>(packed, device));
+                .map(|packed| unpack_rho_block_state::<B>(packed, device));
         }
         None
     }
 
     fn write_linear_attention_rho_state(&self, layer_state: &mut LayerState<B>, rho: Tensor<B, 4>) {
-        if self.rho_chunk_compression_enabled() {
+        if let Some(compression) = self.rho_chunk_compression() {
             if resolve_low_bit_kernel_plan::<B>(
                 &self.low_bit_quant.0,
                 self.available_packed_low_bit_projection_artifacts(),
             )
             .capabilities
             .native_rho_int8_block_supported
+                && matches!(compression, RhoCompressionConfig::Int8BlockExp)
             {
                 layer_state.packed_rho_int8_device = Some(pack_rho_int8_block_state_device(&rho));
-                layer_state.packed_rho_int8 = None;
+                layer_state.packed_rho = None;
             } else {
-                layer_state.packed_rho_int8 = Some(pack_rho_int8_block_state(&rho));
+                layer_state.packed_rho = Some(pack_rho_block_state(&rho, compression));
                 layer_state.packed_rho_int8_device = None;
             }
             layer_state.rho = None;
         } else {
             layer_state.rho = Some(rho);
-            layer_state.packed_rho_int8 = None;
+            layer_state.packed_rho = None;
             layer_state.packed_rho_int8_device = None;
         }
         layer_state.rho_norm = None;
@@ -707,24 +733,25 @@ impl<B: Backend> BDH<B> {
         rho: Tensor<B, 4>,
         rho_norm: Tensor<B, 3>,
     ) {
-        if self.rho_chunk_compression_enabled() {
+        if let Some(compression) = self.rho_chunk_compression() {
             if resolve_low_bit_kernel_plan::<B>(
                 &self.low_bit_quant.0,
                 self.available_packed_low_bit_projection_artifacts(),
             )
             .capabilities
             .native_rho_int8_block_supported
+                && matches!(compression, RhoCompressionConfig::Int8BlockExp)
             {
                 layer_state.packed_rho_int8_device = Some(pack_rho_int8_block_state_device(&rho));
-                layer_state.packed_rho_int8 = None;
+                layer_state.packed_rho = None;
             } else {
-                layer_state.packed_rho_int8 = Some(pack_rho_int8_block_state(&rho));
+                layer_state.packed_rho = Some(pack_rho_block_state(&rho, compression));
                 layer_state.packed_rho_int8_device = None;
             }
             layer_state.rho = None;
         } else {
             layer_state.rho = Some(rho);
-            layer_state.packed_rho_int8 = None;
+            layer_state.packed_rho = None;
             layer_state.packed_rho_int8_device = None;
         }
         layer_state.rho_norm = Some(rho_norm);
@@ -761,27 +788,28 @@ impl<B: Backend> BDH<B> {
         (encoder, encoder_v, decoder, latent_per_head)
     }
 
-    fn project_lowrank_positive(
-        &self,
-        dense: Tensor<B, 4>,
-        projector: Tensor<B, 4>,
-        packed_weight_artifact: Option<&PackedWeightArtifact>,
-        weight_format: Option<LowBitWeightFormat>,
-        activation_format: Option<LowBitActivationFormat>,
-        relu_threshold: f32,
-        use_fused: bool,
-        latent_pattern: &crate::kernel::BlockPattern1d,
-        sparse_mask: Option<Tensor<B, 4>>,
-    ) -> Tensor<B, 4>
+    fn project_lowrank_positive(&self, request: LowrankProjectionRequest<'_, B>) -> Tensor<B, 4>
     where
         B::FloatTensorPrimitive: 'static,
     {
+        let latent_out = request.latent_out();
+        let LowrankProjectionRequest {
+            dense,
+            projector,
+            scale_cache_kind,
+            packed_weight_artifact,
+            weight_format,
+            activation_format,
+            relu_threshold,
+            use_fused,
+            latent_pattern,
+            sparse_mask,
+        } = request;
         if matches!(
             self.packed_low_bit_projection_artifacts().runtime,
             LowBitKernelRuntimeKind::PackedNativeTrainingForward
         ) && weight_format.is_some()
         {
-            let latent_out = projector.shape().dims::<4>()[3];
             let fused_relu_threshold = (!self.low_bit_quant.0.strict_bitnet_reference).then_some(
                 if relu_threshold != 0.0 {
                     relu_threshold
@@ -797,6 +825,7 @@ impl<B: Backend> BDH<B> {
                 latent_out,
                 self.low_bit_quant.0.saved_activations.mode,
                 fused_relu_threshold,
+                (!self.low_bit_quant.0.strict_bitnet_reference).then_some(scale_cache_kind),
             );
             let activated = if fused_relu_threshold.is_some() {
                 projected
@@ -817,17 +846,14 @@ impl<B: Backend> BDH<B> {
 
         if let Some(artifact) = packed_weight_artifact {
             let mut projected = match self.packed_low_bit_projection_artifacts().runtime {
-                LowBitKernelRuntimeKind::PackedNativeInference => packed_lowrank_projection_native(
-                    dense,
-                    artifact,
-                    activation_format,
-                    projector.shape().dims::<4>()[3],
-                ),
+                LowBitKernelRuntimeKind::PackedNativeInference => {
+                    packed_lowrank_projection_native(dense, artifact, activation_format, latent_out)
+                }
                 _ => packed_lowrank_projection_reference(
                     dense,
                     artifact,
                     activation_format,
-                    projector.shape().dims::<4>()[3],
+                    latent_out,
                 ),
             };
             if relu_threshold != 0.0 {
@@ -1209,17 +1235,18 @@ impl<B: Backend> BDH<B> {
             }
             let low_bit_plan = self.low_bit_projection_plan();
             let packed_artifacts = self.packed_low_bit_projection_artifacts();
-            let x_base = self.project_lowrank_positive(
-                branch_flat.clone(),
-                encoder.clone(),
-                packed_artifacts.x,
-                low_bit_plan.x_weight_format,
-                low_bit_plan.x_activation_format,
-                self.x_relu_threshold,
-                fused,
+            let x_base = self.project_lowrank_positive(LowrankProjectionRequest {
+                dense: branch_flat.clone(),
+                projector: encoder.clone(),
+                scale_cache_kind: "decoder_x",
+                packed_weight_artifact: packed_artifacts.x,
+                weight_format: low_bit_plan.x_weight_format,
+                activation_format: low_bit_plan.x_activation_format,
+                relu_threshold: self.x_relu_threshold,
+                use_fused: fused,
                 latent_pattern,
-                sparse_mask.clone(),
-            );
+                sparse_mask: sparse_mask.clone(),
+            });
             let mut next_tokens = Vec::with_capacity(branch_time);
             let mut y_neuron_state = self.resolve_y_neuron_state(
                 layer_state,
@@ -1294,17 +1321,18 @@ impl<B: Backend> BDH<B> {
                     },
                 );
                 let a_dense = self.norm.forward(a_dense);
-                let y_gate = self.project_lowrank_positive(
-                    a_dense,
-                    encoder_v.clone(),
-                    packed_artifacts.y,
-                    low_bit_plan.y_weight_format,
-                    low_bit_plan.y_activation_format,
-                    self.y_relu_threshold,
-                    fused,
+                let y_gate = self.project_lowrank_positive(LowrankProjectionRequest {
+                    dense: a_dense,
+                    projector: encoder_v.clone(),
+                    scale_cache_kind: "decoder_y",
+                    packed_weight_artifact: packed_artifacts.y,
+                    weight_format: low_bit_plan.y_weight_format,
+                    activation_format: low_bit_plan.y_activation_format,
+                    relu_threshold: self.y_relu_threshold,
+                    use_fused: fused,
                     latent_pattern,
-                    sparse_mask.clone(),
-                );
+                    sparse_mask: sparse_mask.clone(),
+                });
                 let y_neuron = self.dropout.forward(x_neuron.clone() * y_gate.clone());
                 let y_neuron = if let Some(format) = low_bit_plan.residual_activation_format {
                     fake_quantize_activation_ste(y_neuron, format)
@@ -1324,6 +1352,7 @@ impl<B: Backend> BDH<B> {
                             .expect("native training decoder tail requires low-bit weight format"),
                         None,
                         self.low_bit_quant.0.saved_activations.mode,
+                        (!self.low_bit_quant.0.strict_bitnet_reference).then_some("decoder_tail"),
                     )
                 } else if let Some(artifact) = packed_artifacts.residual {
                     match packed_artifacts.runtime {

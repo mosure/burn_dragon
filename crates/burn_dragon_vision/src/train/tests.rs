@@ -672,7 +672,11 @@ fn run_foveation_equivalence<B: BackendTrait>(device: &B::Device, backend_label:
     if crate::train::foveation::wgsl::supports_backend::<B>() {
         sampling_modes.push(VisionFoveaSamplingMode::Wgsl);
     }
-    let warp_modes = [VisionFoveaWarpMode::Warped, VisionFoveaWarpMode::Patched];
+    let warp_modes = [
+        VisionFoveaWarpMode::Warped,
+        VisionFoveaWarpMode::Conformal,
+        VisionFoveaWarpMode::Patched,
+    ];
 
     for (size_idx, (width, height, patch_size, subpatch_size)) in
         size_configs.iter().copied().enumerate()
@@ -754,6 +758,9 @@ fn run_foveation_equivalence<B: BackendTrait>(device: &B::Device, backend_label:
                             patch_size,
                             match warp_mode {
                                 VisionFoveaWarpMode::Warped => foveation_cpu::FoveaWarpMode::Warped,
+                                VisionFoveaWarpMode::Conformal => {
+                                    foveation_cpu::FoveaWarpMode::Conformal
+                                }
                                 VisionFoveaWarpMode::Patched => {
                                     foveation_cpu::FoveaWarpMode::Patched
                                 }
@@ -844,7 +851,11 @@ fn run_scatter_equivalence<B: BackendTrait>(device: &B::Device, backend_label: &
     }
 
     let pyramid_modes = [VisionPyramidMode::Stacked, VisionPyramidMode::Laplacian];
-    let warp_modes = [VisionFoveaWarpMode::Warped, VisionFoveaWarpMode::Patched];
+    let warp_modes = [
+        VisionFoveaWarpMode::Warped,
+        VisionFoveaWarpMode::Conformal,
+        VisionFoveaWarpMode::Patched,
+    ];
     for pyramid_mode in pyramid_modes {
         saccade.config.pyramid_mode = pyramid_mode;
         for warp_mode in warp_modes {

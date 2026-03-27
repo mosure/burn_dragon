@@ -1,12 +1,12 @@
 use burn::tensor::Tensor;
 use burn::tensor::backend::Backend;
 
-use crate::model::low_bit_runtime::{PackedRhoInt8DeviceState, PackedRhoInt8State};
+use crate::model::low_bit_runtime::{PackedRhoBlockState, PackedRhoInt8DeviceState};
 
 #[derive(Debug, Clone)]
 pub struct LayerState<B: Backend> {
     pub rho: Option<Tensor<B, 4>>,
-    pub packed_rho_int8: Option<PackedRhoInt8State>,
+    pub packed_rho: Option<PackedRhoBlockState>,
     pub packed_rho_int8_device: Option<PackedRhoInt8DeviceState<B>>,
     pub rho_norm: Option<Tensor<B, 3>>,
     pub sequence_aux: Option<Tensor<B, 4>>,
@@ -38,7 +38,7 @@ impl<B: Backend> ModelState<B> {
             layers: (0..num_layers)
                 .map(|_| LayerState {
                     rho: None,
-                    packed_rho_int8: None,
+                    packed_rho: None,
                     packed_rho_int8_device: None,
                     rho_norm: None,
                     sequence_aux: None,
@@ -56,7 +56,7 @@ impl<B: Backend> ModelState<B> {
     pub fn reset(&mut self) {
         for layer in &mut self.layers {
             layer.rho = None;
-            layer.packed_rho_int8 = None;
+            layer.packed_rho = None;
             layer.packed_rho_int8_device = None;
             layer.rho_norm = None;
             layer.sequence_aux = None;

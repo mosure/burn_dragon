@@ -1,5 +1,6 @@
 use std::any::{Any, TypeId};
 use std::marker::PhantomData;
+use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 use burn::tensor::Tensor as BurnTensor;
@@ -66,9 +67,53 @@ type CudaFusionAutodiffTensor<BT> =
 
 pub type LowrankProjectionProfileSnapshot = KernelProfileSnapshot;
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LowrankForwardRouteProfileSnapshot {
+    pub attempts: u64,
+    pub wgpu_fusion_autodiff: u64,
+    pub wgpu_direct_autodiff: u64,
+    pub wgpu_fusion_runtime: u64,
+    pub wgpu_direct_runtime: u64,
+    pub cuda_fusion_autodiff: u64,
+    pub cuda_direct_autodiff: u64,
+    pub cuda_fusion_runtime: u64,
+    pub cuda_direct_runtime: u64,
+}
+
+impl LowrankForwardRouteProfileSnapshot {
+    pub fn successes(&self) -> u64 {
+        self.wgpu_fusion_autodiff
+            .saturating_add(self.wgpu_direct_autodiff)
+            .saturating_add(self.wgpu_fusion_runtime)
+            .saturating_add(self.wgpu_direct_runtime)
+            .saturating_add(self.cuda_fusion_autodiff)
+            .saturating_add(self.cuda_direct_autodiff)
+            .saturating_add(self.cuda_fusion_runtime)
+            .saturating_add(self.cuda_direct_runtime)
+    }
+
+    pub fn fallbacks(&self) -> u64 {
+        self.attempts.saturating_sub(self.successes())
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum LowrankForwardRouteKind {
+    WgpuFusionAutodiff,
+    WgpuDirectAutodiff,
+    WgpuFusionRuntime,
+    WgpuDirectRuntime,
+    CudaFusionAutodiff,
+    CudaDirectAutodiff,
+    CudaFusionRuntime,
+    CudaDirectRuntime,
+}
+
 static RELU_LOWRANK_FORWARD_PROFILE: KernelProfileSite = KernelProfileSite::new();
 static RELU_LOWRANK_GRAD_INPUT_PROFILE: KernelProfileSite = KernelProfileSite::new();
 static RELU_LOWRANK_GRAD_WEIGHT_PROFILE: KernelProfileSite = KernelProfileSite::new();
+static RELU_LOWRANK_FORWARD_ROUTE_PROFILE: OnceLock<Mutex<LowrankForwardRouteProfileSnapshot>> =
+    OnceLock::new();
 
 pub fn relu_lowrank_forward_profile_reset() {
     profile_reset(&RELU_LOWRANK_FORWARD_PROFILE);
@@ -76,6 +121,66 @@ pub fn relu_lowrank_forward_profile_reset() {
 
 pub fn relu_lowrank_forward_profile_snapshot() -> LowrankProjectionProfileSnapshot {
     profile_snapshot(&RELU_LOWRANK_FORWARD_PROFILE)
+}
+
+pub fn relu_lowrank_forward_route_profile_reset() {
+    if let Ok(mut state) = RELU_LOWRANK_FORWARD_ROUTE_PROFILE
+        .get_or_init(|| Mutex::new(LowrankForwardRouteProfileSnapshot::default()))
+        .lock()
+    {
+        *state = LowrankForwardRouteProfileSnapshot::default();
+    }
+}
+
+pub fn relu_lowrank_forward_route_profile_snapshot() -> LowrankForwardRouteProfileSnapshot {
+    RELU_LOWRANK_FORWARD_ROUTE_PROFILE
+        .get_or_init(|| Mutex::new(LowrankForwardRouteProfileSnapshot::default()))
+        .lock()
+        .map(|state| *state)
+        .unwrap_or_default()
+}
+
+fn relu_lowrank_forward_route_profile_record_attempt() {
+    if let Ok(mut state) = RELU_LOWRANK_FORWARD_ROUTE_PROFILE
+        .get_or_init(|| Mutex::new(LowrankForwardRouteProfileSnapshot::default()))
+        .lock()
+    {
+        state.attempts = state.attempts.saturating_add(1);
+    }
+}
+
+fn relu_lowrank_forward_route_profile_record_route(route: LowrankForwardRouteKind) {
+    if let Ok(mut state) = RELU_LOWRANK_FORWARD_ROUTE_PROFILE
+        .get_or_init(|| Mutex::new(LowrankForwardRouteProfileSnapshot::default()))
+        .lock()
+    {
+        match route {
+            LowrankForwardRouteKind::WgpuFusionAutodiff => {
+                state.wgpu_fusion_autodiff = state.wgpu_fusion_autodiff.saturating_add(1);
+            }
+            LowrankForwardRouteKind::WgpuDirectAutodiff => {
+                state.wgpu_direct_autodiff = state.wgpu_direct_autodiff.saturating_add(1);
+            }
+            LowrankForwardRouteKind::WgpuFusionRuntime => {
+                state.wgpu_fusion_runtime = state.wgpu_fusion_runtime.saturating_add(1);
+            }
+            LowrankForwardRouteKind::WgpuDirectRuntime => {
+                state.wgpu_direct_runtime = state.wgpu_direct_runtime.saturating_add(1);
+            }
+            LowrankForwardRouteKind::CudaFusionAutodiff => {
+                state.cuda_fusion_autodiff = state.cuda_fusion_autodiff.saturating_add(1);
+            }
+            LowrankForwardRouteKind::CudaDirectAutodiff => {
+                state.cuda_direct_autodiff = state.cuda_direct_autodiff.saturating_add(1);
+            }
+            LowrankForwardRouteKind::CudaFusionRuntime => {
+                state.cuda_fusion_runtime = state.cuda_fusion_runtime.saturating_add(1);
+            }
+            LowrankForwardRouteKind::CudaDirectRuntime => {
+                state.cuda_direct_runtime = state.cuda_direct_runtime.saturating_add(1);
+            }
+        }
+    }
 }
 
 pub fn relu_lowrank_grad_input_profile_reset() {
@@ -631,100 +736,134 @@ where
         grad_input_executor,
     )?;
     let meta = shape.meta(&input.device());
+    relu_lowrank_forward_route_profile_record_attempt();
 
-    try_fusion_path_autodiff_runtime::<B, u32, WgpuRuntime>(
+    if let Some(output) = try_fusion_path_autodiff_runtime::<B, u32, WgpuRuntime>(
         input,
         weight,
         threshold,
         sparse_mask,
         &meta,
         shape,
-    )
-    .or_else(|| {
-        try_fusion_path_autodiff_runtime::<B, u8, WgpuRuntime>(
-            input,
-            weight,
-            threshold,
-            sparse_mask,
-            &meta,
-            shape,
-        )
-    })
-    .or_else(|| {
-        try_direct_path_autodiff_cube_runtime::<B, WgpuRuntime>(
-            input,
-            weight,
-            threshold,
-            sparse_mask,
-            &meta,
-            shape,
-        )
-    })
-    .or_else(|| {
+    ) {
+        relu_lowrank_forward_route_profile_record_route(
+            LowrankForwardRouteKind::WgpuFusionAutodiff,
+        );
+        return Some(output);
+    }
+    if let Some(output) = try_fusion_path_autodiff_runtime::<B, u8, WgpuRuntime>(
+        input,
+        weight,
+        threshold,
+        sparse_mask,
+        &meta,
+        shape,
+    ) {
+        relu_lowrank_forward_route_profile_record_route(
+            LowrankForwardRouteKind::WgpuFusionAutodiff,
+        );
+        return Some(output);
+    }
+    if let Some(output) = try_direct_path_autodiff_cube_runtime::<B, WgpuRuntime>(
+        input,
+        weight,
+        threshold,
+        sparse_mask,
+        &meta,
+        shape,
+    ) {
+        relu_lowrank_forward_route_profile_record_route(
+            LowrankForwardRouteKind::WgpuDirectAutodiff,
+        );
+        return Some(output);
+    }
+    if let Some(output) =
         try_fusion_path_runtime::<B, u32, WgpuRuntime>(input, weight, sparse_mask, &meta, shape)
-    })
-    .or_else(|| {
+    {
+        relu_lowrank_forward_route_profile_record_route(LowrankForwardRouteKind::WgpuFusionRuntime);
+        return Some(output);
+    }
+    if let Some(output) =
         try_fusion_path_runtime::<B, u8, WgpuRuntime>(input, weight, sparse_mask, &meta, shape)
-    })
-    .or_else(|| try_direct_path_runtime::<B, WgpuRuntime>(input, weight, sparse_mask, &meta, shape))
-    .or_else(|| {
-        #[cfg(feature = "cuda")]
-        {
-            try_fusion_path_autodiff_runtime::<B, u32, CudaRuntime>(
-                input,
-                weight,
-                threshold,
-                sparse_mask,
-                &meta,
-                shape,
-            )
-            .or_else(|| {
-                try_fusion_path_autodiff_runtime::<B, u8, CudaRuntime>(
-                    input,
-                    weight,
-                    threshold,
-                    sparse_mask,
-                    &meta,
-                    shape,
-                )
-            })
-            .or_else(|| {
-                try_direct_path_autodiff_cube_runtime::<B, CudaRuntime>(
-                    input,
-                    weight,
-                    threshold,
-                    sparse_mask,
-                    &meta,
-                    shape,
-                )
-            })
-            .or_else(|| {
-                try_fusion_path_runtime::<B, u32, CudaRuntime>(
-                    input,
-                    weight,
-                    sparse_mask,
-                    &meta,
-                    shape,
-                )
-            })
-            .or_else(|| {
-                try_fusion_path_runtime::<B, u8, CudaRuntime>(
-                    input,
-                    weight,
-                    sparse_mask,
-                    &meta,
-                    shape,
-                )
-            })
-            .or_else(|| {
-                try_direct_path_runtime::<B, CudaRuntime>(input, weight, sparse_mask, &meta, shape)
-            })
+    {
+        relu_lowrank_forward_route_profile_record_route(LowrankForwardRouteKind::WgpuFusionRuntime);
+        return Some(output);
+    }
+    if let Some(output) =
+        try_direct_path_runtime::<B, WgpuRuntime>(input, weight, sparse_mask, &meta, shape)
+    {
+        relu_lowrank_forward_route_profile_record_route(LowrankForwardRouteKind::WgpuDirectRuntime);
+        return Some(output);
+    }
+
+    #[cfg(feature = "cuda")]
+    {
+        if let Some(output) = try_fusion_path_autodiff_runtime::<B, u32, CudaRuntime>(
+            input,
+            weight,
+            threshold,
+            sparse_mask,
+            &meta,
+            shape,
+        ) {
+            relu_lowrank_forward_route_profile_record_route(
+                LowrankForwardRouteKind::CudaFusionAutodiff,
+            );
+            return Some(output);
         }
-        #[cfg(not(feature = "cuda"))]
-        {
-            None
+        if let Some(output) = try_fusion_path_autodiff_runtime::<B, u8, CudaRuntime>(
+            input,
+            weight,
+            threshold,
+            sparse_mask,
+            &meta,
+            shape,
+        ) {
+            relu_lowrank_forward_route_profile_record_route(
+                LowrankForwardRouteKind::CudaFusionAutodiff,
+            );
+            return Some(output);
         }
-    })
+        if let Some(output) = try_direct_path_autodiff_cube_runtime::<B, CudaRuntime>(
+            input,
+            weight,
+            threshold,
+            sparse_mask,
+            &meta,
+            shape,
+        ) {
+            relu_lowrank_forward_route_profile_record_route(
+                LowrankForwardRouteKind::CudaDirectAutodiff,
+            );
+            return Some(output);
+        }
+        if let Some(output) =
+            try_fusion_path_runtime::<B, u32, CudaRuntime>(input, weight, sparse_mask, &meta, shape)
+        {
+            relu_lowrank_forward_route_profile_record_route(
+                LowrankForwardRouteKind::CudaFusionRuntime,
+            );
+            return Some(output);
+        }
+        if let Some(output) =
+            try_fusion_path_runtime::<B, u8, CudaRuntime>(input, weight, sparse_mask, &meta, shape)
+        {
+            relu_lowrank_forward_route_profile_record_route(
+                LowrankForwardRouteKind::CudaFusionRuntime,
+            );
+            return Some(output);
+        }
+        if let Some(output) =
+            try_direct_path_runtime::<B, CudaRuntime>(input, weight, sparse_mask, &meta, shape)
+        {
+            relu_lowrank_forward_route_profile_record_route(
+                LowrankForwardRouteKind::CudaDirectRuntime,
+            );
+            return Some(output);
+        }
+    }
+
+    None
 }
 
 fn try_head_aligned_grad_input_wgpu<B: BackendTrait>(

@@ -159,7 +159,7 @@ pub fn detach_model_state<B: Backend>(state: &ModelState<B>) -> ModelState<B> {
             .iter()
             .map(|layer| LayerState {
                 rho: layer.rho.clone().map(Tensor::detach),
-                packed_rho_int8: layer.packed_rho_int8.clone(),
+                packed_rho: layer.packed_rho.clone(),
                 packed_rho_int8_device: layer
                     .packed_rho_int8_device
                     .clone()
@@ -189,7 +189,7 @@ pub fn model_state_inner<B: AutodiffBackend>(state: &ModelState<B>) -> ModelStat
             .iter()
             .map(|layer| LayerState {
                 rho: layer.rho.clone().map(Tensor::inner),
-                packed_rho_int8: layer.packed_rho_int8.clone(),
+                packed_rho: layer.packed_rho.clone(),
                 packed_rho_int8_device: layer.packed_rho_int8_device.clone().map(|state| {
                     burn_dragon_core::PackedRhoInt8DeviceState {
                         logical_shape: state.logical_shape,
@@ -225,7 +225,7 @@ pub fn model_state_from_inner<B: AutodiffBackend>(
             .into_iter()
             .map(|layer| LayerState {
                 rho: layer.rho.map(Tensor::from_inner),
-                packed_rho_int8: layer.packed_rho_int8,
+                packed_rho: layer.packed_rho,
                 packed_rho_int8_device: layer.packed_rho_int8_device.map(|state| {
                     burn_dragon_core::PackedRhoInt8DeviceState {
                         logical_shape: state.logical_shape,

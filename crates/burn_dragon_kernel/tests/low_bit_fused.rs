@@ -3,11 +3,18 @@ use burn::tensor::{Int, Tensor, TensorData};
 use burn_autodiff::Autodiff;
 use burn_cubecl::CubeBackend;
 use burn_dragon_kernel::api::low_bit::{
-    packed_decoder_tail_device_reference, packed_lowrank_projection_device_reference,
-    try_cube_fused_packed_decoder_tail_wgpu, try_cube_fused_packed_lowrank_projection_wgpu,
-    try_fused_packed_decoder_tail, try_fused_packed_decoder_tail_training_autodiff,
-    try_fused_packed_lowrank_projection, try_fused_packed_lowrank_training_autodiff,
-    try_wgpu_packed_dot_decoder_tail, try_wgpu_packed_dot_lowrank_projection,
+    pack_decoder_input_codes_i8x4, pack_decoder_weight_codes_i8x4, pack_lowrank_input_codes_i8x4,
+    pack_lowrank_weight_codes_i8x4, packed_decoder_tail_device_reference,
+    packed_lowrank_projection_device_reference, try_cube_fused_packed_decoder_tail_wgpu,
+    try_cube_fused_packed_lowrank_projection_wgpu, try_fused_packed_decoder_tail,
+    try_fused_packed_decoder_tail_training_autodiff, try_fused_packed_lowrank_projection,
+    try_fused_packed_lowrank_training_autodiff, try_wgpu_packed_dot_decoder_tail,
+    try_wgpu_packed_dot_decoder_tail_device_scale,
+    try_wgpu_packed_dot_decoder_tail_prepacked_input_device_scale,
+    try_wgpu_packed_dot_lowrank_projection, try_wgpu_packed_dot_lowrank_projection_device_scale,
+    try_wgpu_packed_dot_lowrank_projection_from_f32_device_scale,
+    try_wgpu_packed_dot_lowrank_projection_prepacked_input_device_scale,
+    try_wgpu_quantize_activation_codes_i32, try_wgpu_quantize_pack_activation_i8x4,
 };
 use burn_wgpu::{RuntimeOptions, WgpuRuntime, graphics};
 
@@ -212,6 +219,217 @@ fn packed_lowrank_packed_dot_wgsl_matches_reference_on_wgpu_when_available() {
 }
 
 #[test]
+fn packed_lowrank_packed_dot_device_scale_matches_reference_on_wgpu_when_available() {
+    let device = <WgpuBackend as BackendTrait>::Device::default();
+    init_runtime(&device);
+
+    let input_shape = [2, 1, 5, 16];
+    let weight_shape = [1, 4, 16, 8];
+    let input_values = deterministic_values(input_shape.iter().product(), 0.315);
+    let weight_values = deterministic_values(weight_shape.iter().product(), 0.935);
+
+    let (input_codes_values, input_scale) = quantize_signed_values(&input_values);
+    let input_codes =
+        int_tensor_from_values::<WgpuBackend, 4>(input_codes_values, input_shape, &device);
+    let input_scale_tensor = Tensor::<WgpuBackend, 1>::from_data([input_scale], &device);
+    let (weight_codes_values, weight_scale) = quantize_signed_values(&weight_values);
+    let weight_codes =
+        int_tensor_from_values::<WgpuBackend, 3>(weight_codes_values, [4, 16, 8], &device);
+
+    let Some(actual) = try_wgpu_packed_dot_lowrank_projection_device_scale(
+        &input_codes,
+        &weight_codes,
+        &input_scale_tensor,
+        weight_scale,
+        8,
+    ) else {
+        return;
+    };
+    let expected = packed_lowrank_projection_device_reference(
+        input_codes.clone().float().mul_scalar(input_scale),
+        weight_codes,
+        weight_scale,
+        8,
+    );
+    assert_close(actual, expected, 5.0e-4, 5.0e-4);
+}
+
+#[test]
+fn quantize_pack_activation_i8x4_matches_host_pack_on_wgpu_when_available() {
+    let device = <WgpuBackend as BackendTrait>::Device::default();
+    init_runtime(&device);
+
+    let input_shape = [2, 3, 5, 18];
+    let input_values = deterministic_values(input_shape.iter().product(), 0.271);
+    let input = tensor_from_values::<WgpuBackend, 4>(input_values.clone(), input_shape, &device);
+    let (codes_values, scale) = quantize_signed_values(&input_values);
+    let expected = pack_lowrank_input_codes_i8x4(
+        &codes_values
+            .iter()
+            .map(|value| *value as i8)
+            .collect::<Vec<_>>(),
+        input_shape[0],
+        input_shape[1],
+        input_shape[2],
+        input_shape[3],
+    );
+    let scale_tensor = Tensor::<WgpuBackend, 1>::from_data([scale], &device);
+
+    let Some(actual) = try_wgpu_quantize_pack_activation_i8x4(&input, &scale_tensor, 127, false)
+    else {
+        return;
+    };
+    let actual = actual
+        .into_data()
+        .convert::<i32>()
+        .into_vec::<i32>()
+        .expect("packed activation values");
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn quantize_activation_codes_i32_matches_host_quantization_on_wgpu_when_available() {
+    let device = <WgpuBackend as BackendTrait>::Device::default();
+    init_runtime(&device);
+
+    let input_shape = [2, 3, 5, 18];
+    let input_values = deterministic_values(input_shape.iter().product(), 0.287);
+    let input = tensor_from_values::<WgpuBackend, 4>(input_values.clone(), input_shape, &device);
+    let (expected, scale) = quantize_signed_values(&input_values);
+    let scale_tensor = Tensor::<WgpuBackend, 1>::from_data([scale], &device);
+
+    let Some(actual) = try_wgpu_quantize_activation_codes_i32(&input, &scale_tensor, 127, false)
+    else {
+        return;
+    };
+    let actual = actual
+        .into_data()
+        .convert::<i32>()
+        .into_vec::<i32>()
+        .expect("quantized activation codes");
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn packed_lowrank_prepacked_packed_dot_device_scale_matches_reference_on_wgpu_when_available() {
+    let device = <WgpuBackend as BackendTrait>::Device::default();
+    init_runtime(&device);
+
+    let input_shape = [2, 1, 5, 18];
+    let weight_shape = [1, 4, 18, 9];
+    let input_values = deterministic_values(input_shape.iter().product(), 0.319);
+    let weight_values = deterministic_values(weight_shape.iter().product(), 0.939);
+
+    let (input_codes_values, input_scale) = quantize_signed_values(&input_values);
+    let input_codes_i8 = input_codes_values
+        .iter()
+        .map(|value| *value as i8)
+        .collect::<Vec<_>>();
+    let input_packed_values = pack_lowrank_input_codes_i8x4(
+        &input_codes_i8,
+        input_shape[0],
+        input_shape[1],
+        input_shape[2],
+        input_shape[3],
+    );
+    let input_packed = int_tensor_from_values::<WgpuBackend, 4>(
+        input_packed_values,
+        [
+            input_shape[0],
+            input_shape[1],
+            input_shape[2],
+            input_shape[3].div_ceil(4),
+        ],
+        &device,
+    );
+    let input_scale_tensor = Tensor::<WgpuBackend, 1>::from_data([input_scale], &device);
+
+    let (weight_codes_values, weight_scale) = quantize_signed_values(&weight_values);
+    let weight_codes_i8 = weight_codes_values
+        .iter()
+        .map(|value| *value as i8)
+        .collect::<Vec<_>>();
+    let weight_packed_values =
+        pack_lowrank_weight_codes_i8x4(&weight_codes_i8, 4, input_shape[3], 9);
+    let weight_packed = int_tensor_from_values::<WgpuBackend, 3>(
+        weight_packed_values,
+        [4, input_shape[3].div_ceil(4), 9],
+        &device,
+    );
+    let weight_codes = int_tensor_from_values::<WgpuBackend, 3>(
+        weight_codes_values,
+        [4, input_shape[3], 9],
+        &device,
+    );
+
+    let Some(actual) = try_wgpu_packed_dot_lowrank_projection_prepacked_input_device_scale(
+        &input_packed,
+        &weight_packed,
+        &input_scale_tensor,
+        weight_scale,
+        9,
+    ) else {
+        return;
+    };
+    let expected = packed_lowrank_projection_device_reference(
+        int_tensor_from_values::<WgpuBackend, 4>(input_codes_values, input_shape, &device)
+            .float()
+            .mul_scalar(input_scale),
+        weight_codes,
+        weight_scale,
+        9,
+    );
+    assert_close(actual, expected, 5.0e-4, 5.0e-4);
+}
+
+#[test]
+fn packed_lowrank_from_f32_packed_dot_device_scale_matches_reference_on_wgpu_when_available() {
+    let device = <WgpuBackend as BackendTrait>::Device::default();
+    init_runtime(&device);
+
+    let input_shape = [2, 1, 5, 18];
+    let weight_shape = [1, 4, 18, 9];
+    let input_values = deterministic_values(input_shape.iter().product(), 0.337);
+    let weight_values = deterministic_values(weight_shape.iter().product(), 0.957);
+
+    let input = tensor_from_values::<WgpuBackend, 4>(input_values.clone(), input_shape, &device);
+    let (_, input_scale) = quantize_signed_values(&input_values);
+    let input_scale_tensor = Tensor::<WgpuBackend, 1>::from_data([input_scale], &device);
+
+    let (weight_codes_values, weight_scale) = quantize_signed_values(&weight_values);
+    let weight_codes_i8 = weight_codes_values
+        .iter()
+        .map(|value| *value as i8)
+        .collect::<Vec<_>>();
+    let weight_packed_values =
+        pack_lowrank_weight_codes_i8x4(&weight_codes_i8, 4, input_shape[3], 9);
+    let weight_packed = int_tensor_from_values::<WgpuBackend, 3>(
+        weight_packed_values,
+        [4, input_shape[3].div_ceil(4), 9],
+        &device,
+    );
+    let weight_codes = int_tensor_from_values::<WgpuBackend, 3>(
+        weight_codes_values,
+        [4, input_shape[3], 9],
+        &device,
+    );
+
+    let Some(actual) = try_wgpu_packed_dot_lowrank_projection_from_f32_device_scale(
+        &input,
+        &weight_packed,
+        &input_scale_tensor,
+        weight_scale,
+        9,
+        127,
+        false,
+    ) else {
+        return;
+    };
+    let expected = packed_lowrank_projection_device_reference(input, weight_codes, weight_scale, 9);
+    assert_close(actual, expected, 5.0e-4, 5.0e-4);
+}
+
+#[test]
 fn packed_decoder_tail_forward_matches_reference_on_wgpu() {
     let device = <WgpuBackend as BackendTrait>::Device::default();
     init_runtime(&device);
@@ -260,6 +478,96 @@ fn packed_decoder_tail_packed_dot_wgsl_matches_reference_on_wgpu_when_available(
     };
     let expected = packed_decoder_tail_device_reference(
         y_codes.clone().float().mul_scalar(y_scale),
+        weight_codes,
+        weight_scale,
+    );
+    assert_close(actual, expected, 5.0e-4, 5.0e-4);
+}
+
+#[test]
+fn packed_decoder_tail_packed_dot_device_scale_matches_reference_on_wgpu_when_available() {
+    let device = <WgpuBackend as BackendTrait>::Device::default();
+    init_runtime(&device);
+
+    let y_shape = [2, 4, 5, 8];
+    let weight_shape = [32, 16];
+    let y_values = deterministic_values(y_shape.iter().product(), 0.415);
+    let weight_values = deterministic_values(weight_shape.iter().product(), 1.145);
+
+    let (y_codes_values, y_scale) = quantize_signed_values(&y_values);
+    let y_codes = int_tensor_from_values::<WgpuBackend, 4>(y_codes_values, y_shape, &device);
+    let y_scale_tensor = Tensor::<WgpuBackend, 1>::from_data([y_scale], &device);
+    let (weight_codes_values, weight_scale) = quantize_signed_values(&weight_values);
+    let weight_codes =
+        int_tensor_from_values::<WgpuBackend, 2>(weight_codes_values, weight_shape, &device);
+
+    let Some(actual) = try_wgpu_packed_dot_decoder_tail_device_scale(
+        &y_codes,
+        &weight_codes,
+        &y_scale_tensor,
+        weight_scale,
+    ) else {
+        return;
+    };
+    let expected = packed_decoder_tail_device_reference(
+        y_codes.clone().float().mul_scalar(y_scale),
+        weight_codes,
+        weight_scale,
+    );
+    assert_close(actual, expected, 5.0e-4, 5.0e-4);
+}
+
+#[test]
+fn packed_decoder_tail_prepacked_packed_dot_device_scale_matches_reference_on_wgpu_when_available()
+{
+    let device = <WgpuBackend as BackendTrait>::Device::default();
+    init_runtime(&device);
+
+    let y_shape = [2, 4, 5, 10];
+    let weight_shape = [40, 16];
+    let y_values = deterministic_values(y_shape.iter().product(), 0.419);
+    let weight_values = deterministic_values(weight_shape.iter().product(), 1.149);
+
+    let (y_codes_values, y_scale) = quantize_signed_values(&y_values);
+    let y_codes_i8 = y_codes_values
+        .iter()
+        .map(|value| *value as i8)
+        .collect::<Vec<_>>();
+    let y_packed_values =
+        pack_decoder_input_codes_i8x4(&y_codes_i8, y_shape[0], y_shape[1], y_shape[2], y_shape[3]);
+    let y_packed = int_tensor_from_values::<WgpuBackend, 4>(
+        y_packed_values,
+        [y_shape[0], y_shape[1], y_shape[2], y_shape[3].div_ceil(4)],
+        &device,
+    );
+    let y_scale_tensor = Tensor::<WgpuBackend, 1>::from_data([y_scale], &device);
+
+    let (weight_codes_values, weight_scale) = quantize_signed_values(&weight_values);
+    let weight_codes_i8 = weight_codes_values
+        .iter()
+        .map(|value| *value as i8)
+        .collect::<Vec<_>>();
+    let weight_packed_values = pack_decoder_weight_codes_i8x4(&weight_codes_i8, 4, y_shape[3], 16);
+    let weight_packed = int_tensor_from_values::<WgpuBackend, 2>(
+        weight_packed_values,
+        [4 * y_shape[3].div_ceil(4), 16],
+        &device,
+    );
+    let weight_codes =
+        int_tensor_from_values::<WgpuBackend, 2>(weight_codes_values, weight_shape, &device);
+
+    let Some(actual) = try_wgpu_packed_dot_decoder_tail_prepacked_input_device_scale(
+        &y_packed,
+        &weight_packed,
+        &y_scale_tensor,
+        weight_scale,
+    ) else {
+        return;
+    };
+    let expected = packed_decoder_tail_device_reference(
+        int_tensor_from_values::<WgpuBackend, 4>(y_codes_values, y_shape, &device)
+            .float()
+            .mul_scalar(y_scale),
         weight_codes,
         weight_scale,
     );
@@ -371,6 +679,7 @@ fn packed_lowrank_training_autodiff_matches_reference_gradients_on_wgpu() {
         weight_scale,
         8,
         false,
+        None,
     )
     .expect("fused autodiff lowrank");
     let reference = quantized_input_ref.matmul(quantized_weight_ref);

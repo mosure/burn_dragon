@@ -62,8 +62,10 @@ where
     apply_wgpu_fused_core_override(
         &mut model_config,
         backend_name,
-        config.wgpu.training.fused_core_recurrent,
-        config.wgpu.training.fused_core_rollout,
+        WgpuFusedCoreOverride {
+            recurrent: config.wgpu.training.fused_core_recurrent,
+            rollout: config.wgpu.training.fused_core_rollout,
+        },
     );
     let summary_event_token_ids = model_config.summary_memory.write_trigger_token_ids.clone();
 

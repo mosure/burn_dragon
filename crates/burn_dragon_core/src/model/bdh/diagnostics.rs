@@ -255,17 +255,18 @@ impl<B: Backend> BDH<B> {
                 let heads = self.n_head;
                 let low_bit_plan = self.low_bit_projection_plan();
                 let packed_artifacts = self.packed_low_bit_projection_artifacts();
-                let x_base = self.project_lowrank_positive(
-                    branch_flat.clone(),
-                    encoder.clone(),
-                    packed_artifacts.x,
-                    low_bit_plan.x_weight_format,
-                    low_bit_plan.x_activation_format,
-                    self.x_relu_threshold,
-                    fused,
+                let x_base = self.project_lowrank_positive(LowrankProjectionRequest {
+                    dense: branch_flat.clone(),
+                    projector: encoder.clone(),
+                    scale_cache_kind: "decoder_x",
+                    packed_weight_artifact: packed_artifacts.x,
+                    weight_format: low_bit_plan.x_weight_format,
+                    activation_format: low_bit_plan.x_activation_format,
+                    relu_threshold: self.x_relu_threshold,
+                    use_fused: fused,
                     latent_pattern,
-                    sparse_mask.clone(),
-                );
+                    sparse_mask: sparse_mask.clone(),
+                });
                 let mut next_tokens = Vec::with_capacity(branch_time);
                 let mut y_neuron_state = self.resolve_y_neuron_state(
                     layer_state,
@@ -338,17 +339,18 @@ impl<B: Backend> BDH<B> {
                         },
                     );
                     let a_dense = self.norm.forward(a_dense);
-                    let y_gate = self.project_lowrank_positive(
-                        a_dense,
-                        encoder_v.clone(),
-                        packed_artifacts.y,
-                        low_bit_plan.y_weight_format,
-                        low_bit_plan.y_activation_format,
-                        self.y_relu_threshold,
-                        fused,
+                    let y_gate = self.project_lowrank_positive(LowrankProjectionRequest {
+                        dense: a_dense,
+                        projector: encoder_v.clone(),
+                        scale_cache_kind: "decoder_y",
+                        packed_weight_artifact: packed_artifacts.y,
+                        weight_format: low_bit_plan.y_weight_format,
+                        activation_format: low_bit_plan.y_activation_format,
+                        relu_threshold: self.y_relu_threshold,
+                        use_fused: fused,
                         latent_pattern,
-                        sparse_mask.clone(),
-                    );
+                        sparse_mask: sparse_mask.clone(),
+                    });
                     let y_neuron = self.dropout.forward(x_neuron.clone() * y_gate.clone());
                     let y_neuron = if let Some(format) = low_bit_plan.residual_activation_format {
                         fake_quantize_activation_ste(y_neuron, format)
@@ -793,17 +795,18 @@ impl<B: Backend> BDH<B> {
             }
             let low_bit_plan = self.low_bit_projection_plan();
             let packed_artifacts = self.packed_low_bit_projection_artifacts();
-            let x_base = self.project_lowrank_positive(
-                branch_flat.clone(),
-                encoder.clone(),
-                packed_artifacts.x,
-                low_bit_plan.x_weight_format,
-                low_bit_plan.x_activation_format,
-                self.x_relu_threshold,
-                fused,
+            let x_base = self.project_lowrank_positive(LowrankProjectionRequest {
+                dense: branch_flat.clone(),
+                projector: encoder.clone(),
+                scale_cache_kind: "decoder_x",
+                packed_weight_artifact: packed_artifacts.x,
+                weight_format: low_bit_plan.x_weight_format,
+                activation_format: low_bit_plan.x_activation_format,
+                relu_threshold: self.x_relu_threshold,
+                use_fused: fused,
                 latent_pattern,
-                sparse_mask.clone(),
-            );
+                sparse_mask: sparse_mask.clone(),
+            });
             let mut next_tokens = Vec::with_capacity(branch_time);
             let mut y_neuron_state = self.resolve_y_neuron_state(
                 layer_state,
@@ -875,17 +878,18 @@ impl<B: Backend> BDH<B> {
                     },
                 );
                 let a_dense = self.norm.forward(a_dense);
-                let y_gate = self.project_lowrank_positive(
-                    a_dense,
-                    encoder_v.clone(),
-                    packed_artifacts.y,
-                    low_bit_plan.y_weight_format,
-                    low_bit_plan.y_activation_format,
-                    self.y_relu_threshold,
-                    fused,
+                let y_gate = self.project_lowrank_positive(LowrankProjectionRequest {
+                    dense: a_dense,
+                    projector: encoder_v.clone(),
+                    scale_cache_kind: "decoder_y",
+                    packed_weight_artifact: packed_artifacts.y,
+                    weight_format: low_bit_plan.y_weight_format,
+                    activation_format: low_bit_plan.y_activation_format,
+                    relu_threshold: self.y_relu_threshold,
+                    use_fused: fused,
                     latent_pattern,
-                    sparse_mask.clone(),
-                );
+                    sparse_mask: sparse_mask.clone(),
+                });
                 let y_neuron = self.dropout.forward(x_neuron.clone() * y_gate.clone());
                 let y_neuron = if let Some(format) = low_bit_plan.residual_activation_format {
                     fake_quantize_activation_ste(y_neuron, format)

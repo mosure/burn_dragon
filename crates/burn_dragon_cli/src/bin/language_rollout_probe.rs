@@ -18,8 +18,9 @@ mod real {
     use burn_dragon::language::dataset::{Dataset, DatasetSplit, TokenSequenceDataset};
     use burn_dragon::language::train::prepare_dataset;
     use burn_dragon::language::{
-        BDH, TrainingConfig, apply_wgpu_fused_core_override, build_model_config,
-        language_model_loss, load_tokenizer_for_checkpoint, load_training_config_for_checkpoint,
+        BDH, TrainingConfig, WgpuFusedCoreOverride, apply_wgpu_fused_core_override,
+        build_model_config, language_model_loss, load_tokenizer_for_checkpoint,
+        load_training_config_for_checkpoint,
     };
     use burn_wgpu::{CubeBackend, RuntimeOptions, WgpuRuntime, graphics};
     use clap::Parser;
@@ -254,8 +255,10 @@ mod real {
         apply_wgpu_fused_core_override(
             &mut model_config,
             "wgpu",
-            config.wgpu.training.fused_core_recurrent,
-            config.wgpu.training.fused_core_rollout,
+            WgpuFusedCoreOverride {
+                recurrent: config.wgpu.training.fused_core_recurrent,
+                rollout: config.wgpu.training.fused_core_rollout,
+            },
         );
         let mut model = BDH::<Backend>::new(model_config, device);
         let record = BinFileRecorder::<FullPrecisionSettings>::new()

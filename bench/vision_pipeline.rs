@@ -83,18 +83,22 @@ mod vision_bench {
         &[("batched", VisionFoveaSamplingMode::Batched)];
     const WARP_MODES_FULL: &[(&str, VisionFoveaWarpMode)] = &[
         ("warped", VisionFoveaWarpMode::Warped),
+        ("conformal", VisionFoveaWarpMode::Conformal),
         ("patched", VisionFoveaWarpMode::Patched),
     ];
     const WARP_MODES_QUICK: &[(&str, VisionFoveaWarpMode)] = &[
         ("warped", VisionFoveaWarpMode::Warped),
+        ("conformal", VisionFoveaWarpMode::Conformal),
         ("patched", VisionFoveaWarpMode::Patched),
     ];
     const BASELINE_WARP_MODES_FULL: &[(&str, foveation::FoveaWarpMode)] = &[
         ("warped", foveation::FoveaWarpMode::Warped),
+        ("conformal", foveation::FoveaWarpMode::Conformal),
         ("patched", foveation::FoveaWarpMode::Patched),
     ];
     const BASELINE_WARP_MODES_QUICK: &[(&str, foveation::FoveaWarpMode)] = &[
         ("warped", foveation::FoveaWarpMode::Warped),
+        ("conformal", foveation::FoveaWarpMode::Conformal),
         ("patched", foveation::FoveaWarpMode::Patched),
     ];
 
@@ -639,6 +643,7 @@ mod vision_bench {
             },
             warp_mode: match warp_mode {
                 foveation::FoveaWarpMode::Warped => 0,
+                foveation::FoveaWarpMode::Conformal => 2,
                 foveation::FoveaWarpMode::Patched => 1,
             },
             _pad0: 0,

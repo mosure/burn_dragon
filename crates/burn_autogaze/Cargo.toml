@@ -1,0 +1,17 @@
+[package]
+name = "burn_autogaze"
+description = "AutoGaze-style fixation traces and teacher hooks for burn dragon"
+version = "0.5.0"
+edition = "2024"
+rust-version = "1.85"
+authors = ["mosure <mitchell@mosure.me>"]
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+anyhow = "1"
+half = "2"
+safetensors = "0.7"
+serde = { version = "1.0", features = ["derive"] }
+
+[dev-dependencies]
+tempfile = "3"

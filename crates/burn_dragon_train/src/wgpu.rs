@@ -14,17 +14,26 @@ pub fn is_wgpu_backend_name(backend_name: &str) -> bool {
             .is_some_and(|prefix| prefix.eq_ignore_ascii_case("wgpu-"))
 }
 
+/// Optional fused-core overrides applied only when the active backend is WGPU.
+///
+/// `rollout` falls back to `recurrent` when it is not provided so callers can express
+/// "set both" without repeating themselves.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WgpuFusedCoreOverride {
+    pub recurrent: Option<bool>,
+    pub rollout: Option<bool>,
+}
+
 pub fn apply_wgpu_fused_core_override(
     model_config: &mut BDHConfig,
     backend_name: &str,
-    fused_core_recurrent: Option<bool>,
-    fused_core_rollout: Option<bool>,
+    override_config: WgpuFusedCoreOverride,
 ) {
     if !is_wgpu_backend_name(backend_name) {
         return;
     }
 
-    if let Some(enabled) = fused_core_recurrent {
+    if let Some(enabled) = override_config.recurrent {
         model_config
             .fused_kernels
             .set_wgpu_recurrent_kernel(enabled);
@@ -33,7 +42,7 @@ pub fn apply_wgpu_fused_core_override(
         }
     }
 
-    let rollout_override = fused_core_rollout.or(fused_core_recurrent);
+    let rollout_override = override_config.rollout.or(override_config.recurrent);
     if let Some(enabled) = rollout_override {
         model_config.fused_kernels.set_wgpu_rollout_fused(enabled);
     }
@@ -80,7 +89,7 @@ fn runtime_options(config: &WgpuRuntimeConfig) -> RuntimeOptions {
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_wgpu_fused_core_override, is_wgpu_backend_name};
+    use super::{WgpuFusedCoreOverride, apply_wgpu_fused_core_override, is_wgpu_backend_name};
     use burn_dragon_core::BDHConfig;
 
     #[test]
@@ -99,7 +108,14 @@ mod tests {
         model_config.fused_kernels.set_wgpu_recurrent_kernel(false);
         model_config.fused_kernels.set_wgpu_rollout_fused(false);
 
-        apply_wgpu_fused_core_override(&mut model_config, "wgpu", Some(true), None);
+        apply_wgpu_fused_core_override(
+            &mut model_config,
+            "wgpu",
+            WgpuFusedCoreOverride {
+                recurrent: Some(true),
+                rollout: None,
+            },
+        );
 
         assert!(model_config.fused_kernels.enabled);
         assert!(model_config.fused_kernels.wgpu_recurrent_kernel);
@@ -116,8 +132,10 @@ mod tests {
         apply_wgpu_fused_core_override(
             &mut model_config,
             "wgpu-fused-core",
-            Some(true),
-            Some(false),
+            WgpuFusedCoreOverride {
+                recurrent: Some(true),
+                rollout: Some(false),
+            },
         );
 
         assert!(model_config.fused_kernels.wgpu_recurrent_kernel);
@@ -131,7 +149,14 @@ mod tests {
         model_config.fused_kernels.set_wgpu_recurrent_kernel(false);
         model_config.fused_kernels.set_wgpu_rollout_fused(false);
 
-        apply_wgpu_fused_core_override(&mut model_config, "cuda", Some(true), Some(true));
+        apply_wgpu_fused_core_override(
+            &mut model_config,
+            "cuda",
+            WgpuFusedCoreOverride {
+                recurrent: Some(true),
+                rollout: Some(true),
+            },
+        );
 
         assert!(!model_config.fused_kernels.enabled);
         assert!(!model_config.fused_kernels.wgpu_recurrent_kernel);

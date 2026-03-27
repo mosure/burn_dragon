@@ -288,6 +288,7 @@ where
     fallback_records: HashMap<ParamId, AdaptorRecord<BitNetAdamW, B>>,
     module: PhantomData<M>,
     grad_clipping: Option<GradientClipping>,
+    target_modules: Option<HashSet<String>>,
 }
 
 impl<M, B> Optimizer<M, B> for MuonHybridOptimizer<M, B>
@@ -299,7 +300,7 @@ where
 
     fn step(&mut self, lr: LearningRate, module: M, grads: GradientsParams) -> M {
         let mut grads = HybridGradAdaptor::Single(grads);
-        let targets = collect_muon_target_ids(&module);
+        let targets = collect_muon_target_ids(&module, self.target_modules.as_ref());
         let mut mapper = MuonHybridMapper::<M, B>::new(
             &self.muon,
             &self.fallback,
@@ -315,7 +316,7 @@ where
 
     fn step_multi(&mut self, lr: LearningRate, module: M, grads: MultiGradientsParams) -> M {
         let mut grads = HybridGradAdaptor::Multi(grads);
-        let targets = collect_muon_target_ids(&module);
+        let targets = collect_muon_target_ids(&module, self.target_modules.as_ref());
         let mut mapper = MuonHybridMapper::<M, B>::new(
             &self.muon,
             &self.fallback,
@@ -369,12 +370,18 @@ struct MuonTargetCollector {
 }
 
 impl MuonTargetCollector {
-    fn should_route_to_muon<const D: usize>(path: &[String]) -> bool {
+    fn should_route_to_muon<const D: usize>(
+        path: &[String],
+        target_modules: Option<&HashSet<String>>,
+    ) -> bool {
         let Some(last) = path.last().map(String::as_str) else {
             return false;
         };
         if !(D == 2 || D == 3) {
             return false;
+        }
+        if let Some(target_modules) = target_modules {
+            return target_modules.contains(last);
         }
         matches!(
             last,
@@ -390,18 +397,42 @@ impl<B: BackendTrait> ModuleVisitor<B> for MuonTargetCollector {
         id: ParamId,
         _tensor: &Tensor<B, D>,
     ) {
-        if Self::should_route_to_muon::<D>(path) {
+        if Self::should_route_to_muon::<D>(path, None) {
             self.ids.insert(id);
         }
     }
 }
 
-fn collect_muon_target_ids<M, B>(module: &M) -> HashSet<ParamId>
+struct ConfigurableMuonTargetCollector<'a> {
+    ids: HashSet<ParamId>,
+    target_modules: Option<&'a HashSet<String>>,
+}
+
+impl<B: BackendTrait> ModuleVisitor<B> for ConfigurableMuonTargetCollector<'_> {
+    fn visit_float_with_path<const D: usize>(
+        &mut self,
+        path: &[String],
+        id: ParamId,
+        _tensor: &Tensor<B, D>,
+    ) {
+        if MuonTargetCollector::should_route_to_muon::<D>(path, self.target_modules) {
+            self.ids.insert(id);
+        }
+    }
+}
+
+fn collect_muon_target_ids<M, B>(
+    module: &M,
+    target_modules: Option<&HashSet<String>>,
+) -> HashSet<ParamId>
 where
     M: AutodiffModule<B>,
     B: AutodiffBackend,
 {
-    let mut collector = MuonTargetCollector::default();
+    let mut collector = ConfigurableMuonTargetCollector {
+        ids: HashSet::new(),
+        target_modules,
+    };
     module.visit(&mut collector);
     collector.ids
 }
@@ -694,6 +725,10 @@ where
                     .grad_clip_value
                     .map(|clip| GradientClippingConfig::Value(clip).init())
             }),
+        target_modules: muon_cfg
+            .target_modules
+            .as_ref()
+            .map(|modules| modules.iter().cloned().collect()),
     })
 }
 

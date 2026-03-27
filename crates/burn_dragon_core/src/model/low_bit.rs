@@ -28,7 +28,7 @@ pub enum LowBitInferenceMode {
     RuntimeFakeQuant,
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum LowBitWeightFormat {
     #[default]
@@ -246,6 +246,8 @@ pub enum RhoCompressionConfig {
     None,
     Fp8BlockExp,
     Int8BlockExp,
+    TernaryBlockExp,
+    BinaryBlockExp,
     BlockfpExp,
     SparsePositiveExp,
     LowrankDeltaExp,
@@ -303,17 +305,24 @@ impl LowBitRhoConfig {
         }
         if !matches!(
             self.compression,
-            RhoCompressionConfig::None | RhoCompressionConfig::Int8BlockExp
+            RhoCompressionConfig::None
+                | RhoCompressionConfig::Int8BlockExp
+                | RhoCompressionConfig::TernaryBlockExp
+                | RhoCompressionConfig::BinaryBlockExp
         ) {
             return Err(anyhow!(
-                "model.rho.compression currently supports only \"none\" or \"int8_block_exp\""
+                "model.rho.compression currently supports only \"none\", \"int8_block_exp\", \"ternary_block_exp\", or \"binary_block_exp\""
             ));
         }
-        if matches!(self.compression, RhoCompressionConfig::Int8BlockExp)
-            && !matches!(self.compression_interval, RhoCompressionInterval::Chunk)
+        if matches!(
+            self.compression,
+            RhoCompressionConfig::Int8BlockExp
+                | RhoCompressionConfig::TernaryBlockExp
+                | RhoCompressionConfig::BinaryBlockExp
+        ) && !matches!(self.compression_interval, RhoCompressionInterval::Chunk)
         {
             return Err(anyhow!(
-                "model.rho.compression = \"int8_block_exp\" currently supports only compression_interval = \"chunk\""
+                "block-compressed model.rho.compression currently supports only compression_interval = \"chunk\""
             ));
         }
         Ok(())
@@ -447,5 +456,46 @@ mod tests {
             err.to_string().contains("compression_interval"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn rho_config_accepts_ternary_block_chunk_compression() {
+        let config = LowBitRhoConfig {
+            compression: RhoCompressionConfig::TernaryBlockExp,
+            compression_interval: RhoCompressionInterval::Chunk,
+            ..Default::default()
+        };
+        config
+            .validate()
+            .expect("expected valid ternary rho config");
+    }
+
+    #[test]
+    fn rho_config_accepts_binary_block_chunk_compression() {
+        let config = LowBitRhoConfig {
+            compression: RhoCompressionConfig::BinaryBlockExp,
+            compression_interval: RhoCompressionInterval::Chunk,
+            ..Default::default()
+        };
+        config.validate().expect("expected valid binary rho config");
+    }
+
+    #[test]
+    fn rho_config_rejects_binary_and_ternary_non_chunk_interval() {
+        for compression in [
+            RhoCompressionConfig::TernaryBlockExp,
+            RhoCompressionConfig::BinaryBlockExp,
+        ] {
+            let config = LowBitRhoConfig {
+                compression,
+                compression_interval: RhoCompressionInterval::EvalOnly,
+                ..Default::default()
+            };
+            let err = config.validate().expect_err("expected validation failure");
+            assert!(
+                err.to_string().contains("compression_interval"),
+                "unexpected error for {compression:?}: {err}"
+            );
+        }
     }
 }

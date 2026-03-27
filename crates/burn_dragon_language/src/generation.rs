@@ -174,9 +174,10 @@ fn flush_pending_token_tensors<B: Backend>(
     pending: &mut Vec<Tensor<B, 2, Int>>,
     full_tokens: &mut Vec<i64>,
     on_chunk: &mut TokenChunkCallback<'_>,
-) -> Result<()> {
+    stop_on_token: Option<i64>,
+) -> Result<bool> {
     if pending.is_empty() {
-        return Ok(());
+        return Ok(false);
     }
 
     let prof_enabled = generation_profile_enabled();
@@ -205,11 +206,21 @@ fn flush_pending_token_tensors<B: Backend>(
         });
     }
 
+    let visible_len = stop_on_token
+        .and_then(|stop| {
+            chunk
+                .iter()
+                .position(|&token| token == stop)
+                .map(|idx| idx + 1)
+        })
+        .unwrap_or(chunk_len);
+    let visible_chunk = &chunk[..visible_len];
+
     if let Some(callback) = on_chunk.as_mut() {
-        (**callback)(&chunk);
+        (**callback)(visible_chunk);
     }
-    full_tokens.extend(chunk);
-    Ok(())
+    full_tokens.extend_from_slice(visible_chunk);
+    Ok(visible_len < chunk_len)
 }
 
 pub fn prefill_state<B: Backend>(
@@ -502,6 +513,7 @@ pub fn generate_tokens_chunked<B: Backend>(
     settings: GenerationSettings,
     chunk_tokens: usize,
     device_buffer_tokens: usize,
+    stop_on_token: Option<i64>,
     mut on_chunk: TokenChunkCallback<'_>,
 ) -> Result<Vec<i64>> {
     let GenerationSettings {
@@ -569,7 +581,15 @@ pub fn generate_tokens_chunked<B: Backend>(
         generated = generated.saturating_add(1);
 
         if pending.len() >= chunk_tokens || pending.len() >= device_buffer_tokens {
-            flush_pending_token_tensors(&mut pending, &mut full_tokens, &mut on_chunk)?;
+            let stop_reached = flush_pending_token_tensors(
+                &mut pending,
+                &mut full_tokens,
+                &mut on_chunk,
+                stop_on_token,
+            )?;
+            if stop_reached {
+                break;
+            }
         }
 
         if let ContextStrategy::Sliding { window } = strategy
@@ -580,7 +600,8 @@ pub fn generate_tokens_chunked<B: Backend>(
         }
     }
 
-    flush_pending_token_tensors(&mut pending, &mut full_tokens, &mut on_chunk)?;
+    let _ =
+        flush_pending_token_tensors(&mut pending, &mut full_tokens, &mut on_chunk, stop_on_token)?;
     Ok(full_tokens)
 }
 

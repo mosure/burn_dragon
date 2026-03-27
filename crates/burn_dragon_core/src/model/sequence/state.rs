@@ -40,7 +40,7 @@ pub fn write_mamba_state<B: Backend>(
     conv: Tensor<B, 4>,
 ) {
     layer_state.rho = Some(ssm);
-    layer_state.packed_rho_int8 = None;
+    layer_state.packed_rho = None;
     layer_state.packed_rho_int8_device = None;
     layer_state.rho_norm = None;
     layer_state.sequence_aux = Some(conv);

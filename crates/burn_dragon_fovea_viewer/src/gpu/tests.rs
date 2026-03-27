@@ -8,9 +8,9 @@ use burn::tensor::backend::Backend;
 use burn::tensor::{Tensor, TensorData};
 use burn_dragon_vision::config::{VisionFoveaSamplingMode, VisionSaccadeConfig};
 use burn_dragon_vision::train::SaccadeFoveationSampler;
+use burn_dragon_vision::{save_rgb_f32_image, save_rgb_f32_patch_image};
 use burn_wgpu::graphics;
 use burn_wgpu::{self, RuntimeOptions, Wgpu};
-use image::RgbImage;
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -223,42 +223,6 @@ fn fovea_test_root() -> PathBuf {
     root.join("runs").join("fovea_test")
 }
 
-fn save_patch_image(path: &Path, patch: &[f32], patch_size: usize) {
-    let expected = patch_size * patch_size * 3;
-    assert_eq!(
-        patch.len(),
-        expected,
-        "expected {expected} rgb values, got {}",
-        patch.len()
-    );
-    let mut bytes = Vec::with_capacity(expected);
-    for value in patch {
-        let scaled = (value.clamp(0.0, 1.0) * 255.0).round() as u8;
-        bytes.push(scaled);
-    }
-    let image =
-        RgbImage::from_raw(patch_size as u32, patch_size as u32, bytes).expect("rgb patch buffer");
-    image.save(path).expect("write fovea test image");
-}
-
-fn save_source_image(path: &Path, source: &SourceImage) {
-    let expected = source.width * source.height * 3;
-    assert_eq!(
-        source.data.len(),
-        expected,
-        "expected {expected} rgb values, got {}",
-        source.data.len()
-    );
-    let mut bytes = Vec::with_capacity(expected);
-    for value in source.data.iter().copied() {
-        let scaled = (value.clamp(0.0, 1.0) * 255.0).round() as u8;
-        bytes.push(scaled);
-    }
-    let image = RgbImage::from_raw(source.width as u32, source.height as u32, bytes)
-        .expect("rgb source buffer");
-    image.save(path).expect("write fovea test source image");
-}
-
 fn save_source_identity(
     root: &Path,
     source_name: &str,
@@ -278,7 +242,13 @@ fn save_source_identity(
         source.width, source.height
     );
     fs::write(dir.join("source.txt"), info).expect("write fovea_test source identity");
-    save_source_image(&dir.join("source.png"), source);
+    save_rgb_f32_image(
+        &dir.join("source.png"),
+        source.width,
+        source.height,
+        &source.data,
+    )
+    .expect("write fovea test source image");
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -309,7 +279,7 @@ fn save_patch_output(
         .join(case_dir);
     fs::create_dir_all(&dir).expect("create fovea_test output dir");
     let path = dir.join(format!("{backend}.png"));
-    save_patch_image(&path, patch, patch_size);
+    save_rgb_f32_patch_image(&path, patch, patch_size).expect("write fovea test image");
 }
 
 fn shader_source_f16() -> String {

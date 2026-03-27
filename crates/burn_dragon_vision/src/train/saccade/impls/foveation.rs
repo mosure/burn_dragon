@@ -67,7 +67,19 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
         sign * y
     }
 
-    pub(crate) fn foveated_warp(
+    fn sinh_from_exp(&self, values: Tensor<B, 3>) -> Tensor<B, 3> {
+        let exp_pos = values.clone().exp();
+        let exp_neg = values.mul_scalar(-1.0).exp();
+        exp_pos.sub(exp_neg).mul_scalar(0.5)
+    }
+
+    fn cosh_from_exp(&self, values: Tensor<B, 3>) -> Tensor<B, 3> {
+        let exp_pos = values.clone().exp();
+        let exp_neg = values.mul_scalar(-1.0).exp();
+        exp_pos.add(exp_neg).mul_scalar(0.5)
+    }
+
+    pub(crate) fn foveated_warp_axis(
         &self,
         u: Tensor<B, 3>,
         sigma: Tensor<B, 3>,
@@ -91,6 +103,112 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
             .mul_scalar(SACCADE_FOVEA_SQRT_PI_OVER_2)
             .mul(erf_inv.clone().powf_scalar(2.0).exp());
         (offset, deriv)
+    }
+
+    fn conformal_alpha(&self, sigma: Tensor<B, 3>, radius: Tensor<B, 3>) -> Tensor<B, 3> {
+        let device = sigma.device();
+        let shape = sigma.shape().dims::<3>();
+        let ones = Tensor::<B, 3>::ones(shape, &device);
+        let zeros = Tensor::<B, 3>::zeros(shape, &device);
+        let ratio = sigma
+            .clamp_min(SACCADE_EPS)
+            .div(radius.clamp_min(SACCADE_EPS))
+            .clamp_max(1.0);
+        let init_small = ones
+            .clone()
+            .sub(ratio.clone())
+            .mul_scalar(6.0)
+            .clamp_min(0.0)
+            .sqrt();
+        let init_large = ones
+            .clone()
+            .mul_scalar(2.0)
+            .div(ratio.clone().clamp_min(1e-4))
+            .log()
+            .clamp_min(0.0);
+        let init_mask = ratio.clone().greater_elem(0.75).float();
+        let init_keep = ones.clone().sub(init_mask.clone());
+        let mut alpha = init_large.mul(init_keep) + init_small.mul(init_mask);
+        for _ in 0..4 {
+            let alpha_safe = alpha.clone().clamp_min(1e-4);
+            let sinh_alpha = self.sinh_from_exp(alpha_safe.clone());
+            let cosh_alpha = self.cosh_from_exp(alpha_safe.clone());
+            let g = alpha_safe
+                .clone()
+                .div(sinh_alpha.clone())
+                .sub(ratio.clone());
+            let gp = sinh_alpha
+                .clone()
+                .sub(alpha_safe.clone().mul(cosh_alpha))
+                .div(sinh_alpha.clone().powf_scalar(2.0).clamp_min(1e-6))
+                .clamp_max(-1e-6);
+            alpha = alpha_safe.sub(g.div(gp)).clamp_min(0.0);
+        }
+        let identity_mask = ratio.greater_equal_elem(1.0 - 1e-4).float();
+        let identity_keep = ones.sub(identity_mask.clone());
+        alpha.mul(identity_keep) + zeros.mul(identity_mask)
+    }
+
+    pub(crate) fn foveated_warp_coords(
+        &self,
+        ux: Tensor<B, 3>,
+        uy: Tensor<B, 3>,
+        sigma: Tensor<B, 3>,
+        radius: Tensor<B, 3>,
+    ) -> (Tensor<B, 3>, Tensor<B, 3>, Tensor<B, 3>) {
+        match self.config.fovea_warp_mode {
+            VisionFoveaWarpMode::Warped | VisionFoveaWarpMode::Patched => {
+                let (dx, dx_deriv) = self.foveated_warp_axis(ux, sigma.clone(), radius.clone());
+                let (dy, dy_deriv) = self.foveated_warp_axis(uy, sigma, radius);
+                let deriv = dx_deriv.abs().max_pair(dy_deriv.abs());
+                (dx, dy, deriv)
+            }
+            VisionFoveaWarpMode::Conformal => {
+                let device = ux.device();
+                let shape = ux.shape().dims::<3>();
+                let radius_safe = radius.clamp_min(SACCADE_EPS);
+                let ux_clamped = ux.clamp_min(-1.0).clamp_max(1.0);
+                let uy_clamped = uy.clamp_min(-1.0).clamp_max(1.0);
+                let alpha = self.conformal_alpha(sigma, radius_safe.clone());
+                let alpha_safe = alpha.clone().clamp_min(1e-4);
+                let ax = alpha_safe.clone().mul(ux_clamped.clone());
+                let ay = alpha_safe.clone().mul(uy_clamped.clone());
+                let norm = radius_safe
+                    .clone()
+                    .div(self.sinh_from_exp(alpha_safe.clone()).clamp_min(1e-6));
+                let sinh_ax = self.sinh_from_exp(ax.clone());
+                let cosh_ax = self.cosh_from_exp(ax.clone());
+                let dx_conformal = norm.clone().mul(sinh_ax.clone()).mul(ay.clone().cos());
+                let dy_conformal = norm.clone().mul(cosh_ax.clone()).mul(ay.clone().sin());
+                let deriv_re = cosh_ax.mul(ay.clone().cos());
+                let deriv_im = sinh_ax.mul(ay.clone().sin());
+                let deriv_conformal = norm.clone().mul(alpha_safe).mul(
+                    deriv_re
+                        .powf_scalar(2.0)
+                        .add(deriv_im.powf_scalar(2.0))
+                        .sqrt(),
+                );
+                let identity_mask = alpha.lower_equal_elem(1e-3).float();
+                let identity_keep = Tensor::<B, 3>::ones(shape, &device).sub(identity_mask.clone());
+                let identity_dx = radius_safe.clone().mul(ux_clamped);
+                let identity_dy = radius_safe.clone().mul(uy_clamped);
+                let identity_deriv = radius_safe;
+                let dx = dx_conformal.mul(identity_keep.clone())
+                    + identity_dx.mul(identity_mask.clone());
+                let dy = dy_conformal.mul(identity_keep.clone())
+                    + identity_dy.mul(identity_mask.clone());
+                let deriv = deriv_conformal.mul(identity_keep) + identity_deriv.mul(identity_mask);
+                if shape[0] == 0 || shape[1] == 0 || shape[2] == 0 {
+                    (
+                        Tensor::<B, 3>::zeros(shape, &device),
+                        Tensor::<B, 3>::zeros(shape, &device),
+                        Tensor::<B, 3>::zeros(shape, &device),
+                    )
+                } else {
+                    (dx, dy, deriv)
+                }
+            }
+        }
     }
 
     // Foveated patch sampling on the image pyramid (GPU tensor path).
@@ -523,13 +641,9 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
             .clone()
             .repeat_dim(1, patch_h)
             .repeat_dim(2, patch_w);
-        let (_, dx_deriv_base) =
-            self.foveated_warp(ux_base, sigma_base.clone(), radius_base.clone());
-        let (_, dy_deriv_base) = self.foveated_warp(uy_base, sigma_base, radius_base);
-        let local_scale_base = dx_deriv_base
-            .abs()
-            .max_pair(dy_deriv_base.abs())
-            .mul_scalar(pixel_du);
+        let (_, _, deriv_base) =
+            self.foveated_warp_coords(ux_base, uy_base, sigma_base, radius_base);
+        let local_scale_base = deriv_base.mul_scalar(pixel_du);
         let use_subsamples = local_scale_base.greater_elem(SACCADE_FOVEA_AA_THRESHOLD);
 
         let base_grid = base_grid.unsqueeze_dim::<5>(0).repeat_dim(0, subsamples);
@@ -568,9 +682,9 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
 
         let ux = grid.clone().slice_dim(3, 0..1).squeeze_dim::<3>(3);
         let uy = grid.slice_dim(3, 1..2).squeeze_dim::<3>(3);
-        let (dx, dx_deriv) = self.foveated_warp(ux, sigma_px.clone(), radius_px.clone());
-        let (dy, dy_deriv) = self.foveated_warp(uy, sigma_px.clone(), radius_px.clone());
-        let local_scale = dx_deriv.abs().max_pair(dy_deriv.abs()).mul_scalar(pixel_du);
+        let (dx, dy, deriv) =
+            self.foveated_warp_coords(ux, uy, sigma_px.clone(), radius_px.clone());
+        let local_scale = deriv.mul_scalar(pixel_du);
         let img_x = center_x + dx.clone();
         let img_y = center_y + dy.clone();
         let fx = img_x.div_scalar(width as f32);

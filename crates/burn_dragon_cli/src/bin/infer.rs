@@ -25,9 +25,13 @@ use burn_dragon::core::{
 };
 #[cfg(feature = "viz")]
 use burn_dragon::language::build_model_config;
+use burn_dragon::language::tokenizer::{
+    SharedTokenizer, Tokenizer, TokenizerConfig, pretokenized::PretokenizedTokenizer,
+};
 use burn_dragon::language::{
     ContextStrategy, ContextStrategyConfig, GenerationConfig, GenerationOutputFormat,
-    GenerationTokenizerSourceConfig, TrainingConfig, apply_wgpu_fused_core_override,
+    GenerationTokenizerSourceConfig, TrainingConfig, WgpuFusedCoreOverride,
+    apply_bitnet_artifact_bundle_to_model, apply_wgpu_fused_core_override,
     build_model_config_with_tokenizer, candidate_bitnet_artifact_paths, default_checkpoint_dir,
     generate_tokens, generate_tokens_chunked, generation_profile_reset,
     generation_profile_snapshot, load_bitnet_artifact_bundle, load_training_config_for_checkpoint,
@@ -39,9 +43,6 @@ use burn_dragon_kernel::api::projection::{
     relu_lowrank_forward_profile_reset, relu_lowrank_forward_profile_snapshot,
 };
 use burn_dragon_kernel::api::recurrent::{recurrent_profile_reset, recurrent_profile_snapshot};
-use burn_dragon_language::tokenizer::{
-    SharedTokenizer, Tokenizer, TokenizerConfig, pretokenized::PretokenizedTokenizer,
-};
 use burn_wgpu::Wgpu;
 
 #[cfg(feature = "cuda")]
@@ -368,55 +369,83 @@ where
     apply_wgpu_fused_core_override(
         &mut model_config,
         backend_name,
-        config.wgpu.inference.fused_core_recurrent,
-        config.wgpu.inference.fused_core_rollout,
+        WgpuFusedCoreOverride {
+            recurrent: config.wgpu.inference.fused_core_recurrent,
+            rollout: config.wgpu.inference.fused_core_rollout,
+        },
     );
-    let burnpack_policy =
-        BurnpackLoadPolicy::default().with_precision(BurnpackPrecisionPreference::PreferF16);
-    let burnpack_candidates = candidate_burnpack_paths(&checkpoint_base, burnpack_policy);
-    let (mut model, mut checkpoint_display) = if let Some((model, _result)) =
-        try_load_model_from_burnpack_candidates(&burnpack_candidates, "BDH model", true, || {
-            BDH::<B>::new(model_config.clone(), &device)
-        })
-        .map_err(|err| anyhow!(err))?
-    {
-        (model, format_burnpack_checkpoint(&burnpack_candidates))
-    } else {
-        let mut model = BDH::<B>::new(model_config, &device);
-        let recorder = BinFileRecorder::<FullPrecisionSettings>::new();
-        let record = recorder
-            .load::<<BDH<B> as Module<B>>::Record>(checkpoint_base.clone(), &device)
-            .with_context(|| {
-                format!(
-                    "failed to load checkpoint {}",
-                    format_checkpoint(&checkpoint_base)
-                )
-            })?;
-        model = model.load_record(record);
-        (model, format_checkpoint(&checkpoint_base))
-    };
     let bitnet_artifact_path = args.bitnet_artifact.clone().or_else(|| {
         candidate_bitnet_artifact_paths(&checkpoint_base, epoch)
             .into_iter()
             .find(|candidate| candidate.is_file())
     });
-    if let Some(artifact_path) = bitnet_artifact_path {
-        let artifact_bundle = load_bitnet_artifact_bundle(&artifact_path).with_context(|| {
-            format!("failed to load BitNet artifact {}", artifact_path.display())
-        })?;
-        model
-            .apply_bitnet_static_artifacts(&artifact_bundle.static_weights, &device)
-            .with_context(|| {
+    let artifact_bundle = bitnet_artifact_path
+        .as_ref()
+        .map(|artifact_path| {
+            load_bitnet_artifact_bundle(artifact_path).with_context(|| {
+                format!("failed to load BitNet artifact {}", artifact_path.display())
+            })
+        })
+        .transpose()?;
+    let (model, checkpoint_display) = if let (Some(artifact_path), Some(artifact_bundle)) =
+        (bitnet_artifact_path.as_ref(), artifact_bundle.as_ref())
+        && artifact_bundle.deploy_base_burnpack.is_some()
+    {
+        let mut model = BDH::<B>::new(model_config.clone(), &device);
+        apply_bitnet_artifact_bundle_to_model(&mut model, artifact_bundle, &device).with_context(
+            || {
                 format!(
-                    "failed to apply BitNet artifact static weights from {}",
+                    "failed to apply standalone BitNet artifact {}",
                     artifact_path.display()
                 )
-            })?;
-        checkpoint_display = format!(
-            "{checkpoint_display} + BitNet artifact {}",
-            artifact_path.display()
-        );
-    }
+            },
+        )?;
+        (
+            model,
+            format!("standalone BitNet artifact {}", artifact_path.display()),
+        )
+    } else {
+        let burnpack_policy =
+            BurnpackLoadPolicy::default().with_precision(BurnpackPrecisionPreference::PreferF16);
+        let burnpack_candidates = candidate_burnpack_paths(&checkpoint_base, burnpack_policy);
+        let (mut model, mut checkpoint_display) = if let Some((model, _result)) =
+            try_load_model_from_burnpack_candidates(&burnpack_candidates, "BDH model", true, || {
+                BDH::<B>::new(model_config.clone(), &device)
+            })
+            .map_err(|err| anyhow!(err))?
+        {
+            (model, format_burnpack_checkpoint(&burnpack_candidates))
+        } else {
+            let mut model = BDH::<B>::new(model_config, &device);
+            let recorder = BinFileRecorder::<FullPrecisionSettings>::new();
+            let record = recorder
+                .load::<<BDH<B> as Module<B>>::Record>(checkpoint_base.clone(), &device)
+                .with_context(|| {
+                    format!(
+                        "failed to load checkpoint {}",
+                        format_checkpoint(&checkpoint_base)
+                    )
+                })?;
+            model = model.load_record(record);
+            (model, format_checkpoint(&checkpoint_base))
+        };
+        if let (Some(artifact_path), Some(artifact_bundle)) =
+            (bitnet_artifact_path.as_ref(), artifact_bundle.as_ref())
+        {
+            apply_bitnet_artifact_bundle_to_model(&mut model, artifact_bundle, &device)
+                .with_context(|| {
+                    format!(
+                        "failed to apply BitNet artifact static weights from {}",
+                        artifact_path.display()
+                    )
+                })?;
+            checkpoint_display = format!(
+                "{checkpoint_display} + BitNet artifact {}",
+                artifact_path.display()
+            );
+        }
+        (model, checkpoint_display)
+    };
 
     let mut generation = config.generation.clone();
     apply_generation_overrides(&mut generation, args, config.training.block_size);
@@ -485,9 +514,6 @@ where
 
         let chunked_plan = chunked_plan.filter(|_| {
             if generation.max_chars.is_some() {
-                return false;
-            }
-            if stop_on_eos.is_some() {
                 return false;
             }
             #[cfg(feature = "viz")]
@@ -559,6 +585,7 @@ where
                 settings,
                 chunk_tokens,
                 buffer_tokens,
+                stop_on_eos.map(i64::from),
                 Some(&mut on_chunk),
             )?;
         } else {
@@ -792,10 +819,17 @@ where
             logits_projection.calls, logits_projection.total_ns,
         );
         eprintln!(
-            "[stage-profile][inference-residual-step] calls={} total_ns={} attention_norm_ns={} decoder_tail_ns={} mlp_norm_ns={} residual_combine_ns={}",
+            "[stage-profile][inference-residual-step] calls={} total_ns={} x_projection_ns={} x_post_quant_ns={} attention_norm_ns={} attention_mixer_ns={} attention_post_norm_ns={} y_projection_ns={} y_post_quant_ns={} y_neuron_ns={} decoder_tail_ns={} mlp_norm_ns={} residual_combine_ns={}",
             residual.calls,
             residual.total_ns,
+            residual.x_projection_ns,
+            residual.x_post_quant_ns,
             residual.attention_norm_ns,
+            residual.attention_mixer_ns,
+            residual.attention_post_norm_ns,
+            residual.y_projection_ns,
+            residual.y_post_quant_ns,
+            residual.y_neuron_ns,
             residual.decoder_tail_ns,
             residual.mlp_norm_ns,
             residual.residual_combine_ns,
@@ -957,19 +991,6 @@ fn generate_output_chunked<B: Backend>(
     chunk_tokens: usize,
     device_buffer_tokens: usize,
 ) -> Result<String> {
-    if stop_on_eos.is_some() {
-        return generate_output(
-            model,
-            prompt_tokenizer,
-            decode_tokenizer,
-            output_format,
-            stop_at_eos,
-            stop_on_eos,
-            device,
-            block_size,
-            generation,
-        );
-    }
     let strategy = resolve_context_strategy(&generation.context_strategy, block_size);
     let mut prompt_ids = prompt_tokenizer.encode(&generation.prompt, false, false);
     if let ContextStrategy::Sliding { window } = strategy
@@ -992,6 +1013,7 @@ fn generate_output_chunked<B: Backend>(
         settings,
         chunk_tokens,
         device_buffer_tokens,
+        stop_on_eos.map(i64::from),
         None,
     )?;
     let decoded_ids: Vec<u32> = tokens_all
@@ -1349,17 +1371,14 @@ fn resolve_chunked_generation_plan_for_values(
     match parse_chunked_override(env_override) {
         Some(false) => return None,
         Some(true) => {}
-        None => {
-            if is_wgpu_backend
-                && !matches!(generation_executor, WgpuGenerationExecutor::RolloutChunked)
-            {
-                return None;
-            }
-        }
+        None => {}
     }
 
     let chunk_tokens = chunk_tokens.max(1);
     let device_buffer_tokens = device_buffer_tokens.max(chunk_tokens);
+    if is_wgpu_backend || matches!(generation_executor, WgpuGenerationExecutor::RolloutChunked) {
+        return Some((chunk_tokens, device_buffer_tokens));
+    }
     Some((chunk_tokens, device_buffer_tokens))
 }
 
@@ -1384,8 +1403,8 @@ fn resolve_chunked_generation_plan(
 #[cfg(test)]
 mod tests {
     use super::{
-        Args, ResolvedGenerationOutputFormat, apply_wgpu_fused_core_override,
-        parse_chunked_override, render_output, render_token_ids,
+        Args, ResolvedGenerationOutputFormat, WgpuFusedCoreOverride,
+        apply_wgpu_fused_core_override, parse_chunked_override, render_output, render_token_ids,
         resolve_chunked_generation_plan_for_values, resolve_generation_output_format,
         sanitize_display_text,
     };
@@ -1405,7 +1424,14 @@ mod tests {
         model_config.fused_kernels.set_wgpu_recurrent_kernel(false);
         model_config.fused_kernels.set_wgpu_rollout_fused(false);
 
-        apply_wgpu_fused_core_override(&mut model_config, "wgpu", Some(true), None);
+        apply_wgpu_fused_core_override(
+            &mut model_config,
+            "wgpu",
+            WgpuFusedCoreOverride {
+                recurrent: Some(true),
+                rollout: None,
+            },
+        );
 
         assert!(
             model_config.fused_kernels.enabled,
@@ -1425,7 +1451,14 @@ mod tests {
         model_config.fused_kernels.set_wgpu_recurrent_kernel(true);
         model_config.fused_kernels.set_wgpu_rollout_fused(true);
 
-        apply_wgpu_fused_core_override(&mut model_config, "wgpu", Some(false), None);
+        apply_wgpu_fused_core_override(
+            &mut model_config,
+            "wgpu",
+            WgpuFusedCoreOverride {
+                recurrent: Some(false),
+                rollout: None,
+            },
+        );
 
         assert!(
             model_config.fused_kernels.enabled,
@@ -1445,7 +1478,14 @@ mod tests {
         model_config.fused_kernels.set_wgpu_recurrent_kernel(false);
         model_config.fused_kernels.set_wgpu_rollout_fused(false);
 
-        apply_wgpu_fused_core_override(&mut model_config, "cuda", Some(true), Some(true));
+        apply_wgpu_fused_core_override(
+            &mut model_config,
+            "cuda",
+            WgpuFusedCoreOverride {
+                recurrent: Some(true),
+                rollout: Some(true),
+            },
+        );
 
         assert!(!model_config.fused_kernels.enabled);
         assert!(!model_config.fused_kernels.wgpu_recurrent_kernel);
@@ -1478,7 +1518,7 @@ mod tests {
     }
 
     #[test]
-    fn wgpu_chunked_inference_stays_executor_gated_by_default() {
+    fn wgpu_chunked_inference_defaults_on_for_argmax_sampling() {
         let plan = resolve_chunked_generation_plan_for_values(
             true,
             WgpuGenerationExecutor::Baseline,
@@ -1487,7 +1527,7 @@ mod tests {
             64,
             None,
         );
-        assert_eq!(plan, None);
+        assert_eq!(plan, Some((8, 64)));
     }
 
     #[test]
@@ -1518,12 +1558,12 @@ mod tests {
         let args = Args::parse_from([
             "infer",
             "--bitnet-artifact",
-            "runs/example/deploy/model-3.bitnet_artifact.json",
+            "runs/example/deploy/model-3.bitnet_artifact.bin.gz",
         ]);
         assert_eq!(
             args.bitnet_artifact,
             Some(PathBuf::from(
-                "runs/example/deploy/model-3.bitnet_artifact.json"
+                "runs/example/deploy/model-3.bitnet_artifact.bin.gz"
             ))
         );
     }

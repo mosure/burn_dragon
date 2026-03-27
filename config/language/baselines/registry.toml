@@ -17,6 +17,18 @@ family = "mamba_contender"
 path = "current_best_large_mamba_contender.toml"
 
 [[entries]]
+name = "current_best_bitnet_single_stage"
+kind = "training_config"
+family = "bitnet_contender"
+path = "current_best_bitnet.toml"
+
+[[entries]]
+name = "current_best_large_bitnet_contender"
+kind = "bundle_config"
+family = "bitnet_contender"
+path = "current_best_large_bitnet_contender.toml"
+
+[[entries]]
 name = "shakespeare_deployed_repro"
 kind = "training_config"
 family = "shakespeare_exact"

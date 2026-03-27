@@ -12,7 +12,7 @@ use burn_dragon::api::language::checkpoint::{
 #[command(
     author,
     version,
-    about = "Export language BDH checkpoints to additive BitNet-style packed static-weight artifacts"
+    about = "Export language BDH checkpoints to standalone BitNet deploy bundles with packed static weights"
 )]
 struct Args {
     /// Path to the checkpoint directory or file.
@@ -25,7 +25,7 @@ struct Args {
     /// use the run-local snapshot/config flow.
     #[arg(short = 'c', long = "config", value_name = "PATH")]
     config: Vec<PathBuf>,
-    /// Optional output path. Defaults to <run>/deploy/model-<epoch>.bitnet_artifact.json.gz.
+    /// Optional output path. Defaults to <run>/deploy/model-<epoch>.bitnet_artifact.bin.gz.
     #[arg(long, value_name = "PATH")]
     output: Option<PathBuf>,
     /// Backend label used only for locating run-local metadata when explicit configs are absent.

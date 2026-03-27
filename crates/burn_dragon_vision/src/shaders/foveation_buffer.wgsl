@@ -41,6 +41,11 @@ struct FoveaWarp {
     deriv: f32,
 };
 
+struct FoveaWarp2d {
+    offset: vec2<f32>,
+    deriv: f32,
+};
+
 fn meta_u32(idx: u32) -> u32 {
     return u32(metadata[idx]);
 }
@@ -82,6 +87,60 @@ fn foveated_warp(u: f32, sigma: f32, radius: f32) -> FoveaWarp {
     let offset = sigma_safe * SQRT2 * erf_inv;
     let deriv = sigma_safe * SQRT2 * u_max * SQRT_PI_OVER_2 * exp(erf_inv * erf_inv);
     return FoveaWarp(offset, deriv);
+}
+
+fn sinh_scalar(x: f32) -> f32 {
+    return 0.5 * (exp(x) - exp(-x));
+}
+
+fn cosh_scalar(x: f32) -> f32 {
+    return 0.5 * (exp(x) + exp(-x));
+}
+
+fn conformal_alpha(sigma: f32, radius: f32) -> f32 {
+    let ratio = clamp(sigma / max(radius, 1e-3), 1e-4, 1.0);
+    if ratio >= 0.9999 {
+        return 0.0;
+    }
+    var alpha = select(
+        max(log(2.0 / max(ratio, 1e-4)), 0.0),
+        sqrt(max(6.0 * (1.0 - ratio), 0.0)),
+        ratio > 0.75,
+    );
+    for (var idx = 0; idx < 4; idx = idx + 1) {
+        let a = max(alpha, 1e-4);
+        let sinh_a = sinh_scalar(a);
+        let cosh_a = cosh_scalar(a);
+        let g = a / sinh_a - ratio;
+        let gp = min((sinh_a - a * cosh_a) / max(sinh_a * sinh_a, 1e-6), -1e-6);
+        alpha = max(a - g / gp, 0.0);
+    }
+    return alpha;
+}
+
+fn conformal_warp(ux: f32, uy: f32, sigma: f32, radius: f32) -> FoveaWarp2d {
+    let radius_safe = max(radius, 1e-3);
+    let alpha = conformal_alpha(sigma, radius_safe);
+    if alpha <= 1e-3 {
+        return FoveaWarp2d(
+            vec2<f32>(radius_safe * clamp(ux, -1.0, 1.0), radius_safe * clamp(uy, -1.0, 1.0)),
+            radius_safe,
+        );
+    }
+    let ux_clamped = clamp(ux, -1.0, 1.0);
+    let uy_clamped = clamp(uy, -1.0, 1.0);
+    let ax = alpha * ux_clamped;
+    let ay = alpha * uy_clamped;
+    let sinh_alpha = max(sinh_scalar(alpha), 1e-6);
+    let norm = radius_safe / sinh_alpha;
+    let sinh_ax = sinh_scalar(ax);
+    let cosh_ax = cosh_scalar(ax);
+    let dx = norm * sinh_ax * cos(ay);
+    let dy = norm * cosh_ax * sin(ay);
+    let deriv_re = cosh_ax * cos(ay);
+    let deriv_im = sinh_ax * sin(ay);
+    let deriv = norm * alpha * sqrt(deriv_re * deriv_re + deriv_im * deriv_im);
+    return FoveaWarp2d(vec2<f32>(dx, dy), deriv);
 }
 
 fn compute_lod(dx: f32, dy: f32, sigma: f32, local_scale: f32, max_level: f32) -> f32 {
@@ -387,6 +446,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let lod_sigma = max(params[param_idx + 4u], 1e-6);
 
     let patched = warp_mode == 1u;
+    let conformal = warp_mode == 2u;
     let mean_x = center_x / base_width;
     let mean_y = center_y / base_height;
     if patched {
@@ -450,11 +510,22 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
         return;
     }
+    var dx_base = 0.0;
+    var dy_base = 0.0;
     var local_scale_base = 0.0;
     if !patched {
-        let warp_x_base = foveated_warp(ux_base, sigma, radius);
-        let warp_y_base = foveated_warp(uy_base, sigma, radius);
-        local_scale_base = max(abs(warp_x_base.deriv), abs(warp_y_base.deriv)) * pixel_du;
+        if conformal {
+            let warp_base = conformal_warp(ux_base, uy_base, sigma, radius);
+            dx_base = warp_base.offset.x;
+            dy_base = warp_base.offset.y;
+            local_scale_base = abs(warp_base.deriv) * pixel_du;
+        } else {
+            let warp_x_base = foveated_warp(ux_base, sigma, radius);
+            let warp_y_base = foveated_warp(uy_base, sigma, radius);
+            dx_base = warp_x_base.offset;
+            dy_base = warp_y_base.offset;
+            local_scale_base = max(abs(warp_x_base.deriv), abs(warp_y_base.deriv)) * pixel_du;
+        }
     }
 
     var channel = 0u;
@@ -472,10 +543,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 dx = ux_base * radius;
                 dy = uy_base * radius;
             } else {
-                let warp_x_base = foveated_warp(ux_base, sigma, radius);
-                let warp_y_base = foveated_warp(uy_base, sigma, radius);
-                dx = warp_x_base.offset;
-                dy = warp_y_base.offset;
+                dx = dx_base;
+                dy = dy_base;
                 local_scale = local_scale_base;
             }
             let img_x = center_x + dx;
@@ -500,11 +569,21 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                     let jitter_y = (f32(sy) + 0.5) / f32(SUBSAMPLE_AXIS) - 0.5;
                     let ux = (base_dx + jitter_x) / half_safe;
                     let uy = (base_dy + jitter_y) / half_safe;
-                    let warp_x = foveated_warp(ux, sigma, radius);
-                    let warp_y = foveated_warp(uy, sigma, radius);
-                    let dx = warp_x.offset;
-                    let dy = warp_y.offset;
-                    let local_scale = max(abs(warp_x.deriv), abs(warp_y.deriv)) * pixel_du;
+                    var dx = 0.0;
+                    var dy = 0.0;
+                    var local_scale = 0.0;
+                    if conformal {
+                        let warp = conformal_warp(ux, uy, sigma, radius);
+                        dx = warp.offset.x;
+                        dy = warp.offset.y;
+                        local_scale = abs(warp.deriv) * pixel_du;
+                    } else {
+                        let warp_x = foveated_warp(ux, sigma, radius);
+                        let warp_y = foveated_warp(uy, sigma, radius);
+                        dx = warp_x.offset;
+                        dy = warp_y.offset;
+                        local_scale = max(abs(warp_x.deriv), abs(warp_y.deriv)) * pixel_du;
+                    }
                     let img_x = center_x + dx;
                     let img_y = center_y + dy;
                     let fx = img_x / base_width;

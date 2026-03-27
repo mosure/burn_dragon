@@ -1,0 +1,4 @@
+extends = [
+  "../current_best_large/nca_stage_base.toml",
+  "../../shared/current_best_large_bitnet_modifier.toml",
+]

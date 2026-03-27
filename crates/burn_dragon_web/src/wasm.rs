@@ -1,3 +1,4 @@
+use std::io::Read;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
@@ -6,6 +7,7 @@ use burn::record::{BinBytesRecorder, FullPrecisionSettings, HalfPrecisionSetting
 use burn::tensor::Tensor;
 use burn::tensor::backend::Backend;
 use burn_wgpu::{RuntimeOptions, graphics};
+use flate2::read::GzDecoder;
 #[cfg(feature = "viz")]
 use js_sys::Promise;
 use serde::Deserialize;
@@ -24,7 +26,9 @@ use burn_dragon_language::generation::{
 };
 use burn_dragon_language::tokenizer::SharedTokenizer;
 use burn_dragon_language::tokenizer::char_vocab::CharVocab;
-use burn_dragon_language::{ContextStrategyConfig, ModelOverrides, build_model_config};
+use burn_dragon_language::{
+    ContextStrategyConfig, ModelOverrides, build_model_config, deserialize_bitnet_artifact_binary,
+};
 
 #[cfg(feature = "viz")]
 use bevy_dragon::{VizConfig, VizDimensions, VizEncoder, viz};
@@ -299,6 +303,53 @@ async fn load_burnpack_url_into_model(
         .map_err(|err| anyhow!("failed to apply burnpack {base_burnpack_url}: {err}"))
 }
 
+fn decode_bitnet_artifact_bytes(bytes: Vec<u8>, source_url: &str) -> Result<Vec<u8>> {
+    if !source_url.ends_with(".gz") {
+        return Ok(bytes);
+    }
+    let mut decoder = GzDecoder::new(bytes.as_slice());
+    let mut decoded = Vec::new();
+    decoder
+        .read_to_end(&mut decoded)
+        .with_context(|| format!("failed to decompress {source_url}"))?;
+    Ok(decoded)
+}
+
+fn load_bitnet_artifact_bytes_into_model(
+    model: &mut BDH<WebBackend>,
+    artifact_bytes: Vec<u8>,
+    source_url: &str,
+    device: &WebDevice,
+) -> Result<()> {
+    let decoded = decode_bitnet_artifact_bytes(artifact_bytes, source_url)?;
+    let bundle = deserialize_bitnet_artifact_binary(decoded.as_slice(), source_url)?;
+    if let Some(deploy_base_burnpack) = bundle.deploy_base_burnpack {
+        let apply_result = apply_burnpack_part_bytes(model, deploy_base_burnpack)
+            .map_err(|err| anyhow!("failed to apply standalone BitNet base burnpack: {err}"))?;
+        if !apply_result.errors.is_empty() {
+            return Err(anyhow!(
+                "standalone BitNet base burnpack reported {} apply errors",
+                apply_result.errors.len()
+            ));
+        }
+        if !apply_result.unused.is_empty() {
+            return Err(anyhow!(
+                "standalone BitNet base burnpack had {} unmatched tensor entries",
+                apply_result.unused.len()
+            ));
+        }
+        if apply_result.applied.is_empty() {
+            return Err(anyhow!(
+                "standalone BitNet base burnpack did not apply any tensors"
+            ));
+        }
+    }
+    model
+        .apply_bitnet_static_artifacts(&bundle.static_weights, device)
+        .context("failed to apply BitNet static weights")?;
+    Ok(())
+}
+
 #[wasm_bindgen(js_name = "loadModel")]
 pub async fn load_model(
     model_bytes: Vec<u8>,
@@ -339,6 +390,16 @@ pub async fn load_model_from_url(
         let mut init = initialize_inference(vocab_json, config_json, start_viz).await?;
         if model_url.ends_with(".bpk") {
             load_burnpack_url_into_model(&mut init.model, model_url.as_str()).await?;
+        } else if model_url.ends_with(".bitnet_artifact.bin")
+            || model_url.ends_with(".bitnet_artifact.bin.gz")
+        {
+            let artifact_bytes = fetch_url_bytes(model_url.as_str()).await?;
+            load_bitnet_artifact_bytes_into_model(
+                &mut init.model,
+                artifact_bytes,
+                model_url.as_str(),
+                &init.device,
+            )?;
         } else {
             let model_bytes = fetch_url_bytes(model_url.as_str()).await?;
             init.model =

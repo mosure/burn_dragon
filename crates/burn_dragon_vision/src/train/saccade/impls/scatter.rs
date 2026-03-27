@@ -264,12 +264,9 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
         let mut accum = Tensor::<B, 4>::zeros([batch, channels, patch_h, patch_w], &device);
         let ux_base = base_grid.clone().slice_dim(3, 0..1).squeeze_dim::<3>(3);
         let uy_base = base_grid.clone().slice_dim(3, 1..2).squeeze_dim::<3>(3);
-        let (_, dx_deriv_base) = self.foveated_warp(ux_base, sigma_px.clone(), radius_px.clone());
-        let (_, dy_deriv_base) = self.foveated_warp(uy_base, sigma_px.clone(), radius_px.clone());
-        let local_scale_base = dx_deriv_base
-            .abs()
-            .max_pair(dy_deriv_base.abs())
-            .mul_scalar(pixel_du);
+        let (_, _, deriv_base) =
+            self.foveated_warp_coords(ux_base, uy_base, sigma_px.clone(), radius_px.clone());
+        let local_scale_base = deriv_base.mul_scalar(pixel_du);
         let use_subsamples = local_scale_base
             .greater_elem(SACCADE_FOVEA_AA_THRESHOLD)
             .unsqueeze_dim::<4>(3)
@@ -281,9 +278,9 @@ impl<B: BackendTrait> VisionSaccadeModel<B> {
 
             let ux = grid.clone().slice_dim(3, 0..1).squeeze_dim::<3>(3);
             let uy = grid.slice_dim(3, 1..2).squeeze_dim::<3>(3);
-            let (dx, dx_deriv) = self.foveated_warp(ux, sigma_px.clone(), radius_px.clone());
-            let (dy, dy_deriv) = self.foveated_warp(uy, sigma_px.clone(), radius_px.clone());
-            let local_scale = dx_deriv.abs().max_pair(dy_deriv.abs()).mul_scalar(pixel_du);
+            let (dx, dy, deriv) =
+                self.foveated_warp_coords(ux, uy, sigma_px.clone(), radius_px.clone());
+            let local_scale = deriv.mul_scalar(pixel_du);
             let img_x = center_x.clone() + dx.clone();
             let img_y = center_y.clone() + dy.clone();
             let fx = img_x.div_scalar(width as f32);

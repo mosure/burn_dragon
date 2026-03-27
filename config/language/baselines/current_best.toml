@@ -1,3 +1,4 @@
 # Promoted single-stage language-training baseline.
 # This is the operational dense-score line that also powers the staged 48h bundle.
+# The Shakespeare-derived BitNet contender lives alongside it in current_best_bitnet.toml.
 extends = ["current_best_large/climbmix_stage_base.toml"]

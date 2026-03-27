@@ -1,8 +1,6 @@
 use std::any::Any;
 use std::collections::HashMap;
-#[cfg(feature = "train")]
 use std::fs;
-#[cfg(feature = "train")]
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow};
@@ -92,7 +90,6 @@ impl RustBpeTokenizer {
         }
     }
 
-    #[cfg(feature = "train")]
     pub fn train_from_texts<'a, I>(&mut self, texts: I) -> Result<()>
     where
         I: Iterator<Item = &'a str>,
@@ -114,7 +111,6 @@ impl RustBpeTokenizer {
         }
     }
 
-    #[cfg(feature = "train")]
     pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
         let path = path.as_ref();
         if let Some(parent) = path.parent() {
@@ -133,7 +129,6 @@ impl RustBpeTokenizer {
         Ok(())
     }
 
-    #[cfg(feature = "train")]
     pub fn load(
         path: impl AsRef<Path>,
         mergeable_vocab_size: usize,
@@ -178,7 +173,6 @@ impl RustBpeTokenizer {
         )
     }
 
-    #[cfg(feature = "train")]
     fn from_huggingface_tokenizer_json_record(
         record: HuggingFaceTokenizerJsonRecord,
         mergeable_vocab_size: usize,
@@ -226,7 +220,6 @@ impl RustBpeTokenizer {
         )
     }
 
-    #[cfg(feature = "train")]
     fn from_huggingface_byte_level_tokenizer_json_record(
         record: HuggingFaceTokenizerJsonRecord,
         mergeable_vocab_size: usize,
@@ -527,7 +520,6 @@ struct RustBpeMergeRecord {
     token_id: u32,
 }
 
-#[cfg(feature = "train")]
 #[derive(Deserialize)]
 struct HuggingFaceTokenizerJsonRecord {
     #[serde(default)]
@@ -537,7 +529,6 @@ struct HuggingFaceTokenizerJsonRecord {
     model: HuggingFaceBpeModelRecord,
 }
 
-#[cfg(feature = "train")]
 impl HuggingFaceTokenizerJsonRecord {
     fn is_byte_level_bpe(&self) -> bool {
         self.pre_tokenizer
@@ -550,28 +541,24 @@ impl HuggingFaceTokenizerJsonRecord {
     }
 }
 
-#[cfg(feature = "train")]
 #[derive(Deserialize)]
 struct HuggingFaceTokenizerComponentRecord {
     #[serde(rename = "type")]
     component_type: String,
 }
 
-#[cfg(feature = "train")]
 impl HuggingFaceTokenizerComponentRecord {
     fn is_byte_level(&self) -> bool {
         self.component_type == "ByteLevel"
     }
 }
 
-#[cfg(feature = "train")]
 #[derive(Deserialize)]
 struct HuggingFaceBpeModelRecord {
     vocab: HashMap<String, u32>,
     merges: Vec<HuggingFaceBpeMergeRecord>,
 }
 
-#[cfg(feature = "train")]
 #[derive(Clone, Deserialize)]
 #[serde(untagged)]
 enum HuggingFaceBpeMergeRecord {
@@ -579,7 +566,6 @@ enum HuggingFaceBpeMergeRecord {
     String(String),
 }
 
-#[cfg(feature = "train")]
 impl HuggingFaceBpeMergeRecord {
     fn into_pair(self) -> Result<(String, String)> {
         match self {

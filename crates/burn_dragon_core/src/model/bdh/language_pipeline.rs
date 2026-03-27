@@ -1,4 +1,6 @@
 use super::*;
+#[cfg(not(any(feature = "viz", feature = "probe")))]
+use crate::model::residual_stream::lowrank_residual_step_next_branch_thresholds_relu_native;
 
 impl<B: Backend> BDH<B> {
     pub(super) fn forward_with_state_from_embedded_single_pass(

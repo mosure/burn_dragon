@@ -2,17 +2,21 @@ use super::*;
 use crate::LatentFanoutScheduleConfig;
 use crate::experimental::bitnet_reference::{PackedWeightEncoding, unpack_weight_artifact_to_f32};
 use crate::model::low_bit::LowBitSavedActivationConfig;
-use crate::model::low_bit_runtime::{
-    unpack_rho_int8_block_state, unpack_rho_int8_block_state_device,
-};
+use crate::model::low_bit_runtime::{unpack_rho_block_state, unpack_rho_int8_block_state_device};
 use crate::model::sequence::mamba::MambaSequenceConfig;
 use burn::tensor::backend::Backend as BackendTrait;
 use burn::tensor::{Int, TensorData};
 use burn_ndarray::NdArray;
+use std::sync::{Mutex, OnceLock};
 
 type RecurrenceBackend = NdArray<f32>;
 
 fn recurrence_test_model(config: BDHConfig) -> BDH<RecurrenceBackend> {
+    static RECURRENCE_MODEL_INIT_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    let _guard = RECURRENCE_MODEL_INIT_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("recurrence model init lock");
     let device = <RecurrenceBackend as BackendTrait>::Device::default();
     <RecurrenceBackend as BackendTrait>::seed(&device, 2026);
     BDH::<RecurrenceBackend>::new(config, &device)
@@ -75,6 +79,74 @@ fn low_bit_export_test_config() -> BDHConfig {
     }
 }
 
+fn decoder_y_quality_recipe_test_config(sequence_kernel: SequenceKernelKind) -> BDHConfig {
+    let mut config = BDHConfig {
+        n_layer: 2,
+        n_embd: 16,
+        n_head: 4,
+        mlp_internal_dim_multiplier: 8,
+        vocab_size: 32,
+        dropout: 0.0,
+        sequence_kernel,
+        fused_kernels: FusedKernelConfig {
+            enabled: false,
+            ..Default::default()
+        },
+        residual_connector: ResidualConnectorKind::AttentionResidual,
+        attention_residual: crate::AttentionResidualConfig {
+            enabled: true,
+            num_heads: 4,
+            history_window: Some(4),
+            dropout: 0.0,
+            recency_bias: 2.0,
+            ..Default::default()
+        },
+        quant: crate::LowBitQuantizationConfig {
+            enable: true,
+            protocol: crate::BitNetLowBitProtocol::BitnetB158,
+            weight_format: crate::LowBitWeightFormat::Ternary158,
+            act_format: crate::LowBitActivationFormat::Int8,
+            target_modules: vec![crate::LowBitTargetModule::DecoderY],
+            decoder_x_mode: crate::LowBitWeightFormat::Fp16,
+            training_mode: crate::LowBitTrainingMode::QatSte,
+            inference_mode: crate::LowBitInferenceMode::OfflinePack,
+            strict_bitnet_reference: false,
+            saved_activations: LowBitSavedActivationConfig {
+                mode: crate::LowBitSavedActivationMode::QuantizedCacheRecomputeExp,
+                format: crate::LowBitActivationFormat::Int8,
+            },
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    if matches!(
+        sequence_kernel,
+        SequenceKernelKind::MambaSelectiveSsmExperimental
+    ) {
+        config.mamba = MambaSequenceConfig {
+            d_state: 16,
+            d_conv: 2,
+            expand: 2,
+            ..Default::default()
+        };
+    }
+    config
+}
+
+fn allmat_quality_recipe_test_config(
+    sequence_kernel: SequenceKernelKind,
+    decoder_x_mode: crate::LowBitWeightFormat,
+) -> BDHConfig {
+    let mut config = decoder_y_quality_recipe_test_config(sequence_kernel);
+    config.quant.target_modules = vec![
+        crate::LowBitTargetModule::Encoder,
+        crate::LowBitTargetModule::DecoderX,
+        crate::LowBitTargetModule::DecoderY,
+    ];
+    config.quant.decoder_x_mode = decoder_x_mode;
+    config
+}
+
 fn recurrence_test_tokens_with_shape(
     device: &<RecurrenceBackend as BackendTrait>::Device,
     values: Vec<i64>,
@@ -126,6 +198,362 @@ fn tensor_mean_abs_diff<const D: usize>(
         / lhs_vec.len().max(1) as f32
 }
 
+fn tensor_values_f32<const D: usize>(tensor: Tensor<RecurrenceBackend, D>) -> Vec<f32> {
+    tensor
+        .to_data()
+        .convert::<f32>()
+        .into_vec::<f32>()
+        .expect("tensor vec")
+}
+
+fn mean_abs(values: &[f32]) -> f32 {
+    values.iter().map(|value| value.abs()).sum::<f32>() / values.len().max(1) as f32
+}
+
+fn max_abs(values: &[f32]) -> f32 {
+    values
+        .iter()
+        .map(|value| value.abs())
+        .fold(0.0f32, f32::max)
+}
+
+#[derive(Clone, Debug)]
+struct DecoderYLayerScaleStats {
+    layer_index: usize,
+    activation_mean_abs: f32,
+    activation_max_abs: f32,
+    activation_int8_scale: f32,
+    activation_int8_saturation_fraction: f32,
+    weight_mean_abs: f32,
+    weight_max_abs: f32,
+    weight_ternary_scale: f32,
+    weight_active_fraction: f32,
+}
+
+#[derive(Clone, Debug)]
+struct AllMatLayerSignalStats {
+    layer_index: usize,
+    x_neuron_mean_abs: f32,
+    x_neuron_max_abs: f32,
+    x_neuron_int8_scale: f32,
+    x_neuron_int8_saturation_fraction: f32,
+    attention_mean_abs: f32,
+    attention_max_abs: f32,
+    y_gate_mean_abs: f32,
+    y_gate_max_abs: f32,
+    y_gate_int8_scale: f32,
+    y_gate_int8_saturation_fraction: f32,
+    y_neuron_mean_abs: f32,
+    y_neuron_max_abs: f32,
+    y_neuron_int8_scale: f32,
+    y_neuron_int8_saturation_fraction: f32,
+}
+
+fn collect_decoder_y_layer_scale_stats(
+    model: &BDH<RecurrenceBackend>,
+    tokens: Tensor<RecurrenceBackend, 2, Int>,
+) -> Vec<DecoderYLayerScaleStats> {
+    assert!(
+        !model.y_neuron_recurrence.enabled,
+        "decoder_y scale-stat helper expects y_neuron_recurrence to be disabled"
+    );
+    let mut state = model.init_state();
+    let start_pos = state.position;
+    let embedded = model.embed.forward(tokens);
+    let [batch, time, embd] = embedded.shape().dims::<3>();
+    let mut current = model.norm.forward(embedded.reshape([batch, 1, time, embd]));
+    let fused = model.kernel.enabled;
+    let mut residual_history = model.initialize_language_residual_history(&current);
+    let mut stats = Vec::with_capacity(model.n_layer);
+
+    for (layer_idx, layer_state) in state.layers.iter_mut().enumerate() {
+        let connector = model.residual_connector_for_layer(layer_idx);
+        let current_before = residual_history.capture_previous(&current);
+        let bindings = model.split_language_residuals_for_layer(
+            current,
+            &connector,
+            residual_history.as_slice(),
+            None,
+        );
+
+        layer_state.clocked_slow_hidden = None;
+        layer_state.summary_memory_hidden = None;
+        layer_state.y_neuron_state = None;
+
+        let [branch_batch, branch_views, branch_time, branch_dim] =
+            bindings.branch_input.shape().dims::<4>();
+        let flat_batch = branch_batch * branch_views;
+        let branch_flat =
+            bindings
+                .branch_input
+                .clone()
+                .reshape([flat_batch, 1, branch_time, branch_dim]);
+        let (encoder, encoder_v, decoder, latent) = model.layer_lowrank_weights(layer_idx);
+        let latent_pattern = &model.kernel.block_sparse.latent;
+        let sparse_mask = if fused && latent_pattern.is_sparse() {
+            Some(latent_pattern.mask::<RecurrenceBackend>(latent, &branch_flat.device()))
+        } else {
+            None
+        };
+        let output = lowrank_residual_step_with_metrics_branch_thresholds(
+            branch_flat,
+            encoder,
+            encoder_v.clone(),
+            decoder,
+            &model.dropout,
+            fused && model.kernel.projection_executor.use_x(),
+            fused && model.kernel.projection_executor.use_y(),
+            model.x_relu_threshold,
+            model.y_relu_threshold,
+            true,
+            model.low_bit_projection_plan(),
+            model.low_bit_quant.0.saved_activations.clone(),
+            model.packed_low_bit_projection_artifacts(),
+            latent_pattern,
+            model.kernel.lowrank_grad_input_executor,
+            sparse_mask,
+            |query, value| {
+                model.recurrent_attention_with_plan(
+                    query,
+                    value,
+                    layer_state,
+                    start_pos,
+                    RecurrentPositionMode::Sequential,
+                    None,
+                )
+            },
+            |values| activation::relu(values),
+            |values| model.norm.forward(values),
+        );
+
+        let attn_values = tensor_values_f32(
+            output
+                .attention_readout
+                .clone()
+                .expect("attention_readout for decoder_y scale stats"),
+        );
+        let activation_mean_abs = mean_abs(&attn_values);
+        let activation_max_abs = max_abs(&attn_values);
+        let activation_int8_scale = (activation_mean_abs * 2.0 / 127.0).max(1.0e-8);
+        let activation_int8_saturation_fraction = attn_values
+            .iter()
+            .filter(|value| {
+                (*value / activation_int8_scale)
+                    .round()
+                    .clamp(-127.0, 127.0)
+                    .abs()
+                    >= 126.5
+            })
+            .count() as f32
+            / attn_values.len().max(1) as f32;
+
+        let weight_values = tensor_values_f32(encoder_v);
+        let weight_mean_abs = mean_abs(&weight_values);
+        let weight_max_abs = max_abs(&weight_values);
+        let weight_ternary_scale = weight_mean_abs.max(1.0e-8);
+        let weight_active_fraction = weight_values
+            .iter()
+            .filter(|value| value.abs() >= weight_ternary_scale)
+            .count() as f32
+            / weight_values.len().max(1) as f32;
+
+        stats.push(DecoderYLayerScaleStats {
+            layer_index: layer_idx,
+            activation_mean_abs,
+            activation_max_abs,
+            activation_int8_scale,
+            activation_int8_saturation_fraction,
+            weight_mean_abs,
+            weight_max_abs,
+            weight_ternary_scale,
+            weight_active_fraction,
+        });
+
+        let branch_out = output
+            .next
+            .reshape([branch_batch, branch_views, branch_time, branch_dim]);
+        let next = model.merge_language_residuals_for_layer(branch_out, bindings, &connector, None);
+        current = if model.residual_connector_needs_post_merge_norm(&connector) {
+            model.norm.forward(next)
+        } else {
+            next
+        };
+        model.update_language_residual_history(&mut residual_history, current_before, &current);
+    }
+
+    assert_eq!(stats.len(), model.n_layer);
+    stats
+}
+
+fn collect_allmat_layer_signal_stats(
+    model: &BDH<RecurrenceBackend>,
+    tokens: Tensor<RecurrenceBackend, 2, Int>,
+) -> Vec<AllMatLayerSignalStats> {
+    assert!(
+        !model.y_neuron_recurrence.enabled,
+        "all-matrix signal-stat helper expects y_neuron_recurrence to be disabled"
+    );
+    let mut state = model.init_state();
+    let start_pos = state.position;
+    let embedded = model.embed.forward(tokens);
+    let [batch, time, embd] = embedded.shape().dims::<3>();
+    let mut current = model.norm.forward(embedded.reshape([batch, 1, time, embd]));
+    let fused = model.kernel.enabled;
+    let mut residual_history = model.initialize_language_residual_history(&current);
+    let mut stats = Vec::with_capacity(model.n_layer);
+
+    for (layer_idx, layer_state) in state.layers.iter_mut().enumerate() {
+        let connector = model.residual_connector_for_layer(layer_idx);
+        let current_before = residual_history.capture_previous(&current);
+        let bindings = model.split_language_residuals_for_layer(
+            current,
+            &connector,
+            residual_history.as_slice(),
+            None,
+        );
+
+        layer_state.clocked_slow_hidden = None;
+        layer_state.summary_memory_hidden = None;
+        layer_state.y_neuron_state = None;
+
+        let [branch_batch, branch_views, branch_time, branch_dim] =
+            bindings.branch_input.shape().dims::<4>();
+        let flat_batch = branch_batch * branch_views;
+        let branch_flat =
+            bindings
+                .branch_input
+                .clone()
+                .reshape([flat_batch, 1, branch_time, branch_dim]);
+        let (encoder, encoder_v, decoder, latent) = model.layer_lowrank_weights(layer_idx);
+        let latent_pattern = &model.kernel.block_sparse.latent;
+        let sparse_mask = if fused && latent_pattern.is_sparse() {
+            Some(latent_pattern.mask::<RecurrenceBackend>(latent, &branch_flat.device()))
+        } else {
+            None
+        };
+        let output = lowrank_residual_step_with_metrics_branch_thresholds(
+            branch_flat,
+            encoder,
+            encoder_v,
+            decoder,
+            &model.dropout,
+            fused && model.kernel.projection_executor.use_x(),
+            fused && model.kernel.projection_executor.use_y(),
+            model.x_relu_threshold,
+            model.y_relu_threshold,
+            true,
+            model.low_bit_projection_plan(),
+            model.low_bit_quant.0.saved_activations.clone(),
+            model.packed_low_bit_projection_artifacts(),
+            latent_pattern,
+            model.kernel.lowrank_grad_input_executor,
+            sparse_mask,
+            |query, value| {
+                model.recurrent_attention_with_plan(
+                    query,
+                    value,
+                    layer_state,
+                    start_pos,
+                    RecurrentPositionMode::Sequential,
+                    None,
+                )
+            },
+            |values| activation::relu(values),
+            |values| model.norm.forward(values),
+        );
+
+        let x_neuron = tensor_values_f32(output.x_neuron.clone());
+        let attention = tensor_values_f32(
+            output
+                .attention_readout
+                .clone()
+                .expect("attention_readout for allmat signal stats"),
+        );
+        let y_gate = tensor_values_f32(output.y_gate.clone());
+        let y_neuron = tensor_values_f32(output.y_neuron.clone());
+
+        let x_neuron_mean_abs = mean_abs(&x_neuron);
+        let x_neuron_max_abs = max_abs(&x_neuron);
+        let x_neuron_int8_scale = (x_neuron_mean_abs * 2.0 / 127.0).max(1.0e-8);
+        let x_neuron_int8_saturation_fraction = x_neuron
+            .iter()
+            .filter(|value| {
+                (*value / x_neuron_int8_scale)
+                    .round()
+                    .clamp(-127.0, 127.0)
+                    .abs()
+                    >= 126.5
+            })
+            .count() as f32
+            / x_neuron.len().max(1) as f32;
+
+        let attention_mean_abs = mean_abs(&attention);
+        let attention_max_abs = max_abs(&attention);
+
+        let y_gate_mean_abs = mean_abs(&y_gate);
+        let y_gate_max_abs = max_abs(&y_gate);
+        let y_gate_int8_scale = (y_gate_mean_abs * 2.0 / 127.0).max(1.0e-8);
+        let y_gate_int8_saturation_fraction = y_gate
+            .iter()
+            .filter(|value| {
+                (*value / y_gate_int8_scale)
+                    .round()
+                    .clamp(-127.0, 127.0)
+                    .abs()
+                    >= 126.5
+            })
+            .count() as f32
+            / y_gate.len().max(1) as f32;
+
+        let y_neuron_mean_abs = mean_abs(&y_neuron);
+        let y_neuron_max_abs = max_abs(&y_neuron);
+        let y_neuron_int8_scale = (y_neuron_mean_abs * 2.0 / 127.0).max(1.0e-8);
+        let y_neuron_int8_saturation_fraction = y_neuron
+            .iter()
+            .filter(|value| {
+                (*value / y_neuron_int8_scale)
+                    .round()
+                    .clamp(-127.0, 127.0)
+                    .abs()
+                    >= 126.5
+            })
+            .count() as f32
+            / y_neuron.len().max(1) as f32;
+
+        stats.push(AllMatLayerSignalStats {
+            layer_index: layer_idx,
+            x_neuron_mean_abs,
+            x_neuron_max_abs,
+            x_neuron_int8_scale,
+            x_neuron_int8_saturation_fraction,
+            attention_mean_abs,
+            attention_max_abs,
+            y_gate_mean_abs,
+            y_gate_max_abs,
+            y_gate_int8_scale,
+            y_gate_int8_saturation_fraction,
+            y_neuron_mean_abs,
+            y_neuron_max_abs,
+            y_neuron_int8_scale,
+            y_neuron_int8_saturation_fraction,
+        });
+
+        let branch_out = output
+            .next
+            .reshape([branch_batch, branch_views, branch_time, branch_dim]);
+        let next = model.merge_language_residuals_for_layer(branch_out, bindings, &connector, None);
+        current = if model.residual_connector_needs_post_merge_norm(&connector) {
+            model.norm.forward(next)
+        } else {
+            next
+        };
+        model.update_language_residual_history(&mut residual_history, current_before, &current);
+    }
+
+    assert_eq!(stats.len(), model.n_layer);
+    stats
+}
+
 fn option_tensor_max_abs_diff<const D: usize>(
     lhs: &Option<Tensor<RecurrenceBackend, D>>,
     rhs: &Option<Tensor<RecurrenceBackend, D>>,
@@ -155,9 +583,9 @@ fn model_state_max_abs_diff(
             .map(unpack_rho_int8_block_state_device::<RecurrenceBackend>)
             .or_else(|| {
                 lhs_layer
-                    .packed_rho_int8
+                    .packed_rho
                     .as_ref()
-                    .map(|packed| unpack_rho_int8_block_state::<RecurrenceBackend>(packed, &device))
+                    .map(|packed| unpack_rho_block_state::<RecurrenceBackend>(packed, &device))
             });
         let rhs_packed_rho = rhs_layer
             .packed_rho_int8_device
@@ -165,9 +593,9 @@ fn model_state_max_abs_diff(
             .map(unpack_rho_int8_block_state_device::<RecurrenceBackend>)
             .or_else(|| {
                 rhs_layer
-                    .packed_rho_int8
+                    .packed_rho
                     .as_ref()
-                    .map(|packed| unpack_rho_int8_block_state::<RecurrenceBackend>(packed, &device))
+                    .map(|packed| unpack_rho_block_state::<RecurrenceBackend>(packed, &device))
             });
         max_diff = max_diff.max(option_tensor_max_abs_diff(&lhs_packed_rho, &rhs_packed_rho));
         max_diff = max_diff.max(option_tensor_max_abs_diff(
@@ -501,45 +929,8 @@ fn train_kernel_exp_forward_selects_native_runtime_and_emits_finite_logits() {
 #[test]
 fn train_kernel_exp_decoder_y_quality_recipe_remains_close_to_qat_reference() {
     let device = <RecurrenceBackend as BackendTrait>::Device::default();
-    let base = BDHConfig {
-        n_layer: 2,
-        n_embd: 16,
-        n_head: 4,
-        mlp_internal_dim_multiplier: 8,
-        vocab_size: 32,
-        dropout: 0.0,
-        sequence_kernel: SequenceKernelKind::BdhLinearDenseScoreExperimental,
-        fused_kernels: FusedKernelConfig {
-            enabled: false,
-            ..Default::default()
-        },
-        residual_connector: ResidualConnectorKind::AttentionResidual,
-        attention_residual: crate::AttentionResidualConfig {
-            enabled: true,
-            num_heads: 4,
-            history_window: Some(4),
-            dropout: 0.0,
-            recency_bias: 2.0,
-            ..Default::default()
-        },
-        quant: crate::LowBitQuantizationConfig {
-            enable: true,
-            protocol: crate::BitNetLowBitProtocol::BitnetB158,
-            weight_format: crate::LowBitWeightFormat::Ternary158,
-            act_format: crate::LowBitActivationFormat::Int8,
-            target_modules: vec![crate::LowBitTargetModule::DecoderY],
-            decoder_x_mode: crate::LowBitWeightFormat::Fp16,
-            training_mode: crate::LowBitTrainingMode::QatSte,
-            inference_mode: crate::LowBitInferenceMode::OfflinePack,
-            strict_bitnet_reference: false,
-            saved_activations: LowBitSavedActivationConfig {
-                mode: crate::LowBitSavedActivationMode::QuantizedCacheRecomputeExp,
-                format: crate::LowBitActivationFormat::Int8,
-            },
-            ..Default::default()
-        },
-        ..Default::default()
-    };
+    let base =
+        decoder_y_quality_recipe_test_config(SequenceKernelKind::BdhLinearDenseScoreExperimental);
     let qat_model = recurrence_test_model(base.clone());
     let native_model = recurrence_test_model(BDHConfig {
         quant: crate::LowBitQuantizationConfig {
@@ -548,11 +939,7 @@ fn train_kernel_exp_decoder_y_quality_recipe_remains_close_to_qat_reference() {
         },
         ..base
     });
-    let tokens = recurrence_test_tokens_with_shape(
-        &device,
-        vec![1, 2, 3, 4, 5, 6, 7, 8],
-        [2, 4],
-    );
+    let tokens = recurrence_test_tokens_with_shape(&device, vec![1, 2, 3, 4, 5, 6, 7, 8], [2, 4]);
     let qat_logits = qat_model.forward(tokens.clone());
     let native_logits = native_model.forward(tokens);
     let max_diff = tensor_max_abs_diff(qat_logits.clone(), native_logits.clone());
@@ -567,6 +954,229 @@ fn train_kernel_exp_decoder_y_quality_recipe_remains_close_to_qat_reference() {
     assert!(
         max_diff <= 0.35,
         "expected decoder_y native forward max diff to stay bounded vs qat reference, max diff {max_diff}"
+    );
+}
+
+#[test]
+fn train_kernel_exp_decoder_y_mamba_quality_recipe_reports_qat_parity() {
+    let device = <RecurrenceBackend as BackendTrait>::Device::default();
+    let base =
+        decoder_y_quality_recipe_test_config(SequenceKernelKind::MambaSelectiveSsmExperimental);
+    let qat_model = recurrence_test_model(base.clone());
+    let native_model = recurrence_test_model(BDHConfig {
+        quant: crate::LowBitQuantizationConfig {
+            training_mode: crate::LowBitTrainingMode::TrainKernelExp,
+            ..base.quant.clone()
+        },
+        ..base
+    });
+    let tokens =
+        recurrence_test_tokens_with_shape(&device, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10], [2, 5]);
+    let qat_logits = qat_model.forward(tokens.clone());
+    let native_logits = native_model.forward(tokens);
+    let max_diff = tensor_max_abs_diff(qat_logits.clone(), native_logits.clone());
+    let mean_diff = tensor_mean_abs_diff(qat_logits, native_logits);
+    eprintln!(
+        "decoder_y_mamba_quality_recipe_parity max_abs_diff={max_diff:.6} mean_abs_diff={mean_diff:.6}"
+    );
+    assert!(max_diff.is_finite() && mean_diff.is_finite());
+    assert!(
+        mean_diff <= 0.10,
+        "expected Mamba decoder_y native path to stay reasonably close to QAT, mean diff {mean_diff}"
+    );
+    assert!(
+        max_diff <= 0.45,
+        "expected Mamba decoder_y native path to avoid large outliers, max diff {max_diff}"
+    );
+}
+
+#[test]
+fn decoder_y_mamba_ablation_reports_fp32_qat_native_drift() {
+    let device = <RecurrenceBackend as BackendTrait>::Device::default();
+    let fp32_base =
+        decoder_y_quality_recipe_test_config(SequenceKernelKind::MambaSelectiveSsmExperimental);
+    let fp32_model = recurrence_test_model(BDHConfig {
+        quant: crate::LowBitQuantizationConfig {
+            enable: false,
+            target_modules: vec![],
+            ..fp32_base.quant.clone()
+        },
+        ..fp32_base.clone()
+    });
+    let qat_model = recurrence_test_model(fp32_base.clone());
+    let native_model = recurrence_test_model(BDHConfig {
+        quant: crate::LowBitQuantizationConfig {
+            training_mode: crate::LowBitTrainingMode::TrainKernelExp,
+            ..fp32_base.quant.clone()
+        },
+        ..fp32_base
+    });
+    let tokens = recurrence_test_tokens_with_shape(
+        &device,
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+        [2, 6],
+    );
+    let fp32_logits = fp32_model.forward(tokens.clone());
+    let qat_logits = qat_model.forward(tokens.clone());
+    let native_logits = native_model.forward(tokens);
+    let fp32_qat_max = tensor_max_abs_diff(fp32_logits.clone(), qat_logits.clone());
+    let fp32_qat_mean = tensor_mean_abs_diff(fp32_logits.clone(), qat_logits.clone());
+    let fp32_native_max = tensor_max_abs_diff(fp32_logits.clone(), native_logits.clone());
+    let fp32_native_mean = tensor_mean_abs_diff(fp32_logits.clone(), native_logits.clone());
+    let qat_native_max = tensor_max_abs_diff(qat_logits.clone(), native_logits.clone());
+    let qat_native_mean = tensor_mean_abs_diff(qat_logits, native_logits);
+    eprintln!(
+        "decoder_y_mamba_ablation fp32_vs_qat max_abs_diff={fp32_qat_max:.6} mean_abs_diff={fp32_qat_mean:.6} \
+fp32_vs_native max_abs_diff={fp32_native_max:.6} mean_abs_diff={fp32_native_mean:.6} \
+qat_vs_native max_abs_diff={qat_native_max:.6} mean_abs_diff={qat_native_mean:.6}"
+    );
+    assert!(
+        fp32_qat_max.is_finite()
+            && fp32_qat_mean.is_finite()
+            && fp32_native_max.is_finite()
+            && fp32_native_mean.is_finite()
+            && qat_native_max.is_finite()
+            && qat_native_mean.is_finite()
+    );
+    assert!(
+        fp32_qat_mean <= 0.12,
+        "expected fake-quant Mamba drift from FP32 to stay bounded, mean diff {fp32_qat_mean}"
+    );
+    assert!(
+        fp32_native_mean <= 0.12,
+        "expected native Mamba drift from FP32 to stay bounded, mean diff {fp32_native_mean}"
+    );
+    assert!(
+        (fp32_native_mean - fp32_qat_mean).abs() <= 0.03,
+        "expected native-vs-FP32 drift to track fake-quant-vs-FP32 drift closely; fp32_qat_mean={fp32_qat_mean}, fp32_native_mean={fp32_native_mean}"
+    );
+}
+
+#[test]
+fn decoder_y_scale_stats_compare_linear_and_mamba() {
+    let device = <RecurrenceBackend as BackendTrait>::Device::default();
+    let tokens = recurrence_test_tokens_with_shape(
+        &device,
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+        [2, 6],
+    );
+    let linear_model = recurrence_test_model(decoder_y_quality_recipe_test_config(
+        SequenceKernelKind::BdhLinearDenseScoreExperimental,
+    ));
+    let mamba_model = recurrence_test_model(decoder_y_quality_recipe_test_config(
+        SequenceKernelKind::MambaSelectiveSsmExperimental,
+    ));
+    let linear_stats = collect_decoder_y_layer_scale_stats(&linear_model, tokens.clone());
+    let mamba_stats = collect_decoder_y_layer_scale_stats(&mamba_model, tokens);
+
+    assert_eq!(linear_stats.len(), mamba_stats.len());
+    for (linear, mamba) in linear_stats.iter().zip(mamba_stats.iter()) {
+        eprintln!(
+            "decoder_y_scale_stats layer={} linear(act_mean_abs={:.6}, act_max_abs={:.6}, act_scale={:.6}, act_sat_frac={:.6}, weight_mean_abs={:.6}, weight_max_abs={:.6}, weight_scale={:.6}, weight_active_frac={:.6}) mamba(act_mean_abs={:.6}, act_max_abs={:.6}, act_scale={:.6}, act_sat_frac={:.6}, weight_mean_abs={:.6}, weight_max_abs={:.6}, weight_scale={:.6}, weight_active_frac={:.6})",
+            linear.layer_index,
+            linear.activation_mean_abs,
+            linear.activation_max_abs,
+            linear.activation_int8_scale,
+            linear.activation_int8_saturation_fraction,
+            linear.weight_mean_abs,
+            linear.weight_max_abs,
+            linear.weight_ternary_scale,
+            linear.weight_active_fraction,
+            mamba.activation_mean_abs,
+            mamba.activation_max_abs,
+            mamba.activation_int8_scale,
+            mamba.activation_int8_saturation_fraction,
+            mamba.weight_mean_abs,
+            mamba.weight_max_abs,
+            mamba.weight_ternary_scale,
+            mamba.weight_active_fraction,
+        );
+        assert!(linear.activation_mean_abs.is_finite());
+        assert!(mamba.activation_mean_abs.is_finite());
+        assert!(linear.weight_mean_abs.is_finite());
+        assert!(mamba.weight_mean_abs.is_finite());
+    }
+}
+
+#[test]
+fn allmat_decoder_x_sign1_qat_improves_fp32_drift_vs_ternary() {
+    let device = <RecurrenceBackend as BackendTrait>::Device::default();
+    let tokens = recurrence_test_tokens_with_shape(
+        &device,
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+        [2, 6],
+    );
+    let mut fp32_config =
+        decoder_y_quality_recipe_test_config(SequenceKernelKind::BdhLinearDenseScoreExperimental);
+    fp32_config.quant.enable = false;
+
+    let mut ternary_config = allmat_quality_recipe_test_config(
+        SequenceKernelKind::BdhLinearDenseScoreExperimental,
+        crate::LowBitWeightFormat::Ternary158,
+    );
+    ternary_config.quant.training_mode = crate::LowBitTrainingMode::QatSte;
+
+    let mut sign1_config = allmat_quality_recipe_test_config(
+        SequenceKernelKind::BdhLinearDenseScoreExperimental,
+        crate::LowBitWeightFormat::Sign1,
+    );
+    sign1_config.quant.training_mode = crate::LowBitTrainingMode::QatSte;
+
+    let fp32_model = recurrence_test_model(fp32_config);
+    let ternary_model = recurrence_test_model(ternary_config);
+    let sign1_model = recurrence_test_model(sign1_config);
+
+    let fp32_logits = fp32_model.forward(tokens.clone());
+    let ternary_logits = ternary_model.forward(tokens.clone());
+    let sign1_logits = sign1_model.forward(tokens.clone());
+    let ternary_mean = tensor_mean_abs_diff(fp32_logits.clone(), ternary_logits);
+    let sign1_mean = tensor_mean_abs_diff(fp32_logits, sign1_logits);
+
+    let ternary_stats = collect_allmat_layer_signal_stats(&ternary_model, tokens.clone());
+    let sign1_stats = collect_allmat_layer_signal_stats(&sign1_model, tokens);
+    assert_eq!(ternary_stats.len(), sign1_stats.len());
+    for (ternary, sign1) in ternary_stats.iter().zip(sign1_stats.iter()) {
+        eprintln!(
+            "allmat_decoder_x_mode_compare layer={} ternary(x_mean_abs={:.6}, x_max_abs={:.6}, x_scale={:.6}, x_sat={:.6}, attn_mean_abs={:.6}, attn_max_abs={:.6}, y_mean_abs={:.6}, y_max_abs={:.6}, y_scale={:.6}, y_sat={:.6}, y_neuron_mean_abs={:.6}, y_neuron_max_abs={:.6}, y_neuron_scale={:.6}, y_neuron_sat={:.6}) sign1(x_mean_abs={:.6}, x_max_abs={:.6}, x_scale={:.6}, x_sat={:.6}, attn_mean_abs={:.6}, attn_max_abs={:.6}, y_mean_abs={:.6}, y_max_abs={:.6}, y_scale={:.6}, y_sat={:.6}, y_neuron_mean_abs={:.6}, y_neuron_max_abs={:.6}, y_neuron_scale={:.6}, y_neuron_sat={:.6})",
+            ternary.layer_index,
+            ternary.x_neuron_mean_abs,
+            ternary.x_neuron_max_abs,
+            ternary.x_neuron_int8_scale,
+            ternary.x_neuron_int8_saturation_fraction,
+            ternary.attention_mean_abs,
+            ternary.attention_max_abs,
+            ternary.y_gate_mean_abs,
+            ternary.y_gate_max_abs,
+            ternary.y_gate_int8_scale,
+            ternary.y_gate_int8_saturation_fraction,
+            ternary.y_neuron_mean_abs,
+            ternary.y_neuron_max_abs,
+            ternary.y_neuron_int8_scale,
+            ternary.y_neuron_int8_saturation_fraction,
+            sign1.x_neuron_mean_abs,
+            sign1.x_neuron_max_abs,
+            sign1.x_neuron_int8_scale,
+            sign1.x_neuron_int8_saturation_fraction,
+            sign1.attention_mean_abs,
+            sign1.attention_max_abs,
+            sign1.y_gate_mean_abs,
+            sign1.y_gate_max_abs,
+            sign1.y_gate_int8_scale,
+            sign1.y_gate_int8_saturation_fraction,
+            sign1.y_neuron_mean_abs,
+            sign1.y_neuron_max_abs,
+            sign1.y_neuron_int8_scale,
+            sign1.y_neuron_int8_saturation_fraction,
+        );
+        assert_eq!(ternary.layer_index, sign1.layer_index);
+    }
+
+    eprintln!(
+        "allmat_decoder_x_mode_compare fp32_vs_ternary_mean_abs_diff={ternary_mean:.6} fp32_vs_sign1_mean_abs_diff={sign1_mean:.6}"
+    );
+    assert!(
+        sign1_mean < ternary_mean,
+        "expected decoder_x Sign1 to reduce all-matrix QAT drift vs ternary, sign1={sign1_mean} ternary={ternary_mean}"
     );
 }
 
@@ -948,6 +1558,32 @@ fn rwkv8_forward_with_state_populates_rho_norm() {
 
 #[test]
 fn linear_forward_with_rho_int8_chunk_compression_preserves_logits_and_compresses_state() {
+    assert_linear_forward_with_rho_chunk_compression_preserves_logits_and_compresses_state(
+        crate::RhoCompressionConfig::Int8BlockExp,
+        1.0e-3,
+    );
+}
+
+#[test]
+fn linear_forward_with_rho_ternary_chunk_compression_preserves_logits_and_compresses_state() {
+    assert_linear_forward_with_rho_chunk_compression_preserves_logits_and_compresses_state(
+        crate::RhoCompressionConfig::TernaryBlockExp,
+        1.5e-2,
+    );
+}
+
+#[test]
+fn linear_forward_with_rho_binary_chunk_compression_preserves_logits_and_compresses_state() {
+    assert_linear_forward_with_rho_chunk_compression_preserves_logits_and_compresses_state(
+        crate::RhoCompressionConfig::BinaryBlockExp,
+        6.0e-2,
+    );
+}
+
+fn assert_linear_forward_with_rho_chunk_compression_preserves_logits_and_compresses_state(
+    compression: crate::RhoCompressionConfig,
+    max_diff_tolerance: f32,
+) {
     let device = <RecurrenceBackend as BackendTrait>::Device::default();
     let dense_model = recurrence_test_model(BDHConfig {
         n_layer: 2,
@@ -961,7 +1597,7 @@ fn linear_forward_with_rho_int8_chunk_compression_preserves_logits_and_compresse
     });
     let mut compressed_model = dense_model.clone();
     compressed_model.low_bit_rho = Ignored(crate::LowBitRhoConfig {
-        compression: crate::RhoCompressionConfig::Int8BlockExp,
+        compression,
         compression_interval: crate::RhoCompressionInterval::Chunk,
         ..Default::default()
     });
@@ -975,17 +1611,21 @@ fn linear_forward_with_rho_int8_chunk_compression_preserves_logits_and_compresse
     let dense_logits = dense_model.forward_with_state(tokens.clone(), &mut dense_state);
     let compressed_logits = compressed_model.forward_with_state(tokens, &mut compressed_state);
     let max_diff = tensor_max_abs_diff(dense_logits, compressed_logits);
+    println!(
+        "rho compression {:?} max_logit_diff={max_diff:.6}",
+        compression
+    );
 
     assert!(
         compressed_state.layers.iter().all(|layer| {
-            (layer.packed_rho_int8.is_some() || layer.packed_rho_int8_device.is_some())
+            (layer.packed_rho.is_some() || layer.packed_rho_int8_device.is_some())
                 && layer.rho.is_none()
         }),
-        "expected int8 rho compression to store packed rho state"
+        "expected {compression:?} rho compression to store packed rho state"
     );
     assert!(
-        max_diff <= 1.0e-3,
-        "expected compressed rho carry to stay close to dense carry, max diff {max_diff}"
+        max_diff <= max_diff_tolerance,
+        "expected {compression:?} rho carry to stay close to dense carry, max diff {max_diff}"
     );
 }
 
@@ -1667,7 +2307,7 @@ fn bdh_mhc_two_view_wrapper_matches_manual_layer_contract() {
     let decoder = model.decoder.val();
     let mut layer_state = LayerState {
         rho: None,
-        packed_rho_int8: None,
+        packed_rho: None,
         packed_rho_int8_device: None,
         rho_norm: None,
         sequence_aux: None,
@@ -1787,7 +2427,7 @@ fn bdh_mhc_dynamic_stream_wrapper_matches_manual_layer_contract() {
     let decoder = model.decoder.val();
     let mut layer_state = LayerState {
         rho: None,
-        packed_rho_int8: None,
+        packed_rho: None,
         packed_rho_int8_device: None,
         rho_norm: None,
         sequence_aux: None,
@@ -2413,7 +3053,7 @@ fn summary_memory_reads_previous_chunk_instead_of_self_summary() {
 
     let mut layer_state = LayerState {
         rho: None,
-        packed_rho_int8: None,
+        packed_rho: None,
         packed_rho_int8_device: None,
         rho_norm: None,
         sequence_aux: None,
@@ -2475,7 +3115,7 @@ fn summary_memory_surprise_gate_preserves_prior_carry_when_chunk_is_unsurprising
 
     let mut layer_state = LayerState {
         rho: None,
-        packed_rho_int8: None,
+        packed_rho: None,
         packed_rho_int8_device: None,
         rho_norm: None,
         sequence_aux: None,
@@ -2540,7 +3180,7 @@ fn summary_memory_write_trigger_updates_only_on_event_chunks() {
 
     let mut layer_state = LayerState {
         rho: None,
-        packed_rho_int8: None,
+        packed_rho: None,
         packed_rho_int8_device: None,
         rho_norm: None,
         sequence_aux: None,

@@ -3,7 +3,8 @@ use burn::tensor::{Int, Tensor, activation};
 
 use burn_dragon_core::kernel::relu_lowrank;
 use burn_dragon_core::{
-    LowBitProjectionPlan, PackedLowBitProjectionArtifacts, lowrank_residual_step,
+    LowBitProjectionPlan, LowBitSavedActivationConfig, PackedLowBitProjectionArtifacts,
+    lowrank_residual_step,
 };
 
 use crate::{
@@ -475,6 +476,7 @@ impl<'a, B: Backend> VisionDenseBenchAdapter<'a, B> {
             self.model.kernel.relu_threshold,
             apply_threshold,
             LowBitProjectionPlan::default(),
+            LowBitSavedActivationConfig::default(),
             PackedLowBitProjectionArtifacts::default(),
             latent_pattern,
             self.model.kernel.lowrank_grad_input_executor,

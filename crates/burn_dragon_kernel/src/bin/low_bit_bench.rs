@@ -5,6 +5,7 @@ use burn::tensor::{Int, Tensor, TensorData};
 use burn_cubecl::CubeBackend;
 use burn_dragon_kernel::api::low_bit::{
     diagnose_wgpu_packed_dot_decoder_tail, diagnose_wgpu_packed_dot_lowrank_projection,
+    diagnose_wgpu_quantize_pack_activation_i8x4, pack_lowrank_input_codes_i8x4,
     pack_rho_int8_block_device_reference, packed_decoder_tail_device_reference,
     packed_decoder_tail_grad_input_device_reference,
     packed_decoder_tail_grad_weight_device_reference, packed_lowrank_grad_input_device_reference,
@@ -105,6 +106,17 @@ fn bench_case_2d(mut func: impl FnMut() -> Tensor<BenchBackend, 2>, iters: usize
     start.elapsed().as_secs_f64() * 1000.0 / iters as f64
 }
 
+fn bench_case_int4(mut func: impl FnMut() -> Tensor<BenchBackend, 4, Int>, iters: usize) -> f64 {
+    for _ in 0..3 {
+        let _ = func().sum().into_data();
+    }
+    let start = Instant::now();
+    for _ in 0..iters {
+        let _ = func().sum().into_data();
+    }
+    start.elapsed().as_secs_f64() * 1000.0 / iters as f64
+}
+
 fn main() {
     let iters = std::env::args()
         .skip(1)
@@ -139,6 +151,7 @@ fn main() {
     let decoder_weight_codes = quantize_signed_values(&decoder_weight_values);
 
     let input_codes_tensor = int_tensor_from_values(input_codes.0, input_shape, &device);
+    let input_scale_tensor = Tensor::<BenchBackend, 1>::from_data([input_codes.1], &device);
     let lowrank_weight_codes_tensor =
         int_tensor_from_values(lowrank_weight_codes.0, lowrank_weight_shape, &device);
     let y_codes_tensor = int_tensor_from_values(y_codes.0, y_shape, &device);
@@ -450,6 +463,44 @@ fn main() {
         },
         iters,
     );
+    let lowrank_quantize_pack_ref_ms = {
+        let input_values = input_values.clone();
+        bench_case_int4(
+            || {
+                let (codes, _) = quantize_signed_values(&input_values);
+                let packed = pack_lowrank_input_codes_i8x4(
+                    &codes.iter().map(|value| *value as i8).collect::<Vec<_>>(),
+                    input_shape[0],
+                    input_shape[1],
+                    input_shape[2],
+                    input_shape[3],
+                );
+                int_tensor_from_values(
+                    packed,
+                    [
+                        input_shape[0],
+                        input_shape[1],
+                        input_shape[2],
+                        input_shape[3].div_ceil(4),
+                    ],
+                    &device,
+                )
+            },
+            iters,
+        )
+    };
+    let lowrank_quantize_pack_wgpu_ms = bench_case_int4(
+        || {
+            diagnose_wgpu_quantize_pack_activation_i8x4(
+                &input_codes_tensor.clone().float().mul_scalar(input_codes.1),
+                &input_scale_tensor,
+                127,
+                false,
+            )
+            .expect("wgpu quantize-pack activation")
+        },
+        iters,
+    );
 
     println!("low_bit_bench backend=wgpu iters={iters}");
     println!(
@@ -573,4 +624,10 @@ fn main() {
         max_abs_diff(decoder_grad_weight_fused, decoder_grad_weight_ref),
     );
     println!("rho.pack_roundtrip ms={rho_pack_ms:.3}");
+    println!(
+        "forward.lowrank_quantize_pack ms_ref={:.3} ms_wgpu={:.3} speedup={:.2}",
+        lowrank_quantize_pack_ref_ms,
+        lowrank_quantize_pack_wgpu_ms,
+        lowrank_quantize_pack_ref_ms / lowrank_quantize_pack_wgpu_ms,
+    );
 }

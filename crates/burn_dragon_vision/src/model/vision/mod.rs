@@ -105,6 +105,10 @@ pub struct VisionDragon<B: Backend> {
     #[module(ignore)]
     normalization: DragonNormConfig,
     #[module(ignore)]
+    image_size: usize,
+    #[module(ignore)]
+    in_channels: usize,
+    #[module(ignore)]
     projection_dim: usize,
     attention_mode: VisionAttentionMode,
     use_alibi: bool,
@@ -378,6 +382,8 @@ impl<B: Backend> VisionDragon<B> {
             use_cls_token: config.use_cls_token,
             backbone_kind,
             normalization: config.normalization.clone(),
+            image_size: config.image_size.max(1),
+            in_channels: config.in_channels.max(1),
             projection_dim: config.projection_dim.max(1),
             attention_mode: config.attention_mode,
             use_alibi,
@@ -421,8 +427,16 @@ impl<B: Backend> VisionDragon<B> {
         }
     }
 
-    pub(crate) fn projection_dim(&self) -> usize {
+    pub fn projection_dim(&self) -> usize {
         self.projection_dim
+    }
+
+    pub fn image_size(&self) -> usize {
+        self.image_size
+    }
+
+    pub fn in_channels(&self) -> usize {
+        self.in_channels
     }
 
     pub(crate) fn normalization_config(&self) -> &DragonNormConfig {

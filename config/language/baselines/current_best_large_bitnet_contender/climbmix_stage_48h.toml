@@ -1,0 +1,11 @@
+extends = ["climbmix_stage_base.toml"]
+
+[training]
+# Initial same-budget 48h contender. Keep the dense rung's step budget until the
+# large BitNet line is re-timed end-to-end on current hardware.
+max_iters = 135000
+
+[optimizer.lr_schedule]
+type = "cosine"
+min_lr = 0.00003
+num_iters = 135000

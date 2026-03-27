@@ -272,8 +272,10 @@ where
     apply_wgpu_fused_core_override(
         &mut model_config,
         backend_name,
-        resolved_config.wgpu.training.fused_core_recurrent,
-        resolved_config.wgpu.training.fused_core_rollout,
+        WgpuFusedCoreOverride {
+            recurrent: resolved_config.wgpu.training.fused_core_recurrent,
+            rollout: resolved_config.wgpu.training.fused_core_rollout,
+        },
     );
     info!(
         "training path fingerprint: backend={} execution_form={} launch_mode={:?} effective_sequence_kernel={:?} sequence_kernel_override={:?} tbptt_chunk_size={:?} kernel_block_size={} pipeline_enabled={}",

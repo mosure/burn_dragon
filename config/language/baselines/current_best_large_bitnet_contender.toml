@@ -1,0 +1,22 @@
+# Shakespeare-derived BitNet contender for the large staged NCA -> ClimbMix line.
+# This keeps the dense operational bundle intact and lifts the leading low-memory
+# decoder_y-only BitNet stack onto the large geometry as a separate contender.
+name = "current_best_large_bitnet_contender_48h"
+output_dir = "runs/language_bundles/current_best_large_bitnet_contender"
+resume_from_last_completed_stage = true
+
+[[stages]]
+name = "nca_prepretrain"
+type = "language_train"
+config = "current_best_large_bitnet_contender/nca_stage_base.toml"
+backend = "cuda"
+launch_mode = "resume_latest_checkpoint_if_present"
+
+[[stages]]
+name = "climbmix_pretrain"
+depends_on = ["nca_prepretrain"]
+type = "language_train"
+config = "current_best_large_bitnet_contender/climbmix_stage_48h.toml"
+backend = "cuda"
+init_checkpoint_from_stage = "nca_prepretrain"
+launch_mode = "resume_latest_checkpoint_if_present"

@@ -22,37 +22,42 @@ fn fovea_warped_checkerboard_moire_is_bounded() {
         VisionFoveaSamplingMode::Sequential,
         VisionFoveaSamplingMode::Batched,
     ];
+    let warp_modes = [VisionFoveaWarpMode::Warped, VisionFoveaWarpMode::Conformal];
 
     for sampling_mode in sampling_modes {
-        saccade.config.fovea_sampling_mode = sampling_mode;
-        saccade.config.fovea_warp_mode = VisionFoveaWarpMode::Warped;
-        saccade.config.mip_levels = 2;
+        for warp_mode in warp_modes {
+            saccade.config.fovea_sampling_mode = sampling_mode;
+            saccade.config.fovea_warp_mode = warp_mode;
+            saccade.config.mip_levels = 2;
 
-        let levels = saccade.build_mip_pyramid(images.clone(), patch_size);
-        let base_grid = build_foveated_base_grid::<Backend>(patch_size, &device);
-        let mean =
-            Tensor::<Backend, 2>::from_data(TensorData::new(vec![0.5, 0.5], [1, 2]), &device);
-        let sigma = Tensor::<Backend, 2>::from_data(TensorData::new(vec![0.08], [1, 1]), &device);
-        let radius = Tensor::<Backend, 2>::from_data(TensorData::new(vec![0.3], [1, 1]), &device);
-        let patch = saccade
-            .foveated_patch_image_with_radius(&levels, &base_grid, mean, sigma, radius, None);
-        let patch_vec = patch
-            .to_data()
-            .convert::<f32>()
-            .into_vec::<f32>()
-            .expect("patch vec");
-        let (mean_diff, range) =
-            checkerboard_center_metrics(&patch_vec, channels, patch_size, patch_size);
-        let normalized = if range > 0.0 { mean_diff / range } else { 0.0 };
-        assert!(
-            normalized >= 0.2 && range >= 0.55,
-            "foveated checkerboard lost high-frequency detail (normalized {normalized:.3} range {range:.3})"
-        );
-        let block_std = block_mean_std(&patch_vec, channels, patch_size, patch_size, 8);
-        assert!(
-            block_std < 0.12,
-            "foveated checkerboard shows low-frequency artifacts (block std {block_std:.3})"
-        );
+            let levels = saccade.build_mip_pyramid(images.clone(), patch_size);
+            let base_grid = build_foveated_base_grid::<Backend>(patch_size, &device);
+            let mean =
+                Tensor::<Backend, 2>::from_data(TensorData::new(vec![0.5, 0.5], [1, 2]), &device);
+            let sigma =
+                Tensor::<Backend, 2>::from_data(TensorData::new(vec![0.08], [1, 1]), &device);
+            let radius =
+                Tensor::<Backend, 2>::from_data(TensorData::new(vec![0.3], [1, 1]), &device);
+            let patch = saccade
+                .foveated_patch_image_with_radius(&levels, &base_grid, mean, sigma, radius, None);
+            let patch_vec = patch
+                .to_data()
+                .convert::<f32>()
+                .into_vec::<f32>()
+                .expect("patch vec");
+            let (mean_diff, range) =
+                checkerboard_center_metrics(&patch_vec, channels, patch_size, patch_size);
+            let normalized = if range > 0.0 { mean_diff / range } else { 0.0 };
+            assert!(
+                normalized >= 0.2 && range >= 0.55,
+                "foveated checkerboard lost high-frequency detail for {warp_mode:?} (normalized {normalized:.3} range {range:.3})"
+            );
+            let block_std = block_mean_std(&patch_vec, channels, patch_size, patch_size, 8);
+            assert!(
+                block_std < 0.12,
+                "foveated checkerboard shows low-frequency artifacts for {warp_mode:?} (block std {block_std:.3})"
+            );
+        }
     }
 }
 
@@ -66,47 +71,55 @@ fn fovea_warped_image_gradients_focus_center() {
         VisionFoveaSamplingMode::Sequential,
         VisionFoveaSamplingMode::Batched,
     ];
+    let warp_modes = [VisionFoveaWarpMode::Warped, VisionFoveaWarpMode::Conformal];
     let data = make_test_image(3, 32, 32);
 
     for sampling_mode in sampling_modes {
-        saccade.config.pyramid_mode = VisionPyramidMode::Stacked;
-        saccade.config.fovea_sampling_mode = sampling_mode;
-        saccade.config.fovea_warp_mode = VisionFoveaWarpMode::Warped;
-        saccade.config.mip_levels = 2;
+        for warp_mode in warp_modes {
+            saccade.config.pyramid_mode = VisionPyramidMode::Stacked;
+            saccade.config.fovea_sampling_mode = sampling_mode;
+            saccade.config.fovea_warp_mode = warp_mode;
+            saccade.config.mip_levels = 2;
 
-        let images =
-            Tensor::<Backend, 4>::from_data(TensorData::new(data.clone(), [1, 3, 32, 32]), &device)
-                .require_grad();
-        let patch_size = saccade.model.patch_size().max(1);
-        let levels = saccade.build_mip_pyramid(images.clone(), patch_size);
-        let base_grid = build_foveated_base_grid::<Backend>(patch_size, &device);
-        let mean_raw =
-            Tensor::<Backend, 2>::from_data(TensorData::new(vec![0.5, 0.5], [1, 2]), &device);
-        let sigma_raw =
-            Tensor::<Backend, 2>::from_data(TensorData::new(vec![0.08], [1, 1]), &device);
-        let mean = activation::sigmoid(mean_raw);
-        let sigma = activation::sigmoid(sigma_raw)
-            .mul_scalar(0.25)
-            .add_scalar(0.05);
-        let patch = saccade.foveated_patch_image(&levels, &base_grid, mean, sigma, None);
-        let grads = patch.mean().backward();
-        let image_grad = images.grad(&grads).expect("image grad");
-        assert_tensor_finite(image_grad.clone());
-        assert_tensor_nonzero(image_grad.clone(), 1e-6);
+            let images = Tensor::<Backend, 4>::from_data(
+                TensorData::new(data.clone(), [1, 3, 32, 32]),
+                &device,
+            )
+            .require_grad();
+            let patch_size = saccade.model.patch_size().max(1);
+            let levels = saccade.build_mip_pyramid(images.clone(), patch_size);
+            let base_grid = build_foveated_base_grid::<Backend>(patch_size, &device);
+            let mean_raw =
+                Tensor::<Backend, 2>::from_data(TensorData::new(vec![0.5, 0.5], [1, 2]), &device);
+            let sigma_raw =
+                Tensor::<Backend, 2>::from_data(TensorData::new(vec![0.08], [1, 1]), &device);
+            let mean = activation::sigmoid(mean_raw);
+            let sigma = activation::sigmoid(sigma_raw)
+                .mul_scalar(0.25)
+                .add_scalar(0.05);
+            let patch = saccade.foveated_patch_image(&levels, &base_grid, mean, sigma, None);
+            let grads = patch.mean().backward();
+            let image_grad = images.grad(&grads).expect("image grad");
+            assert_tensor_finite(image_grad.clone());
+            assert_tensor_nonzero(image_grad.clone(), 1e-6);
 
-        let grad_vec = image_grad
-            .to_data()
-            .convert::<f32>()
-            .into_vec::<f32>()
-            .expect("grad vec");
-        let (inner_mean, outer_mean) = gradient_focus_stats(&grad_vec, 3, 32, 32, 0.5);
-        if outer_mean > 0.0 {
-            assert!(
-                inner_mean > outer_mean * 1.2,
-                "fovea gradients not focused (inner {inner_mean:.6}, outer {outer_mean:.6})"
-            );
-        } else {
-            assert!(inner_mean > 0.0, "inner gradient mean is zero");
+            let grad_vec = image_grad
+                .to_data()
+                .convert::<f32>()
+                .into_vec::<f32>()
+                .expect("grad vec");
+            let (inner_mean, outer_mean) = gradient_focus_stats(&grad_vec, 3, 32, 32, 0.5);
+            if outer_mean > 0.0 {
+                assert!(
+                    inner_mean > outer_mean * 1.2,
+                    "fovea gradients not focused for {warp_mode:?} (inner {inner_mean:.6}, outer {outer_mean:.6})"
+                );
+            } else {
+                assert!(
+                    inner_mean > 0.0,
+                    "inner gradient mean is zero for {warp_mode:?}"
+                );
+            }
         }
     }
 }
@@ -121,6 +134,7 @@ fn fovea_warped_feature_gradients_focus_center() {
         VisionFoveaSamplingMode::Sequential,
         VisionFoveaSamplingMode::Batched,
     ];
+    let warp_modes = [VisionFoveaWarpMode::Warped, VisionFoveaWarpMode::Conformal];
     let feature_channels = 8;
     let mut feature_data = Vec::with_capacity(feature_channels * 32 * 32);
     for c in 0..feature_channels {
@@ -132,53 +146,58 @@ fn fovea_warped_feature_gradients_focus_center() {
     }
 
     for sampling_mode in sampling_modes {
-        saccade.config.pyramid_mode = VisionPyramidMode::Stacked;
-        saccade.config.fovea_sampling_mode = sampling_mode;
-        saccade.config.fovea_warp_mode = VisionFoveaWarpMode::Warped;
-        saccade.config.mip_levels = 1;
+        for warp_mode in warp_modes {
+            saccade.config.pyramid_mode = VisionPyramidMode::Stacked;
+            saccade.config.fovea_sampling_mode = sampling_mode;
+            saccade.config.fovea_warp_mode = warp_mode;
+            saccade.config.mip_levels = 1;
 
-        let features = Tensor::<Backend, 4>::from_data(
-            TensorData::new(feature_data.clone(), [1, 8, 32, 32]),
-            &device,
-        )
-        .require_grad();
-        let base_grid = build_foveated_base_grid::<Backend>(8, &device);
-        let mean_raw =
-            Tensor::<Backend, 2>::from_data(TensorData::new(vec![0.5, 0.5], [1, 2]), &device);
-        let sigma_raw =
-            Tensor::<Backend, 2>::from_data(TensorData::new(vec![0.06], [1, 1]), &device);
-        let mean = activation::sigmoid(mean_raw);
-        let sigma = activation::sigmoid(sigma_raw)
-            .mul_scalar(0.2)
-            .add_scalar(0.05);
-        let level = SaccadeMipLevel {
-            tokens: Tensor::<Backend, 3>::zeros([1, 1, 1], &device),
-            grid: PatchGrid {
-                height: 4,
-                width: 4,
-            },
-            image: features.clone(),
-        };
-        let patch = saccade.foveated_patch_image(&[level], &base_grid, mean, sigma, None);
-        let grads = patch.mean().backward();
-        let feature_grad = features.grad(&grads).expect("feature grad");
-        assert_tensor_finite(feature_grad.clone());
-        assert_tensor_nonzero(feature_grad.clone(), 1e-6);
+            let features = Tensor::<Backend, 4>::from_data(
+                TensorData::new(feature_data.clone(), [1, 8, 32, 32]),
+                &device,
+            )
+            .require_grad();
+            let base_grid = build_foveated_base_grid::<Backend>(8, &device);
+            let mean_raw =
+                Tensor::<Backend, 2>::from_data(TensorData::new(vec![0.5, 0.5], [1, 2]), &device);
+            let sigma_raw =
+                Tensor::<Backend, 2>::from_data(TensorData::new(vec![0.06], [1, 1]), &device);
+            let mean = activation::sigmoid(mean_raw);
+            let sigma = activation::sigmoid(sigma_raw)
+                .mul_scalar(0.2)
+                .add_scalar(0.05);
+            let level = SaccadeMipLevel {
+                tokens: Tensor::<Backend, 3>::zeros([1, 1, 1], &device),
+                grid: PatchGrid {
+                    height: 4,
+                    width: 4,
+                },
+                image: features.clone(),
+            };
+            let patch = saccade.foveated_patch_image(&[level], &base_grid, mean, sigma, None);
+            let grads = patch.mean().backward();
+            let feature_grad = features.grad(&grads).expect("feature grad");
+            assert_tensor_finite(feature_grad.clone());
+            assert_tensor_nonzero(feature_grad.clone(), 1e-6);
 
-        let grad_vec = feature_grad
-            .to_data()
-            .convert::<f32>()
-            .into_vec::<f32>()
-            .expect("feature grad vec");
-        let (inner_mean, outer_mean) =
-            gradient_focus_stats(&grad_vec, feature_channels, 32, 32, 0.5);
-        if outer_mean > 0.0 {
-            assert!(
-                inner_mean > outer_mean * 1.2,
-                "feature gradients not focused (inner {inner_mean:.6}, outer {outer_mean:.6})"
-            );
-        } else {
-            assert!(inner_mean > 0.0, "inner feature gradient mean is zero");
+            let grad_vec = feature_grad
+                .to_data()
+                .convert::<f32>()
+                .into_vec::<f32>()
+                .expect("feature grad vec");
+            let (inner_mean, outer_mean) =
+                gradient_focus_stats(&grad_vec, feature_channels, 32, 32, 0.5);
+            if outer_mean > 0.0 {
+                assert!(
+                    inner_mean > outer_mean * 1.2,
+                    "feature gradients not focused for {warp_mode:?} (inner {inner_mean:.6}, outer {outer_mean:.6})"
+                );
+            } else {
+                assert!(
+                    inner_mean > 0.0,
+                    "inner feature gradient mean is zero for {warp_mode:?}"
+                );
+            }
         }
     }
 }

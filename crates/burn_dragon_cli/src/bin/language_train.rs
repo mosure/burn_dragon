@@ -2,9 +2,14 @@
 
 #[cfg(feature = "language-ddp")]
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 #[cfg(feature = "language-ddp")]
 use std::process::{Command as ProcessCommand, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 #[cfg(feature = "language-ddp")]
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -18,12 +23,13 @@ use burn_autodiff::checkpoint::strategy::BalancedCheckpointing;
 use burn_collective::start_global_orchestrator;
 use burn_dragon::api::core::recurrent::{
     logits_projection_profile_reset, logits_projection_profile_snapshot,
-    low_bit_training_lowrank_memory_profile_snapshot,
+    low_bit_training_lowrank_memory_profile_snapshot, low_bit_training_quantize_profile_snapshot,
     lowrank_residual_memory_profile_reset, lowrank_residual_memory_profile_snapshot,
     lowrank_residual_profile_reset, lowrank_residual_profile_snapshot,
 };
 use burn_dragon_kernel::api::projection::{
     relu_lowrank_forward_profile_reset, relu_lowrank_forward_profile_snapshot,
+    relu_lowrank_forward_route_profile_reset, relu_lowrank_forward_route_profile_snapshot,
     relu_lowrank_grad_input_profile_reset, relu_lowrank_grad_input_profile_snapshot,
     relu_lowrank_grad_weight_profile_reset, relu_lowrank_grad_weight_profile_snapshot,
 };
@@ -44,6 +50,7 @@ use burn_dragon_train::wgpu::init_runtime;
 use burn_ndarray::NdArray;
 use burn_wgpu::{CubeBackend, WgpuRuntime};
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use serde::Serialize;
 
 #[cfg(feature = "language-cuda")]
 use burn_cuda::Cuda;
@@ -135,6 +142,10 @@ struct LanguageArgs {
     /// GPU telemetry sampling interval for rerun, in seconds.
     #[arg(long, default_value_t = 5)]
     rerun_telemetry_interval_secs: u64,
+    /// Persist `nvidia-smi` power/utilization samples into the run directory every N seconds.
+    /// Set to 0 to disable sidecar sampling.
+    #[arg(long, default_value_t = 2)]
+    gpu_telemetry_interval_secs: u64,
 }
 
 #[cfg(feature = "language-ddp")]
@@ -215,6 +226,55 @@ struct PreparedLanguageCommand {
     planned_run: Option<PlannedRunArtifacts>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct GpuTelemetryDeviceSummary {
+    gpu_index: u32,
+    samples: u64,
+    mean_utilization_pct: f32,
+    max_utilization_pct: f32,
+    mean_power_watts: f32,
+    max_power_watts: f32,
+    max_memory_used_mib: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct GpuTelemetrySummary {
+    sample_interval_secs: u64,
+    devices: Vec<GpuTelemetryDeviceSummary>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct GpuTelemetrySample {
+    gpu_index: u32,
+    utilization_pct: f32,
+    power_watts: f32,
+    memory_used_mib: u64,
+}
+
+#[derive(Debug, Default)]
+struct GpuTelemetryAccumulator {
+    samples: u64,
+    sum_utilization_pct: f64,
+    max_utilization_pct: f32,
+    sum_power_watts: f64,
+    max_power_watts: f32,
+    max_memory_used_mib: u64,
+}
+
+struct GpuTelemetrySidecarGuard {
+    shutdown: Arc<AtomicBool>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl Drop for GpuTelemetrySidecarGuard {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::Relaxed);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
 #[cfg(feature = "language-rerun")]
 struct RerunSessionGuard {
     active: bool,
@@ -261,6 +321,188 @@ fn plan_single_process_run_artifacts(
         return Ok(None);
     }
     plan_run_artifacts(run_root, config.training.resume_run_dir.as_deref()).map(Some)
+}
+
+fn backend_uses_nvidia_gpu(backend: BackendArg) -> bool {
+    matches!(
+        backend,
+        BackendArg::Cuda | BackendArg::Wgpu | BackendArg::WgpuNoFusion
+    )
+}
+
+fn parse_gpu_telemetry_samples(stdout: &str) -> Result<Vec<GpuTelemetrySample>> {
+    stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let fields = line
+                .split(',')
+                .map(|field| field.trim())
+                .collect::<Vec<_>>();
+            if fields.len() != 4 {
+                return Err(anyhow::anyhow!(
+                    "expected 4 telemetry fields from nvidia-smi, got {} in line: {}",
+                    fields.len(),
+                    line
+                ));
+            }
+            Ok(GpuTelemetrySample {
+                gpu_index: fields[0].parse()?,
+                utilization_pct: fields[1].parse()?,
+                power_watts: fields[2].parse()?,
+                memory_used_mib: fields[3].parse()?,
+            })
+        })
+        .collect()
+}
+
+fn query_gpu_telemetry_samples() -> Result<Vec<GpuTelemetrySample>> {
+    let output = std::process::Command::new("nvidia-smi")
+        .args([
+            "--query-gpu=index,utilization.gpu,power.draw,memory.used",
+            "--format=csv,noheader,nounits",
+        ])
+        .output()?;
+    if !output.status.success() {
+        return Err(anyhow::anyhow!(
+            "nvidia-smi exited with status {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    parse_gpu_telemetry_samples(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn spawn_gpu_telemetry_sidecar(
+    run_dir: &Path,
+    interval: Duration,
+) -> Result<GpuTelemetrySidecarGuard> {
+    let csv_path = run_dir.join("gpu_telemetry.csv");
+    let summary_path = run_dir.join("gpu_telemetry_summary.json");
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let worker_shutdown = Arc::clone(&shutdown);
+    let csv_path_for_thread = csv_path.clone();
+    let summary_path_for_thread = summary_path.clone();
+    let interval_secs = interval.as_secs().max(1);
+
+    let worker = thread::Builder::new()
+        .name("language-gpu-telemetry".into())
+        .spawn(move || {
+            let mut csv = match std::fs::File::create(&csv_path_for_thread) {
+                Ok(file) => file,
+                Err(err) => {
+                    tracing::warn!(
+                        "failed to create gpu telemetry sidecar {}: {err}",
+                        csv_path_for_thread.display()
+                    );
+                    return;
+                }
+            };
+            if writeln!(
+                csv,
+                "sample,elapsed_secs,gpu_index,utilization_pct,power_watts,memory_used_mib"
+            )
+            .is_err()
+            {
+                tracing::warn!(
+                    "failed to write gpu telemetry header to {}",
+                    csv_path_for_thread.display()
+                );
+                return;
+            }
+
+            let start = Instant::now();
+            let mut sample_index = 0u64;
+            let mut devices: std::collections::BTreeMap<u32, GpuTelemetryAccumulator> =
+                std::collections::BTreeMap::new();
+
+            while !worker_shutdown.load(Ordering::Relaxed) {
+                match query_gpu_telemetry_samples() {
+                    Ok(samples) => {
+                        sample_index += 1;
+                        let elapsed = start.elapsed().as_secs_f32();
+                        for sample in samples {
+                            let _ = writeln!(
+                                csv,
+                                "{sample_index},{elapsed:.3},{},{:.1},{:.1},{}",
+                                sample.gpu_index,
+                                sample.utilization_pct,
+                                sample.power_watts,
+                                sample.memory_used_mib
+                            );
+                            let entry = devices.entry(sample.gpu_index).or_default();
+                            entry.samples += 1;
+                            entry.sum_utilization_pct += f64::from(sample.utilization_pct);
+                            entry.max_utilization_pct =
+                                entry.max_utilization_pct.max(sample.utilization_pct);
+                            entry.sum_power_watts += f64::from(sample.power_watts);
+                            entry.max_power_watts = entry.max_power_watts.max(sample.power_watts);
+                            entry.max_memory_used_mib =
+                                entry.max_memory_used_mib.max(sample.memory_used_mib);
+                        }
+                        let _ = csv.flush();
+                    }
+                    Err(err) => {
+                        tracing::warn!("gpu telemetry sidecar sample failed: {err}");
+                        break;
+                    }
+                }
+
+                let mut slept = Duration::ZERO;
+                while slept < interval && !worker_shutdown.load(Ordering::Relaxed) {
+                    let step = (interval - slept).min(Duration::from_millis(200));
+                    thread::sleep(step);
+                    slept += step;
+                }
+            }
+
+            let summary = GpuTelemetrySummary {
+                sample_interval_secs: interval_secs,
+                devices: devices
+                    .into_iter()
+                    .map(|(gpu_index, entry)| GpuTelemetryDeviceSummary {
+                        gpu_index,
+                        samples: entry.samples,
+                        mean_utilization_pct: if entry.samples == 0 {
+                            0.0
+                        } else {
+                            (entry.sum_utilization_pct / entry.samples as f64) as f32
+                        },
+                        max_utilization_pct: entry.max_utilization_pct,
+                        mean_power_watts: if entry.samples == 0 {
+                            0.0
+                        } else {
+                            (entry.sum_power_watts / entry.samples as f64) as f32
+                        },
+                        max_power_watts: entry.max_power_watts,
+                        max_memory_used_mib: entry.max_memory_used_mib,
+                    })
+                    .collect(),
+            };
+            match serde_json::to_string_pretty(&summary) {
+                Ok(json) => {
+                    let _ = std::fs::write(&summary_path_for_thread, json);
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        "failed to serialize gpu telemetry summary {}: {err}",
+                        summary_path_for_thread.display()
+                    );
+                }
+            }
+        })?;
+
+    tracing::info!(
+        "gpu telemetry sidecar writing {} and {} every {}s",
+        csv_path.display(),
+        summary_path.display(),
+        interval_secs
+    );
+
+    Ok(GpuTelemetrySidecarGuard {
+        shutdown,
+        worker: Some(worker),
+    })
 }
 
 fn apply_planned_run_env(planned_run: &PlannedRunArtifacts) {
@@ -380,6 +622,21 @@ fn run_language(prepared: PreparedLanguageCommand) -> Result<()> {
         ));
     }
 
+    let _gpu_telemetry_guard =
+        if backend_uses_nvidia_gpu(args.backend) && args.gpu_telemetry_interval_secs > 0 {
+            planned_run
+                .as_ref()
+                .map(|planned_run| {
+                    spawn_gpu_telemetry_sidecar(
+                        &planned_run.run_dir,
+                        Duration::from_secs(args.gpu_telemetry_interval_secs.max(1)),
+                    )
+                })
+                .transpose()?
+        } else {
+            None
+        };
+
     run_in_training_thread("language-train", move || match args.backend {
         BackendArg::Ndarray => {
             if balanced_checkpointing_enabled() {
@@ -397,6 +654,7 @@ fn run_language(prepared: PreparedLanguageCommand) -> Result<()> {
             if stage_profile {
                 recurrent_profile_reset();
                 relu_lowrank_forward_profile_reset();
+                relu_lowrank_forward_route_profile_reset();
                 relu_lowrank_grad_input_profile_reset();
                 relu_lowrank_grad_weight_profile_reset();
                 logits_projection_profile_reset();
@@ -425,15 +683,31 @@ fn run_language(prepared: PreparedLanguageCommand) -> Result<()> {
             };
             if stage_profile {
                 let lowrank_forward = relu_lowrank_forward_profile_snapshot();
+                let lowrank_forward_route = relu_lowrank_forward_route_profile_snapshot();
                 let lowrank_grad_input = relu_lowrank_grad_input_profile_snapshot();
                 let lowrank_grad_weight = relu_lowrank_grad_weight_profile_snapshot();
                 let logits_projection = logits_projection_profile_snapshot();
+                let lowbit_quantize = low_bit_training_quantize_profile_snapshot();
                 let residual_memory = lowrank_residual_memory_profile_snapshot();
                 let residual = lowrank_residual_profile_snapshot();
                 let snapshot = recurrent_profile_snapshot();
                 eprintln!(
                     "[stage-profile][training-lowrank-forward] calls={} launches={} total_ns={}",
                     lowrank_forward.calls, lowrank_forward.launches, lowrank_forward.total_ns,
+                );
+                eprintln!(
+                    "[stage-profile][training-lowrank-forward-route] attempts={} successes={} fallbacks={} wgpu_fusion_autodiff={} wgpu_direct_autodiff={} wgpu_fusion_runtime={} wgpu_direct_runtime={} cuda_fusion_autodiff={} cuda_direct_autodiff={} cuda_fusion_runtime={} cuda_direct_runtime={}",
+                    lowrank_forward_route.attempts,
+                    lowrank_forward_route.successes(),
+                    lowrank_forward_route.fallbacks(),
+                    lowrank_forward_route.wgpu_fusion_autodiff,
+                    lowrank_forward_route.wgpu_direct_autodiff,
+                    lowrank_forward_route.wgpu_fusion_runtime,
+                    lowrank_forward_route.wgpu_direct_runtime,
+                    lowrank_forward_route.cuda_fusion_autodiff,
+                    lowrank_forward_route.cuda_direct_autodiff,
+                    lowrank_forward_route.cuda_fusion_runtime,
+                    lowrank_forward_route.cuda_direct_runtime,
                 );
                 eprintln!(
                     "[stage-profile][training-lowrank-grad-input] calls={} launches={} total_ns={}",
@@ -450,10 +724,26 @@ fn run_language(prepared: PreparedLanguageCommand) -> Result<()> {
                     logits_projection.calls, logits_projection.total_ns,
                 );
                 eprintln!(
-                    "[stage-profile][training-residual-step] calls={} total_ns={} attention_norm_ns={} decoder_tail_ns={} mlp_norm_ns={} residual_combine_ns={}",
+                    "[stage-profile][training-lowbit-quantize] lowrank_direct_calls={} lowrank_direct_total_ns={} lowrank_fallback_calls={} lowrank_fallback_total_ns={} decoder_tail_calls={} decoder_tail_total_ns={}",
+                    lowbit_quantize.lowrank_direct_calls,
+                    lowbit_quantize.lowrank_direct_total_ns,
+                    lowbit_quantize.lowrank_fallback_calls,
+                    lowbit_quantize.lowrank_fallback_total_ns,
+                    lowbit_quantize.decoder_tail_calls,
+                    lowbit_quantize.decoder_tail_total_ns,
+                );
+                eprintln!(
+                    "[stage-profile][training-residual-step] calls={} total_ns={} x_projection_ns={} x_post_quant_ns={} attention_norm_ns={} attention_mixer_ns={} attention_post_norm_ns={} y_projection_ns={} y_post_quant_ns={} y_neuron_ns={} decoder_tail_ns={} mlp_norm_ns={} residual_combine_ns={}",
                     residual.calls,
                     residual.total_ns,
+                    residual.x_projection_ns,
+                    residual.x_post_quant_ns,
                     residual.attention_norm_ns,
+                    residual.attention_mixer_ns,
+                    residual.attention_post_norm_ns,
+                    residual.y_projection_ns,
+                    residual.y_post_quant_ns,
+                    residual.y_neuron_ns,
                     residual.decoder_tail_ns,
                     residual.mlp_norm_ns,
                     residual.residual_combine_ns,
@@ -492,6 +782,7 @@ fn run_language(prepared: PreparedLanguageCommand) -> Result<()> {
             if stage_profile {
                 recurrent_profile_reset();
                 relu_lowrank_forward_profile_reset();
+                relu_lowrank_forward_route_profile_reset();
                 relu_lowrank_grad_input_profile_reset();
                 relu_lowrank_grad_weight_profile_reset();
                 logits_projection_profile_reset();
@@ -517,15 +808,31 @@ fn run_language(prepared: PreparedLanguageCommand) -> Result<()> {
             };
             if stage_profile {
                 let lowrank_forward = relu_lowrank_forward_profile_snapshot();
+                let lowrank_forward_route = relu_lowrank_forward_route_profile_snapshot();
                 let lowrank_grad_input = relu_lowrank_grad_input_profile_snapshot();
                 let lowrank_grad_weight = relu_lowrank_grad_weight_profile_snapshot();
                 let logits_projection = logits_projection_profile_snapshot();
+                let lowbit_quantize = low_bit_training_quantize_profile_snapshot();
                 let residual_memory = lowrank_residual_memory_profile_snapshot();
                 let residual = lowrank_residual_profile_snapshot();
                 let snapshot = recurrent_profile_snapshot();
                 eprintln!(
                     "[stage-profile][training-lowrank-forward] calls={} launches={} total_ns={}",
                     lowrank_forward.calls, lowrank_forward.launches, lowrank_forward.total_ns,
+                );
+                eprintln!(
+                    "[stage-profile][training-lowrank-forward-route] attempts={} successes={} fallbacks={} wgpu_fusion_autodiff={} wgpu_direct_autodiff={} wgpu_fusion_runtime={} wgpu_direct_runtime={} cuda_fusion_autodiff={} cuda_direct_autodiff={} cuda_fusion_runtime={} cuda_direct_runtime={}",
+                    lowrank_forward_route.attempts,
+                    lowrank_forward_route.successes(),
+                    lowrank_forward_route.fallbacks(),
+                    lowrank_forward_route.wgpu_fusion_autodiff,
+                    lowrank_forward_route.wgpu_direct_autodiff,
+                    lowrank_forward_route.wgpu_fusion_runtime,
+                    lowrank_forward_route.wgpu_direct_runtime,
+                    lowrank_forward_route.cuda_fusion_autodiff,
+                    lowrank_forward_route.cuda_direct_autodiff,
+                    lowrank_forward_route.cuda_fusion_runtime,
+                    lowrank_forward_route.cuda_direct_runtime,
                 );
                 eprintln!(
                     "[stage-profile][training-lowrank-grad-input] calls={} launches={} total_ns={}",
@@ -542,10 +849,26 @@ fn run_language(prepared: PreparedLanguageCommand) -> Result<()> {
                     logits_projection.calls, logits_projection.total_ns,
                 );
                 eprintln!(
-                    "[stage-profile][training-residual-step] calls={} total_ns={} attention_norm_ns={} decoder_tail_ns={} mlp_norm_ns={} residual_combine_ns={}",
+                    "[stage-profile][training-lowbit-quantize] lowrank_direct_calls={} lowrank_direct_total_ns={} lowrank_fallback_calls={} lowrank_fallback_total_ns={} decoder_tail_calls={} decoder_tail_total_ns={}",
+                    lowbit_quantize.lowrank_direct_calls,
+                    lowbit_quantize.lowrank_direct_total_ns,
+                    lowbit_quantize.lowrank_fallback_calls,
+                    lowbit_quantize.lowrank_fallback_total_ns,
+                    lowbit_quantize.decoder_tail_calls,
+                    lowbit_quantize.decoder_tail_total_ns,
+                );
+                eprintln!(
+                    "[stage-profile][training-residual-step] calls={} total_ns={} x_projection_ns={} x_post_quant_ns={} attention_norm_ns={} attention_mixer_ns={} attention_post_norm_ns={} y_projection_ns={} y_post_quant_ns={} y_neuron_ns={} decoder_tail_ns={} mlp_norm_ns={} residual_combine_ns={}",
                     residual.calls,
                     residual.total_ns,
+                    residual.x_projection_ns,
+                    residual.x_post_quant_ns,
                     residual.attention_norm_ns,
+                    residual.attention_mixer_ns,
+                    residual.attention_post_norm_ns,
+                    residual.y_projection_ns,
+                    residual.y_post_quant_ns,
+                    residual.y_neuron_ns,
                     residual.decoder_tail_ns,
                     residual.mlp_norm_ns,
                     residual.residual_combine_ns,
@@ -586,6 +909,7 @@ fn run_language(prepared: PreparedLanguageCommand) -> Result<()> {
                 if stage_profile {
                     recurrent_profile_reset();
                     relu_lowrank_forward_profile_reset();
+                    relu_lowrank_forward_route_profile_reset();
                     relu_lowrank_grad_input_profile_reset();
                     relu_lowrank_grad_weight_profile_reset();
                     logits_projection_profile_reset();
@@ -603,15 +927,31 @@ fn run_language(prepared: PreparedLanguageCommand) -> Result<()> {
                 };
                 if stage_profile {
                     let lowrank_forward = relu_lowrank_forward_profile_snapshot();
+                    let lowrank_forward_route = relu_lowrank_forward_route_profile_snapshot();
                     let lowrank_grad_input = relu_lowrank_grad_input_profile_snapshot();
                     let lowrank_grad_weight = relu_lowrank_grad_weight_profile_snapshot();
                     let logits_projection = logits_projection_profile_snapshot();
+                    let lowbit_quantize = low_bit_training_quantize_profile_snapshot();
                     let residual_memory = lowrank_residual_memory_profile_snapshot();
                     let residual = lowrank_residual_profile_snapshot();
                     let snapshot = recurrent_profile_snapshot();
                     eprintln!(
                         "[stage-profile][training-lowrank-forward] calls={} launches={} total_ns={}",
                         lowrank_forward.calls, lowrank_forward.launches, lowrank_forward.total_ns,
+                    );
+                    eprintln!(
+                        "[stage-profile][training-lowrank-forward-route] attempts={} successes={} fallbacks={} wgpu_fusion_autodiff={} wgpu_direct_autodiff={} wgpu_fusion_runtime={} wgpu_direct_runtime={} cuda_fusion_autodiff={} cuda_direct_autodiff={} cuda_fusion_runtime={} cuda_direct_runtime={}",
+                        lowrank_forward_route.attempts,
+                        lowrank_forward_route.successes(),
+                        lowrank_forward_route.fallbacks(),
+                        lowrank_forward_route.wgpu_fusion_autodiff,
+                        lowrank_forward_route.wgpu_direct_autodiff,
+                        lowrank_forward_route.wgpu_fusion_runtime,
+                        lowrank_forward_route.wgpu_direct_runtime,
+                        lowrank_forward_route.cuda_fusion_autodiff,
+                        lowrank_forward_route.cuda_direct_autodiff,
+                        lowrank_forward_route.cuda_fusion_runtime,
+                        lowrank_forward_route.cuda_direct_runtime,
                     );
                     eprintln!(
                         "[stage-profile][training-lowrank-grad-input] calls={} launches={} total_ns={}",
@@ -628,10 +968,26 @@ fn run_language(prepared: PreparedLanguageCommand) -> Result<()> {
                         logits_projection.calls, logits_projection.total_ns,
                     );
                     eprintln!(
-                        "[stage-profile][training-residual-step] calls={} total_ns={} attention_norm_ns={} decoder_tail_ns={} mlp_norm_ns={} residual_combine_ns={}",
+                        "[stage-profile][training-lowbit-quantize] lowrank_direct_calls={} lowrank_direct_total_ns={} lowrank_fallback_calls={} lowrank_fallback_total_ns={} decoder_tail_calls={} decoder_tail_total_ns={}",
+                        lowbit_quantize.lowrank_direct_calls,
+                        lowbit_quantize.lowrank_direct_total_ns,
+                        lowbit_quantize.lowrank_fallback_calls,
+                        lowbit_quantize.lowrank_fallback_total_ns,
+                        lowbit_quantize.decoder_tail_calls,
+                        lowbit_quantize.decoder_tail_total_ns,
+                    );
+                    eprintln!(
+                        "[stage-profile][training-residual-step] calls={} total_ns={} x_projection_ns={} x_post_quant_ns={} attention_norm_ns={} attention_mixer_ns={} attention_post_norm_ns={} y_projection_ns={} y_post_quant_ns={} y_neuron_ns={} decoder_tail_ns={} mlp_norm_ns={} residual_combine_ns={}",
                         residual.calls,
                         residual.total_ns,
+                        residual.x_projection_ns,
+                        residual.x_post_quant_ns,
                         residual.attention_norm_ns,
+                        residual.attention_mixer_ns,
+                        residual.attention_post_norm_ns,
+                        residual.y_projection_ns,
+                        residual.y_post_quant_ns,
+                        residual.y_neuron_ns,
                         residual.decoder_tail_ns,
                         residual.mlp_norm_ns,
                         residual.residual_combine_ns,
@@ -1086,10 +1442,41 @@ mod tests {
                 assert_eq!(args.rerun_bind_ip, "0.0.0.0");
                 assert_eq!(args.rerun_port, 9988);
                 assert_eq!(args.rerun_telemetry_interval_secs, 7);
+                assert_eq!(args.gpu_telemetry_interval_secs, 2);
             }
             #[allow(unreachable_patterns)]
             _ => panic!("expected language command"),
         }
+    }
+
+    #[test]
+    fn clap_parses_gpu_telemetry_interval_for_language_training() {
+        let cli = Cli::parse_from([
+            "language_train",
+            "language",
+            "--gpu-telemetry-interval-secs",
+            "4",
+        ]);
+        match cli.command {
+            Command::Language(args) => {
+                assert_eq!(args.gpu_telemetry_interval_secs, 4);
+            }
+            #[allow(unreachable_patterns)]
+            _ => panic!("expected language command"),
+        }
+    }
+
+    #[test]
+    fn parse_gpu_telemetry_samples_accepts_nvidia_smi_csv_output() {
+        let samples =
+            super::parse_gpu_telemetry_samples("0, 91, 287.5, 14321\n1, 88, 250.0, 12001\n")
+                .expect("samples");
+        assert_eq!(samples.len(), 2);
+        assert_eq!(samples[0].gpu_index, 0);
+        assert_eq!(samples[0].utilization_pct, 91.0);
+        assert_eq!(samples[0].power_watts, 287.5);
+        assert_eq!(samples[0].memory_used_mib, 14321);
+        assert_eq!(samples[1].gpu_index, 1);
     }
 
     #[cfg(feature = "language-ddp")]

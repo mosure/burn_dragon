@@ -8,6 +8,7 @@
 //! - this crate layers tokenization, datasets, generation, and training schedules on top of that
 //!   core without redefining the recurrent state semantics
 
+pub mod bitnet_artifact;
 pub mod config;
 pub mod generation;
 pub mod inference;
@@ -48,6 +49,10 @@ pub mod api {
     }
 
     pub mod inference {
+        pub use crate::bitnet_artifact::{
+            BITNET_ARTIFACT_BINARY_MAGIC, LanguageBitNetArtifactBundle,
+            deserialize_bitnet_artifact_binary, serialize_bitnet_artifact_binary,
+        };
         pub use crate::generation::{
             ContextStrategy, GenerationProfileSnapshot, GenerationSettings, generate_text,
             generate_tokens, generate_tokens_chunked, generation_profile_reset,
@@ -55,8 +60,8 @@ pub mod api {
             sample_next_token,
         };
         pub use crate::inference::{
-            apply_wgpu_fused_core_override, build_model_config, build_model_config_with_tokenizer,
-            is_wgpu_backend_name,
+            WgpuFusedCoreOverride, apply_wgpu_fused_core_override, build_model_config,
+            build_model_config_with_tokenizer, is_wgpu_backend_name,
         };
         pub use crate::loss::language_model_loss;
         pub use crate::tokenizer::char_vocab::CharVocab;
@@ -64,9 +69,10 @@ pub mod api {
 
     #[cfg(feature = "train")]
     pub mod checkpoint {
+        pub use crate::bitnet_artifact::LanguageBitNetArtifactBundle;
         pub use crate::checkpoint::{
-            LanguageBitNetArtifactBundle, LanguageBitNetArtifactExportReport,
-            LanguageBurnpackExportReport, LanguageRunConfigSnapshot,
+            LanguageBitNetArtifactExportReport, LanguageBurnpackExportReport,
+            LanguageRunConfigSnapshot, apply_bitnet_artifact_bundle_to_model,
             candidate_bitnet_artifact_paths, default_bitnet_artifact_path, default_checkpoint_dir,
             export_language_checkpoint_to_bitnet_artifact, export_language_checkpoint_to_burnpack,
             load_bitnet_artifact_bundle, load_language_core_from_checkpoint,
@@ -83,15 +89,20 @@ pub mod api {
     }
 }
 
+pub use bitnet_artifact::{
+    BITNET_ARTIFACT_BINARY_MAGIC, LanguageBitNetArtifactBundle, deserialize_bitnet_artifact_binary,
+    serialize_bitnet_artifact_binary,
+};
 pub use burn_dragon_core::{BDH, BDHConfig, ModelState, SequenceKernelKind};
 #[cfg(feature = "train")]
 pub use checkpoint::{
-    LanguageBitNetArtifactBundle, LanguageBitNetArtifactExportReport, LanguageBurnpackExportReport,
-    LanguageRunConfigSnapshot, candidate_bitnet_artifact_paths, default_bitnet_artifact_path,
-    default_checkpoint_dir, export_language_checkpoint_to_bitnet_artifact,
-    export_language_checkpoint_to_burnpack, load_bitnet_artifact_bundle,
-    load_language_core_from_checkpoint, load_language_core_from_checkpoint_with_bitnet_artifact,
-    load_tokenizer_for_checkpoint, load_training_config_for_checkpoint, write_training_snapshot,
+    LanguageBitNetArtifactExportReport, LanguageBurnpackExportReport, LanguageRunConfigSnapshot,
+    apply_bitnet_artifact_bundle_to_model, candidate_bitnet_artifact_paths,
+    default_bitnet_artifact_path, default_checkpoint_dir,
+    export_language_checkpoint_to_bitnet_artifact, export_language_checkpoint_to_burnpack,
+    load_bitnet_artifact_bundle, load_language_core_from_checkpoint,
+    load_language_core_from_checkpoint_with_bitnet_artifact, load_tokenizer_for_checkpoint,
+    load_training_config_for_checkpoint, write_training_snapshot,
 };
 pub use config::{
     ContextStrategyConfig, GenerationConfig, GenerationOutputFormat,
@@ -108,8 +119,8 @@ pub use generation::{
     resolve_context_strategy, sample_next_token,
 };
 pub use inference::{
-    apply_wgpu_fused_core_override, build_model_config, build_model_config_with_tokenizer,
-    is_wgpu_backend_name,
+    WgpuFusedCoreOverride, apply_wgpu_fused_core_override, build_model_config,
+    build_model_config_with_tokenizer, is_wgpu_backend_name,
 };
 pub use loss::language_model_loss;
 #[cfg(feature = "train")]

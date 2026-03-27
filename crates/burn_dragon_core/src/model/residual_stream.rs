@@ -2,6 +2,7 @@ use burn::nn::Dropout;
 use burn::tensor::Tensor;
 use burn::tensor::backend::Backend;
 use burn_dragon_kernel::api::projection::LowrankGradInputExecutor;
+#[cfg(any(feature = "benchmark", feature = "train", feature = "cuda"))]
 use std::any::Any;
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
@@ -86,11 +87,89 @@ struct LowRankResidualInternal<B: Backend> {
     low_bit_saved_activation_cache: Option<LowBitSavedActivationCache>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LowRankResidualStepMode {
+    native_projection_relu_fused: bool,
+    keep_aux: bool,
+    keep_metric_aux: bool,
+}
+
+impl LowRankResidualStepMode {
+    const fn full_output() -> Self {
+        Self {
+            native_projection_relu_fused: false,
+            keep_aux: true,
+            keep_metric_aux: false,
+        }
+    }
+
+    const fn full_output_relu_native() -> Self {
+        Self {
+            native_projection_relu_fused: true,
+            ..Self::full_output()
+        }
+    }
+
+    #[cfg(any(feature = "probe", test))]
+    const fn with_metrics() -> Self {
+        Self {
+            keep_metric_aux: true,
+            ..Self::full_output()
+        }
+    }
+
+    const fn next_only() -> Self {
+        Self {
+            native_projection_relu_fused: false,
+            keep_aux: false,
+            keep_metric_aux: false,
+        }
+    }
+
+    const fn next_only_relu_native() -> Self {
+        Self {
+            native_projection_relu_fused: true,
+            ..Self::next_only()
+        }
+    }
+}
+
+/// Named inputs for a single low-rank residual step.
+///
+/// The step mixes model tensors, low-bit runtime policy, and fused-kernel routing. Grouping them
+/// in one struct avoids positional boolean/option callsites and makes each wrapper's intent
+/// explicit through `mode`.
+struct LowRankResidualStepConfig<'a, B: Backend> {
+    encoder: Tensor<B, 4>,
+    encoder_v: Tensor<B, 4>,
+    decoder: Tensor<B, 2>,
+    dropout: &'a Dropout,
+    use_fused_x: bool,
+    use_fused_y: bool,
+    x_relu_threshold: f32,
+    y_relu_threshold: f32,
+    apply_threshold: bool,
+    low_bit_plan: LowBitProjectionPlan,
+    saved_activation_config: LowBitSavedActivationConfig,
+    packed_artifacts: PackedLowBitProjectionArtifacts<'a, B>,
+    latent_pattern: &'a BlockPattern1d,
+    lowrank_grad_input_executor: LowrankGradInputExecutor,
+    sparse_mask: Option<Tensor<B, 4>>,
+    mode: LowRankResidualStepMode,
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct LowRankResidualProfileSnapshot {
     pub calls: u64,
     pub total_ns: u128,
+    pub x_projection_ns: u128,
+    pub x_post_quant_ns: u128,
     pub attention_norm_ns: u128,
+    pub attention_mixer_ns: u128,
+    pub attention_post_norm_ns: u128,
+    pub y_projection_ns: u128,
+    pub y_post_quant_ns: u128,
+    pub y_neuron_ns: u128,
     pub decoder_tail_ns: u128,
     pub mlp_norm_ns: u128,
     pub residual_combine_ns: u128,
@@ -191,22 +270,39 @@ pub fn lowrank_residual_memory_profile_snapshot() -> LowRankResidualMemoryProfil
         .unwrap_or_default()
 }
 
-fn lowrank_residual_profile_record(
-    total_ns: u128,
-    attention_norm_ns: u128,
-    decoder_tail_ns: u128,
-    mlp_norm_ns: u128,
-    residual_combine_ns: u128,
-) {
+fn lowrank_residual_profile_record(observed: LowRankResidualProfileSnapshot) {
     if let Ok(mut state) = lowrank_residual_profile_state().lock() {
-        state.calls = state.calls.saturating_add(1);
-        state.total_ns = state.total_ns.saturating_add(total_ns);
-        state.attention_norm_ns = state.attention_norm_ns.saturating_add(attention_norm_ns);
-        state.decoder_tail_ns = state.decoder_tail_ns.saturating_add(decoder_tail_ns);
-        state.mlp_norm_ns = state.mlp_norm_ns.saturating_add(mlp_norm_ns);
+        state.calls = state.calls.saturating_add(observed.calls);
+        state.total_ns = state.total_ns.saturating_add(observed.total_ns);
+        state.x_projection_ns = state
+            .x_projection_ns
+            .saturating_add(observed.x_projection_ns);
+        state.x_post_quant_ns = state
+            .x_post_quant_ns
+            .saturating_add(observed.x_post_quant_ns);
+        state.attention_norm_ns = state
+            .attention_norm_ns
+            .saturating_add(observed.attention_norm_ns);
+        state.attention_mixer_ns = state
+            .attention_mixer_ns
+            .saturating_add(observed.attention_mixer_ns);
+        state.attention_post_norm_ns = state
+            .attention_post_norm_ns
+            .saturating_add(observed.attention_post_norm_ns);
+        state.y_projection_ns = state
+            .y_projection_ns
+            .saturating_add(observed.y_projection_ns);
+        state.y_post_quant_ns = state
+            .y_post_quant_ns
+            .saturating_add(observed.y_post_quant_ns);
+        state.y_neuron_ns = state.y_neuron_ns.saturating_add(observed.y_neuron_ns);
+        state.decoder_tail_ns = state
+            .decoder_tail_ns
+            .saturating_add(observed.decoder_tail_ns);
+        state.mlp_norm_ns = state.mlp_norm_ns.saturating_add(observed.mlp_norm_ns);
         state.residual_combine_ns = state
             .residual_combine_ns
-            .saturating_add(residual_combine_ns);
+            .saturating_add(observed.residual_combine_ns);
     }
 }
 
@@ -302,30 +398,12 @@ fn decode_y_neuron_tail<B: Backend>(y_neuron: Tensor<B, 4>, decoder: Tensor<B, 2
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn lowrank_residual_step_impl<B, FAttn, FNorm, FAct>(
     current: Tensor<B, 4>,
-    encoder: Tensor<B, 4>,
-    encoder_v: Tensor<B, 4>,
-    decoder: Tensor<B, 2>,
-    dropout: &Dropout,
-    use_fused_x: bool,
-    use_fused_y: bool,
-    x_relu_threshold: f32,
-    y_relu_threshold: f32,
-    apply_threshold: bool,
-    low_bit_plan: LowBitProjectionPlan,
-    saved_activation_config: LowBitSavedActivationConfig,
-    packed_artifacts: PackedLowBitProjectionArtifacts<'_, B>,
-    latent_pattern: &BlockPattern1d,
-    lowrank_grad_input_executor: LowrankGradInputExecutor,
-    sparse_mask: Option<Tensor<B, 4>>,
+    config: LowRankResidualStepConfig<'_, B>,
     mut attention: FAttn,
     apply_latent: FAct,
     apply_norm: FNorm,
-    native_projection_relu_fused: bool,
-    keep_aux: bool,
-    keep_metric_aux: bool,
 ) -> LowRankResidualInternal<B>
 where
     B: Backend,
@@ -335,10 +413,39 @@ where
     FNorm: Fn(Tensor<B, 4>) -> Tensor<B, 4>,
     FAct: Fn(Tensor<B, 4>) -> Tensor<B, 4>,
 {
+    let LowRankResidualStepConfig {
+        encoder,
+        encoder_v,
+        decoder,
+        dropout,
+        use_fused_x,
+        use_fused_y,
+        x_relu_threshold,
+        y_relu_threshold,
+        apply_threshold,
+        low_bit_plan,
+        saved_activation_config,
+        packed_artifacts,
+        latent_pattern,
+        lowrank_grad_input_executor,
+        sparse_mask,
+        mode,
+    } = config;
+    let LowRankResidualStepMode {
+        native_projection_relu_fused,
+        keep_aux,
+        keep_metric_aux,
+    } = mode;
     let prof_enabled = lowrank_residual_profile_enabled();
     let memory_prof_enabled = lowrank_residual_memory_profile_enabled();
     let total_start = prof_enabled.then(Instant::now);
-    let mut attention_norm_ns = 0;
+    let mut x_projection_ns = 0;
+    let mut x_post_quant_ns = 0;
+    let mut attention_mixer_ns = 0;
+    let mut attention_post_norm_ns = 0;
+    let mut y_projection_ns = 0;
+    let mut y_post_quant_ns = 0;
+    let mut y_neuron_ns = 0;
     let mut decoder_tail_ns = 0;
     let mut mlp_norm_ns = 0;
     let mut residual_combine_ns = 0;
@@ -391,6 +498,7 @@ where
             None
         };
 
+    let x_projection_start = prof_enabled.then(Instant::now);
     let x_neuron = if matches!(
         packed_artifacts.runtime,
         LowBitKernelRuntimeKind::PackedNativeTrainingForward
@@ -406,6 +514,7 @@ where
             x_latent_out,
             saved_activation_config.mode,
             x_native_relu_threshold,
+            practical_native_training.then_some("residual_x"),
         );
         if x_native_relu_threshold.is_some() {
             x_latent
@@ -464,6 +573,10 @@ where
             apply_latent(x_latent)
         }
     };
+    if let Some(start) = x_projection_start {
+        x_projection_ns = start.elapsed().as_nanos();
+    }
+    let x_post_quant_start = prof_enabled.then(Instant::now);
     let x_neuron = if practical_native_training && low_bit_plan.x_weight_format.is_some() {
         x_neuron
     } else if let Some(format) = low_bit_plan.x_activation_format {
@@ -471,6 +584,9 @@ where
     } else {
         x_neuron
     };
+    if let Some(start) = x_post_quant_start {
+        x_post_quant_ns = start.elapsed().as_nanos();
+    }
     let x_projection_input_cache = should_capture_saved_activations
         .then(|| {
             low_bit_plan
@@ -479,12 +595,17 @@ where
         })
         .flatten();
 
-    let attention_start = prof_enabled.then(Instant::now);
+    let attention_mixer_start = prof_enabled.then(Instant::now);
     let attn = attention(x_neuron.clone(), current.clone());
-    let attn = apply_norm(attn);
-    if let Some(start) = attention_start {
-        attention_norm_ns = start.elapsed().as_nanos();
+    if let Some(start) = attention_mixer_start {
+        attention_mixer_ns = start.elapsed().as_nanos();
     }
+    let attention_post_norm_start = prof_enabled.then(Instant::now);
+    let attn = apply_norm(attn);
+    if let Some(start) = attention_post_norm_start {
+        attention_post_norm_ns = start.elapsed().as_nanos();
+    }
+    let attention_norm_ns = attention_mixer_ns.saturating_add(attention_post_norm_ns);
     let attn_out = if keep_metric_aux {
         Some(attn.clone())
     } else {
@@ -505,6 +626,7 @@ where
         );
     }
 
+    let y_projection_start = prof_enabled.then(Instant::now);
     let y_gate = if matches!(
         packed_artifacts.runtime,
         LowBitKernelRuntimeKind::PackedNativeTrainingForward
@@ -520,6 +642,7 @@ where
             y_latent_out,
             saved_activation_config.mode,
             y_native_relu_threshold,
+            practical_native_training.then_some("residual_y"),
         );
         if y_native_relu_threshold.is_some() {
             y_latent
@@ -577,6 +700,9 @@ where
             apply_latent(y_latent)
         }
     };
+    if let Some(start) = y_projection_start {
+        y_projection_ns = start.elapsed().as_nanos();
+    }
     if memory_prof_enabled {
         lowrank_residual_memory_record_stage::<B>(
             |profile| &mut profile.after_y_projection,
@@ -587,6 +713,7 @@ where
                 + tensor_bytes(&y_gate),
         );
     }
+    let y_post_quant_start = prof_enabled.then(Instant::now);
     let y_gate = if practical_native_training && low_bit_plan.y_weight_format.is_some() {
         y_gate
     } else if let Some(format) = low_bit_plan.y_activation_format {
@@ -594,6 +721,9 @@ where
     } else {
         y_gate
     };
+    if let Some(start) = y_post_quant_start {
+        y_post_quant_ns = start.elapsed().as_nanos();
+    }
     if memory_prof_enabled {
         lowrank_residual_memory_record_stage::<B>(
             |profile| &mut profile.after_y_post_quant,
@@ -604,6 +734,7 @@ where
                 + tensor_bytes(&y_gate),
         );
     }
+    let y_neuron_start = prof_enabled.then(Instant::now);
     let (y_neuron, x_neuron_out, y_gate_out) = if keep_aux {
         let y_neuron = dropout.forward(x_neuron.clone() * y_gate.clone());
         (y_neuron, Some(x_neuron), Some(y_gate))
@@ -616,6 +747,9 @@ where
     } else {
         y_neuron
     };
+    if let Some(start) = y_neuron_start {
+        y_neuron_ns = start.elapsed().as_nanos();
+    }
     if memory_prof_enabled {
         lowrank_residual_memory_record_stage::<B>(
             |profile| &mut profile.after_y_neuron,
@@ -645,6 +779,7 @@ where
                 .expect("native training residual projection requires low-bit weight format"),
             None,
             saved_activation_config.mode,
+            Some("decoder_tail"),
         )
     } else if let Some(artifact) = packed_artifacts.residual {
         match packed_artifacts.runtime {
@@ -695,13 +830,21 @@ where
     }
 
     if let Some(start) = total_start {
-        lowrank_residual_profile_record(
-            start.elapsed().as_nanos(),
+        lowrank_residual_profile_record(LowRankResidualProfileSnapshot {
+            calls: 1,
+            total_ns: start.elapsed().as_nanos(),
+            x_projection_ns,
+            x_post_quant_ns,
             attention_norm_ns,
+            attention_mixer_ns,
+            attention_post_norm_ns,
+            y_projection_ns,
+            y_post_quant_ns,
+            y_neuron_ns,
             decoder_tail_ns,
             mlp_norm_ns,
             residual_combine_ns,
-        );
+        });
     }
     if memory_prof_enabled {
         if let Ok(mut profile) = lowrank_residual_memory_profile_state().lock() {
@@ -757,92 +900,27 @@ where
 {
     let output = lowrank_residual_step_impl(
         current,
-        encoder,
-        encoder_v,
-        decoder,
-        dropout,
-        use_fused_x,
-        use_fused_y,
-        relu_threshold,
-        relu_threshold,
-        apply_threshold,
-        low_bit_plan,
-        saved_activation_config,
-        packed_artifacts,
-        latent_pattern,
-        lowrank_grad_input_executor,
-        sparse_mask,
+        LowRankResidualStepConfig {
+            encoder,
+            encoder_v,
+            decoder,
+            dropout,
+            use_fused_x,
+            use_fused_y,
+            x_relu_threshold: relu_threshold,
+            y_relu_threshold: relu_threshold,
+            apply_threshold,
+            low_bit_plan,
+            saved_activation_config,
+            packed_artifacts,
+            latent_pattern,
+            lowrank_grad_input_executor,
+            sparse_mask,
+            mode: LowRankResidualStepMode::full_output(),
+        },
         attention,
         apply_latent,
         apply_norm,
-        false,
-        true,
-        false,
-    );
-    LowRankResidualOutput {
-        next: output.next,
-        attention_readout: output.attention_readout,
-        residual_delta: output.residual_delta,
-        x_neuron: output.x_neuron.expect("x_neuron for full residual output"),
-        y_gate: output.y_gate.expect("y_gate for full residual output"),
-        y_neuron: output.y_neuron.expect("y_neuron for full residual output"),
-        low_bit_saved_activation_cache: output.low_bit_saved_activation_cache,
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-pub fn lowrank_residual_step_branch_thresholds<B, FAttn, FNorm, FAct>(
-    current: Tensor<B, 4>,
-    encoder: Tensor<B, 4>,
-    encoder_v: Tensor<B, 4>,
-    decoder: Tensor<B, 2>,
-    dropout: &Dropout,
-    use_fused_x: bool,
-    use_fused_y: bool,
-    x_relu_threshold: f32,
-    y_relu_threshold: f32,
-    apply_threshold: bool,
-    low_bit_plan: LowBitProjectionPlan,
-    saved_activation_config: LowBitSavedActivationConfig,
-    packed_artifacts: PackedLowBitProjectionArtifacts<'_, B>,
-    latent_pattern: &BlockPattern1d,
-    lowrank_grad_input_executor: LowrankGradInputExecutor,
-    sparse_mask: Option<Tensor<B, 4>>,
-    attention: FAttn,
-    apply_latent: FAct,
-    apply_norm: FNorm,
-) -> LowRankResidualOutput<B>
-where
-    B: Backend,
-    B::Device: 'static,
-    B::FloatTensorPrimitive: 'static,
-    FAttn: FnMut(Tensor<B, 4>, Tensor<B, 4>) -> Tensor<B, 4>,
-    FNorm: Fn(Tensor<B, 4>) -> Tensor<B, 4>,
-    FAct: Fn(Tensor<B, 4>) -> Tensor<B, 4>,
-{
-    let output = lowrank_residual_step_impl(
-        current,
-        encoder,
-        encoder_v,
-        decoder,
-        dropout,
-        use_fused_x,
-        use_fused_y,
-        x_relu_threshold,
-        y_relu_threshold,
-        apply_threshold,
-        low_bit_plan,
-        saved_activation_config,
-        packed_artifacts,
-        latent_pattern,
-        lowrank_grad_input_executor,
-        sparse_mask,
-        attention,
-        apply_latent,
-        apply_norm,
-        false,
-        true,
-        false,
     );
     LowRankResidualOutput {
         next: output.next,
@@ -887,27 +965,27 @@ where
 {
     let output = lowrank_residual_step_impl(
         current,
-        encoder,
-        encoder_v,
-        decoder,
-        dropout,
-        use_fused_x,
-        use_fused_y,
-        x_relu_threshold,
-        y_relu_threshold,
-        apply_threshold,
-        low_bit_plan,
-        saved_activation_config,
-        packed_artifacts,
-        latent_pattern,
-        lowrank_grad_input_executor,
-        sparse_mask,
+        LowRankResidualStepConfig {
+            encoder,
+            encoder_v,
+            decoder,
+            dropout,
+            use_fused_x,
+            use_fused_y,
+            x_relu_threshold,
+            y_relu_threshold,
+            apply_threshold,
+            low_bit_plan,
+            saved_activation_config,
+            packed_artifacts,
+            latent_pattern,
+            lowrank_grad_input_executor,
+            sparse_mask,
+            mode: LowRankResidualStepMode::full_output_relu_native(),
+        },
         attention,
         apply_latent,
         apply_norm,
-        true,
-        true,
-        false,
     );
     LowRankResidualOutput {
         next: output.next,
@@ -953,27 +1031,27 @@ where
 {
     let output = lowrank_residual_step_impl(
         current,
-        encoder,
-        encoder_v,
-        decoder,
-        dropout,
-        use_fused_x,
-        use_fused_y,
-        x_relu_threshold,
-        y_relu_threshold,
-        apply_threshold,
-        low_bit_plan,
-        saved_activation_config,
-        packed_artifacts,
-        latent_pattern,
-        lowrank_grad_input_executor,
-        sparse_mask,
+        LowRankResidualStepConfig {
+            encoder,
+            encoder_v,
+            decoder,
+            dropout,
+            use_fused_x,
+            use_fused_y,
+            x_relu_threshold,
+            y_relu_threshold,
+            apply_threshold,
+            low_bit_plan,
+            saved_activation_config,
+            packed_artifacts,
+            latent_pattern,
+            lowrank_grad_input_executor,
+            sparse_mask,
+            mode: LowRankResidualStepMode::with_metrics(),
+        },
         attention,
         apply_latent,
         apply_norm,
-        false,
-        true,
-        true,
     );
     LowRankResidualOutput {
         next: output.next,
@@ -1071,27 +1149,27 @@ where
 {
     lowrank_residual_step_impl(
         current,
-        encoder,
-        encoder_v,
-        decoder,
-        dropout,
-        use_fused_x,
-        use_fused_y,
-        x_relu_threshold,
-        y_relu_threshold,
-        apply_threshold,
-        low_bit_plan,
-        saved_activation_config,
-        packed_artifacts,
-        latent_pattern,
-        lowrank_grad_input_executor,
-        sparse_mask,
+        LowRankResidualStepConfig {
+            encoder,
+            encoder_v,
+            decoder,
+            dropout,
+            use_fused_x,
+            use_fused_y,
+            x_relu_threshold,
+            y_relu_threshold,
+            apply_threshold,
+            low_bit_plan,
+            saved_activation_config,
+            packed_artifacts,
+            latent_pattern,
+            lowrank_grad_input_executor,
+            sparse_mask,
+            mode: LowRankResidualStepMode::next_only(),
+        },
         attention,
         apply_latent,
         apply_norm,
-        false,
-        false,
-        false,
     )
     .next
 }
@@ -1128,27 +1206,27 @@ where
 {
     lowrank_residual_step_impl(
         current,
-        encoder,
-        encoder_v,
-        decoder,
-        dropout,
-        use_fused_x,
-        use_fused_y,
-        x_relu_threshold,
-        y_relu_threshold,
-        apply_threshold,
-        low_bit_plan,
-        saved_activation_config,
-        packed_artifacts,
-        latent_pattern,
-        lowrank_grad_input_executor,
-        sparse_mask,
+        LowRankResidualStepConfig {
+            encoder,
+            encoder_v,
+            decoder,
+            dropout,
+            use_fused_x,
+            use_fused_y,
+            x_relu_threshold,
+            y_relu_threshold,
+            apply_threshold,
+            low_bit_plan,
+            saved_activation_config,
+            packed_artifacts,
+            latent_pattern,
+            lowrank_grad_input_executor,
+            sparse_mask,
+            mode: LowRankResidualStepMode::next_only_relu_native(),
+        },
         attention,
         apply_latent,
         apply_norm,
-        true,
-        false,
-        false,
     )
     .next
 }

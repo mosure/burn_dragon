@@ -1,0 +1,24 @@
+[package]
+name = "burn_vjepa"
+description = "Frozen video teacher interfaces and V-JEPA-style hooks for burn dragon"
+version = "0.5.0"
+edition = "2024"
+rust-version = "1.85"
+authors = ["mosure <mitchell@mosure.me>"]
+license = "MIT OR Apache-2.0"
+
+[features]
+default = ["train"]
+train = ["burn_dragon_vision/train"]
+
+[dependencies]
+anyhow = "1"
+burn = { version = "0.21.0-pre.2", default-features = false, features = ["fusion", "ndarray", "std", "wgpu"] }
+burn_dragon_vision = { path = "../burn_dragon_vision", version = "0.5.0", default-features = false, features = ["train"] }
+half = "2"
+safetensors = "0.7"
+serde = { version = "1.0", features = ["derive"] }
+
+[dev-dependencies]
+burn-ndarray = { version = "0.21.0-pre.2" }
+tempfile = "3"

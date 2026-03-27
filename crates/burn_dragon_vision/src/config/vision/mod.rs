@@ -94,6 +94,7 @@ impl ModuleDisplay for VisionFoveaSamplingMode {}
 pub enum VisionFoveaWarpMode {
     #[default]
     Warped,
+    Conformal,
     Patched,
 }
 
@@ -101,6 +102,7 @@ impl fmt::Display for VisionFoveaWarpMode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Warped => write!(f, "warped"),
+            Self::Conformal => write!(f, "conformal"),
             Self::Patched => write!(f, "patched"),
         }
     }

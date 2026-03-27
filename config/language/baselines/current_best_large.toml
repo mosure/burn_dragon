@@ -1,6 +1,7 @@
 # Promoted operational large language bundle.
 # This remains the dense-score line because it is the only full staged bundle that has already
 # been proven end-to-end on the streaming-TBPTT + NCA-warm-start regime.
+# The matching large BitNet contender is kept as a sibling bundle rather than replacing this one.
 name = "current_best_large_48h"
 output_dir = "runs/language_bundles/current_best_large"
 resume_from_last_completed_stage = true

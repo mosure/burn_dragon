@@ -8,6 +8,7 @@ mod init;
 mod low_bit;
 mod low_bit_runtime;
 mod mhc;
+mod micro_transformer;
 mod norm;
 mod residual_stream;
 mod sequence;
@@ -21,7 +22,7 @@ pub use attention_residual::{
     AttentionResidual, AttentionResidualConfig, BlockAttentionResidual,
     BlockAttentionResidualConfig, BlockAttentionResidualSummaryMode, ResidualConnectorKind,
 };
-pub use bdh::BDH;
+pub use bdh::{BDH, BdhBitNetDeployScaffold};
 #[cfg(any(feature = "probe", test))]
 pub use bdh_support::LanguageBdhInitLayerDiagnostics;
 pub use bdh_support::{
@@ -54,14 +55,15 @@ pub use low_bit_runtime::{
     LowBitNativeProjectionProfileSnapshot, LowBitProjectionPlan, LowBitSavedActivationInventory,
     LowBitSavedActivationRecomputePolicy, LowBitSavedActivationTensorInventoryEntry,
     LowBitTrainingProjectionMemoryProfileSnapshot, LowBitTrainingProjectionMemoryStageSnapshot,
-    PackedLowBitProjectionArtifacts, PackedRhoInt8DeviceState, PackedRhoInt8State,
-    PackedSavedActivationBuffer, PackedSavedActivationState, RhoCompressionQualityGate,
-    RhoCompressionStatsSnapshot, build_low_bit_saved_activation_inventory,
-    estimate_low_bit_memory_buckets, fake_quantize_activation_ste, fake_quantize_weight_ste,
-    fraction_nonzero, low_bit_kernel_capabilities, low_bit_kernel_capabilities_for_backend_name,
+    LowBitTrainingQuantizeProfileSnapshot, PackedLowBitProjectionArtifacts, PackedRhoBlockEncoding,
+    PackedRhoBlockState, PackedRhoInt8DeviceState, PackedSavedActivationBuffer,
+    PackedSavedActivationState, RhoCompressionQualityGate, RhoCompressionStatsSnapshot,
+    build_low_bit_saved_activation_inventory, estimate_low_bit_memory_buckets,
+    fake_quantize_activation_ste, fake_quantize_weight_ste, fraction_nonzero,
+    low_bit_kernel_capabilities, low_bit_kernel_capabilities_for_backend_name,
     low_bit_native_decoder_tail_profile_snapshot, low_bit_native_lowrank_profile_snapshot,
     low_bit_native_projection_profile_reset, low_bit_training_lowrank_memory_profile_snapshot,
-    pack_saved_activation_state,
+    low_bit_training_quantize_profile_snapshot, pack_saved_activation_state,
     resolve_low_bit_kernel_plan, resolve_low_bit_kernel_plan_for_backend_name,
     rho_compression_profile_reset, rho_compression_profile_snapshot,
     rho_compression_snapshot_passes_gate, unpack_saved_activation_state,
@@ -73,6 +75,7 @@ pub use mhc::{
     mhc_merge, mhc_merge_with_coefficients, mhc_passthrough, mhc_passthrough_with_coefficients,
     mhc_split, mhc_split_with_coefficients,
 };
+pub use micro_transformer::MicroTransformerBlock;
 pub use norm::{DragonNorm, DragonNormConfig, DragonNormKind};
 pub use residual_stream::{
     LowBitSavedActivationCache, LowRankResidualMemoryProfileSnapshot,

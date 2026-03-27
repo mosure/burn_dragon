@@ -83,11 +83,13 @@ pub mod kernels {
     /// Fused low-rank projection kernels used in recurrent x/y projection paths.
     pub mod projection {
         pub use crate::relu_lowrank::{
-            LowrankGradInputExecutor, LowrankProjectionProfileSnapshot,
-            relu_lowrank_forward_profile_reset, relu_lowrank_forward_profile_snapshot,
-            relu_lowrank_grad_input_profile_reset, relu_lowrank_grad_input_profile_snapshot,
-            relu_lowrank_grad_weight_profile_reset, relu_lowrank_grad_weight_profile_snapshot,
-            supports_relu_lowrank_projection_backend, try_fused_relu_lowrank_projection_wgpu,
+            LowrankForwardRouteProfileSnapshot, LowrankGradInputExecutor,
+            LowrankProjectionProfileSnapshot, relu_lowrank_forward_profile_reset,
+            relu_lowrank_forward_profile_snapshot, relu_lowrank_forward_route_profile_reset,
+            relu_lowrank_forward_route_profile_snapshot, relu_lowrank_grad_input_profile_reset,
+            relu_lowrank_grad_input_profile_snapshot, relu_lowrank_grad_weight_profile_reset,
+            relu_lowrank_grad_weight_profile_snapshot, supports_relu_lowrank_projection_backend,
+            try_fused_relu_lowrank_projection_wgpu,
             try_fused_relu_lowrank_projection_wgpu_with_executor,
         };
     }
@@ -95,8 +97,10 @@ pub mod kernels {
     /// Device-executed low-bit helpers for packed/static BitNet-style paths.
     pub mod low_bit {
         pub use crate::low_bit::{
-            PackedRhoInt8BlockDeviceTensors, diagnose_wgpu_packed_dot_decoder_tail,
-            diagnose_wgpu_packed_dot_lowrank_projection, pack_decoder_input_codes_i8x4,
+            PackedRhoInt8BlockDeviceTensors, cached_wgpu_packed_dot_decoder_tail_support,
+            cached_wgpu_packed_dot_lowrank_support, diagnose_wgpu_packed_dot_decoder_tail,
+            diagnose_wgpu_packed_dot_lowrank_projection,
+            diagnose_wgpu_quantize_pack_activation_i8x4, pack_decoder_input_codes_i8x4,
             pack_decoder_weight_codes_i8x4, pack_lowrank_input_codes_i8x4,
             pack_lowrank_weight_codes_i8x4, pack_rho_int8_block_device_reference,
             packed_decoder_tail_device_reference, packed_decoder_tail_grad_input_device_reference,
@@ -109,15 +113,26 @@ pub mod kernels {
             try_fused_packed_decoder_tail_grad_input, try_fused_packed_decoder_tail_grad_weight,
             try_fused_packed_decoder_tail_training_autodiff, try_fused_packed_lowrank_grad_input,
             try_fused_packed_lowrank_grad_weight, try_fused_packed_lowrank_projection,
-            try_fused_packed_lowrank_training_autodiff, try_raw_cuda_packed_decoder_tail,
+            try_fused_packed_lowrank_training_autodiff,
+            try_fused_packed_lowrank_training_autodiff_cuda_device_projection_scale,
+            try_raw_cuda_packed_decoder_tail, try_raw_cuda_packed_decoder_tail_device_scale,
             try_raw_cuda_packed_decoder_tail_grad_input,
             try_raw_cuda_packed_decoder_tail_grad_weight,
             try_raw_cuda_packed_decoder_tail_prepacked_input,
+            try_raw_cuda_packed_decoder_tail_prepacked_input_device_scale,
             try_raw_cuda_packed_lowrank_grad_input, try_raw_cuda_packed_lowrank_grad_weight,
             try_raw_cuda_packed_lowrank_projection,
             try_raw_cuda_packed_lowrank_projection_device_scale,
             try_raw_cuda_packed_lowrank_projection_prepacked_input,
-            try_wgpu_packed_dot_decoder_tail, try_wgpu_packed_dot_lowrank_projection,
+            try_raw_cuda_packed_lowrank_projection_prepacked_input_device_scale,
+            try_raw_cuda_quantize_pack_activation_i8x4, try_wgpu_packed_dot_decoder_tail,
+            try_wgpu_packed_dot_decoder_tail_device_scale,
+            try_wgpu_packed_dot_decoder_tail_prepacked_input_device_scale,
+            try_wgpu_packed_dot_lowrank_projection,
+            try_wgpu_packed_dot_lowrank_projection_device_scale,
+            try_wgpu_packed_dot_lowrank_projection_from_f32_device_scale,
+            try_wgpu_packed_dot_lowrank_projection_prepacked_input_device_scale,
+            try_wgpu_quantize_activation_codes_i32, try_wgpu_quantize_pack_activation_i8x4,
             unpack_rho_int8_block_device_reference,
         };
         #[cfg(feature = "cuda")]

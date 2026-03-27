@@ -213,6 +213,11 @@ path = "src/bin/vision_model_stats.rs"
 required-features = ["train"]
 
 [[bin]]
+name = "language_model_stats"
+path = "src/bin/language_model_stats.rs"
+required-features = ["language-train"]
+
+[[bin]]
 name = "language_rollout_probe"
 path = "src/bin/language_rollout_probe.rs"
 required-features = ["benchmark"]

@@ -23,6 +23,7 @@ pub enum PyramidMode {
 pub enum FoveaWarpMode {
     #[default]
     Warped,
+    Conformal,
     Patched,
 }
 
@@ -200,14 +201,13 @@ pub fn render_foveated_patch_with_radius(
             let base_dy = y as f32 + 0.5 - half;
             let ux_base = base_dx / half.max(1.0);
             let uy_base = base_dy / half.max(1.0);
-            let warp_x_base = foveated_warp(ux_base, sigma_px, radius_px);
-            let warp_y_base = foveated_warp(uy_base, sigma_px, radius_px);
-            let local_scale_base = warp_x_base.deriv.abs().max(warp_y_base.deriv.abs()) * pixel_du;
+            let warp_base = sample_foveated_warp(ux_base, uy_base, sigma_px, radius_px, warp_mode);
+            let local_scale_base = warp_base.deriv.abs() * pixel_du;
             let mut color = [0.0; 3];
             let mut count = 0.0;
             if local_scale_base <= FOVEA_AA_THRESHOLD {
-                let offset_x = warp_x_base.offset;
-                let offset_y = warp_y_base.offset;
+                let offset_x = warp_base.dx;
+                let offset_y = warp_base.dy;
                 let img_x = center_x + offset_x;
                 let img_y = center_y + offset_y;
                 let fx = img_x / width as f32;
@@ -248,11 +248,10 @@ pub fn render_foveated_patch_with_radius(
                         let jitter_y = (sy as f32 + 0.5) / SUBSAMPLES as f32 - 0.5;
                         let ux = (base_dx + jitter_x) / half.max(1.0);
                         let uy = (base_dy + jitter_y) / half.max(1.0);
-                        let warp_x = foveated_warp(ux, sigma_px, radius_px);
-                        let warp_y = foveated_warp(uy, sigma_px, radius_px);
-                        let offset_x = warp_x.offset;
-                        let offset_y = warp_y.offset;
-                        let local_scale = warp_x.deriv.abs().max(warp_y.deriv.abs()) * pixel_du;
+                        let warp = sample_foveated_warp(ux, uy, sigma_px, radius_px, warp_mode);
+                        let offset_x = warp.dx;
+                        let offset_y = warp.dy;
+                        let local_scale = warp.deriv.abs() * pixel_du;
                         let img_x = center_x + offset_x;
                         let img_y = center_y + offset_y;
                         let fx = img_x / width as f32;
@@ -345,6 +344,12 @@ struct FoveaWarp {
     deriv: f32,
 }
 
+struct FoveaWarp2d {
+    dx: f32,
+    dy: f32,
+    deriv: f32,
+}
+
 fn foveated_warp(u: f32, sigma: f32, radius: f32) -> FoveaWarp {
     let sigma = sigma.max(1e-3);
     let radius = radius.max(1e-3);
@@ -355,6 +360,75 @@ fn foveated_warp(u: f32, sigma: f32, radius: f32) -> FoveaWarp {
     let offset = sigma * SQRT2 * erf_inv;
     let deriv = sigma * SQRT2 * u_max * SQRT_PI_OVER_2 * (erf_inv * erf_inv).exp();
     FoveaWarp { offset, deriv }
+}
+
+fn conformal_alpha_from_ratio(ratio: f32) -> f32 {
+    let q = ratio.clamp(1e-4, 1.0);
+    if q >= 1.0 - 1e-4 {
+        return 0.0;
+    }
+    let mut alpha = if q > 0.75 {
+        (6.0 * (1.0 - q)).max(0.0).sqrt()
+    } else {
+        (2.0 / q.max(1e-4)).ln().max(0.0)
+    };
+    for _ in 0..4 {
+        let a = alpha.max(1e-4);
+        let sinh_a = a.sinh();
+        let cosh_a = a.cosh();
+        let g = a / sinh_a - q;
+        let gp = (sinh_a - a * cosh_a) / (sinh_a * sinh_a).max(1e-6);
+        alpha = (a - g / gp).max(0.0);
+    }
+    alpha
+}
+
+fn conformal_warp(ux: f32, uy: f32, sigma: f32, radius: f32) -> FoveaWarp2d {
+    let sigma_safe = sigma.max(1e-3);
+    let radius_safe = radius.max(1e-3);
+    let ratio = (sigma_safe / radius_safe).clamp(1e-4, 1.0);
+    let alpha = conformal_alpha_from_ratio(ratio);
+    if alpha <= 1e-3 {
+        return FoveaWarp2d {
+            dx: radius_safe * ux.clamp(-1.0, 1.0),
+            dy: radius_safe * uy.clamp(-1.0, 1.0),
+            deriv: radius_safe,
+        };
+    }
+
+    let ux = ux.clamp(-1.0, 1.0);
+    let uy = uy.clamp(-1.0, 1.0);
+    let ax = alpha * ux;
+    let ay = alpha * uy;
+    let sinh_alpha = alpha.sinh().max(1e-6);
+    let norm = radius_safe / sinh_alpha;
+    let dx = norm * ax.sinh() * ay.cos();
+    let dy = norm * ax.cosh() * ay.sin();
+    let deriv_re = ax.cosh() * ay.cos();
+    let deriv_im = ax.sinh() * ay.sin();
+    let deriv = norm * alpha * (deriv_re * deriv_re + deriv_im * deriv_im).sqrt();
+    FoveaWarp2d { dx, dy, deriv }
+}
+
+fn sample_foveated_warp(
+    ux: f32,
+    uy: f32,
+    sigma: f32,
+    radius: f32,
+    warp_mode: FoveaWarpMode,
+) -> FoveaWarp2d {
+    match warp_mode {
+        FoveaWarpMode::Warped | FoveaWarpMode::Patched => {
+            let warp_x = foveated_warp(ux, sigma, radius);
+            let warp_y = foveated_warp(uy, sigma, radius);
+            FoveaWarp2d {
+                dx: warp_x.offset,
+                dy: warp_y.offset,
+                deriv: warp_x.deriv.abs().max(warp_y.deriv.abs()),
+            }
+        }
+        FoveaWarpMode::Conformal => conformal_warp(ux, uy, sigma, radius),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -723,6 +797,23 @@ mod tests {
         let base = constant_image(16, 16, 0.25);
         let cache = build_pyramid_cache(base, 4, PyramidMode::Stacked);
         let patch = render_foveated_patch(&cache, [0.5, 0.5], 0.1, 8, FoveaWarpMode::Warped);
+        for value in patch {
+            assert!((value - 0.25).abs() < 1e-3);
+        }
+    }
+
+    #[test]
+    fn conformal_patch_constant_image_is_constant() {
+        let base = constant_image(16, 16, 0.25);
+        let cache = build_pyramid_cache(base, 4, PyramidMode::Stacked);
+        let patch = render_foveated_patch_with_radius(
+            &cache,
+            [0.5, 0.5],
+            0.1,
+            0.35,
+            8,
+            FoveaWarpMode::Conformal,
+        );
         for value in patch {
             assert!((value - 0.25).abs() < 1e-3);
         }

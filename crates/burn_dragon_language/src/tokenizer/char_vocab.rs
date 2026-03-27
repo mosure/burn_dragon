@@ -1,8 +1,6 @@
 use std::any::Any;
 use std::collections::HashMap;
-#[cfg(feature = "train")]
 use std::fs;
-#[cfg(feature = "train")]
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow};
@@ -87,7 +85,6 @@ impl CharVocab {
         })
     }
 
-    #[cfg(feature = "train")]
     fn to_record(&self) -> CharVocabRecord {
         CharVocabRecord {
             chars: self.id2ch.clone(),
@@ -110,7 +107,6 @@ impl CharVocab {
         Ok(vocab)
     }
 
-    #[cfg(feature = "train")]
     pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
         let path = path.as_ref();
         if let Some(parent) = path.parent() {
@@ -123,7 +119,6 @@ impl CharVocab {
         Ok(())
     }
 
-    #[cfg(feature = "train")]
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         let data = fs::read_to_string(path)

@@ -18,6 +18,7 @@ viz = ["dep:bevy_dragon"]
 anyhow = "1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+flate2 = "1.1"
 burn = { version = "0.21.0-pre.2", default-features = false, features = ["std", "webgpu"] }
 burn-wgpu = { version = "0.21.0-pre.2", default-features = false, features = ["webgpu", "std"] }
 burn_dragon_checkpoint = { path = "../burn_dragon_checkpoint", version = "0.5.0", default-features = false }

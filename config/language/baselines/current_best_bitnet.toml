@@ -1,0 +1,4 @@
+# Leading single-stage BitNet contender.
+# This mirrors the promoted large dense-score geometry, but lifts the Shakespeare
+# winner's attention-residual + decoder_y-only low-bit stack into the large line.
+extends = ["current_best_large_bitnet_contender/climbmix_stage_base.toml"]

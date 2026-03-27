@@ -1,0 +1,14 @@
+extends = [
+  "../current_best_large/climbmix_stage_base.toml",
+  "../../shared/current_best_large_bitnet_modifier.toml",
+]
+
+[training]
+# Start with the same proven step budget as the dense operational rung until the
+# large BitNet contender is recalibrated on fresh throughput measurements.
+max_iters = 70000
+
+[optimizer.lr_schedule]
+type = "cosine"
+min_lr = 0.00003
+num_iters = 70000

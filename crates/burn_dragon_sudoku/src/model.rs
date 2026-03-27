@@ -9,7 +9,7 @@ use burn_dragon_core::{
     ManifoldHyperConnectionsConfig, ModelState, SequenceKernelKind,
 };
 use burn_dragon_train::WgpuRuntimeConfig;
-use burn_dragon_train::wgpu::apply_wgpu_fused_core_override;
+use burn_dragon_train::wgpu::{WgpuFusedCoreOverride, apply_wgpu_fused_core_override};
 
 use crate::config::{
     SudokuCacheUpdateMode, SudokuGridPositional, SudokuModelConfig, SudokuPolicyHead,
@@ -156,8 +156,10 @@ impl SudokuModelConfig {
         apply_wgpu_fused_core_override(
             &mut config,
             backend_name,
-            wgpu.training.fused_core_recurrent,
-            wgpu.training.fused_core_rollout,
+            WgpuFusedCoreOverride {
+                recurrent: wgpu.training.fused_core_recurrent,
+                rollout: wgpu.training.fused_core_rollout,
+            },
         );
         config
     }

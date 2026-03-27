@@ -1,0 +1,44 @@
+[package]
+name = "burn_dragon_dreamer"
+description = "Dreamer-style latent imagination over burn dragon active vision"
+version = "0.5.0"
+edition = "2024"
+rust-version = "1.85"
+authors = ["mosure <mitchell@mosure.me>"]
+license = "MIT OR Apache-2.0"
+
+[lib]
+doctest = false
+
+[dependencies]
+anyhow = "1"
+burn = { version = "0.21.0-pre.2", default-features = false, features = ["fusion", "ndarray", "std", "wgpu"] }
+burn-autodiff = { version = "0.21.0-pre.2" }
+burn-cuda = { version = "0.21.0-pre.2", default-features = false, features = ["std"] }
+burn-ndarray = { version = "0.21.0-pre.2" }
+burn_autogaze = { path = "../burn_autogaze", version = "0.5.0" }
+burn_vjepa = { path = "../burn_vjepa", version = "0.5.0", features = ["train"] }
+burn_dragon_core = { path = "../burn_dragon_core", version = "0.5.0", default-features = false }
+burn_dragon_train = { path = "../burn_dragon_train", version = "0.5.0", default-features = false, features = ["train"] }
+burn_dragon_vision = { path = "../burn_dragon_vision", version = "0.5.0", default-features = false, features = ["train"] }
+font8x8 = "0.3"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+safetensors = "0.7"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+
+[dev-dependencies]
+tempfile = "3"
+
+[[bin]]
+name = "train_moving_mnist"
+path = "src/bin/train_moving_mnist.rs"
+
+[[bin]]
+name = "train_moving_mnist_tokenizer"
+path = "src/bin/train_moving_mnist_tokenizer.rs"
+
+[[bin]]
+name = "export_moving_mnist_teacher_clips"
+path = "src/bin/export_moving_mnist_teacher_clips.rs"

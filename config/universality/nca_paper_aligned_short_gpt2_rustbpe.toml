@@ -1,5 +1,5 @@
-name = "nca_paper_aligned_short_gpt2_rustbpe"
-output_dir = "data/universality/nca_paper_aligned_short_gpt2_rustbpe"
+name = "nca_paper_aligned_short_byte259"
+output_dir = "data/universality/nca_paper_aligned_short_byte259"
 seed = 1337
 train_samples = 512
 validation_samples = 128
@@ -11,10 +11,9 @@ include_observable_header = true
 preview_samples = 8
 
 [tokenization]
-type = "rust_bpe"
-vocab_path = "data/tokenizers/gpt2/tokenizer.json"
-mergeable_vocab_size = 50256
-eos_id = 50256
+type = "gpt2_byte_compatible"
+vocab_size = 259
+eos_id = 257
 
 [[families]]
 kind = "neural_stochastic"

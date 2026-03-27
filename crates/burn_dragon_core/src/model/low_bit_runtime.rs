@@ -7,15 +7,27 @@ use burn_cubecl::cubecl::cuda::CudaRuntime;
 #[cfg(feature = "cuda")]
 use burn_cuda::CudaDevice;
 use burn_dragon_kernel::api::low_bit::{
+    cached_wgpu_packed_dot_decoder_tail_support, cached_wgpu_packed_dot_lowrank_support,
     pack_decoder_input_codes_i8x4, pack_decoder_weight_codes_i8x4, pack_lowrank_input_codes_i8x4,
     pack_lowrank_weight_codes_i8x4, pack_rho_int8_block_device_reference,
     packed_decoder_tail_device_reference, packed_lowrank_projection_device_reference,
     supports_packed_low_bit_device_backend, supports_packed_rho_int8_block_device_backend,
     try_fused_packed_decoder_tail, try_fused_packed_decoder_tail_training_autodiff,
-    try_fused_packed_lowrank_projection, try_fused_packed_lowrank_training_autodiff,
-    try_raw_cuda_packed_decoder_tail, try_raw_cuda_packed_decoder_tail_prepacked_input,
+    try_fused_packed_lowrank_projection,
+    try_fused_packed_lowrank_training_autodiff_cuda_device_projection_scale,
+    try_raw_cuda_packed_decoder_tail, try_raw_cuda_packed_decoder_tail_device_scale,
+    try_raw_cuda_packed_decoder_tail_prepacked_input,
+    try_raw_cuda_packed_decoder_tail_prepacked_input_device_scale,
     try_raw_cuda_packed_lowrank_projection, try_raw_cuda_packed_lowrank_projection_device_scale,
-    try_raw_cuda_packed_lowrank_projection_prepacked_input, unpack_rho_int8_block_device_reference,
+    try_raw_cuda_packed_lowrank_projection_prepacked_input,
+    try_raw_cuda_packed_lowrank_projection_prepacked_input_device_scale,
+    try_raw_cuda_quantize_pack_activation_i8x4, try_wgpu_packed_dot_decoder_tail_device_scale,
+    try_wgpu_packed_dot_decoder_tail_prepacked_input_device_scale,
+    try_wgpu_packed_dot_lowrank_projection_device_scale,
+    try_wgpu_packed_dot_lowrank_projection_from_f32_device_scale,
+    try_wgpu_packed_dot_lowrank_projection_prepacked_input_device_scale,
+    try_wgpu_quantize_activation_codes_i32, try_wgpu_quantize_pack_activation_i8x4,
+    unpack_rho_int8_block_device_reference,
 };
 #[cfg(any(feature = "benchmark", feature = "train"))]
 use burn_wgpu::{WgpuDevice, WgpuRuntime};
@@ -27,16 +39,17 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 use crate::experimental::bitnet_reference::{
-    PackedWeightArtifact, pack_weight_artifact_from_dequantized_values,
+    PackedTernaryBuffer, PackedWeightArtifact, pack_binary_1bit, pack_ternary_2bit,
+    quantize_binary_sign, quantize_ternary_absmean, unpack_binary_1bit, unpack_ternary_2bit,
     unpack_weight_artifact_to_i8_codes,
 };
 use crate::model::low_bit::{
     LowBitActivationFormat, LowBitInferenceMode, LowBitQuantizationConfig,
-    LowBitSavedActivationMode, LowBitTargetModule, LowBitWeightFormat,
+    LowBitSavedActivationMode, LowBitTargetModule, LowBitWeightFormat, RhoCompressionConfig,
 };
 
 const QUANT_EPSILON: f32 = 1.0e-8;
-const RHO_INT8_BLOCK_SIZE: usize = 32;
+const RHO_BLOCK_SIZE: usize = 32;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct LowBitProjectionPlan {
@@ -62,8 +75,6 @@ pub struct CachedDecoderTailArtifact<B: Backend> {
     pub artifact: PackedWeightArtifact,
     pub codes: Tensor<B, 2, Int>,
     pub packed_weight: Tensor<B, 2, Int>,
-    pub heads: usize,
-    pub latent_per_head: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -196,6 +207,16 @@ pub struct LowBitTrainingProjectionMemoryStageSnapshot {
     pub tracked_tensor_bytes: u64,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LowBitTrainingQuantizeProfileSnapshot {
+    pub lowrank_direct_calls: u64,
+    pub lowrank_direct_total_ns: u128,
+    pub lowrank_fallback_calls: u64,
+    pub lowrank_fallback_total_ns: u128,
+    pub decoder_tail_calls: u64,
+    pub decoder_tail_total_ns: u128,
+}
+
 impl LowBitTrainingProjectionMemoryStageSnapshot {
     fn should_replace(self, observed: Self) -> bool {
         (
@@ -229,12 +250,36 @@ impl LowBitMemoryBucketEstimate {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct PackedRhoInt8State {
+/// Host-side rho block encoding used for chunk-compressed recurrent state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PackedRhoBlockEncoding {
+    Int8,
+    Ternary2,
+    Binary1,
+}
+
+impl PackedRhoBlockEncoding {
+    fn from_compression(compression: RhoCompressionConfig) -> Option<Self> {
+        match compression {
+            RhoCompressionConfig::Int8BlockExp => Some(Self::Int8),
+            RhoCompressionConfig::TernaryBlockExp => Some(Self::Ternary2),
+            RhoCompressionConfig::BinaryBlockExp => Some(Self::Binary1),
+            _ => None,
+        }
+    }
+}
+
+/// Host-side rho block state.
+///
+/// This is the portable fallback representation for chunk-compressed rho when no
+/// backend-native device path exists. Each block stores one scale plus packed codes.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PackedRhoBlockState {
     pub logical_shape: [usize; 4],
     pub block_size: usize,
+    pub encoding: PackedRhoBlockEncoding,
     pub scales: Vec<f32>,
-    pub packed: Vec<i8>,
+    pub packed: Vec<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -397,6 +442,18 @@ fn backend_name_prefers_training_low_bit_runtime(backend_name: &str) -> bool {
     backend_name.contains("Autodiff")
 }
 
+fn config_prefers_native_training_runtime(config: &LowBitQuantizationConfig) -> bool {
+    !config
+        .target_modules
+        .iter()
+        .any(|module| matches!(module, LowBitTargetModule::DecoderX))
+}
+
+fn backend_name_prefers_inference_cached_scale(backend_name: &str) -> bool {
+    let normalized = backend_name.trim().to_ascii_lowercase();
+    normalized.contains("wgpu") || normalized.contains("burn_wgpu")
+}
+
 pub fn low_bit_kernel_capabilities<B: Backend>() -> LowBitKernelCapabilities {
     let _ = core::any::type_name::<B>();
     LowBitKernelCapabilities {
@@ -483,6 +540,7 @@ fn resolve_low_bit_kernel_plan_from_packed_static_ready(
         config.training_mode,
         crate::model::low_bit::LowBitTrainingMode::TrainKernelExp
     ) && capabilities.native_projection_supported
+        && config_prefers_native_training_runtime(config)
     {
         return LowBitKernelPlan {
             runtime: LowBitKernelRuntimeKind::PackedNativeTrainingForward,
@@ -511,6 +569,7 @@ pub fn resolve_low_bit_kernel_plan<B: Backend>(
             crate::model::low_bit::LowBitTrainingMode::TrainKernelExp
         )
         && capabilities.native_projection_supported
+        && config_prefers_native_training_runtime(config)
         && backend_name_prefers_training_low_bit_runtime(core::any::type_name::<B>())
     {
         return LowBitKernelPlan {
@@ -563,8 +622,11 @@ fn estimate_packed_tensor_bytes(elements: u64, numerator: u64, denominator: u64)
 fn rho_bytes_per_element(config: &crate::model::low_bit::LowBitRhoConfig) -> (u64, u64) {
     use crate::model::low_bit::{RhoCompressionConfig, RhoPrecisionConfig};
 
-    if matches!(config.compression, RhoCompressionConfig::Int8BlockExp) {
-        return (9, 8);
+    match config.compression {
+        RhoCompressionConfig::Int8BlockExp => return (9, 8),
+        RhoCompressionConfig::TernaryBlockExp => return (3, 8),
+        RhoCompressionConfig::BinaryBlockExp => return (1, 4),
+        _ => {}
     }
 
     match config.precision {
@@ -853,7 +915,108 @@ pub fn rho_compression_snapshot_passes_gate(
         && compression_ratio <= gate.max_compression_ratio
 }
 
-pub fn pack_rho_int8_block_state<B: Backend>(rho: &Tensor<B, 4>) -> PackedRhoInt8State {
+fn total_rho_elements(logical_shape: [usize; 4]) -> usize {
+    logical_shape.iter().product()
+}
+
+fn pack_rho_block_values(
+    values: &[f32],
+    compression: RhoCompressionConfig,
+) -> (PackedRhoBlockEncoding, Vec<f32>, Vec<u8>, Vec<f32>) {
+    let encoding = PackedRhoBlockEncoding::from_compression(compression)
+        .expect("rho block packing requires a block compression mode");
+    let mut packed = Vec::new();
+    let mut scales = Vec::with_capacity(values.len().div_ceil(RHO_BLOCK_SIZE));
+    let mut reconstructed = Vec::with_capacity(values.len());
+
+    for block in values.chunks(RHO_BLOCK_SIZE) {
+        match encoding {
+            PackedRhoBlockEncoding::Int8 => {
+                let max_abs = block.iter().map(|value| value.abs()).fold(0.0f32, f32::max);
+                let scale = (max_abs / 127.0).max(QUANT_EPSILON);
+                scales.push(scale);
+                for value in block {
+                    let quantized = (value / scale).round().clamp(-127.0, 127.0) as i8;
+                    packed.push(quantized as u8);
+                    reconstructed.push(quantized as f32 * scale);
+                }
+            }
+            PackedRhoBlockEncoding::Ternary2 => {
+                let quantized = quantize_ternary_absmean(block);
+                scales.push(quantized.scale);
+                reconstructed.extend(
+                    quantized
+                        .values
+                        .iter()
+                        .map(|value| *value as f32 * quantized.scale),
+                );
+                packed.extend(pack_ternary_2bit(&quantized.values).packed);
+            }
+            PackedRhoBlockEncoding::Binary1 => {
+                let quantized = quantize_binary_sign(block);
+                scales.push(quantized.scale);
+                reconstructed.extend(
+                    quantized
+                        .values
+                        .iter()
+                        .map(|value| *value as f32 * quantized.scale),
+                );
+                packed.extend(pack_binary_1bit(&quantized.values));
+            }
+        }
+    }
+
+    (encoding, scales, packed, reconstructed)
+}
+
+fn unpack_rho_block_values(packed_state: &PackedRhoBlockState) -> Vec<f32> {
+    let total_elements = total_rho_elements(packed_state.logical_shape);
+    let mut values = Vec::with_capacity(total_elements);
+    let mut packed_offset = 0usize;
+
+    for (block_index, scale) in packed_state.scales.iter().copied().enumerate() {
+        let remaining = total_elements.saturating_sub(block_index * packed_state.block_size);
+        if remaining == 0 {
+            break;
+        }
+        let block_len = remaining.min(packed_state.block_size);
+        match packed_state.encoding {
+            PackedRhoBlockEncoding::Int8 => {
+                let next_offset = packed_offset + block_len;
+                for value in &packed_state.packed[packed_offset..next_offset] {
+                    values.push((*value as i8) as f32 * scale);
+                }
+                packed_offset = next_offset;
+            }
+            PackedRhoBlockEncoding::Ternary2 => {
+                let byte_len = block_len.div_ceil(4);
+                let next_offset = packed_offset + byte_len;
+                let ternary = unpack_ternary_2bit(&PackedTernaryBuffer {
+                    packed: packed_state.packed[packed_offset..next_offset].to_vec(),
+                    len: block_len,
+                });
+                values.extend(ternary.into_iter().map(|value| value as f32 * scale));
+                packed_offset = next_offset;
+            }
+            PackedRhoBlockEncoding::Binary1 => {
+                let byte_len = block_len.div_ceil(8);
+                let next_offset = packed_offset + byte_len;
+                let binary =
+                    unpack_binary_1bit(&packed_state.packed[packed_offset..next_offset], block_len);
+                values.extend(binary.into_iter().map(|value| value as f32 * scale));
+                packed_offset = next_offset;
+            }
+        }
+    }
+
+    values
+}
+
+/// Pack rho into a host-side block-compressed representation using the requested encoding.
+pub fn pack_rho_block_state<B: Backend>(
+    rho: &Tensor<B, 4>,
+    compression: RhoCompressionConfig,
+) -> PackedRhoBlockState {
     let logical_shape = rho.shape().dims::<4>();
     let values = rho
         .clone()
@@ -861,28 +1024,16 @@ pub fn pack_rho_int8_block_state<B: Backend>(rho: &Tensor<B, 4>) -> PackedRhoInt
         .convert::<f32>()
         .into_vec::<f32>()
         .expect("rho values");
-    let mut packed = Vec::with_capacity(values.len());
-    let mut scales = Vec::with_capacity(values.len().div_ceil(RHO_INT8_BLOCK_SIZE));
-    let mut reconstructed = Vec::with_capacity(values.len());
-
-    for block in values.chunks(RHO_INT8_BLOCK_SIZE) {
-        let max_abs = block.iter().map(|value| value.abs()).fold(0.0f32, f32::max);
-        let scale = (max_abs / 127.0).max(QUANT_EPSILON);
-        scales.push(scale);
-        for value in block {
-            let quantized = (value / scale).round().clamp(-127.0, 127.0) as i8;
-            packed.push(quantized);
-            reconstructed.push(quantized as f32 * scale);
-        }
-    }
+    let (encoding, scales, packed, reconstructed) = pack_rho_block_values(&values, compression);
 
     let compressed_bytes =
         packed.len() as u64 + (scales.len() * core::mem::size_of::<f32>()) as u64;
     record_rho_compression_profile(&values, &reconstructed, compressed_bytes);
 
-    PackedRhoInt8State {
+    PackedRhoBlockState {
         logical_shape,
-        block_size: RHO_INT8_BLOCK_SIZE,
+        block_size: RHO_BLOCK_SIZE,
+        encoding,
         scales,
         packed,
     }
@@ -892,7 +1043,7 @@ pub fn pack_rho_int8_block_state_device<B: Backend>(
     rho: &Tensor<B, 4>,
 ) -> PackedRhoInt8DeviceState<B> {
     let logical_shape = rho.shape().dims::<4>();
-    let compressed = pack_rho_int8_block_device_reference(rho.clone(), RHO_INT8_BLOCK_SIZE);
+    let compressed = pack_rho_int8_block_device_reference(rho.clone(), RHO_BLOCK_SIZE);
     let packed_values = compressed
         .packed
         .clone()
@@ -911,7 +1062,7 @@ pub fn pack_rho_int8_block_state_device<B: Backend>(
         compressed.packed.clone(),
         compressed.scales.clone(),
         logical_shape,
-        RHO_INT8_BLOCK_SIZE,
+        RHO_BLOCK_SIZE,
     )
     .into_data()
     .convert::<f32>()
@@ -928,31 +1079,18 @@ pub fn pack_rho_int8_block_state_device<B: Backend>(
     record_rho_compression_profile(&original, &reconstructed, compressed_bytes);
     PackedRhoInt8DeviceState {
         logical_shape,
-        block_size: RHO_INT8_BLOCK_SIZE,
+        block_size: RHO_BLOCK_SIZE,
         scales: compressed.scales,
         packed: compressed.packed,
     }
 }
 
-pub fn unpack_rho_int8_block_state<B: Backend>(
-    packed_state: &PackedRhoInt8State,
+/// Unpack a host-side block-compressed rho state back into a dense tensor.
+pub fn unpack_rho_block_state<B: Backend>(
+    packed_state: &PackedRhoBlockState,
     device: &B::Device,
 ) -> Tensor<B, 4> {
-    let mut values = Vec::with_capacity(packed_state.packed.len());
-    for (block_index, block) in packed_state
-        .packed
-        .chunks(packed_state.block_size)
-        .enumerate()
-    {
-        let scale = packed_state
-            .scales
-            .get(block_index)
-            .copied()
-            .unwrap_or(QUANT_EPSILON);
-        for value in block {
-            values.push(*value as f32 * scale);
-        }
-    }
+    let values = unpack_rho_block_values(packed_state);
     Tensor::<B, 4>::from_data(TensorData::new(values, packed_state.logical_shape), device)
 }
 
@@ -1057,30 +1195,6 @@ impl ReferenceActivationBuffer {
             buffer,
         }
     }
-
-    fn into_device_codes<B: Backend, const D: usize>(
-        self,
-        shape: [usize; D],
-        device: &B::Device,
-    ) -> Option<(Tensor<B, D, Int>, f32)> {
-        match self {
-            Self::Float(_) => None,
-            Self::Signed { values, scale } => Some((
-                Tensor::<B, D, Int>::from_data(
-                    TensorData::new(values.into_iter().map(i64::from).collect::<Vec<_>>(), shape),
-                    device,
-                ),
-                scale,
-            )),
-            Self::UnsignedPositive { values, scale } => Some((
-                Tensor::<B, D, Int>::from_data(
-                    TensorData::new(values.into_iter().map(i64::from).collect::<Vec<_>>(), shape),
-                    device,
-                ),
-                scale,
-            )),
-        }
-    }
 }
 
 pub fn pack_saved_activation_state<B: Backend, const D: usize>(
@@ -1131,13 +1245,38 @@ fn quantize_activation_codes_tensor<B: Backend, const D: usize>(
     format: Option<LowBitActivationFormat>,
     scale_cache_key: Option<&ActivationScaleCacheKey>,
 ) -> Option<(Tensor<B, D, Int>, f32, bool)> {
-    let quant_format = format?;
-    let cached_scale = if low_bit_inference_cached_scale_enabled() {
+    let cached_scale = if low_bit_inference_cached_scale_enabled_for_backend::<B>() {
         scale_cache_key
             .and_then(|key| ACTIVATION_SCALE_CACHE.with(|cache| cache.borrow().get(key).copied()))
     } else {
         None
     };
+    quantize_activation_codes_tensor_with_cached_scale(
+        tensor,
+        format,
+        cached_scale,
+        |scale, quant_format| {
+            if low_bit_inference_cached_scale_enabled_for_backend::<B>() {
+                if let Some(key) = scale_cache_key {
+                    ACTIVATION_SCALE_CACHE.with(|cache| {
+                        cache
+                            .borrow_mut()
+                            .insert(key.clone(), scale.max(QUANT_EPSILON));
+                    });
+                }
+            }
+            let _ = quant_format;
+        },
+    )
+}
+
+fn quantize_activation_codes_tensor_with_cached_scale<B: Backend, const D: usize>(
+    tensor: &Tensor<B, D>,
+    format: Option<LowBitActivationFormat>,
+    cached_scale: Option<f32>,
+    mut store_scale: impl FnMut(f32, LowBitActivationFormat),
+) -> Option<(Tensor<B, D, Int>, f32, bool)> {
+    let quant_format = format?;
     match quant_format {
         LowBitActivationFormat::Fp16 => None,
         LowBitActivationFormat::Int8 | LowBitActivationFormat::Int4Exp => {
@@ -1158,13 +1297,7 @@ fn quantize_activation_codes_tensor<B: Backend, const D: usize>(
                     .into_scalar()
                     .elem::<f32>();
                 let scale = (dynamic_range / qmax).max(QUANT_EPSILON);
-                if low_bit_inference_cached_scale_enabled() {
-                    if let Some(key) = scale_cache_key {
-                        ACTIVATION_SCALE_CACHE.with(|cache| {
-                            cache.borrow_mut().insert(key.clone(), scale);
-                        });
-                    }
-                }
+                store_scale(scale, quant_format);
                 (scale, false)
             };
             let codes = round_nearest(tensor.clone().div_scalar(scale))
@@ -1187,13 +1320,7 @@ fn quantize_activation_codes_tensor<B: Backend, const D: usize>(
                     .into_scalar()
                     .elem::<f32>();
                 let scale = (dynamic_range / qmax).max(QUANT_EPSILON);
-                if low_bit_inference_cached_scale_enabled() {
-                    if let Some(key) = scale_cache_key {
-                        ACTIVATION_SCALE_CACHE.with(|cache| {
-                            cache.borrow_mut().insert(key.clone(), scale);
-                        });
-                    }
-                }
+                store_scale(scale, quant_format);
                 (scale, false)
             };
             let codes = round_nearest(clamped.div_scalar(scale))
@@ -1205,10 +1332,68 @@ fn quantize_activation_codes_tensor<B: Backend, const D: usize>(
     }
 }
 
-fn quantize_activation_codes_tensor_device_scale_4d<B: Backend>(
+fn training_activation_scale_cache_key<B: Backend>(
+    kind: &'static str,
+    format: LowBitActivationFormat,
+    shape: [usize; 4],
+) -> TrainingActivationScaleCacheKey {
+    TrainingActivationScaleCacheKey {
+        backend_name: std::any::type_name::<B>(),
+        kind,
+        format,
+        shape,
+    }
+}
+
+fn training_weight_scale_cache_key<B: Backend, const D: usize>(
+    kind: &'static str,
+    format: LowBitWeightFormat,
+    shape: [usize; D],
+) -> TrainingWeightScaleCacheKey {
+    TrainingWeightScaleCacheKey {
+        backend_name: std::any::type_name::<B>(),
+        kind,
+        format,
+        shape: shape.into_iter().collect(),
+    }
+}
+
+fn quantize_training_activation_codes_tensor_4d<B: Backend>(
     tensor: &Tensor<B, 4>,
     format: Option<LowBitActivationFormat>,
-) -> Option<(Tensor<B, 4, Int>, Tensor<B, 1>)> {
+    cache_kind: Option<&'static str>,
+) -> Option<(Tensor<B, 4, Int>, f32, bool)> {
+    let quant_format = format?;
+    let cache_key = if low_bit_training_cached_scale_enabled() {
+        cache_kind.map(|kind| {
+            training_activation_scale_cache_key::<B>(kind, quant_format, tensor.shape().dims::<4>())
+        })
+    } else {
+        None
+    };
+    let cached_scale = cache_key.as_ref().and_then(|key| {
+        TRAINING_ACTIVATION_SCALE_CACHE.with(|cache| cache.borrow().get(key).copied())
+    });
+    quantize_activation_codes_tensor_with_cached_scale(
+        tensor,
+        Some(quant_format),
+        cached_scale,
+        |scale, _| {
+            if let Some(key) = cache_key.as_ref() {
+                TRAINING_ACTIVATION_SCALE_CACHE.with(|cache| {
+                    cache
+                        .borrow_mut()
+                        .insert(key.clone(), scale.max(QUANT_EPSILON));
+                });
+            }
+        },
+    )
+}
+
+fn activation_scale_tensor_device_4d<B: Backend>(
+    tensor: &Tensor<B, 4>,
+    format: Option<LowBitActivationFormat>,
+) -> Option<(LowBitActivationFormat, Tensor<B, 1>)> {
     let quant_format = format?;
     match quant_format {
         LowBitActivationFormat::Fp16 => None,
@@ -1225,11 +1410,7 @@ fn quantize_activation_codes_tensor_device_scale_4d<B: Backend>(
                 .mul_scalar(2.0 / qmax)
                 .clamp_min(QUANT_EPSILON)
                 .reshape([1]);
-            let codes = round_nearest(tensor.clone().div(scale.clone().reshape([1, 1, 1, 1])))
-                .clamp_min(-qmax)
-                .clamp_max(qmax)
-                .int();
-            Some((codes, scale))
+            Some((quant_format, scale))
         }
         LowBitActivationFormat::Uint8PosExp => {
             let qmax = 255.0;
@@ -1240,13 +1421,114 @@ fn quantize_activation_codes_tensor_device_scale_4d<B: Backend>(
                 .mul_scalar(2.0 / qmax)
                 .clamp_min(QUANT_EPSILON)
                 .reshape([1]);
-            let codes = round_nearest(clamped.div(scale.clone().reshape([1, 1, 1, 1])))
-                .clamp_min(0.0)
-                .clamp_max(qmax)
-                .int();
-            Some((codes, scale))
+            Some((quant_format, scale))
         }
     }
+}
+
+fn quantize_activation_codes_tensor_device_scale_4d<B: Backend>(
+    tensor: &Tensor<B, 4>,
+    format: Option<LowBitActivationFormat>,
+) -> Option<(Tensor<B, 4, Int>, Tensor<B, 1>)> {
+    let (quant_format, scale) = activation_scale_tensor_device_4d(tensor, format)?;
+    let wgpu_codes = match quant_format {
+        LowBitActivationFormat::Int8 => {
+            try_wgpu_quantize_activation_codes_i32(tensor, &scale, 127, false)
+        }
+        LowBitActivationFormat::Int4Exp => {
+            try_wgpu_quantize_activation_codes_i32(tensor, &scale, 7, false)
+        }
+        LowBitActivationFormat::Uint8PosExp => {
+            try_wgpu_quantize_activation_codes_i32(tensor, &scale, 255, true)
+        }
+        LowBitActivationFormat::Fp16 => None,
+    };
+    if let Some(codes) = wgpu_codes {
+        return Some((codes, scale));
+    }
+    let codes = match quant_format {
+        LowBitActivationFormat::Int8 => {
+            round_nearest(tensor.clone().div(scale.clone().reshape([1, 1, 1, 1])))
+                .clamp_min(-127.0)
+                .clamp_max(127.0)
+                .int()
+        }
+        LowBitActivationFormat::Int4Exp => {
+            round_nearest(tensor.clone().div(scale.clone().reshape([1, 1, 1, 1])))
+                .clamp_min(-7.0)
+                .clamp_max(7.0)
+                .int()
+        }
+        LowBitActivationFormat::Uint8PosExp => round_nearest(
+            tensor
+                .clone()
+                .clamp_min(0.0)
+                .div(scale.clone().reshape([1, 1, 1, 1])),
+        )
+        .clamp_min(0.0)
+        .clamp_max(255.0)
+        .int(),
+        LowBitActivationFormat::Fp16 => return None,
+    };
+    Some((codes, scale))
+}
+
+fn activation_scale_tensor_cached_device_4d<B: Backend>(
+    tensor: &Tensor<B, 4>,
+    format: Option<LowBitActivationFormat>,
+    scale_cache_key: Option<&ActivationScaleCacheKey>,
+) -> Option<(LowBitActivationFormat, Tensor<B, 1>, bool)> {
+    let quant_format = format?;
+    if matches!(
+        quant_format,
+        LowBitActivationFormat::Fp16 | LowBitActivationFormat::Uint8PosExp
+    ) {
+        return None;
+    }
+    let cached_scale = if low_bit_inference_cached_scale_enabled_for_backend::<B>() {
+        scale_cache_key
+            .and_then(|key| ACTIVATION_SCALE_CACHE.with(|cache| cache.borrow().get(key).copied()))
+    } else {
+        None
+    };
+    if let Some(scale) = cached_scale {
+        return Some((
+            quant_format,
+            Tensor::<B, 1>::from_data(
+                TensorData::new(vec![scale.max(QUANT_EPSILON)], [1]),
+                &tensor.device(),
+            ),
+            true,
+        ));
+    }
+
+    let (_, scale) = activation_scale_tensor_device_4d(tensor, Some(quant_format))?;
+    if low_bit_inference_cached_scale_enabled_for_backend::<B>() {
+        if let Some(key) = scale_cache_key {
+            let scale_value = scale.clone().into_scalar().elem::<f32>().max(QUANT_EPSILON);
+            ACTIVATION_SCALE_CACHE.with(|cache| {
+                cache.borrow_mut().insert(key.clone(), scale_value);
+            });
+        }
+    }
+    Some((quant_format, scale, false))
+}
+
+fn quantize_activation_packed_codes_tensor_device_scale_4d<B: Backend>(
+    tensor: &Tensor<B, 4>,
+    format: Option<LowBitActivationFormat>,
+    scale_cache_key: Option<&ActivationScaleCacheKey>,
+) -> Option<(Tensor<B, 4, Int>, Tensor<B, 1>, bool)> {
+    let (quant_format, scale, used_cached_scale) =
+        activation_scale_tensor_cached_device_4d(tensor, format, scale_cache_key)?;
+    let (qmax, positive_only) = match quant_format {
+        LowBitActivationFormat::Int8 => (127, false),
+        LowBitActivationFormat::Int4Exp => (7, false),
+        LowBitActivationFormat::Fp16 | LowBitActivationFormat::Uint8PosExp => return None,
+    };
+    let packed = try_raw_cuda_quantize_pack_activation_i8x4(tensor, &scale, qmax, positive_only)
+        .or_else(|| try_wgpu_quantize_pack_activation_i8x4(tensor, &scale, qmax, positive_only))?;
+    Some((packed, scale, used_cached_scale))
 }
 
 fn quantize_activation_packed_codes_tensor_4d<B: Backend>(
@@ -1537,34 +1819,65 @@ fn logical_shape_2d(artifact: &PackedWeightArtifact, context: &str) -> [usize; 2
 fn weight_codes_tensor_from_float_values<B: Backend, const D: usize>(
     tensor: &Tensor<B, D>,
     format: LowBitWeightFormat,
-) -> Option<(Tensor<B, D, Int>, f32)> {
+    cache_kind: Option<&'static str>,
+) -> Option<(Tensor<B, D, Int>, f32, bool)> {
+    let cache_key = if low_bit_training_cached_scale_enabled() {
+        cache_kind.map(|kind| {
+            training_weight_scale_cache_key::<B, D>(kind, format, tensor.shape().dims())
+        })
+    } else {
+        None
+    };
+    let cached_scale = cache_key
+        .as_ref()
+        .and_then(|key| TRAINING_WEIGHT_SCALE_CACHE.with(|cache| cache.borrow().get(key).copied()));
     match format {
         LowBitWeightFormat::Fp16 => None,
         LowBitWeightFormat::Int8 => {
             let qmax = 127.0;
-            let dynamic_range = tensor
-                .clone()
-                .abs()
-                .mean()
-                .mul_scalar(2.0)
-                .clamp_min(QUANT_EPSILON)
-                .into_scalar()
-                .elem::<f32>();
-            let scale = (dynamic_range / qmax).max(QUANT_EPSILON);
+            let (scale, used_cached_scale) = if let Some(scale) = cached_scale {
+                (scale.max(QUANT_EPSILON), true)
+            } else {
+                let dynamic_range = tensor
+                    .clone()
+                    .abs()
+                    .mean()
+                    .mul_scalar(2.0)
+                    .clamp_min(QUANT_EPSILON)
+                    .into_scalar()
+                    .elem::<f32>();
+                let scale = (dynamic_range / qmax).max(QUANT_EPSILON);
+                if let Some(key) = cache_key.as_ref() {
+                    TRAINING_WEIGHT_SCALE_CACHE.with(|cache| {
+                        cache.borrow_mut().insert(key.clone(), scale);
+                    });
+                }
+                (scale, false)
+            };
             let codes = round_nearest(tensor.clone().div_scalar(scale))
                 .clamp_min(-qmax)
                 .clamp_max(qmax)
                 .int();
-            Some((codes, scale))
+            Some((codes, scale, used_cached_scale))
         }
         LowBitWeightFormat::Sign1 => {
-            let scale = tensor
-                .clone()
-                .abs()
-                .mean()
-                .clamp_min(QUANT_EPSILON)
-                .into_scalar()
-                .elem::<f32>();
+            let (scale, used_cached_scale) = if let Some(scale) = cached_scale {
+                (scale.max(QUANT_EPSILON), true)
+            } else {
+                let scale = tensor
+                    .clone()
+                    .abs()
+                    .mean()
+                    .clamp_min(QUANT_EPSILON)
+                    .into_scalar()
+                    .elem::<f32>();
+                if let Some(key) = cache_key.as_ref() {
+                    TRAINING_WEIGHT_SCALE_CACHE.with(|cache| {
+                        cache.borrow_mut().insert(key.clone(), scale);
+                    });
+                }
+                (scale, false)
+            };
             let codes = tensor
                 .clone()
                 .greater_equal_elem(0.0)
@@ -1572,20 +1885,125 @@ fn weight_codes_tensor_from_float_values<B: Backend, const D: usize>(
                 .mul_scalar(2.0)
                 .sub_scalar(1.0)
                 .int();
-            Some((codes, scale))
+            Some((codes, scale, used_cached_scale))
         }
         LowBitWeightFormat::Ternary158 | LowBitWeightFormat::Packed2 => {
-            let scale = tensor
+            let (scale, used_cached_scale) = if let Some(scale) = cached_scale {
+                (scale.max(QUANT_EPSILON), true)
+            } else {
+                let scale = tensor
+                    .clone()
+                    .abs()
+                    .mean()
+                    .clamp_min(QUANT_EPSILON)
+                    .into_scalar()
+                    .elem::<f32>();
+                if let Some(key) = cache_key.as_ref() {
+                    TRAINING_WEIGHT_SCALE_CACHE.with(|cache| {
+                        cache.borrow_mut().insert(key.clone(), scale);
+                    });
+                }
+                (scale, false)
+            };
+            let active = tensor.clone().abs().greater_equal_elem(scale).float();
+            let sign = tensor
                 .clone()
-                .abs()
-                .mean()
-                .clamp_min(QUANT_EPSILON)
-                .into_scalar()
-                .elem::<f32>();
+                .greater_equal_elem(0.0)
+                .float()
+                .mul_scalar(2.0)
+                .sub_scalar(1.0);
+            Some((sign.mul(active).int(), scale, used_cached_scale))
+        }
+    }
+}
+
+fn weight_codes_tensor_device_scale_from_float_values<B: Backend, const D: usize>(
+    tensor: &Tensor<B, D>,
+    format: LowBitWeightFormat,
+    cache_kind: Option<&'static str>,
+) -> Option<(Tensor<B, D, Int>, Tensor<B, 1>, bool)> {
+    let cache_key = if low_bit_training_cached_scale_enabled() {
+        cache_kind.map(|kind| {
+            training_weight_scale_cache_key::<B, D>(kind, format, tensor.shape().dims())
+        })
+    } else {
+        None
+    };
+    let cached_scale = cache_key
+        .as_ref()
+        .and_then(|key| TRAINING_WEIGHT_SCALE_CACHE.with(|cache| cache.borrow().get(key).copied()));
+    match format {
+        LowBitWeightFormat::Fp16 => None,
+        LowBitWeightFormat::Int8 => {
+            let qmax = 127.0;
+            let (scale, used_cached_scale) = if let Some(scale) = cached_scale {
+                (
+                    Tensor::<B, 1>::from_data(
+                        TensorData::new(vec![scale.max(QUANT_EPSILON)], [1]),
+                        &tensor.device(),
+                    ),
+                    true,
+                )
+            } else {
+                (
+                    tensor
+                        .clone()
+                        .abs()
+                        .mean()
+                        .mul_scalar(2.0 / qmax)
+                        .clamp_min(QUANT_EPSILON)
+                        .reshape([1]),
+                    false,
+                )
+            };
+            let codes = round_nearest(tensor.clone().div(scale.clone().reshape([1; D])))
+                .clamp_min(-qmax)
+                .clamp_max(qmax)
+                .int();
+            Some((codes, scale, used_cached_scale))
+        }
+        LowBitWeightFormat::Sign1 => {
+            let scale = if let Some(scale) = cached_scale {
+                Tensor::<B, 1>::from_data(
+                    TensorData::new(vec![scale.max(QUANT_EPSILON)], [1]),
+                    &tensor.device(),
+                )
+            } else {
+                tensor
+                    .clone()
+                    .abs()
+                    .mean()
+                    .clamp_min(QUANT_EPSILON)
+                    .reshape([1])
+            };
+            let codes = tensor
+                .clone()
+                .greater_equal_elem(0.0)
+                .float()
+                .mul_scalar(2.0)
+                .sub_scalar(1.0)
+                .int();
+            Some((codes, scale, cached_scale.is_some()))
+        }
+        LowBitWeightFormat::Ternary158 | LowBitWeightFormat::Packed2 => {
+            let scale = if let Some(scale) = cached_scale {
+                Tensor::<B, 1>::from_data(
+                    TensorData::new(vec![scale.max(QUANT_EPSILON)], [1]),
+                    &tensor.device(),
+                )
+            } else {
+                tensor
+                    .clone()
+                    .abs()
+                    .mean()
+                    .clamp_min(QUANT_EPSILON)
+                    .reshape([1])
+            };
             let active = tensor
                 .clone()
                 .abs()
-                .greater_equal_elem(scale)
+                .div(scale.clone().reshape([1; D]))
+                .greater_equal_elem(1.0)
                 .float();
             let sign = tensor
                 .clone()
@@ -1593,7 +2011,7 @@ fn weight_codes_tensor_from_float_values<B: Backend, const D: usize>(
                 .float()
                 .mul_scalar(2.0)
                 .sub_scalar(1.0);
-            Some((sign.mul(active).int(), scale))
+            Some((sign.mul(active).int(), scale, cached_scale.is_some()))
         }
     }
 }
@@ -1641,6 +2059,32 @@ thread_local! {
         RefCell::new(HashMap::new());
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct TrainingActivationScaleCacheKey {
+    backend_name: &'static str,
+    kind: &'static str,
+    format: LowBitActivationFormat,
+    shape: [usize; 4],
+}
+
+thread_local! {
+    static TRAINING_ACTIVATION_SCALE_CACHE: RefCell<HashMap<TrainingActivationScaleCacheKey, f32>> =
+        RefCell::new(HashMap::new());
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct TrainingWeightScaleCacheKey {
+    backend_name: &'static str,
+    kind: &'static str,
+    format: LowBitWeightFormat,
+    shape: Vec<usize>,
+}
+
+thread_local! {
+    static TRAINING_WEIGHT_SCALE_CACHE: RefCell<HashMap<TrainingWeightScaleCacheKey, f32>> =
+        RefCell::new(HashMap::new());
+}
+
 static LOW_BIT_NATIVE_PROJECTION_PROFILE_ENABLED: OnceLock<bool> = OnceLock::new();
 static LOW_BIT_NATIVE_LOWRANK_PROFILE: OnceLock<Mutex<LowBitNativeProjectionProfileSnapshot>> =
     OnceLock::new();
@@ -1651,7 +2095,9 @@ static LOW_BIT_TRAINING_PROJECTION_MEMORY_PROFILE_SYNC_ENABLED: OnceLock<bool> =
 static LOW_BIT_TRAINING_LOWRANK_MEMORY_PROFILE: OnceLock<
     Mutex<LowBitTrainingProjectionMemoryProfileSnapshot>,
 > = OnceLock::new();
-static LOW_BIT_INFERENCE_CACHED_SCALE_ENABLED: OnceLock<bool> = OnceLock::new();
+static LOW_BIT_TRAINING_QUANTIZE_PROFILE: OnceLock<Mutex<LowBitTrainingQuantizeProfileSnapshot>> =
+    OnceLock::new();
+static LOW_BIT_TRAINING_CACHED_SCALE_ENABLED: OnceLock<bool> = OnceLock::new();
 
 fn low_bit_native_projection_profile_enabled() -> bool {
     *LOW_BIT_NATIVE_PROJECTION_PROFILE_ENABLED
@@ -1668,9 +2114,20 @@ fn low_bit_training_projection_memory_profile_sync_enabled() -> bool {
         .get_or_init(|| std::env::var_os("BDH_STAGE_PROFILE_MEMORY_SYNC").is_some())
 }
 
-fn low_bit_inference_cached_scale_enabled() -> bool {
-    *LOW_BIT_INFERENCE_CACHED_SCALE_ENABLED
-        .get_or_init(|| std::env::var_os("BURN_DRAGON_LOWBIT_INFERENCE_CACHED_SCALE").is_some())
+fn low_bit_inference_cached_scale_enabled_for_backend<B: Backend>() -> bool {
+    if std::env::var_os("BURN_DRAGON_LOWBIT_INFERENCE_DYNAMIC_SCALE_ONLY").is_some() {
+        return false;
+    }
+    if std::env::var_os("BURN_DRAGON_LOWBIT_INFERENCE_CACHED_SCALE").is_some() {
+        return true;
+    }
+    backend_name_prefers_inference_cached_scale(core::any::type_name::<B>())
+}
+
+fn low_bit_training_cached_scale_enabled() -> bool {
+    *LOW_BIT_TRAINING_CACHED_SCALE_ENABLED.get_or_init(|| {
+        std::env::var_os("BURN_DRAGON_LOWBIT_TRAINING_DYNAMIC_SCALE_ONLY").is_none()
+    })
 }
 
 fn low_bit_native_lowrank_profile_state() -> &'static Mutex<LowBitNativeProjectionProfileSnapshot> {
@@ -1690,6 +2147,12 @@ fn low_bit_training_lowrank_memory_profile_state()
         .get_or_init(|| Mutex::new(LowBitTrainingProjectionMemoryProfileSnapshot::default()))
 }
 
+fn low_bit_training_quantize_profile_state() -> &'static Mutex<LowBitTrainingQuantizeProfileSnapshot>
+{
+    LOW_BIT_TRAINING_QUANTIZE_PROFILE
+        .get_or_init(|| Mutex::new(LowBitTrainingQuantizeProfileSnapshot::default()))
+}
+
 pub fn low_bit_native_projection_profile_reset() {
     if let Ok(mut state) = low_bit_native_lowrank_profile_state().lock() {
         *state = LowBitNativeProjectionProfileSnapshot::default();
@@ -1699,6 +2162,9 @@ pub fn low_bit_native_projection_profile_reset() {
     }
     if let Ok(mut state) = low_bit_training_lowrank_memory_profile_state().lock() {
         *state = LowBitTrainingProjectionMemoryProfileSnapshot::default();
+    }
+    if let Ok(mut state) = low_bit_training_quantize_profile_state().lock() {
+        *state = LowBitTrainingQuantizeProfileSnapshot::default();
     }
 }
 
@@ -1716,9 +2182,16 @@ pub fn low_bit_native_decoder_tail_profile_snapshot() -> LowBitNativeProjectionP
         .unwrap_or_default()
 }
 
-pub fn low_bit_training_lowrank_memory_profile_snapshot(
-) -> LowBitTrainingProjectionMemoryProfileSnapshot {
+pub fn low_bit_training_lowrank_memory_profile_snapshot()
+-> LowBitTrainingProjectionMemoryProfileSnapshot {
     low_bit_training_lowrank_memory_profile_state()
+        .lock()
+        .map(|state| *state)
+        .unwrap_or_default()
+}
+
+pub fn low_bit_training_quantize_profile_snapshot() -> LowBitTrainingQuantizeProfileSnapshot {
+    low_bit_training_quantize_profile_state()
         .lock()
         .map(|state| *state)
         .unwrap_or_default()
@@ -1748,7 +2221,8 @@ where
 }
 
 fn tensor_bytes<const D: usize>(shape: [usize; D], element_bytes: u64) -> u64 {
-    shape.into_iter()
+    shape
+        .into_iter()
         .fold(1u64, |acc, dim| acc.saturating_mul(dim as u64))
         .saturating_mul(element_bytes)
 }
@@ -1763,7 +2237,8 @@ fn record_low_bit_training_lowrank_memory_stage<B: Backend>(
     if !low_bit_training_projection_memory_profile_enabled() {
         return;
     }
-    let Some((reserved_bytes, in_use_bytes)) = low_bit_training_projection_memory_usage::<B>(device)
+    let Some((reserved_bytes, in_use_bytes)) =
+        low_bit_training_projection_memory_usage::<B>(device)
     else {
         return;
     };
@@ -1782,6 +2257,32 @@ fn record_low_bit_training_lowrank_memory_stage<B: Backend>(
         };
         if slot.should_replace(observed) {
             *slot = observed;
+        }
+    }
+}
+
+fn record_low_bit_training_quantize_profile(stage: &'static str, elapsed_ns: u128) {
+    if !low_bit_native_projection_profile_enabled() {
+        return;
+    }
+    if let Ok(mut profile) = low_bit_training_quantize_profile_state().lock() {
+        match stage {
+            "lowrank_direct" => {
+                profile.lowrank_direct_calls = profile.lowrank_direct_calls.saturating_add(1);
+                profile.lowrank_direct_total_ns =
+                    profile.lowrank_direct_total_ns.saturating_add(elapsed_ns);
+            }
+            "lowrank_fallback" => {
+                profile.lowrank_fallback_calls = profile.lowrank_fallback_calls.saturating_add(1);
+                profile.lowrank_fallback_total_ns =
+                    profile.lowrank_fallback_total_ns.saturating_add(elapsed_ns);
+            }
+            "decoder_tail" => {
+                profile.decoder_tail_calls = profile.decoder_tail_calls.saturating_add(1);
+                profile.decoder_tail_total_ns =
+                    profile.decoder_tail_total_ns.saturating_add(elapsed_ns);
+            }
+            _ => {}
         }
     }
 }
@@ -2070,8 +2571,6 @@ where
             latent_per_head,
             device,
         ),
-        heads,
-        latent_per_head,
     })
 }
 
@@ -2088,23 +2587,36 @@ pub(crate) fn packed_lowrank_projection_native_cached<B: Backend>(
     let mut fused_ns = 0;
     let mut reference_ns = 0;
     let mut used_cached_scale = false;
-    let quantize_start = profile_enabled.then(Instant::now);
-    if let Some((input_codes, activation_scale)) =
-        quantize_activation_codes_tensor_device_scale_4d(&input, activation_format)
+    let scale_cache_key = activation_format
+        .filter(|format| !matches!(format, LowBitActivationFormat::Fp16))
+        .map(|format| {
+            activation_scale_cache_key::<B>(&cache.artifact, &input.device(), "lowrank", format)
+        });
+    let fused_start = profile_enabled.then(Instant::now);
+    if let Some((quant_format, activation_scale, cached_scale_hit)) =
+        activation_scale_tensor_cached_device_4d(
+            &input,
+            activation_format,
+            scale_cache_key.as_ref(),
+        )
     {
-        if let Some(start) = quantize_start {
-            quantize_ns = start.elapsed().as_nanos();
-        }
-        let raw_start = profile_enabled.then(Instant::now);
-        if let Some(raw_cuda) = try_raw_cuda_packed_lowrank_projection_device_scale(
-            &input_codes,
+        let (qmax, positive_only) = match quant_format {
+            LowBitActivationFormat::Int8 => (127, false),
+            LowBitActivationFormat::Int4Exp => (7, false),
+            LowBitActivationFormat::Fp16 | LowBitActivationFormat::Uint8PosExp => (0, false),
+        };
+        used_cached_scale = cached_scale_hit;
+        if let Some(fused) = try_wgpu_packed_dot_lowrank_projection_from_f32_device_scale(
+            &input,
             &cache.packed_weight,
             &activation_scale,
             cache.artifact.scale.max(QUANT_EPSILON),
             cache.latent_out,
+            qmax,
+            positive_only,
         ) {
-            if let Some(start) = raw_start {
-                raw_cuda_ns = start.elapsed().as_nanos();
+            if let Some(start) = fused_start {
+                fused_ns = start.elapsed().as_nanos();
             }
             if let Some(start) = total_start {
                 record_low_bit_native_projection_profile(
@@ -2118,19 +2630,150 @@ pub(crate) fn packed_lowrank_projection_native_cached<B: Backend>(
                     used_cached_scale,
                 );
             }
-            return raw_cuda;
+            return fused;
         }
-        if let Some(start) = raw_start {
-            raw_cuda_ns = start.elapsed().as_nanos();
+    }
+    let skip_wgpu_prepacked_lowrank =
+        matches!(cached_wgpu_packed_dot_lowrank_support(&input), Some(false));
+    let quantize_start = profile_enabled.then(Instant::now);
+    if !skip_wgpu_prepacked_lowrank {
+        if let Some((input_packed, activation_scale, cached_scale_hit)) =
+            quantize_activation_packed_codes_tensor_device_scale_4d(
+                &input,
+                activation_format,
+                scale_cache_key.as_ref(),
+            )
+        {
+            used_cached_scale = cached_scale_hit;
+            if let Some(start) = quantize_start {
+                prepacked_quantize_ns = start.elapsed().as_nanos();
+            }
+            let raw_start = profile_enabled.then(Instant::now);
+            if let Some(raw_cuda) =
+                try_raw_cuda_packed_lowrank_projection_prepacked_input_device_scale(
+                    &input_packed,
+                    &cache.packed_weight,
+                    &activation_scale,
+                    cache.artifact.scale.max(QUANT_EPSILON),
+                    cache.latent_out,
+                )
+            {
+                if let Some(start) = raw_start {
+                    raw_cuda_ns = start.elapsed().as_nanos();
+                }
+                if let Some(start) = total_start {
+                    record_low_bit_native_projection_profile(
+                        "lowrank",
+                        start.elapsed().as_nanos(),
+                        quantize_ns,
+                        prepacked_quantize_ns,
+                        raw_cuda_ns,
+                        fused_ns,
+                        reference_ns,
+                        used_cached_scale,
+                    );
+                }
+                return raw_cuda;
+            }
+            if let Some(start) = raw_start {
+                raw_cuda_ns = start.elapsed().as_nanos();
+            }
+            let fused_start = profile_enabled.then(Instant::now);
+            if let Some(fused) = try_wgpu_packed_dot_lowrank_projection_prepacked_input_device_scale(
+                &input_packed,
+                &cache.packed_weight,
+                &activation_scale,
+                cache.artifact.scale.max(QUANT_EPSILON),
+                cache.latent_out,
+            ) {
+                if let Some(start) = fused_start {
+                    fused_ns = start.elapsed().as_nanos();
+                }
+                if let Some(start) = total_start {
+                    record_low_bit_native_projection_profile(
+                        "lowrank",
+                        start.elapsed().as_nanos(),
+                        quantize_ns,
+                        prepacked_quantize_ns,
+                        raw_cuda_ns,
+                        fused_ns,
+                        reference_ns,
+                        used_cached_scale,
+                    );
+                }
+                return fused;
+            }
+            if let Some(start) = fused_start {
+                fused_ns = start.elapsed().as_nanos();
+            }
+        }
+        let quantize_start = profile_enabled.then(Instant::now);
+        if let Some((input_codes, activation_scale)) =
+            quantize_activation_codes_tensor_device_scale_4d(&input, activation_format)
+        {
+            if let Some(start) = quantize_start {
+                quantize_ns = start.elapsed().as_nanos();
+            }
+            let raw_start = profile_enabled.then(Instant::now);
+            if let Some(raw_cuda) = try_raw_cuda_packed_lowrank_projection_device_scale(
+                &input_codes,
+                &cache.packed_weight,
+                &activation_scale,
+                cache.artifact.scale.max(QUANT_EPSILON),
+                cache.latent_out,
+            ) {
+                if let Some(start) = raw_start {
+                    raw_cuda_ns = start.elapsed().as_nanos();
+                }
+                if let Some(start) = total_start {
+                    record_low_bit_native_projection_profile(
+                        "lowrank",
+                        start.elapsed().as_nanos(),
+                        quantize_ns,
+                        prepacked_quantize_ns,
+                        raw_cuda_ns,
+                        fused_ns,
+                        reference_ns,
+                        used_cached_scale,
+                    );
+                }
+                return raw_cuda;
+            }
+            if let Some(start) = raw_start {
+                raw_cuda_ns = start.elapsed().as_nanos();
+            }
+            let fused_start = profile_enabled.then(Instant::now);
+            if let Some(fused) = try_wgpu_packed_dot_lowrank_projection_device_scale(
+                &input_codes,
+                &cache.packed_weight,
+                &activation_scale,
+                cache.artifact.scale.max(QUANT_EPSILON),
+                cache.latent_out,
+            ) {
+                if let Some(start) = fused_start {
+                    fused_ns = start.elapsed().as_nanos();
+                }
+                if let Some(start) = total_start {
+                    record_low_bit_native_projection_profile(
+                        "lowrank",
+                        start.elapsed().as_nanos(),
+                        quantize_ns,
+                        prepacked_quantize_ns,
+                        raw_cuda_ns,
+                        fused_ns,
+                        reference_ns,
+                        used_cached_scale,
+                    );
+                }
+                return fused;
+            }
+            if let Some(start) = fused_start {
+                fused_ns = start.elapsed().as_nanos();
+            }
         }
     } else if let Some(start) = quantize_start {
         quantize_ns = start.elapsed().as_nanos();
     }
-    let scale_cache_key = activation_format
-        .filter(|format| !matches!(format, LowBitActivationFormat::Fp16))
-        .map(|format| {
-            activation_scale_cache_key::<B>(&cache.artifact, &input.device(), "lowrank", format)
-        });
     let quantize_start = profile_enabled.then(Instant::now);
     if let Some((input_codes, activation_scale, cached_scale_hit)) =
         quantize_activation_codes_tensor(&input, activation_format, scale_cache_key.as_ref())
@@ -2198,45 +2841,47 @@ pub(crate) fn packed_lowrank_projection_native_cached<B: Backend>(
     } else if let Some(start) = quantize_start {
         quantize_ns = start.elapsed().as_nanos();
     }
-    let prepacked_start = profile_enabled.then(Instant::now);
-    if let Some((input_packed, activation_scale)) =
-        quantize_activation_packed_codes_tensor_4d(&input, activation_format, |codes, shape| {
-            pack_lowrank_input_codes_i8x4(codes, shape[0], shape[1], shape[2], shape[3])
-        })
-    {
-        if let Some(start) = prepacked_start {
-            prepacked_quantize_ns = start.elapsed().as_nanos();
-        }
-        let raw_start = profile_enabled.then(Instant::now);
-        if let Some(raw_cuda) = try_raw_cuda_packed_lowrank_projection_prepacked_input(
-            &input_packed,
-            &cache.packed_weight,
-            activation_scale,
-            cache.artifact.scale.max(QUANT_EPSILON),
-            cache.latent_out,
-        ) {
+    if !skip_wgpu_prepacked_lowrank {
+        let prepacked_start = profile_enabled.then(Instant::now);
+        if let Some((input_packed, activation_scale)) =
+            quantize_activation_packed_codes_tensor_4d(&input, activation_format, |codes, shape| {
+                pack_lowrank_input_codes_i8x4(codes, shape[0], shape[1], shape[2], shape[3])
+            })
+        {
+            if let Some(start) = prepacked_start {
+                prepacked_quantize_ns = start.elapsed().as_nanos();
+            }
+            let raw_start = profile_enabled.then(Instant::now);
+            if let Some(raw_cuda) = try_raw_cuda_packed_lowrank_projection_prepacked_input(
+                &input_packed,
+                &cache.packed_weight,
+                activation_scale,
+                cache.artifact.scale.max(QUANT_EPSILON),
+                cache.latent_out,
+            ) {
+                if let Some(start) = raw_start {
+                    raw_cuda_ns = raw_cuda_ns.saturating_add(start.elapsed().as_nanos());
+                }
+                if let Some(start) = total_start {
+                    record_low_bit_native_projection_profile(
+                        "lowrank",
+                        start.elapsed().as_nanos(),
+                        quantize_ns,
+                        prepacked_quantize_ns,
+                        raw_cuda_ns,
+                        fused_ns,
+                        reference_ns,
+                        used_cached_scale,
+                    );
+                }
+                return raw_cuda;
+            }
             if let Some(start) = raw_start {
                 raw_cuda_ns = raw_cuda_ns.saturating_add(start.elapsed().as_nanos());
             }
-            if let Some(start) = total_start {
-                record_low_bit_native_projection_profile(
-                    "lowrank",
-                    start.elapsed().as_nanos(),
-                    quantize_ns,
-                    prepacked_quantize_ns,
-                    raw_cuda_ns,
-                    fused_ns,
-                    reference_ns,
-                    used_cached_scale,
-                );
-            }
-            return raw_cuda;
+        } else if let Some(start) = prepacked_start {
+            prepacked_quantize_ns = start.elapsed().as_nanos();
         }
-        if let Some(start) = raw_start {
-            raw_cuda_ns = raw_cuda_ns.saturating_add(start.elapsed().as_nanos());
-        }
-    } else if let Some(start) = prepacked_start {
-        prepacked_quantize_ns = start.elapsed().as_nanos();
     }
     let input = if let Some(format) = activation_format {
         fake_quantize_activation_ste(input, format)
@@ -2268,23 +2913,6 @@ pub(crate) fn packed_lowrank_projection_native_cached<B: Backend>(
     output
 }
 
-pub(crate) fn packed_lowrank_projection_reference_cached<B: Backend>(
-    input: Tensor<B, 4>,
-    cache: &CachedLowrankProjectionArtifact<B>,
-    activation_format: Option<LowBitActivationFormat>,
-) -> Tensor<B, 4> {
-    packed_lowrank_projection_device_reference(
-        if let Some(format) = activation_format {
-            fake_quantize_activation_ste(input, format)
-        } else {
-            input
-        },
-        cache.codes.clone(),
-        cache.artifact.scale.max(QUANT_EPSILON),
-        cache.latent_out,
-    )
-}
-
 pub(crate) fn packed_decoder_tail_native_cached<B: Backend>(
     y_neuron: Tensor<B, 4>,
     cache: &CachedDecoderTailArtifact<B>,
@@ -2310,6 +2938,140 @@ pub(crate) fn packed_decoder_tail_native_cached<B: Backend>(
                 format,
             )
         });
+    let skip_wgpu_prepacked_decoder_tail = matches!(
+        cached_wgpu_packed_dot_decoder_tail_support(&y_neuron),
+        Some(false)
+    );
+    let quantize_start = profile_enabled.then(Instant::now);
+    if !skip_wgpu_prepacked_decoder_tail
+        && let Some((y_packed, activation_scale, cached_scale_hit)) =
+            quantize_activation_packed_codes_tensor_device_scale_4d(
+                &y_neuron,
+                activation_format,
+                scale_cache_key.as_ref(),
+            )
+    {
+        used_cached_scale = cached_scale_hit;
+        if let Some(start) = quantize_start {
+            prepacked_quantize_ns = start.elapsed().as_nanos();
+        }
+        let raw_start = profile_enabled.then(Instant::now);
+        if let Some(raw_cuda) = try_raw_cuda_packed_decoder_tail_prepacked_input_device_scale(
+            &y_packed,
+            &runtime_view.packed_weight,
+            &activation_scale,
+            cache.artifact.scale.max(QUANT_EPSILON),
+        ) {
+            if let Some(start) = raw_start {
+                raw_cuda_ns = start.elapsed().as_nanos();
+            }
+            if let Some(start) = total_start {
+                record_low_bit_native_projection_profile(
+                    "decoder_tail",
+                    start.elapsed().as_nanos(),
+                    quantize_ns,
+                    prepacked_quantize_ns,
+                    raw_cuda_ns,
+                    fused_ns,
+                    reference_ns,
+                    used_cached_scale,
+                );
+            }
+            return raw_cuda;
+        }
+        if let Some(start) = raw_start {
+            raw_cuda_ns = start.elapsed().as_nanos();
+        }
+        let fused_start = profile_enabled.then(Instant::now);
+        if let Some(fused) = try_wgpu_packed_dot_decoder_tail_prepacked_input_device_scale(
+            &y_packed,
+            &runtime_view.packed_weight,
+            &activation_scale,
+            cache.artifact.scale.max(QUANT_EPSILON),
+        ) {
+            if let Some(start) = fused_start {
+                fused_ns = start.elapsed().as_nanos();
+            }
+            if let Some(start) = total_start {
+                record_low_bit_native_projection_profile(
+                    "decoder_tail",
+                    start.elapsed().as_nanos(),
+                    quantize_ns,
+                    prepacked_quantize_ns,
+                    raw_cuda_ns,
+                    fused_ns,
+                    reference_ns,
+                    used_cached_scale,
+                );
+            }
+            return fused;
+        }
+        if let Some(start) = fused_start {
+            fused_ns = start.elapsed().as_nanos();
+        }
+    }
+    let quantize_start = profile_enabled.then(Instant::now);
+    if let Some((y_codes, activation_scale)) =
+        quantize_activation_codes_tensor_device_scale_4d(&y_neuron, activation_format)
+    {
+        if let Some(start) = quantize_start {
+            quantize_ns = start.elapsed().as_nanos();
+        }
+        let raw_start = profile_enabled.then(Instant::now);
+        if let Some(raw_cuda) = try_raw_cuda_packed_decoder_tail_device_scale(
+            &y_codes,
+            &runtime_view.packed_weight,
+            &activation_scale,
+            cache.artifact.scale.max(QUANT_EPSILON),
+        ) {
+            if let Some(start) = raw_start {
+                raw_cuda_ns = start.elapsed().as_nanos();
+            }
+            if let Some(start) = total_start {
+                record_low_bit_native_projection_profile(
+                    "decoder_tail",
+                    start.elapsed().as_nanos(),
+                    quantize_ns,
+                    prepacked_quantize_ns,
+                    raw_cuda_ns,
+                    fused_ns,
+                    reference_ns,
+                    used_cached_scale,
+                );
+            }
+            return raw_cuda;
+        }
+        if let Some(start) = raw_start {
+            raw_cuda_ns = start.elapsed().as_nanos();
+        }
+        let fused_start = profile_enabled.then(Instant::now);
+        if let Some(fused) = try_wgpu_packed_dot_decoder_tail_device_scale(
+            &y_codes,
+            &runtime_view.packed_weight,
+            &activation_scale,
+            cache.artifact.scale.max(QUANT_EPSILON),
+        ) {
+            if let Some(start) = fused_start {
+                fused_ns = start.elapsed().as_nanos();
+            }
+            if let Some(start) = total_start {
+                record_low_bit_native_projection_profile(
+                    "decoder_tail",
+                    start.elapsed().as_nanos(),
+                    quantize_ns,
+                    prepacked_quantize_ns,
+                    raw_cuda_ns,
+                    fused_ns,
+                    reference_ns,
+                    used_cached_scale,
+                );
+            }
+            return fused;
+        }
+        if let Some(start) = fused_start {
+            fused_ns = start.elapsed().as_nanos();
+        }
+    }
     let quantize_start = profile_enabled.then(Instant::now);
     if let Some((y_codes, activation_scale, cached_scale_hit)) =
         quantize_activation_codes_tensor(&y_neuron, activation_format, scale_cache_key.as_ref())
@@ -2443,38 +3205,6 @@ pub(crate) fn packed_decoder_tail_native_cached<B: Backend>(
     output
 }
 
-pub(crate) fn packed_decoder_tail_reference_cached<B: Backend>(
-    y_neuron: Tensor<B, 4>,
-    cache: &CachedDecoderTailArtifact<B>,
-    activation_format: Option<LowBitActivationFormat>,
-) -> Tensor<B, 4> {
-    packed_decoder_tail_device_reference(
-        if let Some(format) = activation_format {
-            fake_quantize_activation_ste(y_neuron, format)
-        } else {
-            y_neuron
-        },
-        cache.codes.clone(),
-        cache.artifact.scale.max(QUANT_EPSILON),
-    )
-}
-
-fn weight_artifact_from_tensor<B: Backend, const D: usize>(
-    quantized_tensor: &Tensor<B, D>,
-    logical_shape: &[usize],
-    format: LowBitWeightFormat,
-    context: &str,
-) -> PackedWeightArtifact {
-    let values = quantized_tensor
-        .clone()
-        .into_data()
-        .convert::<f32>()
-        .into_vec::<f32>()
-        .unwrap_or_else(|_| panic!("{context} weight values"));
-    pack_weight_artifact_from_dequantized_values(&values, logical_shape, format)
-        .unwrap_or_else(|| panic!("{context} requires a quantized weight format"))
-}
-
 pub(crate) fn packed_lowrank_projection_native<B: Backend>(
     input: Tensor<B, 4>,
     artifact: &PackedWeightArtifact,
@@ -2521,6 +3251,7 @@ pub(crate) fn packed_lowrank_projection_training_native<B: Backend>(
     latent_out: usize,
     saved_activation_mode: LowBitSavedActivationMode,
     relu_threshold: Option<f32>,
+    scale_cache_kind: Option<&'static str>,
 ) -> Tensor<B, 4> {
     let input_detached = input.clone().detach();
     let input_device = input.device();
@@ -2529,11 +3260,126 @@ pub(crate) fn packed_lowrank_projection_training_native<B: Backend>(
         LowBitSavedActivationMode::QuantizedCacheRecomputeExp
     );
     let projector_detached = projector.clone().detach();
-    let (direct_codes, weight_scale) = weight_codes_tensor_from_float_values(
-        &projector_detached,
-        weight_format,
-    )
-    .expect("native low-rank training projection requires non-fp16 low-bit weights");
+    let skip_direct_device_scale_autodiff = matches!(scale_cache_kind, Some("decoder_x"));
+    if !skip_direct_device_scale_autodiff {
+        if let Some((direct_codes, weight_scale_tensor, _)) =
+            weight_codes_tensor_device_scale_from_float_values(
+                &projector_detached,
+                weight_format,
+                scale_cache_kind,
+            )
+        {
+            let direct_shape = direct_codes.shape().dims::<4>();
+            assert_eq!(
+                direct_shape[0], 1,
+                "packed low-rank training projection expects singleton outer axis for direct codes"
+            );
+            let codes = direct_codes
+                .slice([
+                    0..1,
+                    0..direct_shape[1],
+                    0..direct_shape[2],
+                    0..direct_shape[3],
+                ])
+                .reshape([direct_shape[1], direct_shape[2], direct_shape[3]]);
+            record_low_bit_training_lowrank_memory_stage::<B>(
+                "after_weight_codes",
+                &input_device,
+                tensor_bytes(
+                    projector_detached.shape().dims::<4>(),
+                    core::mem::size_of::<f32>() as u64,
+                )
+                .saturating_add(tensor_bytes(
+                    codes.shape().dims::<3>(),
+                    core::mem::size_of::<i32>() as u64,
+                )),
+            );
+            let quantize_start = low_bit_native_projection_profile_enabled().then(Instant::now);
+            if let Some((input_codes, activation_scale, _)) =
+                quantize_training_activation_codes_tensor_4d(
+                    &input_detached,
+                    activation_format,
+                    scale_cache_kind,
+                )
+            {
+                if let Some(start) = quantize_start {
+                    record_low_bit_training_quantize_profile(
+                        "lowrank_direct",
+                        start.elapsed().as_nanos(),
+                    );
+                }
+                record_low_bit_training_lowrank_memory_stage::<B>(
+                    "after_activation_codes",
+                    &input_device,
+                    tensor_bytes(
+                        projector_detached.shape().dims::<4>(),
+                        core::mem::size_of::<f32>() as u64,
+                    )
+                    .saturating_add(tensor_bytes(
+                        codes.shape().dims::<3>(),
+                        core::mem::size_of::<i32>() as u64,
+                    ))
+                    .saturating_add(tensor_bytes(
+                        input_detached.shape().dims::<4>(),
+                        core::mem::size_of::<f32>() as u64,
+                    ))
+                    .saturating_add(tensor_bytes(
+                        input_codes.shape().dims::<4>(),
+                        core::mem::size_of::<i32>() as u64,
+                    )),
+                );
+                let projection_scale = weight_scale_tensor.clone().mul_scalar(activation_scale);
+                if let Some(fused_autodiff) =
+                    try_fused_packed_lowrank_training_autodiff_cuda_device_projection_scale(
+                        &input,
+                        &projector,
+                        &input_codes,
+                        &codes,
+                        activation_scale,
+                        &projection_scale,
+                        latent_out,
+                        pack_activation_state_to_host,
+                        relu_threshold,
+                    )
+                {
+                    record_low_bit_training_lowrank_memory_stage::<B>(
+                        "after_output",
+                        &input_device,
+                        tensor_bytes(
+                            projector_detached.shape().dims::<4>(),
+                            core::mem::size_of::<f32>() as u64,
+                        )
+                        .saturating_add(tensor_bytes(
+                            codes.shape().dims::<3>(),
+                            core::mem::size_of::<i32>() as u64,
+                        ))
+                        .saturating_add(tensor_bytes(
+                            input_detached.shape().dims::<4>(),
+                            core::mem::size_of::<f32>() as u64,
+                        ))
+                        .saturating_add(tensor_bytes(
+                            input_codes.shape().dims::<4>(),
+                            core::mem::size_of::<i32>() as u64,
+                        ))
+                        .saturating_add(tensor_bytes(
+                            fused_autodiff.shape().dims::<4>(),
+                            core::mem::size_of::<f32>() as u64,
+                        )),
+                    );
+                    return fused_autodiff;
+                }
+            } else if let Some(start) = quantize_start {
+                record_low_bit_training_quantize_profile(
+                    "lowrank_direct",
+                    start.elapsed().as_nanos(),
+                );
+            }
+        }
+    }
+
+    let (direct_codes, weight_scale, _) =
+        weight_codes_tensor_from_float_values(&projector_detached, weight_format, scale_cache_kind)
+            .expect("native low-rank training projection requires non-fp16 low-bit weights");
     let direct_shape = direct_codes.shape().dims::<4>();
     assert_eq!(
         direct_shape[0], 1,
@@ -2547,77 +3393,17 @@ pub(crate) fn packed_lowrank_projection_training_native<B: Backend>(
             0..direct_shape[3],
         ])
         .reshape([direct_shape[1], direct_shape[2], direct_shape[3]]);
-    record_low_bit_training_lowrank_memory_stage::<B>(
-        "after_weight_codes",
-        &input_device,
-        tensor_bytes(
-            projector_detached.shape().dims::<4>(),
-            core::mem::size_of::<f32>() as u64,
-        )
-        .saturating_add(tensor_bytes(
-            codes.shape().dims::<3>(),
-            core::mem::size_of::<i32>() as u64,
-        )),
-    );
-    if let Some((input_codes, activation_scale, _)) =
-        quantize_activation_codes_tensor(&input_detached, activation_format, None)
-    {
-        record_low_bit_training_lowrank_memory_stage::<B>(
-            "after_activation_codes",
-            &input_device,
-            tensor_bytes(
-                projector_detached.shape().dims::<4>(),
-                core::mem::size_of::<f32>() as u64,
-            )
-            .saturating_add(tensor_bytes(
-                codes.shape().dims::<3>(),
-                core::mem::size_of::<i32>() as u64,
-            ))
-            .saturating_add(tensor_bytes(
-                input_detached.shape().dims::<4>(),
-                core::mem::size_of::<f32>() as u64,
-            ))
-            .saturating_add(tensor_bytes(
-                input_codes.shape().dims::<4>(),
-                core::mem::size_of::<i32>() as u64,
-            )),
-        );
-        if let Some(fused_autodiff) = try_fused_packed_lowrank_training_autodiff(
-            &input,
-            &projector,
-            &input_codes,
-            &codes,
-            activation_scale,
-            weight_scale,
-            latent_out,
-            pack_activation_state_to_host,
-            relu_threshold,
-        ) {
-            record_low_bit_training_lowrank_memory_stage::<B>(
-                "after_output",
-                &input_device,
-                tensor_bytes(
-                    projector_detached.shape().dims::<4>(),
-                    core::mem::size_of::<f32>() as u64,
-                )
-                .saturating_add(tensor_bytes(
-                    codes.shape().dims::<3>(),
-                    core::mem::size_of::<i32>() as u64,
-                ))
-                .saturating_add(tensor_bytes(
-                    input_detached.shape().dims::<4>(),
-                    core::mem::size_of::<f32>() as u64,
-                ))
-                .saturating_add(tensor_bytes(
-                    input_codes.shape().dims::<4>(),
-                    core::mem::size_of::<i32>() as u64,
-                ))
-                .saturating_add(tensor_bytes(
-                    fused_autodiff.shape().dims::<4>(),
-                    core::mem::size_of::<f32>() as u64,
-                )),
+    let quantize_start = low_bit_native_projection_profile_enabled().then(Instant::now);
+    if let Some((input_codes, activation_scale, _)) = quantize_training_activation_codes_tensor_4d(
+        &input_detached,
+        activation_format,
+        scale_cache_kind,
+    ) {
+        if let Some(start) = quantize_start {
+            record_low_bit_training_quantize_profile(
+                "lowrank_fallback",
+                start.elapsed().as_nanos(),
             );
-            return fused_autodiff;
         }
         let quantized_weight = fake_quantize_weight_ste(projector.clone(), weight_format);
         let quantized_input = if let Some(format) = activation_format {
@@ -2666,8 +3452,14 @@ pub(crate) fn packed_lowrank_projection_training_native<B: Backend>(
                 core::mem::size_of::<f32>() as u64,
             )),
         );
-        return output;
+        output
     } else {
+        if let Some(start) = quantize_start {
+            record_low_bit_training_quantize_profile(
+                "lowrank_fallback",
+                start.elapsed().as_nanos(),
+            );
+        }
         let quantized_weight = fake_quantize_weight_ste(projector.clone(), weight_format);
         let quantized_input = if let Some(format) = activation_format {
             fake_quantize_activation_ste(input.clone(), format)
@@ -2698,7 +3490,7 @@ pub(crate) fn packed_lowrank_projection_training_native<B: Backend>(
                 core::mem::size_of::<f32>() as u64,
             )),
         );
-        return output;
+        output
     }
 }
 
@@ -2708,6 +3500,7 @@ pub(crate) fn packed_decoder_tail_training_native<B: Backend>(
     weight_format: LowBitWeightFormat,
     activation_format: Option<LowBitActivationFormat>,
     saved_activation_mode: LowBitSavedActivationMode,
+    scale_cache_kind: Option<&'static str>,
 ) -> Tensor<B, 4> {
     let shape = decoder.shape().dims::<2>();
     let y_neuron_detached = y_neuron.clone().detach();
@@ -2717,14 +3510,16 @@ pub(crate) fn packed_decoder_tail_training_native<B: Backend>(
     );
     let [batch, heads, time, latent] = y_neuron.shape().dims::<4>();
     let decoder_detached = decoder.clone().detach();
-    let (codes, weight_scale) = weight_codes_tensor_from_float_values(
-        &decoder_detached,
-        weight_format,
-    )
-    .expect("native decoder-tail training projection requires non-fp16 low-bit weights");
+    let (codes, weight_scale, _) =
+        weight_codes_tensor_from_float_values(&decoder_detached, weight_format, scale_cache_kind)
+            .expect("native decoder-tail training projection requires non-fp16 low-bit weights");
+    let quantize_start = low_bit_native_projection_profile_enabled().then(Instant::now);
     if let Some((y_codes, activation_scale, _)) =
         quantize_activation_codes_tensor(&y_neuron_detached, activation_format, None)
     {
+        if let Some(start) = quantize_start {
+            record_low_bit_training_quantize_profile("decoder_tail", start.elapsed().as_nanos());
+        }
         if let Some(fused_autodiff) = try_fused_packed_decoder_tail_training_autodiff(
             &y_neuron,
             &decoder,
@@ -2763,6 +3558,9 @@ pub(crate) fn packed_decoder_tail_training_native<B: Backend>(
             .reshape([batch, 1, time, shape[1]]);
         return reference + native.clone() - native.detach();
     } else {
+        if let Some(start) = quantize_start {
+            record_low_bit_training_quantize_profile("decoder_tail", start.elapsed().as_nanos());
+        }
         let quantized_decoder = fake_quantize_weight_ste(decoder.clone(), weight_format);
         let quantized_y_neuron = if let Some(format) = activation_format {
             fake_quantize_activation_ste(y_neuron.clone(), format)
@@ -2875,23 +3673,25 @@ fn ste_passthrough<B: Backend, const D: usize>(
     original.clone() + (quantized - original).detach()
 }
 
+fn broadcast_scalar_tensor<B: Backend, const D: usize>(scalar: Tensor<B, 1>) -> Tensor<B, D> {
+    scalar.reshape([1; D])
+}
+
 fn symmetric_fake_quant_ste<B: Backend, const D: usize>(
     tensor: Tensor<B, D>,
     qmax: f32,
 ) -> Tensor<B, D> {
-    let dynamic_range = tensor
+    let step = tensor
         .clone()
         .abs()
         .mean()
-        .mul_scalar(2.0)
-        .clamp_min(QUANT_EPSILON)
-        .into_scalar()
-        .elem::<f32>();
-    let step = (dynamic_range / qmax).max(QUANT_EPSILON);
-    let quantized = round_nearest(tensor.clone().div_scalar(step))
+        .mul_scalar(2.0 / qmax)
+        .clamp_min(QUANT_EPSILON);
+    let step_broadcast = broadcast_scalar_tensor(step.clone());
+    let quantized = round_nearest(tensor.clone().div(step_broadcast.clone()))
         .clamp_min(-qmax)
         .clamp_max(qmax)
-        .mul_scalar(step);
+        .mul(step_broadcast);
     ste_passthrough(tensor, quantized)
 }
 
@@ -2900,54 +3700,49 @@ fn positive_fake_quant_ste<B: Backend, const D: usize>(
     qmax: f32,
 ) -> Tensor<B, D> {
     let clamped = tensor.clone().clamp_min(0.0);
-    let dynamic_range = clamped
+    let step = clamped
         .clone()
         .mean()
-        .mul_scalar(2.0)
+        .mul_scalar(2.0 / qmax)
         .clamp_min(QUANT_EPSILON);
-    let step = (dynamic_range.into_scalar().elem::<f32>() / qmax).max(QUANT_EPSILON);
-    let quantized = round_nearest(clamped.div_scalar(step))
+    let step_broadcast = broadcast_scalar_tensor(step.clone());
+    let quantized = round_nearest(clamped.div(step_broadcast.clone()))
         .clamp_min(0.0)
         .clamp_max(qmax)
-        .mul_scalar(step);
+        .mul(step_broadcast);
     ste_passthrough(tensor, quantized)
 }
 
 fn binary_fake_quant_ste<B: Backend, const D: usize>(tensor: Tensor<B, D>) -> Tensor<B, D> {
-    let scale = tensor
-        .clone()
-        .abs()
-        .mean()
-        .clamp_min(QUANT_EPSILON)
-        .into_scalar()
-        .elem::<f32>();
+    let scale = tensor.clone().abs().mean().clamp_min(QUANT_EPSILON);
+    let scale_broadcast = broadcast_scalar_tensor(scale);
     let sign = tensor
         .clone()
         .greater_equal_elem(0.0)
         .float()
         .mul_scalar(2.0)
         .sub_scalar(1.0);
-    ste_passthrough(tensor, sign.mul_scalar(scale))
+    ste_passthrough(tensor, sign.mul(scale_broadcast))
 }
 
 fn ternary_absmean_fake_quant_ste<B: Backend, const D: usize>(
     tensor: Tensor<B, D>,
 ) -> Tensor<B, D> {
-    let scale = tensor
+    let scale = tensor.clone().abs().mean().clamp_min(QUANT_EPSILON);
+    let scale_broadcast = broadcast_scalar_tensor(scale);
+    let active = tensor
         .clone()
         .abs()
-        .mean()
-        .clamp_min(QUANT_EPSILON)
-        .into_scalar()
-        .elem::<f32>();
-    let active = tensor.clone().abs().greater_equal_elem(scale).float();
+        .div(scale_broadcast.clone())
+        .greater_equal_elem(1.0)
+        .float();
     let sign = tensor
         .clone()
         .greater_equal_elem(0.0)
         .float()
         .mul_scalar(2.0)
         .sub_scalar(1.0);
-    ste_passthrough(tensor, sign.mul(active).mul_scalar(scale))
+    ste_passthrough(tensor, sign.mul(active).mul(scale_broadcast))
 }
 
 fn round_nearest<B: Backend, const D: usize>(tensor: Tensor<B, D>) -> Tensor<B, D> {
@@ -2964,6 +3759,98 @@ mod tests {
     use burn_ndarray::NdArray;
 
     type Backend = NdArray<f32>;
+
+    #[derive(Clone, Copy, Debug)]
+    struct RhoRoundTripMetrics {
+        mean_abs_error: f32,
+        max_abs_error: f32,
+        compression_ratio: f32,
+    }
+
+    fn synthetic_rho() -> Tensor<Backend, 4> {
+        let device = Default::default();
+        Tensor::<Backend, 4>::from_data(
+            TensorData::new(
+                (0..192)
+                    .map(|index| ((index as f32 * 0.17).sin() * 3.0) + (index % 7) as f32 * 0.1)
+                    .collect::<Vec<_>>(),
+                [1, 2, 8, 12],
+            ),
+            &device,
+        )
+    }
+
+    fn rho_round_trip_metrics(compression: RhoCompressionConfig) -> RhoRoundTripMetrics {
+        let device = Default::default();
+        let rho = synthetic_rho();
+        let packed = pack_rho_block_state(&rho, compression);
+        let restored = unpack_rho_block_state::<Backend>(&packed, &device);
+        let original = rho.into_data().to_vec::<f32>().expect("original vec");
+        let restored = restored.into_data().to_vec::<f32>().expect("restored vec");
+        let max_abs_error = original
+            .iter()
+            .zip(restored.iter())
+            .map(|(lhs, rhs)| (lhs - rhs).abs())
+            .fold(0.0f32, f32::max);
+        let mean_abs_error = original
+            .iter()
+            .zip(restored.iter())
+            .map(|(lhs, rhs)| (lhs - rhs).abs())
+            .sum::<f32>()
+            / original.len() as f32;
+        RhoRoundTripMetrics {
+            mean_abs_error,
+            max_abs_error,
+            compression_ratio: (packed.packed.len() as f32
+                + (packed.scales.len() * core::mem::size_of::<f32>()) as f32)
+                / (original.len() * core::mem::size_of::<f32>()) as f32,
+        }
+    }
+
+    fn rho_local_snapshot(
+        original: &[f32],
+        reconstructed: &[f32],
+        compressed_bytes: u64,
+    ) -> RhoCompressionStatsSnapshot {
+        let mean_abs_error = original
+            .iter()
+            .zip(reconstructed.iter())
+            .map(|(lhs, rhs)| (lhs - rhs).abs() as f64)
+            .sum::<f64>()
+            / original.len().max(1) as f64;
+        let max_abs_error = original
+            .iter()
+            .zip(reconstructed.iter())
+            .map(|(lhs, rhs)| (lhs - rhs).abs())
+            .fold(0.0f32, f32::max);
+        let original_rms = (original
+            .iter()
+            .map(|value| {
+                let value = f64::from(*value);
+                value * value
+            })
+            .sum::<f64>()
+            / original.len().max(1) as f64)
+            .sqrt();
+        let reconstructed_rms = (reconstructed
+            .iter()
+            .map(|value| {
+                let value = f64::from(*value);
+                value * value
+            })
+            .sum::<f64>()
+            / reconstructed.len().max(1) as f64)
+            .sqrt();
+        RhoCompressionStatsSnapshot {
+            calls: 1,
+            total_original_rms: original_rms,
+            total_reconstructed_rms: reconstructed_rms,
+            total_mean_abs_error: mean_abs_error,
+            max_abs_error,
+            total_original_bytes: (original.len() * core::mem::size_of::<f32>()) as u64,
+            total_compressed_bytes: compressed_bytes,
+        }
+    }
 
     #[test]
     fn projection_plan_maps_repo_targets_to_runtime_roles() {
@@ -3007,6 +3894,84 @@ mod tests {
             fake_quantize_activation_ste(activations, LowBitActivationFormat::Uint8PosExp);
         let values = quantized.into_data().to_vec::<f32>().expect("f32 data");
         assert!(values.iter().all(|value| *value >= 0.0));
+    }
+
+    #[test]
+    fn training_activation_quantization_reuses_cached_scale_after_warmup() {
+        let device = Default::default();
+        let activations = Tensor::<Backend, 4>::from_data(
+            TensorData::new(
+                vec![
+                    0.0, 0.2, 1.3, 4.7, -0.4, 0.9, -1.1, 0.3, 0.7, -0.8, 0.5, -0.2, 1.0, 0.6, -0.3,
+                    0.4,
+                ],
+                [1, 1, 4, 4],
+            ),
+            &device,
+        );
+        let format = Some(LowBitActivationFormat::Int8);
+        let cache_kind = Some("unit_test_training_cache");
+
+        let (_, first_scale, first_hit) =
+            quantize_training_activation_codes_tensor_4d(&activations, format, cache_kind)
+                .expect("first quantization");
+        let (_, second_scale, second_hit) =
+            quantize_training_activation_codes_tensor_4d(&activations, format, cache_kind)
+                .expect("second quantization");
+
+        assert!(
+            !first_hit,
+            "first training quantization should warm the cache"
+        );
+        assert!(
+            second_hit,
+            "second training quantization should hit the cache"
+        );
+        assert!(
+            (first_scale - second_scale).abs() <= 1.0e-8,
+            "cached training scale drifted: first={first_scale} second={second_scale}"
+        );
+    }
+
+    #[test]
+    fn training_weight_quantization_reuses_cached_scale_after_warmup() {
+        let device = Default::default();
+        let weights = Tensor::<Backend, 2>::from_data(
+            TensorData::new(
+                vec![
+                    -0.4, 0.1, 0.9, -1.2, 0.3, -0.7, 1.1, -0.2, 0.5, -0.6, 0.8, -0.9,
+                ],
+                [3, 4],
+            ),
+            &device,
+        );
+        let cache_kind = Some("unit_test_weight_cache");
+
+        let (_, first_scale, first_hit) = weight_codes_tensor_from_float_values(
+            &weights,
+            LowBitWeightFormat::Ternary158,
+            cache_kind,
+        )
+        .expect("first weight quantization");
+        let (_, second_scale, second_hit) = weight_codes_tensor_from_float_values(
+            &weights,
+            LowBitWeightFormat::Ternary158,
+            cache_kind,
+        )
+        .expect("second weight quantization");
+
+        assert!(
+            !first_hit,
+            "first weight quantization should warm the cache"
+        );
+        assert!(
+            second_hit,
+            "second weight quantization should hit the cache"
+        );
+        assert!(
+            (first_scale - second_scale).abs() <= 1.0e-8,
+            "cached weight scale drifted: first={first_scale} second={second_scale}"
+        );
     }
 
     #[test]
@@ -3116,19 +4081,10 @@ mod tests {
     #[test]
     fn rho_int8_block_round_trip_keeps_error_bounded() {
         let device = Default::default();
-        let rho = Tensor::<Backend, 4>::from_data(
-            TensorData::new(
-                (0..192)
-                    .map(|index| ((index as f32 * 0.17).sin() * 3.0) + (index % 7) as f32 * 0.1)
-                    .collect::<Vec<_>>(),
-                [1, 2, 8, 12],
-            ),
-            &device,
-        );
+        let rho = synthetic_rho();
 
-        rho_compression_profile_reset();
-        let packed = pack_rho_int8_block_state(&rho);
-        let restored = unpack_rho_int8_block_state::<Backend>(&packed, &device);
+        let packed = pack_rho_block_state(&rho, RhoCompressionConfig::Int8BlockExp);
+        let restored = unpack_rho_block_state::<Backend>(&packed, &device);
         let original = rho.into_data().to_vec::<f32>().expect("original vec");
         let restored = restored.into_data().to_vec::<f32>().expect("restored vec");
         let max_abs_error = original
@@ -3142,10 +4098,13 @@ mod tests {
             .map(|(lhs, rhs)| (lhs - rhs).abs())
             .sum::<f32>()
             / original.len() as f32;
-        let snapshot = rho_compression_profile_snapshot();
+        let snapshot = rho_local_snapshot(
+            &original,
+            &restored,
+            packed.packed.len() as u64 + (packed.scales.len() * core::mem::size_of::<f32>()) as u64,
+        );
 
         assert_eq!(packed.logical_shape, [1, 2, 8, 12]);
-        assert!(snapshot.calls >= 1);
         assert!(
             rho_compression_snapshot_passes_gate(&snapshot, &RhoCompressionQualityGate::default()),
             "expected rho int8-block compression snapshot to pass default quality gate: {snapshot:?}"
@@ -3177,7 +4136,6 @@ mod tests {
             &device,
         );
 
-        rho_compression_profile_reset();
         let packed = pack_rho_int8_block_state_device(&rho);
         let restored = unpack_rho_int8_block_state_device(&packed);
         let original = rho.into_data().to_vec::<f32>().expect("original vec");
@@ -3193,16 +4151,60 @@ mod tests {
             .map(|(lhs, rhs)| (lhs - rhs).abs())
             .sum::<f32>()
             / original.len() as f32;
-        let snapshot = rho_compression_profile_snapshot();
+        let packed_values = packed
+            .packed
+            .clone()
+            .into_data()
+            .convert::<i64>()
+            .into_vec::<i64>()
+            .expect("packed rho values");
+        let scale_values = packed
+            .scales
+            .clone()
+            .into_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .expect("rho scales");
+        let snapshot = rho_local_snapshot(
+            &original,
+            &restored,
+            packed_values.len() as u64 + (scale_values.len() * core::mem::size_of::<f32>()) as u64,
+        );
 
         assert_eq!(packed.logical_shape, [1, 2, 8, 12]);
-        assert!(snapshot.calls >= 1);
         assert!(mean_abs_error <= 0.02);
         assert!(max_abs_error <= 0.05);
         assert!(rho_compression_snapshot_passes_gate(
             &snapshot,
             &RhoCompressionQualityGate::default()
         ));
+    }
+
+    #[test]
+    fn rho_binary_and_ternary_block_trade_accuracy_for_size() {
+        let int8 = rho_round_trip_metrics(RhoCompressionConfig::Int8BlockExp);
+        let ternary = rho_round_trip_metrics(RhoCompressionConfig::TernaryBlockExp);
+        let binary = rho_round_trip_metrics(RhoCompressionConfig::BinaryBlockExp);
+
+        println!(
+            "rho block tradeoff: int8 mean={:.5} max={:.5} ratio={:.5}; ternary mean={:.5} max={:.5} ratio={:.5}; binary mean={:.5} max={:.5} ratio={:.5}",
+            int8.mean_abs_error,
+            int8.max_abs_error,
+            int8.compression_ratio,
+            ternary.mean_abs_error,
+            ternary.max_abs_error,
+            ternary.compression_ratio,
+            binary.mean_abs_error,
+            binary.max_abs_error,
+            binary.compression_ratio,
+        );
+
+        assert!(int8.mean_abs_error <= ternary.mean_abs_error);
+        assert!(int8.mean_abs_error <= binary.mean_abs_error);
+        assert!(int8.max_abs_error <= ternary.max_abs_error);
+        assert!(int8.max_abs_error <= binary.max_abs_error);
+        assert!(int8.compression_ratio >= ternary.compression_ratio);
+        assert!(ternary.compression_ratio >= binary.compression_ratio);
     }
 
     #[test]
@@ -3283,6 +4285,7 @@ mod tests {
             enable: true,
             training_mode: crate::LowBitTrainingMode::TrainKernelExp,
             inference_mode: LowBitInferenceMode::RuntimeFakeQuant,
+            target_modules: vec![LowBitTargetModule::DecoderY],
             ..Default::default()
         };
         let plan = resolve_low_bit_kernel_plan::<Backend>(
@@ -3297,11 +4300,40 @@ mod tests {
     }
 
     #[test]
+    fn low_bit_kernel_plan_avoids_native_training_forward_when_decoder_x_is_targeted() {
+        let config = LowBitQuantizationConfig {
+            enable: true,
+            training_mode: crate::LowBitTrainingMode::TrainKernelExp,
+            inference_mode: LowBitInferenceMode::RuntimeFakeQuant,
+            target_modules: vec![LowBitTargetModule::DecoderX, LowBitTargetModule::DecoderY],
+            ..Default::default()
+        };
+        let plan = resolve_low_bit_kernel_plan::<Backend>(
+            &config,
+            PackedLowBitProjectionArtifacts::default(),
+        );
+        assert_eq!(plan.runtime, LowBitKernelRuntimeKind::FakeQuantReference);
+    }
+
+    #[test]
     fn autodiff_backend_name_prefers_training_runtime() {
         assert!(backend_name_prefers_training_low_bit_runtime(
             "burn_autodiff::backend::Autodiff<burn_ndarray::backend::NdArray<f32>>"
         ));
         assert!(!backend_name_prefers_training_low_bit_runtime(
+            "burn_ndarray::backend::NdArray<f32>"
+        ));
+    }
+
+    #[test]
+    fn wgpu_backend_name_prefers_inference_cached_scale() {
+        assert!(backend_name_prefers_inference_cached_scale(
+            "burn_wgpu::backend::Wgpu<f32>"
+        ));
+        assert!(backend_name_prefers_inference_cached_scale(
+            "burn_cubecl::backend::CubeBackend<burn_wgpu::WgpuRuntime, f32, i32, u32>"
+        ));
+        assert!(!backend_name_prefers_inference_cached_scale(
             "burn_ndarray::backend::NdArray<f32>"
         ));
     }
@@ -3369,6 +4401,51 @@ mod tests {
             input,
         );
         assert!(compressed.rho_state_bytes < bf16.rho_state_bytes);
+    }
+
+    #[test]
+    fn rho_binary_and_ternary_block_estimates_reduce_rho_bucket_beyond_int8() {
+        let input = LowBitMemoryEstimateInput {
+            batch_size: 2,
+            time_steps: 64,
+            n_layer: 2,
+            n_head: 4,
+            n_embd: 128,
+            latent_total: 8192,
+        };
+        let quant = LowBitQuantizationConfig {
+            enable: true,
+            protocol: crate::BitNetLowBitProtocol::BitnetB158,
+            target_modules: vec![LowBitTargetModule::Encoder],
+            ..Default::default()
+        };
+        let int8 = estimate_low_bit_memory_buckets(
+            &quant,
+            &crate::LowBitRhoConfig {
+                compression: crate::RhoCompressionConfig::Int8BlockExp,
+                ..Default::default()
+            },
+            input,
+        );
+        let ternary = estimate_low_bit_memory_buckets(
+            &quant,
+            &crate::LowBitRhoConfig {
+                compression: crate::RhoCompressionConfig::TernaryBlockExp,
+                ..Default::default()
+            },
+            input,
+        );
+        let binary = estimate_low_bit_memory_buckets(
+            &quant,
+            &crate::LowBitRhoConfig {
+                compression: crate::RhoCompressionConfig::BinaryBlockExp,
+                ..Default::default()
+            },
+            input,
+        );
+
+        assert!(ternary.rho_state_bytes < int8.rho_state_bytes);
+        assert!(binary.rho_state_bytes < ternary.rho_state_bytes);
     }
 
     #[test]

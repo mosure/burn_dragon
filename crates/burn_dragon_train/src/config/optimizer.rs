@@ -35,6 +35,8 @@ pub struct MuonHybridConfig {
     pub ns_steps: usize,
     pub adjust_lr_fn: MuonAdjustLrFn,
     pub split_decoder_heads: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_modules: Option<Vec<String>>,
 }
 
 impl Default for MuonHybridConfig {
@@ -46,6 +48,7 @@ impl Default for MuonHybridConfig {
             ns_steps: 5,
             adjust_lr_fn: MuonAdjustLrFn::default(),
             split_decoder_heads: true,
+            target_modules: None,
         }
     }
 }
@@ -112,6 +115,13 @@ impl OptimizerConfig {
             }
             if muon.ns_steps == 0 {
                 return Err(anyhow!("optimizer.muon.ns_steps must be > 0"));
+            }
+            if let Some(target_modules) = muon.target_modules.as_ref()
+                && target_modules.is_empty()
+            {
+                return Err(anyhow!(
+                    "optimizer.muon.target_modules must be non-empty when set"
+                ));
             }
         }
         Ok(())

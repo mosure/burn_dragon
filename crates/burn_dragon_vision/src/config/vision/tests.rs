@@ -21,6 +21,7 @@ fn distill_mode_parses() {
 
             [optimizer]
             learning_rate = 0.001
+            weight_decay = 0.0
             weight_decay = 0.1
 
             [vision]
@@ -1622,6 +1623,54 @@ fn saccade_mode_parses() {
             assert_eq!(saccade.artifact_max_images, 3);
             assert_eq!(saccade.artifact_max_views, 2);
             assert!(!saccade.artifact_overwrite);
+        }
+        other => panic!("unexpected mode: {other:?}"),
+    }
+}
+
+#[test]
+fn saccade_mode_parses_conformal_warp() {
+    let text = r#"
+            [dataset]
+            imagenet_root = "data/imagenet1k"
+            train_dir = "train"
+            val_dir = "val"
+
+            [training]
+            batch_size = 2
+            max_iters = 1
+
+            [optimizer]
+            learning_rate = 0.001
+            weight_decay = 0.0
+
+            [vision]
+            image_size = 64
+            patch_size = 8
+            in_channels = 3
+            embed_dim = 64
+            steps = 2
+            n_head = 2
+            mlp_internal_dim_multiplier = 4
+            dropout = 0.0
+            projection_dim = 64
+            projection_hidden_dim = 128
+            use_cls_token = true
+            num_eyes = 1
+            pos_encoding = "learned2d"
+            attention_mode = "row_l1"
+            fused_kernels = false
+            relu_threshold = 0.0
+
+            [mode]
+            type = "saccade"
+            fovea_warp_mode = "conformal"
+        "#;
+
+    let config: VisionTrainingConfig = toml::from_str(text).expect("parse conformal saccade");
+    match config.mode {
+        VisionTrainingModeConfig::Saccade(saccade) => {
+            assert_eq!(saccade.fovea_warp_mode, VisionFoveaWarpMode::Conformal);
         }
         other => panic!("unexpected mode: {other:?}"),
     }

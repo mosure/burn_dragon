@@ -34,9 +34,12 @@ exclude = [
 members = [
   ".",
   "crates/bevy_dragon",
+  "crates/burn_autogaze",
+  "crates/burn_vjepa",
   "crates/burn_dragon_checkpoint",
   "crates/burn_dragon_core",
   "crates/burn_dragon_cli",
+  "crates/burn_dragon_dreamer",
   "crates/burn_dragon_language",
   "crates/burn_dragon_multimodal",
   "crates/burn_dragon_reasoning",

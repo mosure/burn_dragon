@@ -24,6 +24,8 @@
 //!   as the lower-storage fallback when only SigLIP2 global features are available
 
 #[cfg(feature = "train")]
+pub mod artifacts;
+#[cfg(feature = "train")]
 pub mod checkpoint;
 #[cfg(feature = "train")]
 pub mod config;
@@ -93,6 +95,14 @@ pub mod api {
             CpuImageLevel, CpuPyramidCache, FoveaWarpMode, PyramidMode, build_pyramid_cache,
             image_from_nchw, lod_sigma_from_sigma, render_foveated_patch,
             render_foveated_patch_with_radius, sigma_from_unit,
+        };
+    }
+
+    #[cfg(feature = "train")]
+    pub mod artifacts {
+        pub use crate::artifacts::{
+            LoadedCpuArtifactSource, load_cpu_artifact_source, rgb_f32_to_rgba_image,
+            save_rgb_f32_image, save_rgb_f32_patch_image,
         };
     }
 
@@ -191,6 +201,11 @@ pub use train::{
     run_vision_distill_linear_probe_with_seed, run_vision_distill_serving_benchmark,
 };
 
+#[cfg(feature = "train")]
+pub use artifacts::{
+    LoadedCpuArtifactSource, load_cpu_artifact_source, rgb_f32_to_rgba_image, save_rgb_f32_image,
+    save_rgb_f32_patch_image,
+};
 #[cfg(feature = "train")]
 pub use checkpoint::{
     VisionBurnpackExportReport, export_vision_encoder_checkpoint_to_burnpack,

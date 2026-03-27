@@ -62,7 +62,8 @@ pub mod api {
 
     pub mod wgpu {
         pub use crate::wgpu::{
-            WgpuDevice, apply_wgpu_fused_core_override, init_runtime, is_wgpu_backend_name,
+            WgpuDevice, WgpuFusedCoreOverride, apply_wgpu_fused_core_override, init_runtime,
+            is_wgpu_backend_name,
         };
     }
 

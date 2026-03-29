@@ -1,0 +1,22 @@
+[model]
+n_layer = 8
+n_embd = 256
+n_head = 1
+mlp_internal_dim_multiplier = 128
+latent_total = 32768
+relu_threshold = 0.0
+dropout = 0.0
+fused_kernels = true
+rotary_embedding = "alibi"
+rollout_fast_steps_per_slow_step = 1
+residual_connector = "mhc"
+
+[model.mhc]
+enabled = true
+num_streams = 2
+num_views = 1
+coefficient_policy = "dynamic_positive"
+mhc_iters = 4
+mhc_tau = 0.1
+add_branch_out_to_residual = true
+dropout = 0.0

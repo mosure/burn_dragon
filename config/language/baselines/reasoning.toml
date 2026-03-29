@@ -1,1 +1,59 @@
-extends = ["../experiments/deep_math_multiscale_clock8_topquarter_fixediters96.toml"]
+[dataset]
+cache_dir = "data/deep_math"
+train_split_ratio = 0.95
+type = "deep_math"
+max_records = 512
+
+[dataset.tokenizer]
+type = "char"
+include_unknown = true
+vocab_path = "vocab.json"
+
+[training]
+block_size = 256
+batch_size = 8
+gradient_accumulation_steps = 1
+max_iters = 96
+log_frequency = 16
+
+[optimizer]
+learning_rate = 0.001
+weight_decay = 0.1
+
+[optimizer.lr_schedule]
+type = "cosine"
+min_lr = 0.00005
+num_iters = 96
+
+[generation]
+prompt = "Question:\nWhat is 2 + 2?\n\nAnswer:\n"
+temperature = 0.9
+top_k = 1
+
+[wgpu.training]
+fused_core_recurrent = true
+fused_core_rollout = false
+
+[wgpu.inference]
+fused_core_recurrent = true
+fused_core_rollout = false
+generation_executor = "baseline"
+generation_chunk_tokens = 8
+generation_device_buffer_tokens = 64
+
+[model]
+n_layer = 4
+n_embd = 192
+n_head = 4
+mlp_internal_dim_multiplier = 4
+rollout_fast_steps_per_slow_step = 1
+relu_threshold = 0.0
+dropout = 0.1
+fused_kernels = true
+rotary_embedding = "alibi"
+
+[model.clocked_slow_memory]
+enabled = true
+last_layers = 1
+chunk_tokens = 8
+residual_scale = 1.0

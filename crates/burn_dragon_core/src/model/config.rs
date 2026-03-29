@@ -14,7 +14,7 @@ use crate::model::init::BdhInitializationConfig;
 use crate::model::low_bit::{LowBitQuantizationConfig, LowBitRhoConfig};
 use crate::model::mhc::ManifoldHyperConnectionsConfig;
 use crate::model::norm::DragonNormConfig;
-use crate::model::sequence::MambaSequenceConfig;
+use crate::model::sequence::{MambaSequenceConfig, SequenceKernelConfig};
 use crate::positional::RotaryEmbedding;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -189,67 +189,6 @@ impl ModuleDisplayDefault for FusedKernelConfig {
 }
 
 impl ModuleDisplay for FusedKernelConfig {}
-
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum SequenceKernelKind {
-    #[default]
-    BdhLinearAttention,
-    BdhLinearDenseScoreExperimental,
-    Rwkv8StateSpaceExperimental,
-    MambaSelectiveSsmExperimental,
-}
-
-impl<B: Backend> Module<B> for SequenceKernelKind {
-    type Record = ();
-
-    fn collect_devices(&self, devices: Devices<B>) -> Devices<B> {
-        devices
-    }
-
-    fn fork(self, _device: &B::Device) -> Self {
-        self
-    }
-
-    fn to_device(self, _device: &B::Device) -> Self {
-        self
-    }
-
-    fn visit<Visitor: ModuleVisitor<B>>(&self, _visitor: &mut Visitor) {}
-
-    fn map<Mapper: ModuleMapper<B>>(self, _mapper: &mut Mapper) -> Self {
-        self
-    }
-
-    fn load_record(self, _record: Self::Record) -> Self {
-        self
-    }
-
-    fn into_record(self) -> Self::Record {}
-}
-
-impl<B: AutodiffBackend> AutodiffModule<B> for SequenceKernelKind {
-    type InnerModule = SequenceKernelKind;
-
-    fn valid(&self) -> Self::InnerModule {
-        *self
-    }
-
-    fn from_inner(module: Self::InnerModule) -> Self {
-        module
-    }
-}
-
-impl ModuleDisplayDefault for SequenceKernelKind {
-    fn content(&self, content: Content) -> Option<Content> {
-        content
-            .set_top_level_type("SequenceKernelKind")
-            .add_formatted(&format!("{self:?}"))
-            .optional()
-    }
-}
-
-impl ModuleDisplay for SequenceKernelKind {}
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct YNeuronRecurrenceConfig {
@@ -621,7 +560,7 @@ pub struct BDHConfig {
     #[serde(default)]
     pub initialization: BdhInitializationConfig,
     #[serde(default)]
-    pub sequence_kernel: SequenceKernelKind,
+    pub sequence_kernel: SequenceKernelConfig,
     #[serde(default)]
     pub latent_fanout_schedule: Option<LatentFanoutScheduleConfig>,
     #[serde(default)]
@@ -658,7 +597,7 @@ impl Default for BDHConfig {
             n_head: 4,
             mlp_internal_dim_multiplier: 4,
             initialization: BdhInitializationConfig::default(),
-            sequence_kernel: SequenceKernelKind::default(),
+            sequence_kernel: SequenceKernelConfig::default(),
             latent_fanout_schedule: None,
             mamba: MambaSequenceConfig::default(),
             n_expert: 1,

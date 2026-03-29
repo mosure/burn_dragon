@@ -71,7 +71,6 @@ fn vision_configs_parse_serialize_validate() {
         "vision/video_lejepa/baselines/vjepa21_dense_promoted.toml",
         "vision/video_lejepa/baselines/vjepa21_imagenet1k_dense_smoke.toml",
         "vision/video_lejepa/baselines/vjepa21_imagenet1k_dense_long.toml",
-        "vision/video_lejepa/moving_mnist_trm_artifact_validate.toml",
     ];
 
     for file in files {
@@ -334,30 +333,24 @@ fn rac_imagenet1k_experiment_configs_stay_curated() {
 #[test]
 fn video_lejepa_configs_parse_serialize_validate() {
     let root = config_root().join("vision").join("video_lejepa");
-    let mut files = fs::read_dir(&root)
+    let mut files = fs::read_dir(root.join("baselines"))
         .unwrap_or_else(|err| panic!("failed to read {}: {err}", root.display()))
         .filter_map(|entry| entry.ok().map(|entry| entry.path()))
         .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("toml"))
         .collect::<Vec<_>>();
     files.sort();
 
-    assert!(
-        !files.is_empty(),
-        "expected at least one video_lejepa overlay config in {}",
-        root.display()
-    );
-
     for path in files {
         let config: VisionTrainingConfig = load_vision_training_config(std::slice::from_ref(&path))
             .unwrap_or_else(|err| {
                 panic!(
-                    "failed to load video_lejepa config {}: {err}",
+                    "failed to load curated video_lejepa config {}: {err}",
                     path.display()
                 );
             });
         config
             .validate()
-            .unwrap_or_else(|err| panic!("video_lejepa config validation failed: {err}"));
+            .unwrap_or_else(|err| panic!("curated video_lejepa config validation failed: {err}"));
 
         let roundtripped: VisionTrainingConfig = roundtrip_config(&config);
         roundtripped.validate().unwrap_or_else(|err| {
@@ -370,20 +363,13 @@ fn video_lejepa_configs_parse_serialize_validate() {
 }
 
 #[test]
-fn moving_mnist_vjepa21_dense_promoted_baseline_matches_latest_wide_recipe() {
+fn moving_mnist_vjepa21_dense_promoted_baseline_validates() {
     let root = config_root().join("vision").join("video_lejepa");
     let baseline_path = root.join("baselines").join("vjepa21_dense_promoted.toml");
-    let latest_path =
-        root.join("moving_mnist_vjepa21_dense_wgpu_diag_probe025_recon1_256_wide.toml");
 
     let baseline: VisionTrainingConfig =
         load_vision_training_config(std::slice::from_ref(&baseline_path))
             .unwrap_or_else(|err| panic!("failed to load {}: {err}", baseline_path.display()));
-    let latest: VisionTrainingConfig =
-        load_vision_training_config(std::slice::from_ref(&latest_path))
-            .unwrap_or_else(|err| panic!("failed to load {}: {err}", latest_path.display()));
-
-    assert_eq!(baseline, latest);
     baseline
         .validate()
         .expect("promoted dense V-JEPA 2.1 baseline should validate");

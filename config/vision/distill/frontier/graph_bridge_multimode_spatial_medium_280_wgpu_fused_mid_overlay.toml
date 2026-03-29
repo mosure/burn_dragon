@@ -1,0 +1,23 @@
+# Mid-point fused WGPU launch overrides for full ImageNet-1k multimode spatial training.
+# Purpose:
+# - improve hardware occupancy over the conservative diagnostic launch
+# - stay below the startup allocation pressure that breaks at batch_size = 32
+
+[dataset]
+prefetch_batches = 1
+prefetch_workers = 8
+prefetch_to_device = false
+
+[training]
+batch_size = 24
+gradient_accumulation_steps = 12
+log_frequency = 16
+device_memory_check_every = 2
+max_device_memory_mb = 98304
+
+[vision]
+fused_kernels = true
+
+[wgpu.training]
+fused_core_recurrent = true
+fused_core_rollout = true

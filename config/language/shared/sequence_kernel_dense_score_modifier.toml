@@ -1,0 +1,2 @@
+[model]
+sequence_kernel = { memory_system = "linear_attention", executor = "dense_score_short_context" }

@@ -144,7 +144,7 @@ struct LanguageArgs {
     rerun_telemetry_interval_secs: u64,
     /// Persist `nvidia-smi` power/utilization samples into the run directory every N seconds.
     /// Set to 0 to disable sidecar sampling.
-    #[arg(long, default_value_t = 2)]
+    #[arg(long, default_value_t = 0)]
     gpu_telemetry_interval_secs: u64,
 }
 
@@ -243,6 +243,23 @@ struct GpuTelemetrySummary {
     devices: Vec<GpuTelemetryDeviceSummary>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct GpuTelemetryActiveTrainSummary {
+    warmup_iterations_skipped: usize,
+    train_iterations: usize,
+    micro_batch_size: usize,
+    kernel_block_size: usize,
+    tokens_per_step: usize,
+    telemetry_samples: u64,
+    mean_step_secs: f64,
+    median_step_secs: f64,
+    approx_tokens_per_sec: f64,
+    mean_utilization_pct: f32,
+    mean_power_watts: f32,
+    max_power_watts: f32,
+    max_memory_used_mib: u64,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct GpuTelemetrySample {
     gpu_index: u32,
@@ -259,6 +276,16 @@ struct GpuTelemetryAccumulator {
     sum_power_watts: f64,
     max_power_watts: f32,
     max_memory_used_mib: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ActiveTrainWindow {
+    warmup_iterations_skipped: usize,
+    train_iterations: usize,
+    train_start_elapsed_secs: f64,
+    validation_start_elapsed_secs: f64,
+    mean_step_secs: f64,
+    median_step_secs: f64,
 }
 
 struct GpuTelemetrySidecarGuard {
@@ -505,6 +532,186 @@ fn spawn_gpu_telemetry_sidecar(
     })
 }
 
+fn parse_log_clock_secs(line: &str) -> Option<f64> {
+    let token = line.split_whitespace().next()?;
+    let time = token.split('T').nth(1)?.trim_end_matches('Z');
+    let mut parts = time.split(':');
+    let hour = parts.next()?.parse::<f64>().ok()?;
+    let minute = parts.next()?.parse::<f64>().ok()?;
+    let second = parts.next()?.parse::<f64>().ok()?;
+    Some(hour * 3600.0 + minute * 60.0 + second)
+}
+
+fn parse_iteration_index(line: &str) -> Option<usize> {
+    line.split("INFO Iteration ")
+        .nth(1)?
+        .trim()
+        .parse::<usize>()
+        .ok()
+}
+
+fn effective_training_kernel_block_size(
+    training: &burn_dragon_language::TrainingHyperparameters,
+) -> usize {
+    training
+        .tbptt_chunk_size
+        .filter(|chunk| *chunk > 0 && *chunk < training.block_size)
+        .unwrap_or(training.block_size)
+        .max(1)
+}
+
+fn resolve_active_train_window(experiment_log: &Path) -> Result<Option<ActiveTrainWindow>> {
+    use anyhow::Context as _;
+
+    let content = std::fs::read_to_string(experiment_log)
+        .with_context(|| format!("failed to read {}", experiment_log.display()))?;
+    let mut base_secs = None;
+    let mut iteration_times = Vec::new();
+    let mut validation_start_secs = None;
+    for line in content.lines() {
+        let Some(clock_secs) = parse_log_clock_secs(line) else {
+            continue;
+        };
+        let base = *base_secs.get_or_insert(clock_secs);
+        let elapsed_secs = clock_secs - base;
+        if let Some(iteration) = parse_iteration_index(line) {
+            iteration_times.push((iteration, elapsed_secs));
+        }
+        if validation_start_secs.is_none() && line.contains("INFO Executing validation step") {
+            validation_start_secs = Some(elapsed_secs);
+        }
+    }
+    let Some(validation_start_elapsed_secs) = validation_start_secs else {
+        return Ok(None);
+    };
+    if iteration_times.len() < 2 {
+        return Ok(None);
+    }
+    let train_iterations = iteration_times
+        .last()
+        .map(|(iteration, _)| *iteration)
+        .unwrap_or_default();
+    if train_iterations < 2 {
+        return Ok(None);
+    }
+    let warmup_iterations_skipped = if train_iterations > 20 {
+        10
+    } else {
+        (train_iterations / 4).clamp(2, 10)
+    };
+    let train_start_elapsed_secs = iteration_times
+        .iter()
+        .find(|(iteration, _)| *iteration >= warmup_iterations_skipped)
+        .map(|(_, elapsed)| *elapsed)
+        .or_else(|| iteration_times.first().map(|(_, elapsed)| *elapsed))
+        .unwrap_or(0.0);
+    let mut step_deltas = Vec::new();
+    for window in iteration_times.windows(2) {
+        let [(prev_iteration, prev_elapsed), (next_iteration, next_elapsed)] = window else {
+            continue;
+        };
+        let _ = prev_iteration;
+        if *next_iteration >= warmup_iterations_skipped {
+            step_deltas.push(next_elapsed - prev_elapsed);
+        }
+    }
+    if step_deltas.is_empty() {
+        return Ok(None);
+    }
+    let mean_step_secs = step_deltas.iter().sum::<f64>() / step_deltas.len() as f64;
+    step_deltas.sort_by(|left, right| {
+        left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let median_step_secs = step_deltas[step_deltas.len() / 2];
+    Ok(Some(ActiveTrainWindow {
+        warmup_iterations_skipped,
+        train_iterations,
+        train_start_elapsed_secs,
+        validation_start_elapsed_secs,
+        mean_step_secs,
+        median_step_secs,
+    }))
+}
+
+fn write_active_train_telemetry_summary(run_dir: &Path) -> Result<()> {
+    use anyhow::Context as _;
+
+    let config_path = run_dir.join("training_config.json");
+    let config_payload = std::fs::read(&config_path)
+        .with_context(|| format!("failed to read {}", config_path.display()))?;
+    let config: LanguageTrainingConfig = serde_json::from_slice(&config_payload)
+        .with_context(|| format!("failed to parse {}", config_path.display()))?;
+    let Some(window) = resolve_active_train_window(&run_dir.join("experiment.log"))? else {
+        return Ok(());
+    };
+    let csv_path = run_dir.join("gpu_telemetry.csv");
+    let csv_payload = std::fs::read_to_string(&csv_path)
+        .with_context(|| format!("failed to read {}", csv_path.display()))?;
+    let mut telemetry_samples = 0u64;
+    let mut sum_utilization_pct = 0.0f64;
+    let mut sum_power_watts = 0.0f64;
+    let mut max_power_watts = 0.0f32;
+    let mut max_memory_used_mib = 0u64;
+    for line in csv_payload.lines().skip(1) {
+        let mut parts = line.split(',');
+        let _sample = parts.next();
+        let Some(elapsed_secs) = parts.next().and_then(|value| value.parse::<f64>().ok()) else {
+            continue;
+        };
+        let _gpu_index = parts.next();
+        let Some(utilization_pct) = parts.next().and_then(|value| value.parse::<f32>().ok()) else {
+            continue;
+        };
+        let Some(power_watts) = parts.next().and_then(|value| value.parse::<f32>().ok()) else {
+            continue;
+        };
+        let Some(memory_used_mib) = parts.next().and_then(|value| value.parse::<u64>().ok()) else {
+            continue;
+        };
+        if elapsed_secs < window.train_start_elapsed_secs
+            || elapsed_secs > window.validation_start_elapsed_secs
+        {
+            continue;
+        }
+        telemetry_samples += 1;
+        sum_utilization_pct += f64::from(utilization_pct);
+        sum_power_watts += f64::from(power_watts);
+        max_power_watts = max_power_watts.max(power_watts);
+        max_memory_used_mib = max_memory_used_mib.max(memory_used_mib);
+    }
+    if telemetry_samples == 0 {
+        return Ok(());
+    }
+    let kernel_block_size = effective_training_kernel_block_size(&config.training);
+    let tokens_per_step = config.training.batch_size.saturating_mul(kernel_block_size);
+    let summary = GpuTelemetryActiveTrainSummary {
+        warmup_iterations_skipped: window.warmup_iterations_skipped,
+        train_iterations: window.train_iterations,
+        micro_batch_size: config.training.batch_size,
+        kernel_block_size,
+        tokens_per_step,
+        telemetry_samples,
+        mean_step_secs: window.mean_step_secs,
+        median_step_secs: window.median_step_secs,
+        approx_tokens_per_sec: tokens_per_step as f64 / window.mean_step_secs.max(1.0e-9),
+        mean_utilization_pct: (sum_utilization_pct / telemetry_samples as f64) as f32,
+        mean_power_watts: (sum_power_watts / telemetry_samples as f64) as f32,
+        max_power_watts,
+        max_memory_used_mib,
+    };
+    let summary_path = run_dir.join("gpu_telemetry_active_train_summary.json");
+    std::fs::write(&summary_path, serde_json::to_string_pretty(&summary)?)
+        .with_context(|| format!("failed to write {}", summary_path.display()))?;
+    tracing::info!(
+        "active train summary: tokens_per_sec={:.1} mean_power_watts={:.1} mean_utilization_pct={:.1} summary={}",
+        summary.approx_tokens_per_sec,
+        summary.mean_power_watts,
+        summary.mean_utilization_pct,
+        summary_path.display(),
+    );
+    Ok(())
+}
+
 fn apply_planned_run_env(planned_run: &PlannedRunArtifacts) {
     unsafe {
         std::env::set_var(RUN_ROOT_ENV, &planned_run.run_root);
@@ -593,6 +800,7 @@ fn run_language(prepared: PreparedLanguageCommand) -> Result<()> {
     } else {
         unsafe { std::env::set_var(RUN_ROOT_ENV, &run_root) };
     }
+    let telemetry_run_dir = planned_run.as_ref().map(|planned_run| planned_run.run_dir.clone());
 
     #[cfg(feature = "language-rerun")]
     let _rerun_guard = if args.rerun {
@@ -622,7 +830,7 @@ fn run_language(prepared: PreparedLanguageCommand) -> Result<()> {
         ));
     }
 
-    let _gpu_telemetry_guard =
+    let gpu_telemetry_guard =
         if backend_uses_nvidia_gpu(args.backend) && args.gpu_telemetry_interval_secs > 0 {
             planned_run
                 .as_ref()
@@ -637,7 +845,7 @@ fn run_language(prepared: PreparedLanguageCommand) -> Result<()> {
             None
         };
 
-    run_in_training_thread("language-train", move || match args.backend {
+    let result = run_in_training_thread("language-train", move || match args.backend {
         BackendArg::Ndarray => {
             if balanced_checkpointing_enabled() {
                 train_language::<Autodiff<NdArray<f32>, BalancedCheckpointing>, _>(
@@ -1028,7 +1236,19 @@ fn run_language(prepared: PreparedLanguageCommand) -> Result<()> {
                 ))
             }
         }
-    })
+    });
+    drop(gpu_telemetry_guard);
+    if result.is_ok() {
+        if let Some(run_dir) = telemetry_run_dir.as_ref() {
+            if let Err(err) = write_active_train_telemetry_summary(run_dir) {
+                tracing::warn!(
+                    "failed to write active train telemetry summary for {}: {err:#}",
+                    run_dir.display()
+                );
+            }
+        }
+    }
+    result
 }
 
 #[cfg(feature = "language-ddp")]
@@ -1230,7 +1450,8 @@ mod tests {
     use super::{
         Cli, Command, LaunchModeArg, PreparedCommand, PreparedLanguageCommand,
         apply_run_root_and_resume_policy, default_or_explicit_config_paths,
-        plan_single_process_run_artifacts, prepare_command, resolve_cli_run_root,
+        plan_single_process_run_artifacts, prepare_command, resolve_active_train_window,
+        resolve_cli_run_root, write_active_train_telemetry_summary,
     };
     use burn_dragon_language::TrainingConfig as LanguageTrainingConfig;
     use burn_dragon_language::checkpoint::RUN_ROOT_ENV;
@@ -1346,6 +1567,21 @@ mod tests {
     }
 
     #[test]
+    fn resolve_cli_run_root_mirrors_local_overlay_configs_under_local_namespace() {
+        let run_root = resolve_cli_run_root(
+            &tiny_training_config(),
+            &[PathBuf::from(
+                "config/local/shakespeare_kernel_ablation/mamba2.toml",
+            )],
+        );
+
+        assert_eq!(
+            run_root,
+            PathBuf::from("runs/language/local/shakespeare_kernel_ablation/mamba2")
+        );
+    }
+
+    #[test]
     fn apply_run_root_and_resume_policy_sets_resume_dir_from_latest() {
         let _env_guard = env_lock().lock().expect("env lock");
         let dir = tempdir().expect("tempdir");
@@ -1442,7 +1678,19 @@ mod tests {
                 assert_eq!(args.rerun_bind_ip, "0.0.0.0");
                 assert_eq!(args.rerun_port, 9988);
                 assert_eq!(args.rerun_telemetry_interval_secs, 7);
-                assert_eq!(args.gpu_telemetry_interval_secs, 2);
+                assert_eq!(args.gpu_telemetry_interval_secs, 0);
+            }
+            #[allow(unreachable_patterns)]
+            _ => panic!("expected language command"),
+        }
+    }
+
+    #[test]
+    fn clap_defaults_gpu_telemetry_to_disabled_for_language_training() {
+        let cli = Cli::parse_from(["language_train", "language"]);
+        match cli.command {
+            Command::Language(args) => {
+                assert_eq!(args.gpu_telemetry_interval_secs, 0);
             }
             #[allow(unreachable_patterns)]
             _ => panic!("expected language command"),
@@ -1477,6 +1725,84 @@ mod tests {
         assert_eq!(samples[0].power_watts, 287.5);
         assert_eq!(samples[0].memory_used_mib, 14321);
         assert_eq!(samples[1].gpu_index, 1);
+    }
+
+    #[test]
+    fn resolve_active_train_window_extracts_steady_state_window() {
+        let dir = tempdir().expect("tempdir");
+        let log_path = dir.path().join("experiment.log");
+        fs::write(
+            &log_path,
+            "\
+2026-03-29T06:00:00.000Z  INFO start\n\
+2026-03-29T06:00:01.000Z  INFO Iteration 1\n\
+2026-03-29T06:00:02.000Z  INFO Iteration 2\n\
+2026-03-29T06:00:03.000Z  INFO Iteration 3\n\
+2026-03-29T06:00:04.000Z  INFO Iteration 4\n\
+2026-03-29T06:00:05.000Z  INFO Iteration 5\n\
+2026-03-29T06:00:06.000Z  INFO Iteration 6\n\
+2026-03-29T06:00:07.000Z  INFO Iteration 7\n\
+2026-03-29T06:00:08.000Z  INFO Iteration 8\n\
+2026-03-29T06:00:09.000Z  INFO Executing validation step for epoch 1\n",
+        )
+        .expect("write log");
+
+        let window = resolve_active_train_window(&log_path)
+            .expect("window")
+            .expect("some window");
+        assert_eq!(window.warmup_iterations_skipped, 2);
+        assert_eq!(window.train_iterations, 8);
+        assert!((window.mean_step_secs - 1.0).abs() < 1.0e-6);
+        assert!((window.median_step_secs - 1.0).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn write_active_train_telemetry_summary_emits_tokens_per_sec_summary() {
+        let dir = tempdir().expect("tempdir");
+        let run_dir = dir.path();
+        let mut config = tiny_training_config();
+        config.training.batch_size = 4;
+        config.training.block_size = 8;
+        fs::write(
+            run_dir.join("training_config.json"),
+            serde_json::to_vec_pretty(&config).expect("serialize config"),
+        )
+        .expect("write config");
+        fs::write(
+            run_dir.join("experiment.log"),
+            "\
+2026-03-29T06:00:00.000Z  INFO start\n\
+2026-03-29T06:00:01.000Z  INFO Iteration 1\n\
+2026-03-29T06:00:02.000Z  INFO Iteration 2\n\
+2026-03-29T06:00:03.000Z  INFO Iteration 3\n\
+2026-03-29T06:00:04.000Z  INFO Iteration 4\n\
+2026-03-29T06:00:05.000Z  INFO Iteration 5\n\
+2026-03-29T06:00:06.000Z  INFO Iteration 6\n\
+2026-03-29T06:00:07.000Z  INFO Iteration 7\n\
+2026-03-29T06:00:08.000Z  INFO Iteration 8\n\
+2026-03-29T06:00:09.000Z  INFO Executing validation step for epoch 1\n",
+        )
+        .expect("write log");
+        fs::write(
+            run_dir.join("gpu_telemetry.csv"),
+            "\
+sample,elapsed_secs,gpu_index,utilization_pct,power_watts,memory_used_mib\n\
+1,5.200,0,97.0,410.0,12000\n\
+2,6.200,0,98.0,420.0,12032\n\
+3,7.200,0,99.0,430.0,12064\n\
+4,9.200,0,10.0,100.0,2048\n",
+        )
+        .expect("write telemetry");
+
+        write_active_train_telemetry_summary(run_dir).expect("write summary");
+        let payload = fs::read_to_string(run_dir.join("gpu_telemetry_active_train_summary.json"))
+            .expect("read summary");
+        let json: serde_json::Value = serde_json::from_str(&payload).expect("parse summary");
+        assert_eq!(json["tokens_per_step"], 32);
+        assert_eq!(json["telemetry_samples"], 3);
+        assert_eq!(json["max_memory_used_mib"], 12064);
+        assert_eq!(json["mean_step_secs"], 1.0);
+        assert_eq!(json["approx_tokens_per_sec"], 32.0);
     }
 
     #[cfg(feature = "language-ddp")]

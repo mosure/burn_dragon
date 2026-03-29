@@ -8,11 +8,38 @@ use crate::train::startup_autotune::{
 };
 use crate::train::utils::{build_training_execution_form, write_run_config};
 use crate::write_training_snapshot;
+use burn_dragon_core::SequenceMemorySystem;
 use std::time::Instant;
 use tracing::warn;
 
 const PROCESS_GROUP_RUN_DIR_ENV: &str = "BURN_DRAGON_PROCESS_GROUP_RUN_DIR";
 const PROCESS_GROUP_RUN_NAME_ENV: &str = "BURN_DRAGON_PROCESS_GROUP_RUN_NAME";
+const CUDA_LINEAR_DENSE_SCORE_AUTO_BLOCK_LIMIT: usize = 1024;
+
+fn cuda_mamba2_training_geometry_summary(
+    model_config: &BDHConfig,
+    micro_batch_size: usize,
+    training_kernel_block_size: usize,
+) -> Option<String> {
+    if model_config.sequence_kernel.memory_system != SequenceMemorySystem::Mamba2StateSpaceDuality {
+        return None;
+    }
+    let resolved = model_config
+        .mamba
+        .resolve(model_config.n_embd, SequenceMemorySystem::Mamba2StateSpaceDuality);
+    Some(format!(
+        "cuda mamba2 geometry: micro_batch={} kernel_block={} tokens/micro_batch={} d_inner={} headdim={} nheads={} ngroups={} d_state={} d_conv={}",
+        micro_batch_size,
+        training_kernel_block_size,
+        micro_batch_size.saturating_mul(training_kernel_block_size),
+        resolved.d_inner,
+        resolved.headdim,
+        resolved.nheads,
+        resolved.ngroups,
+        resolved.d_state,
+        resolved.d_conv,
+    ))
+}
 
 fn resolve_run_root() -> PathBuf {
     crate::checkpoint::resolve_run_root()
@@ -198,6 +225,38 @@ where
     }
 }
 
+fn resolve_effective_training_sequence_kernel(
+    configured_kernel: SequenceKernelConfig,
+    training_override: Option<SequenceKernelConfig>,
+    backend_name: &str,
+    training_kernel_block_size: usize,
+) -> (
+    SequenceKernelConfig,
+    Option<SequenceKernelConfig>,
+    Option<&'static str>,
+) {
+    if let Some(explicit) = training_override {
+        return (explicit, Some(explicit), None);
+    }
+
+    if backend_name.eq_ignore_ascii_case("cuda")
+        && configured_kernel
+            == SequenceKernelConfig::reference(SequenceMemorySystem::LinearAttention)
+        && training_kernel_block_size <= CUDA_LINEAR_DENSE_SCORE_AUTO_BLOCK_LIMIT
+    {
+        let promoted = SequenceKernelConfig::dense_score_short_context();
+        return (
+            promoted,
+            Some(promoted),
+            Some(
+                "auto-promoted short-context CUDA linear-attention training to dense_score_short_context",
+            ),
+        );
+    }
+
+    (configured_kernel, None, None)
+}
+
 pub fn train_backend<B, Init>(
     config: &TrainingConfig,
     dataset: Arc<Dataset>,
@@ -266,9 +325,15 @@ where
         training_kernel_block_size,
         tokenizer.as_ref(),
     )?;
-    if let Some(sequence_kernel) = training.sequence_kernel_override {
-        model_config.sequence_kernel = sequence_kernel;
-    }
+    let configured_sequence_kernel = model_config.sequence_kernel;
+    let (effective_sequence_kernel, effective_training_sequence_kernel_override, promotion_reason) =
+        resolve_effective_training_sequence_kernel(
+            configured_sequence_kernel,
+            training.sequence_kernel_override,
+            backend_name,
+            training_kernel_block_size,
+        );
+    model_config.sequence_kernel = effective_sequence_kernel;
     apply_wgpu_fused_core_override(
         &mut model_config,
         backend_name,
@@ -283,14 +348,35 @@ where
         build_training_execution_form(&resolved_config),
         training.launch_mode,
         model_config.sequence_kernel,
-        training.sequence_kernel_override,
+        effective_training_sequence_kernel_override,
         training.tbptt_chunk_size,
         training_kernel_block_size,
         resolved_config.parallel.pipeline.enabled,
     );
+    if let Some(reason) = promotion_reason {
+        info!(
+            "training sequence kernel promotion: configured={:?} effective={:?} reason={reason}",
+            configured_sequence_kernel, model_config.sequence_kernel,
+        );
+    }
     if backend_name.eq_ignore_ascii_case("cuda") && model_config.fused_kernels.enabled {
         warn!(
             "cuda language training still mixes burn_dragon_kernel fused kernels with generic Burn tensor ops; only selected recurrent/projection paths are accelerated today"
+        );
+    }
+    if backend_name.eq_ignore_ascii_case("cuda")
+        && model_config.sequence_kernel.memory_system
+            == SequenceMemorySystem::Mamba2StateSpaceDuality
+    {
+        if let Some(summary) = cuda_mamba2_training_geometry_summary(
+            &model_config,
+            resolved_config.training.batch_size,
+            training_kernel_block_size,
+        ) {
+            info!("{summary}");
+        }
+        warn!(
+            "cuda mamba2 training is on the tensorized SSD path with the custom analytic backward wrapper and fused SSD forward/backward core; projections and depthwise conv still run as tensor ops, so compare tokens/sec and active-train power against mamba1 rather than whole-run mean watts"
         );
     }
     let pipeline_plan = if resolved_config.parallel.pipeline.enabled {
@@ -475,6 +561,7 @@ where
             &run_dir,
             &run_name,
             backend_name,
+            effective_training_sequence_kernel_override,
             startup_autotune.as_ref(),
         )?;
         write_training_snapshot(&resolved_config, &run_dir, dataset.tokenizer().as_ref())?;
@@ -743,6 +830,47 @@ mod tests {
     }
 
     #[test]
+    fn cuda_mamba2_training_geometry_summary_reports_resolved_shape() {
+        let model_config = burn_dragon_core::BDHConfig {
+            n_embd: 128,
+            sequence_kernel: SequenceKernelConfig::reference(
+                SequenceMemorySystem::Mamba2StateSpaceDuality,
+            ),
+            mamba: burn_dragon_core::MambaSequenceConfig {
+                headdim: 128,
+                ngroups: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let summary = cuda_mamba2_training_geometry_summary(&model_config, 24, 512)
+            .expect("summary");
+        assert!(summary.contains("tokens/micro_batch=12288"), "{summary}");
+        assert!(summary.contains("headdim=128"), "{summary}");
+        assert!(summary.contains("nheads=2"), "{summary}");
+    }
+
+    #[test]
+    fn cuda_mamba2_training_geometry_summary_skips_other_kernels() {
+        let model_config = burn_dragon_core::BDHConfig {
+            sequence_kernel: SequenceKernelConfig::reference(
+                SequenceMemorySystem::LinearAttention,
+            ),
+            mamba: burn_dragon_core::MambaSequenceConfig {
+                headdim: 128,
+                ngroups: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        assert!(
+            cuda_mamba2_training_geometry_summary(&model_config, 24, 512).is_none()
+        );
+    }
+
+    #[test]
     fn checkpoint_steps_per_epoch_uses_interval_for_max_iters_runs() {
         let training = TrainingHyperparameters {
             block_size: 8,
@@ -799,6 +927,49 @@ mod tests {
         };
 
         assert_eq!(resolve_checkpoint_steps_per_epoch(&training, 512), 512);
+    }
+
+    #[test]
+    fn short_context_cuda_linear_attention_auto_promotes_to_dense_score() {
+        let (effective, recorded_override, reason) = resolve_effective_training_sequence_kernel(
+            SequenceKernelConfig::reference(SequenceMemorySystem::LinearAttention),
+            None,
+            "cuda",
+            512,
+        );
+
+        assert_eq!(effective, SequenceKernelConfig::dense_score_short_context());
+        assert_eq!(
+            recorded_override,
+            Some(SequenceKernelConfig::dense_score_short_context())
+        );
+        assert!(reason.is_some());
+    }
+
+    #[test]
+    fn explicit_training_override_prevents_auto_promotion() {
+        let explicit = SequenceKernelConfig::reference(SequenceMemorySystem::LinearAttention);
+        let (effective, recorded_override, reason) = resolve_effective_training_sequence_kernel(
+            SequenceKernelConfig::reference(SequenceMemorySystem::LinearAttention),
+            Some(explicit),
+            "cuda",
+            512,
+        );
+
+        assert_eq!(effective, explicit);
+        assert_eq!(recorded_override, Some(explicit));
+        assert!(reason.is_none());
+    }
+
+    #[test]
+    fn non_cuda_linear_attention_stays_on_reference_without_override() {
+        let configured = SequenceKernelConfig::reference(SequenceMemorySystem::LinearAttention);
+        let (effective, recorded_override, reason) =
+            resolve_effective_training_sequence_kernel(configured, None, "cpu", 512);
+
+        assert_eq!(effective, configured);
+        assert_eq!(recorded_override, None);
+        assert!(reason.is_none());
     }
 
     #[cfg(feature = "ddp")]

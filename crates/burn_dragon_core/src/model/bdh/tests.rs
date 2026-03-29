@@ -11,6 +11,26 @@ use std::sync::{Mutex, OnceLock};
 
 type RecurrenceBackend = NdArray<f32>;
 
+fn kernel_linear_attention() -> SequenceKernelConfig {
+    SequenceKernelConfig::reference(SequenceMemorySystem::LinearAttention)
+}
+
+fn kernel_linear_dense_score() -> SequenceKernelConfig {
+    SequenceKernelConfig::dense_score_short_context()
+}
+
+fn kernel_rwkv8() -> SequenceKernelConfig {
+    SequenceKernelConfig::reference(SequenceMemorySystem::Rwkv8StateSpace)
+}
+
+fn kernel_mamba1() -> SequenceKernelConfig {
+    SequenceKernelConfig::reference(SequenceMemorySystem::Mamba1SelectiveScan)
+}
+
+fn kernel_mamba2() -> SequenceKernelConfig {
+    SequenceKernelConfig::reference(SequenceMemorySystem::Mamba2StateSpaceDuality)
+}
+
 fn recurrence_test_model(config: BDHConfig) -> BDH<RecurrenceBackend> {
     static RECURRENCE_MODEL_INIT_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     let _guard = RECURRENCE_MODEL_INIT_LOCK
@@ -23,7 +43,7 @@ fn recurrence_test_model(config: BDHConfig) -> BDH<RecurrenceBackend> {
 }
 
 fn recurrence_test_model_with_shape(
-    kernel: SequenceKernelKind,
+    kernel: SequenceKernelConfig,
     n_layer: usize,
     n_embd: usize,
     n_head: usize,
@@ -35,7 +55,7 @@ fn recurrence_test_model_with_shape(
         0,
         "latent_total must be divisible by n_embd in recurrence tests"
     );
-    recurrence_test_model(BDHConfig {
+    let mut config = BDHConfig {
         n_layer,
         n_embd,
         n_head,
@@ -48,7 +68,11 @@ fn recurrence_test_model_with_shape(
             ..Default::default()
         },
         ..Default::default()
-    })
+    };
+    if kernel.memory_system == SequenceMemorySystem::Mamba2StateSpaceDuality {
+        config.mamba.headdim = n_embd.max(1);
+    }
+    recurrence_test_model(config)
 }
 
 fn low_bit_export_test_config() -> BDHConfig {
@@ -79,7 +103,7 @@ fn low_bit_export_test_config() -> BDHConfig {
     }
 }
 
-fn decoder_y_quality_recipe_test_config(sequence_kernel: SequenceKernelKind) -> BDHConfig {
+fn decoder_y_quality_recipe_test_config(sequence_kernel: SequenceKernelConfig) -> BDHConfig {
     let mut config = BDHConfig {
         n_layer: 2,
         n_embd: 16,
@@ -119,10 +143,7 @@ fn decoder_y_quality_recipe_test_config(sequence_kernel: SequenceKernelKind) -> 
         },
         ..Default::default()
     };
-    if matches!(
-        sequence_kernel,
-        SequenceKernelKind::MambaSelectiveSsmExperimental
-    ) {
+    if sequence_kernel.memory_system == SequenceMemorySystem::Mamba1SelectiveScan {
         config.mamba = MambaSequenceConfig {
             d_state: 16,
             d_conv: 2,
@@ -134,7 +155,7 @@ fn decoder_y_quality_recipe_test_config(sequence_kernel: SequenceKernelKind) -> 
 }
 
 fn allmat_quality_recipe_test_config(
-    sequence_kernel: SequenceKernelKind,
+    sequence_kernel: SequenceKernelConfig,
     decoder_x_mode: crate::LowBitWeightFormat,
 ) -> BDHConfig {
     let mut config = decoder_y_quality_recipe_test_config(sequence_kernel);
@@ -622,7 +643,7 @@ fn model_state_max_abs_diff(
     max_diff
 }
 
-fn assert_full_forward_matches_token_step_recurrence(kernel: SequenceKernelKind) {
+fn assert_full_forward_matches_token_step_recurrence(kernel: SequenceKernelConfig) {
     let tokens = vec![1i64, 2, 3, 4, 5, 6];
     assert_full_forward_matches_token_step_recurrence_with_shape(
         kernel,
@@ -637,7 +658,7 @@ fn assert_full_forward_matches_token_step_recurrence(kernel: SequenceKernelKind)
 }
 
 fn assert_full_forward_matches_token_step_recurrence_with_shape(
-    kernel: SequenceKernelKind,
+    kernel: SequenceKernelConfig,
     n_layer: usize,
     n_embd: usize,
     n_head: usize,
@@ -667,7 +688,7 @@ fn assert_full_forward_matches_token_step_recurrence_with_shape(
     );
 }
 
-fn assert_chunked_recurrence_matches_uninterrupted_state(kernel: SequenceKernelKind) {
+fn assert_chunked_recurrence_matches_uninterrupted_state(kernel: SequenceKernelConfig) {
     let tokens = vec![1i64, 2, 3, 4, 5, 6];
     assert_chunked_recurrence_matches_uninterrupted_state_with_shape(
         kernel,
@@ -683,7 +704,7 @@ fn assert_chunked_recurrence_matches_uninterrupted_state(kernel: SequenceKernelK
 }
 
 fn assert_chunked_recurrence_matches_uninterrupted_state_with_shape(
-    kernel: SequenceKernelKind,
+    kernel: SequenceKernelConfig,
     n_layer: usize,
     n_embd: usize,
     n_head: usize,
@@ -929,8 +950,7 @@ fn train_kernel_exp_forward_selects_native_runtime_and_emits_finite_logits() {
 #[test]
 fn train_kernel_exp_decoder_y_quality_recipe_remains_close_to_qat_reference() {
     let device = <RecurrenceBackend as BackendTrait>::Device::default();
-    let base =
-        decoder_y_quality_recipe_test_config(SequenceKernelKind::BdhLinearDenseScoreExperimental);
+    let base = decoder_y_quality_recipe_test_config(kernel_linear_dense_score());
     let qat_model = recurrence_test_model(base.clone());
     let native_model = recurrence_test_model(BDHConfig {
         quant: crate::LowBitQuantizationConfig {
@@ -960,8 +980,7 @@ fn train_kernel_exp_decoder_y_quality_recipe_remains_close_to_qat_reference() {
 #[test]
 fn train_kernel_exp_decoder_y_mamba_quality_recipe_reports_qat_parity() {
     let device = <RecurrenceBackend as BackendTrait>::Device::default();
-    let base =
-        decoder_y_quality_recipe_test_config(SequenceKernelKind::MambaSelectiveSsmExperimental);
+    let base = decoder_y_quality_recipe_test_config(kernel_mamba1());
     let qat_model = recurrence_test_model(base.clone());
     let native_model = recurrence_test_model(BDHConfig {
         quant: crate::LowBitQuantizationConfig {
@@ -993,8 +1012,7 @@ fn train_kernel_exp_decoder_y_mamba_quality_recipe_reports_qat_parity() {
 #[test]
 fn decoder_y_mamba_ablation_reports_fp32_qat_native_drift() {
     let device = <RecurrenceBackend as BackendTrait>::Device::default();
-    let fp32_base =
-        decoder_y_quality_recipe_test_config(SequenceKernelKind::MambaSelectiveSsmExperimental);
+    let fp32_base = decoder_y_quality_recipe_test_config(kernel_mamba1());
     let fp32_model = recurrence_test_model(BDHConfig {
         quant: crate::LowBitQuantizationConfig {
             enable: false,
@@ -1061,11 +1079,9 @@ fn decoder_y_scale_stats_compare_linear_and_mamba() {
         [2, 6],
     );
     let linear_model = recurrence_test_model(decoder_y_quality_recipe_test_config(
-        SequenceKernelKind::BdhLinearDenseScoreExperimental,
+        kernel_linear_dense_score(),
     ));
-    let mamba_model = recurrence_test_model(decoder_y_quality_recipe_test_config(
-        SequenceKernelKind::MambaSelectiveSsmExperimental,
-    ));
+    let mamba_model = recurrence_test_model(decoder_y_quality_recipe_test_config(kernel_mamba1()));
     let linear_stats = collect_decoder_y_layer_scale_stats(&linear_model, tokens.clone());
     let mamba_stats = collect_decoder_y_layer_scale_stats(&mamba_model, tokens);
 
@@ -1106,18 +1122,17 @@ fn allmat_decoder_x_sign1_qat_improves_fp32_drift_vs_ternary() {
         vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
         [2, 6],
     );
-    let mut fp32_config =
-        decoder_y_quality_recipe_test_config(SequenceKernelKind::BdhLinearDenseScoreExperimental);
+    let mut fp32_config = decoder_y_quality_recipe_test_config(kernel_linear_dense_score());
     fp32_config.quant.enable = false;
 
     let mut ternary_config = allmat_quality_recipe_test_config(
-        SequenceKernelKind::BdhLinearDenseScoreExperimental,
+        kernel_linear_dense_score(),
         crate::LowBitWeightFormat::Ternary158,
     );
     ternary_config.quant.training_mode = crate::LowBitTrainingMode::QatSte;
 
     let mut sign1_config = allmat_quality_recipe_test_config(
-        SequenceKernelKind::BdhLinearDenseScoreExperimental,
+        kernel_linear_dense_score(),
         crate::LowBitWeightFormat::Sign1,
     );
     sign1_config.quant.training_mode = crate::LowBitTrainingMode::QatSte;
@@ -1483,7 +1498,7 @@ fn recurrent_rwkv8_state_space_reference_matches_decayed_normalized_contract() {
             mlp_internal_dim_multiplier: 1,
             vocab_size: 8,
             dropout: 0.0,
-            sequence_kernel: SequenceKernelKind::Rwkv8StateSpaceExperimental,
+            sequence_kernel: kernel_rwkv8(),
             ..Default::default()
         },
         &device,
@@ -1542,7 +1557,7 @@ fn rwkv8_forward_with_state_populates_rho_norm() {
             mlp_internal_dim_multiplier: 2,
             vocab_size: 32,
             dropout: 0.0,
-            sequence_kernel: SequenceKernelKind::Rwkv8StateSpaceExperimental,
+            sequence_kernel: kernel_rwkv8(),
             ..Default::default()
         },
         &device,
@@ -1592,7 +1607,7 @@ fn assert_linear_forward_with_rho_chunk_compression_preserves_logits_and_compres
         mlp_internal_dim_multiplier: 2,
         vocab_size: 32,
         dropout: 0.0,
-        sequence_kernel: SequenceKernelKind::BdhLinearAttention,
+        sequence_kernel: kernel_linear_attention(),
         ..Default::default()
     });
     let mut compressed_model = dense_model.clone();
@@ -1641,7 +1656,43 @@ fn mamba_forward_with_state_populates_sequence_aux() {
             mlp_internal_dim_multiplier: 2,
             vocab_size: 32,
             dropout: 0.0,
-            sequence_kernel: SequenceKernelKind::MambaSelectiveSsmExperimental,
+            sequence_kernel: kernel_mamba1(),
+            ..Default::default()
+        },
+        &device,
+    );
+    let tokens =
+        Tensor::<Backend, 2, Int>::from_data(TensorData::new(vec![1, 2, 3], [1, 3]), &device);
+    let mut state = model.init_state();
+    let _ = model.forward_with_state(tokens, &mut state);
+
+    assert!(state.layers.iter().all(|layer| layer.rho.is_some()));
+    assert!(
+        state
+            .layers
+            .iter()
+            .all(|layer| layer.sequence_aux.is_some())
+    );
+    assert!(state.layers.iter().all(|layer| layer.rho_norm.is_none()));
+}
+
+#[test]
+fn mamba2_forward_with_state_populates_sequence_aux() {
+    type Backend = NdArray<f32>;
+    let device = <Backend as BackendTrait>::Device::default();
+    let model = BDH::<Backend>::new(
+        BDHConfig {
+            n_layer: 2,
+            n_embd: 8,
+            n_head: 2,
+            mlp_internal_dim_multiplier: 2,
+            vocab_size: 32,
+            dropout: 0.0,
+            sequence_kernel: kernel_mamba2(),
+            mamba: MambaSequenceConfig {
+                headdim: 8,
+                ..Default::default()
+            },
             ..Default::default()
         },
         &device,
@@ -1663,7 +1714,7 @@ fn mamba_forward_with_state_populates_sequence_aux() {
 
 #[test]
 fn linear_full_forward_matches_token_step_recurrence() {
-    assert_full_forward_matches_token_step_recurrence(SequenceKernelKind::BdhLinearAttention);
+    assert_full_forward_matches_token_step_recurrence(kernel_linear_attention());
 }
 
 #[test]
@@ -1675,7 +1726,7 @@ fn vanilla_language_pipeline_state_does_not_track_residual_history() {
         mlp_internal_dim_multiplier: 4,
         vocab_size: 32,
         dropout: 0.0,
-        sequence_kernel: SequenceKernelKind::BdhLinearAttention,
+        sequence_kernel: kernel_linear_attention(),
         residual_connector: ResidualConnectorKind::Vanilla,
         fused_kernels: FusedKernelConfig {
             enabled: false,
@@ -1699,7 +1750,7 @@ fn attention_residual_full_forward_matches_token_step_recurrence() {
         mlp_internal_dim_multiplier: 4,
         vocab_size: 32,
         dropout: 0.0,
-        sequence_kernel: SequenceKernelKind::BdhLinearAttention,
+        sequence_kernel: kernel_linear_attention(),
         residual_connector: ResidualConnectorKind::AttentionResidual,
         attention_residual: crate::AttentionResidualConfig {
             enabled: true,
@@ -1741,7 +1792,7 @@ fn block_attention_residual_full_forward_matches_token_step_recurrence() {
         mlp_internal_dim_multiplier: 4,
         vocab_size: 32,
         dropout: 0.0,
-        sequence_kernel: SequenceKernelKind::BdhLinearAttention,
+        sequence_kernel: kernel_linear_attention(),
         residual_connector: ResidualConnectorKind::BlockAttentionResidual,
         block_attention_residual: crate::BlockAttentionResidualConfig {
             enabled: true,
@@ -1778,56 +1829,54 @@ fn block_attention_residual_full_forward_matches_token_step_recurrence() {
 
 #[test]
 fn rwkv8_full_forward_matches_token_step_recurrence() {
-    assert_full_forward_matches_token_step_recurrence(
-        SequenceKernelKind::Rwkv8StateSpaceExperimental,
-    );
+    assert_full_forward_matches_token_step_recurrence(kernel_rwkv8());
 }
 
 #[test]
 fn mamba_full_forward_matches_token_step_recurrence() {
-    assert_full_forward_matches_token_step_recurrence(
-        SequenceKernelKind::MambaSelectiveSsmExperimental,
-    );
+    assert_full_forward_matches_token_step_recurrence(kernel_mamba1());
+}
+
+#[test]
+fn mamba2_full_forward_matches_token_step_recurrence() {
+    assert_full_forward_matches_token_step_recurrence(kernel_mamba2());
 }
 
 #[test]
 fn linear_chunked_recurrence_matches_uninterrupted_state_and_logits() {
-    assert_chunked_recurrence_matches_uninterrupted_state(SequenceKernelKind::BdhLinearAttention);
+    assert_chunked_recurrence_matches_uninterrupted_state(kernel_linear_attention());
 }
 
 #[test]
 fn linear_dense_score_full_forward_matches_token_step_recurrence() {
-    assert_full_forward_matches_token_step_recurrence(
-        SequenceKernelKind::BdhLinearDenseScoreExperimental,
-    );
+    assert_full_forward_matches_token_step_recurrence(kernel_linear_dense_score());
 }
 
 #[test]
 fn linear_dense_score_chunked_recurrence_matches_uninterrupted_state_and_logits() {
-    assert_chunked_recurrence_matches_uninterrupted_state(
-        SequenceKernelKind::BdhLinearDenseScoreExperimental,
-    );
+    assert_chunked_recurrence_matches_uninterrupted_state(kernel_linear_dense_score());
 }
 
 #[test]
 fn rwkv8_chunked_recurrence_matches_uninterrupted_state_and_logits() {
-    assert_chunked_recurrence_matches_uninterrupted_state(
-        SequenceKernelKind::Rwkv8StateSpaceExperimental,
-    );
+    assert_chunked_recurrence_matches_uninterrupted_state(kernel_rwkv8());
 }
 
 #[test]
 fn mamba_chunked_recurrence_matches_uninterrupted_state_and_logits() {
-    assert_chunked_recurrence_matches_uninterrupted_state(
-        SequenceKernelKind::MambaSelectiveSsmExperimental,
-    );
+    assert_chunked_recurrence_matches_uninterrupted_state(kernel_mamba1());
+}
+
+#[test]
+fn mamba2_chunked_recurrence_matches_uninterrupted_state_and_logits() {
+    assert_chunked_recurrence_matches_uninterrupted_state(kernel_mamba2());
 }
 
 #[test]
 fn linear_multi_head_recurrence_matches_token_step_and_chunked_state() {
     let token_values = vec![1i64, 2, 3, 4, 5, 6, 7, 8, 9, 10];
     assert_full_forward_matches_token_step_recurrence_with_shape(
-        SequenceKernelKind::BdhLinearAttention,
+        kernel_linear_attention(),
         3,
         12,
         3,
@@ -1837,7 +1886,7 @@ fn linear_multi_head_recurrence_matches_token_step_and_chunked_state() {
         [2, 5],
     );
     assert_chunked_recurrence_matches_uninterrupted_state_with_shape(
-        SequenceKernelKind::BdhLinearAttention,
+        kernel_linear_attention(),
         3,
         12,
         3,
@@ -1853,7 +1902,7 @@ fn linear_multi_head_recurrence_matches_token_step_and_chunked_state() {
 fn linear_dense_score_multi_head_recurrence_matches_token_step_and_chunked_state() {
     let token_values = vec![1i64, 2, 3, 4, 5, 6, 7, 8, 9, 10];
     assert_full_forward_matches_token_step_recurrence_with_shape(
-        SequenceKernelKind::BdhLinearDenseScoreExperimental,
+        kernel_linear_dense_score(),
         3,
         12,
         3,
@@ -1863,7 +1912,7 @@ fn linear_dense_score_multi_head_recurrence_matches_token_step_and_chunked_state
         [2, 5],
     );
     assert_chunked_recurrence_matches_uninterrupted_state_with_shape(
-        SequenceKernelKind::BdhLinearDenseScoreExperimental,
+        kernel_linear_dense_score(),
         3,
         12,
         3,
@@ -1879,7 +1928,7 @@ fn linear_dense_score_multi_head_recurrence_matches_token_step_and_chunked_state
 fn rwkv8_multi_head_recurrence_matches_token_step_and_chunked_state() {
     let token_values = vec![1i64, 2, 3, 4, 5, 6, 7, 8, 9, 10];
     assert_full_forward_matches_token_step_recurrence_with_shape(
-        SequenceKernelKind::Rwkv8StateSpaceExperimental,
+        kernel_rwkv8(),
         3,
         12,
         3,
@@ -1889,7 +1938,7 @@ fn rwkv8_multi_head_recurrence_matches_token_step_and_chunked_state() {
         [2, 5],
     );
     assert_chunked_recurrence_matches_uninterrupted_state_with_shape(
-        SequenceKernelKind::Rwkv8StateSpaceExperimental,
+        kernel_rwkv8(),
         3,
         12,
         3,
@@ -1954,7 +2003,7 @@ fn rwkv8_tensorized_parallel_reference_matches_host_loop_reference() {
             mlp_internal_dim_multiplier: 2,
             vocab_size: 16,
             dropout: 0.0,
-            sequence_kernel: SequenceKernelKind::Rwkv8StateSpaceExperimental,
+            sequence_kernel: kernel_rwkv8(),
             ..Default::default()
         },
         &device,
@@ -2006,7 +2055,7 @@ fn rwkv8_kernel_tensorized_forward_matches_host_loop_reference() {
             mlp_internal_dim_multiplier: 2,
             vocab_size: 16,
             dropout: 0.0,
-            sequence_kernel: SequenceKernelKind::Rwkv8StateSpaceExperimental,
+            sequence_kernel: kernel_rwkv8(),
             ..Default::default()
         },
         &device,
@@ -2057,7 +2106,7 @@ fn rwkv8_kernel_scan_fallback_matches_host_loop_reference() {
             mlp_internal_dim_multiplier: 2,
             vocab_size: 16,
             dropout: 0.0,
-            sequence_kernel: SequenceKernelKind::Rwkv8StateSpaceExperimental,
+            sequence_kernel: kernel_rwkv8(),
             ..Default::default()
         },
         &device,
@@ -2116,7 +2165,7 @@ fn rwkv8_kernel_matmul_fallback_matches_host_loop_reference() {
             mlp_internal_dim_multiplier: 2,
             vocab_size: 16,
             dropout: 0.0,
-            sequence_kernel: SequenceKernelKind::Rwkv8StateSpaceExperimental,
+            sequence_kernel: kernel_rwkv8(),
             ..Default::default()
         },
         &device,
@@ -2171,8 +2220,13 @@ fn rwkv8_kernel_matmul_fallback_matches_host_loop_reference() {
 fn mamba_kernel_tensorized_forward_matches_reference() {
     type Backend = NdArray<f32>;
     let device = <Backend as BackendTrait>::Device::default();
-    let config = MambaSequenceConfig::default().resolve(8);
-    let params = MambaSequenceParameters::<Backend>::new(config, &device);
+    let config =
+        MambaSequenceConfig::default().resolve(8, SequenceMemorySystem::Mamba1SelectiveScan);
+    let params = MambaSequenceParameters::<Backend>::new(
+        config,
+        SequenceMemorySystem::Mamba1SelectiveScan,
+        &device,
+    );
     let hidden = Tensor::<Backend, 4>::from_data(
         TensorData::new(
             (0..(2 * 1 * 5 * 8))
@@ -2184,22 +2238,73 @@ fn mamba_kernel_tensorized_forward_matches_reference() {
     );
 
     let (context_host, state_host) = mamba_reference(hidden.clone(), &params, None);
+    let params_mamba1 = params.mamba1().expect("mamba1 params");
     let tensorized = tensorized_mamba_forward(
         hidden,
         config.d_inner,
         config.d_state,
         config.d_conv,
         config.dt_rank,
-        params.in_proj_tensor(),
-        params.conv_weight_tensor(),
-        params.conv_bias_tensor(),
-        params.x_proj_tensor(),
-        params.dt_proj_weight_tensor(),
-        params.dt_proj_bias_tensor(),
-        params.a_log_tensor(),
-        params.d_skip_tensor(),
-        params.out_proj_tensor(),
+        params_mamba1.in_proj_tensor(),
+        params_mamba1.conv_weight_tensor(),
+        params_mamba1.conv_bias_tensor(),
+        params_mamba1.x_proj_tensor(),
+        params_mamba1.dt_proj_weight_tensor(),
+        params_mamba1.dt_proj_bias_tensor(),
+        params_mamba1.a_log_tensor(),
+        params_mamba1.d_skip_tensor(),
+        params_mamba1.out_proj_tensor(),
         None,
+    );
+
+    assert!(tensor_max_abs_diff(context_host, tensorized.context) <= 1.0e-4);
+    assert!(tensor_max_abs_diff(state_host.conv, tensorized.state.conv) <= 1.0e-4);
+    assert!(tensor_max_abs_diff(state_host.ssm, tensorized.state.ssm) <= 1.0e-4);
+}
+
+#[test]
+fn mamba2_kernel_tensorized_forward_matches_reference() {
+    type Backend = NdArray<f32>;
+    let device = <Backend as BackendTrait>::Device::default();
+    let config = MambaSequenceConfig {
+        headdim: 8,
+        ..Default::default()
+    }
+    .resolve(8, SequenceMemorySystem::Mamba2StateSpaceDuality);
+    let params = MambaSequenceParameters::<Backend>::new(
+        config,
+        SequenceMemorySystem::Mamba2StateSpaceDuality,
+        &device,
+    );
+    let hidden = Tensor::<Backend, 4>::from_data(
+        TensorData::new(
+            (0..(2 * 1 * 5 * 8))
+                .map(|idx| ((idx % 19) as f32) / 19.0 - 0.3)
+                .collect::<Vec<_>>(),
+            [2, 1, 5, 8],
+        ),
+        &device,
+    );
+
+    let (context_host, state_host) = mamba_reference(hidden.clone(), &params, None);
+    let params_mamba2 = params.mamba2().expect("mamba2 params");
+    let tensorized = tensorized_mamba2_forward(
+        hidden,
+        config.d_inner,
+        config.d_state,
+        config.d_conv,
+        config.headdim,
+        config.ngroups,
+        params_mamba2.in_proj_tensor(),
+        params_mamba2.conv_weight_tensor(),
+        params_mamba2.conv_bias_tensor(),
+        params_mamba2.dt_bias_tensor(),
+        params_mamba2.a_log_tensor(),
+        params_mamba2.d_skip_tensor(),
+        params_mamba2.norm_weight_tensor(),
+        config.norm_eps,
+        params_mamba2.out_proj_tensor(),
+        None::<Mamba2TensorizedState<Backend>>,
     );
 
     assert!(tensor_max_abs_diff(context_host, tensorized.context) <= 1.0e-4);

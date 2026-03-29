@@ -1,0 +1,12 @@
+[model]
+residual_connector = "mhc"
+
+[model.mhc]
+enabled = true
+num_streams = 2
+num_views = 1
+coefficient_policy = "dynamic_positive"
+mhc_iters = 4
+mhc_tau = 0.1
+add_branch_out_to_residual = true
+dropout = 0.0

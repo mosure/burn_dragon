@@ -1,1 +1,13 @@
-extends = ["../experiments/moving_mnist_trm_stageaware_hybrid_compute_floor_dense_b160_vv_noaux_coarsesub1_h8_short.toml"]
+extends = ["base.toml"]
+
+[dataset]
+max_records = 1024
+
+[training]
+batch_size = 24
+max_iters = 400
+log_frequency = 20
+
+[mode]
+artifact_every = 50
+artifact_max_images = 1

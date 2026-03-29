@@ -7,7 +7,7 @@ use burn_dragon_core::{
     AttentionResidualConfig, BdhInitializationConfig, BlockAttentionResidualConfig,
     ClockedSlowMemoryConfig, DragonNormConfig, LatentFanoutScheduleConfig,
     LowBitQuantizationConfig, LowBitRhoConfig, MambaSequenceConfig, ManifoldHyperConnectionsConfig,
-    ResidualConnectorKind, RotaryEmbedding, SequenceKernelKind, SummaryMemoryConfig,
+    ResidualConnectorKind, RotaryEmbedding, SequenceKernelConfig, SummaryMemoryConfig,
     YNeuronRecurrenceConfig,
 };
 
@@ -74,7 +74,7 @@ pub struct ModelOverrides {
     pub latent_total: Option<usize>,
     #[serde(alias = "init")]
     pub initialization: Option<BdhInitializationConfig>,
-    pub sequence_kernel: Option<SequenceKernelKind>,
+    pub sequence_kernel: Option<SequenceKernelConfig>,
     pub mamba: Option<MambaSequenceConfig>,
     pub residual_connector: Option<ResidualConnectorKind>,
     pub attention_residual: Option<AttentionResidualConfig>,

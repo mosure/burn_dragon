@@ -10,6 +10,12 @@ pub struct RunLayoutConfig {
     pub category: Option<PathBuf>,
     #[serde(default = "default_true")]
     pub mirror_config_path: bool,
+    #[serde(default)]
+    pub bundle: Option<PathBuf>,
+    #[serde(default)]
+    pub stage: Option<PathBuf>,
+    #[serde(default)]
+    pub variant: Option<PathBuf>,
 }
 
 impl Default for RunLayoutConfig {
@@ -18,6 +24,9 @@ impl Default for RunLayoutConfig {
             base_dir: None,
             category: None,
             mirror_config_path: default_true(),
+            bundle: None,
+            stage: None,
+            variant: None,
         }
     }
 }

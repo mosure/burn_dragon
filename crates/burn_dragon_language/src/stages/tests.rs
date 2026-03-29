@@ -129,6 +129,11 @@ rotary_embedding = "alibi"
         Some(dir.path().join("pre/checkpoint"))
     );
     assert_eq!(config.training.init_checkpoint_epoch, Some(3));
+    assert_eq!(
+        config.run_layout.base_dir,
+        Some(dir.path().join("stage").join("runs"))
+    );
+    assert!(!config.run_layout.mirror_config_path);
 }
 
 #[test]

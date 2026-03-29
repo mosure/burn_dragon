@@ -15,10 +15,13 @@ train = ["burn_dragon_vision/train"]
 anyhow = "1"
 burn = { version = "0.21.0-pre.2", default-features = false, features = ["fusion", "ndarray", "std", "wgpu"] }
 burn_dragon_vision = { path = "../burn_dragon_vision", version = "0.5.0", default-features = false, features = ["train"] }
+burn-store = { version = "0.21.0-pre.2", features = ["pytorch", "safetensors", "std"] }
 half = "2"
 safetensors = "0.7"
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 
 [dev-dependencies]
 burn-ndarray = { version = "0.21.0-pre.2" }
+serde_json = "1.0"
 tempfile = "3"

@@ -465,7 +465,7 @@ fn shakespeare_deployed_dense_score_train_only_differs_by_training_kernel_overri
     );
     assert_eq!(
         dense.training.sequence_kernel_override,
-        Some(burn_dragon_core::SequenceKernelKind::BdhLinearDenseScoreExperimental)
+        Some(burn_dragon_core::SequenceKernelConfig::dense_score_short_context())
     );
     assert_eq!(repro.training.sequence_kernel_override, None);
 }

@@ -1,0 +1,5 @@
+extends = ["nemotron_climbmix_sequence_kernel_probe_model_32768.toml"]
+
+[model]
+mlp_internal_dim_multiplier = 256
+latent_total = 65536

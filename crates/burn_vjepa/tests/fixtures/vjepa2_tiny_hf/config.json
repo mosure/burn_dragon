@@ -1,0 +1,32 @@
+{
+  "architectures": [
+    "VJEPA2Model"
+  ],
+  "attention_dropout": 0.0,
+  "attention_probs_dropout_prob": 0.0,
+  "crop_size": 16,
+  "drop_path_rate": 0.0,
+  "dtype": "float32",
+  "frames_per_clip": 4,
+  "hidden_act": "gelu",
+  "hidden_size": 24,
+  "image_size": 16,
+  "in_chans": 1,
+  "initializer_range": 0.02,
+  "layer_norm_eps": 1e-06,
+  "mlp_ratio": 2.0,
+  "model_type": "vjepa2",
+  "num_attention_heads": 4,
+  "num_hidden_layers": 2,
+  "num_pooler_layers": 3,
+  "patch_size": 8,
+  "pred_hidden_size": 16,
+  "pred_mlp_ratio": 2.0,
+  "pred_num_attention_heads": 4,
+  "pred_num_hidden_layers": 2,
+  "pred_num_mask_tokens": 2,
+  "pred_zero_init_mask_tokens": true,
+  "qkv_bias": true,
+  "transformers_version": "5.3.0",
+  "tubelet_size": 2
+}

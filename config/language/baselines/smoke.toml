@@ -1,1 +1,20 @@
-extends = ["../experiments/shakespeare_smoke.toml"]
+[training]
+block_size = 256
+batch_size = 64
+max_iters = 200
+epochs = 2
+log_frequency = 20
+
+[optimizer]
+learning_rate = 0.001
+weight_decay = 0.1
+
+[optimizer.lr_schedule]
+type = "cosine"
+min_lr = 0.00005
+num_iters = 200
+
+[generation]
+prompt = "To be or "
+temperature = 0.9
+top_k = 1

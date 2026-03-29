@@ -53,7 +53,7 @@ wgpu = { version = "26", optional = true }
 burn = { version = "0.21.0-pre.2", default-features = false, features = ["fusion", "ndarray", "std", "wgpu"] }
 burn-autodiff = { version = "0.21.0-pre.2", optional = true }
 burn-ndarray = { version = "0.21.0-pre.2", optional = true }
-burn-train = { version = "0.21.0-pre.2", optional = true, default-features = false, features = ["tui"] }
+burn-train = { version = "0.21.0-pre.2", optional = true, default-features = false }
 burn-cuda = { version = "0.21.0-pre.2", optional = true, default-features = false, features = ["std"] }
 burn-wgpu = { version = "0.21.0-pre.2", optional = true, default-features = false, features = ["fusion", "std"] }
 cubecl = { version = "0.10.0-pre.2", default-features = false, optional = true, features = ["std", "cuda"] }

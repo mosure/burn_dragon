@@ -1,6 +1,8 @@
 use burn::tensor::backend::Backend;
 use burn::tensor::{Int, Tensor, TensorData};
-use burn_dragon_core::{BDH, BDHConfig, FusedKernelConfig, SequenceKernelKind};
+use burn_dragon_core::{
+    BDH, BDHConfig, FusedKernelConfig, SequenceKernelConfig, SequenceMemorySystem,
+};
 use burn_wgpu::{CubeBackend, RuntimeOptions, WgpuRuntime, graphics};
 
 type TestBackend = CubeBackend<WgpuRuntime, f32, i32, u32>;
@@ -80,7 +82,7 @@ fn build_dense_score_config(case: &ParityCase, wgpu_rollout_fused: bool) -> BDHC
             wgpu_rollout_fused,
             ..Default::default()
         },
-        sequence_kernel: SequenceKernelKind::BdhLinearDenseScoreExperimental,
+        sequence_kernel: SequenceKernelConfig::dense_score_short_context(),
         ..Default::default()
     };
     config

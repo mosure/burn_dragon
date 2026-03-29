@@ -1,0 +1,24 @@
+# Conservative fused WGPU overlay for full ImageNet-1k multimode spatial training.
+# Purpose:
+# - enable the stage-aware pyramid fused path on the promoted graph-bridge recipe
+# - keep startup allocation pressure low enough to survive autotune
+# - preserve the same effective batch size as the diagnostic unfused launch
+
+[dataset]
+prefetch_batches = 1
+prefetch_workers = 6
+prefetch_to_device = false
+
+[training]
+batch_size = 16
+gradient_accumulation_steps = 16
+log_frequency = 8
+device_memory_check_every = 2
+max_device_memory_mb = 98304
+
+[vision]
+fused_kernels = true
+
+[wgpu.training]
+fused_core_recurrent = true
+fused_core_rollout = true

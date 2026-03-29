@@ -32,7 +32,7 @@ pub use bdh_support::{
 pub use burn_dragon_kernel::api::projection::LowrankGradInputExecutor;
 pub use config::{
     BDHConfig, ClockedSlowMemoryConfig, FusedAttentionExecutor, FusedKernelConfig,
-    FusedProjectionExecutor, LatentFanoutScheduleConfig, SequenceKernelKind, SummaryMemoryConfig,
+    FusedProjectionExecutor, LatentFanoutScheduleConfig, SummaryMemoryConfig,
     YNeuronRecurrenceConfig,
 };
 pub use halt::HaltHead;
@@ -85,7 +85,7 @@ pub use residual_stream::{
     lowrank_residual_step_next,
 };
 pub use sequence::{
-    MambaSequenceConfig, SequenceKernelConfig, SequenceKernelFamily, SequenceTrainingExecutor,
+    MambaSequenceConfig, SequenceKernelConfig, SequenceMemorySystem, SequenceTrainingExecutor,
 };
 #[cfg(any(feature = "viz", feature = "probe"))]
 pub use state::LayerVizState;

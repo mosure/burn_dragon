@@ -1,0 +1,17 @@
+# CUDA launch overrides for full ImageNet-1k multimode spatial training.
+# Uses the proven bs32 operating point from CUDA smoke scaling while keeping
+# the original effective batch size of 256.
+
+[dataset]
+prefetch_batches = 4
+prefetch_workers = 8
+prefetch_to_device = true
+
+[training]
+batch_size = 32
+gradient_accumulation_steps = 8
+schedule_mode = "max_iters"
+log_frequency = 25
+device_memory_check_every = 10
+max_device_memory_mb = 98304
+

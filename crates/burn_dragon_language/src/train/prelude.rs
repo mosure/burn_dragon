@@ -90,5 +90,5 @@ pub(crate) use burn_dragon_train::{
     GdpoConfig, GdpoHardGate, KernelSpec, LayerStateSpec, LearningRateScheduleConfig,
     LowBitMemorySpec, LowBitModelSpec, ModelSpec, OptimizerConfig, OptimizerKind,
     OptimizerScheduleMode, OptimizerSpec, ParallelConfig, ParallelSpec, ParallelismKind,
-    SequenceKernelKind, StateAxisSpec, StateLayout, StateTensorSpec, WgpuRuntimeConfig,
+    SequenceKernelConfig, StateAxisSpec, StateLayout, StateTensorSpec, WgpuRuntimeConfig,
 };

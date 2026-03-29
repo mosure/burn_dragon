@@ -209,13 +209,15 @@ fn validate_accepts_sequence_kernel_override() {
         prompt = "abc"
 
         [model]
-        sequence_kernel = "rwkv8_state_space_experimental"
+        sequence_kernel = "rwkv8_state_space"
     "#;
     let config: TrainingConfig = toml::from_str(text).expect("parse training config");
     config.validate().expect("valid config");
     assert_eq!(
         config.model.sequence_kernel,
-        Some(burn_dragon_core::SequenceKernelKind::Rwkv8StateSpaceExperimental)
+        Some(burn_dragon_core::SequenceKernelConfig::reference(
+            burn_dragon_core::SequenceMemorySystem::Rwkv8StateSpace,
+        ))
     );
 }
 
@@ -231,7 +233,7 @@ fn validate_accepts_training_sequence_kernel_override() {
         batch_size = 2
         max_iters = 4
         log_frequency = 1
-        sequence_kernel_override = "bdh_linear_dense_score_experimental"
+        sequence_kernel_override = { memory_system = "linear_attention", executor = "dense_score_short_context" }
 
         [optimizer]
         learning_rate = 0.001
@@ -241,18 +243,52 @@ fn validate_accepts_training_sequence_kernel_override() {
         prompt = "abc"
 
         [model]
-        sequence_kernel = "bdh_linear_attention"
+        sequence_kernel = "linear_attention"
     "#;
     let config: TrainingConfig = toml::from_str(text).expect("parse training config");
     config.validate().expect("valid config");
     assert_eq!(
         config.training.sequence_kernel_override,
-        Some(burn_dragon_core::SequenceKernelKind::BdhLinearDenseScoreExperimental)
+        Some(burn_dragon_core::SequenceKernelConfig::dense_score_short_context())
     );
     assert_eq!(
         config.model.sequence_kernel,
-        Some(burn_dragon_core::SequenceKernelKind::BdhLinearAttention)
+        Some(burn_dragon_core::SequenceKernelConfig::reference(
+            burn_dragon_core::SequenceMemorySystem::LinearAttention,
+        ))
     );
+}
+
+#[test]
+fn validate_accepts_mamba2_state_space_duality_request() {
+    let text = r#"
+        [dataset]
+        cache_dir = "data"
+        type = "shakespeare"
+
+        [training]
+        block_size = 32
+        batch_size = 2
+        max_iters = 4
+        log_frequency = 1
+
+        [optimizer]
+        learning_rate = 0.001
+        weight_decay = 0.0
+
+        [generation]
+        prompt = "abc"
+
+        [model]
+        sequence_kernel = "mamba2_state_space_duality"
+
+        [model.mamba]
+        headdim = 64
+    "#;
+    let config: TrainingConfig = toml::from_str(text).expect("parse training config");
+    config
+        .validate()
+        .expect("mamba2_state_space_duality should validate");
 }
 
 #[test]
@@ -277,7 +313,7 @@ fn load_training_config_rejects_removed_fast_train_key() {
         prompt = "abc"
 
         [model]
-        sequence_kernel = "bdh_linear_attention"
+        sequence_kernel = "linear_attention"
     "#;
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("removed-fast-train.toml");

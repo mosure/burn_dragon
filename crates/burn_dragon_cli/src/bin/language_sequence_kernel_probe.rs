@@ -14,10 +14,12 @@ use burn::tensor::{Int, Tensor, TensorData};
 #[cfg(any(feature = "cuda", feature = "language-cuda"))]
 use burn_cuda::Cuda;
 use burn_dragon::core::{
-    BDH, BDHConfig, FusedKernelConfig, SequenceKernelConfig, SequenceKernelFamily,
-    SequenceKernelKind, SequenceTrainingExecutor,
+    BDH, BDHConfig, FusedKernelConfig, SequenceKernelConfig, SequenceMemorySystem,
+    SequenceTrainingExecutor,
 };
-use burn_dragon_kernel::kernels::sequence::{mamba as mamba_kernel, rwkv8 as rwkv8_kernel};
+use burn_dragon_kernel::kernels::sequence::{
+    mamba as mamba_kernel, mamba2 as mamba2_kernel, rwkv8 as rwkv8_kernel,
+};
 use burn_ndarray::NdArray;
 use clap::{Parser, ValueEnum};
 use serde::Serialize;
@@ -55,9 +57,7 @@ enum BackendArg {
 
 #[derive(Debug, Clone, Serialize)]
 struct KernelProbeResult {
-    legacy_kind: Option<SequenceKernelKind>,
-    family: SequenceKernelFamily,
-    executor: SequenceTrainingExecutor,
+    sequence_kernel: SequenceKernelConfig,
     implementation_status: String,
     algorithmic_executor_shortcut: bool,
     forward_kernel_available: bool,
@@ -117,7 +117,7 @@ fn sample_tokens<B: BackendTrait>(
     Tensor::<B, 2, Int>::from_data(TensorData::new(tokens, [batch, block]), device)
 }
 
-fn build_config(args: &Args, kernel: SequenceKernelKind) -> BDHConfig {
+fn build_config(args: &Args, kernel: SequenceKernelConfig) -> BDHConfig {
     assert!(
         args.latent_total % args.n_embd == 0,
         "latent_total must be divisible by n_embd"
@@ -142,27 +142,28 @@ fn build_config(args: &Args, kernel: SequenceKernelKind) -> BDHConfig {
     config
 }
 
-fn probe_cases() -> [SequenceKernelConfig; 4] {
+fn probe_cases() -> [SequenceKernelConfig; 5] {
     [
-        SequenceKernelKind::BdhLinearAttention.resolved_config(),
-        SequenceKernelKind::BdhLinearDenseScoreExperimental.resolved_config(),
-        SequenceKernelKind::Rwkv8StateSpaceExperimental.resolved_config(),
-        SequenceKernelKind::MambaSelectiveSsmExperimental.resolved_config(),
+        SequenceKernelConfig::reference(SequenceMemorySystem::LinearAttention),
+        SequenceKernelConfig::dense_score_short_context(),
+        SequenceKernelConfig::reference(SequenceMemorySystem::Rwkv8StateSpace),
+        SequenceKernelConfig::reference(SequenceMemorySystem::Mamba1SelectiveScan),
+        SequenceKernelConfig::reference(SequenceMemorySystem::Mamba2StateSpaceDuality),
     ]
 }
 
 fn implementation_metadata(
     kernel_config: SequenceKernelConfig,
 ) -> (&'static str, bool, bool, bool, Option<String>) {
-    match (kernel_config.family, kernel_config.executor) {
+    match (kernel_config.memory_system, kernel_config.executor) {
         (
-            SequenceKernelFamily::LinearAttention,
+            SequenceMemorySystem::LinearAttention,
             SequenceTrainingExecutor::DenseScoreShortContext,
         ) => ("algorithmic_executor_shortcut", true, false, false, None),
-        (SequenceKernelFamily::LinearAttention, SequenceTrainingExecutor::Reference) => {
+        (SequenceMemorySystem::LinearAttention, SequenceTrainingExecutor::Reference) => {
             ("reference_only", false, false, false, None)
         }
-        (SequenceKernelFamily::Rwkv8, SequenceTrainingExecutor::Reference) => (
+        (SequenceMemorySystem::Rwkv8StateSpace, SequenceTrainingExecutor::Reference) => (
             rwkv8_kernel::STATUS,
             false,
             rwkv8_kernel::FORWARD_ACCELERATION_AVAILABLE,
@@ -174,7 +175,7 @@ fn implementation_metadata(
                 rwkv8_kernel::UPSTREAM_TARGET_KIND
             )),
         ),
-        (SequenceKernelFamily::Mamba1SelectiveSsm, SequenceTrainingExecutor::Reference) => (
+        (SequenceMemorySystem::Mamba1SelectiveScan, SequenceTrainingExecutor::Reference) => (
             mamba_kernel::STATUS,
             false,
             mamba_kernel::FORWARD_ACCELERATION_AVAILABLE,
@@ -186,12 +187,25 @@ fn implementation_metadata(
                 mamba_kernel::UPSTREAM_TARGET_KIND
             )),
         ),
-        (family, executor) => (
+        (SequenceMemorySystem::Mamba2StateSpaceDuality, SequenceTrainingExecutor::Reference) => (
+            mamba2_kernel::STATUS,
+            false,
+            mamba2_kernel::FORWARD_ACCELERATION_AVAILABLE,
+            mamba2_kernel::BACKWARD_ACCELERATION_AVAILABLE,
+            Some(format!(
+                "{} ({})",
+                mamba2_kernel::UPSTREAM_REPO,
+                mamba2_kernel::UPSTREAM_TARGET_KIND
+            )),
+        ),
+        (memory_system, executor) => (
             "unclassified",
             false,
             false,
             false,
-            Some(format!("family={family:?}, executor={executor:?}")),
+            Some(format!(
+                "memory_system={memory_system:?}, executor={executor:?}"
+            )),
         ),
     }
 }
@@ -384,9 +398,6 @@ fn run_probe<B: BackendTrait>(args: &Args, backend_name: &str, device: &B::Devic
     let results = probe_cases()
         .into_iter()
         .map(|kernel_config| {
-            let kernel = kernel_config
-                .legacy_kind()
-                .expect("probe currently only supports legacy-backed families");
             let (
                 implementation_status,
                 algorithmic_executor_shortcut,
@@ -395,7 +406,7 @@ fn run_probe<B: BackendTrait>(args: &Args, backend_name: &str, device: &B::Devic
                 upstream_anchor,
             ) = implementation_metadata(kernel_config);
             <B as BackendTrait>::seed(device, 2026);
-            let model = BDH::<B>::new(build_config(args, kernel), device);
+            let model = BDH::<B>::new(build_config(args, kernel_config), device);
             let (full_forward_ms, full_forward_tokens_per_s, checksum, full_forward_gpu) =
                 timed_full_forward(
                     &model,
@@ -414,9 +425,7 @@ fn run_probe<B: BackendTrait>(args: &Args, backend_name: &str, device: &B::Devic
                 sample_gpu,
             );
             KernelProbeResult {
-                legacy_kind: Some(kernel),
-                family: kernel_config.family,
-                executor: kernel_config.executor,
+                sequence_kernel: kernel_config,
                 implementation_status: implementation_status.to_string(),
                 algorithmic_executor_shortcut,
                 forward_kernel_available,

@@ -1,0 +1,8 @@
+[training]
+sequence_kernel_override = "mamba1_selective_scan"
+
+[model.mamba]
+d_state = 8
+d_conv = 4
+expand = 2
+use_fast_path = true

@@ -140,7 +140,7 @@ fn run_stage(
 }
 
 fn run_language_train_child(
-    stage_dir: &Path,
+    _stage_dir: &Path,
     resolved_config_path: &Path,
     backend: burn_dragon_language::ExperimentBackend,
 ) -> Result<()> {
@@ -156,16 +156,12 @@ fn run_language_train_child(
         ));
     }
 
-    let run_root = stage_dir.join("runs");
-    std::fs::create_dir_all(&run_root)
-        .with_context(|| format!("failed to create {}", run_root.display()))?;
     let status = Command::new(&train_binary)
         .arg("language")
         .arg("--backend")
         .arg(backend.as_cli_arg())
         .arg("-c")
         .arg(resolved_config_path)
-        .env("BURN_DRAGON_RUN_ROOT", &run_root)
         .status()
         .with_context(|| format!("failed to launch {}", train_binary.display()))?;
     if !status.success() {

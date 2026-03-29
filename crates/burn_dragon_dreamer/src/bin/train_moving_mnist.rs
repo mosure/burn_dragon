@@ -11,7 +11,9 @@ fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let (mut config, offset) = load_config_or_default(&args)?;
     config.artifact_every = config.validate_every;
-    config.artifact_samples = 4;
+    if config.artifact_samples == 0 {
+        config.artifact_samples = 16;
+    }
     if let Some(steps) = args.get(offset) {
         config.steps = steps.parse().unwrap_or(config.steps);
     }
@@ -109,9 +111,14 @@ fn main() -> anyhow::Result<()> {
             "1" | "true" | "True" | "TRUE" | "yes" | "on"
         );
     }
+    if let Some(dreamer_checkpoint) = args.get(offset + 15) {
+        if !matches!(dreamer_checkpoint.as_str(), "none" | "off" | "false") {
+            config.dreamer_checkpoint = Some(PathBuf::from(dreamer_checkpoint));
+        }
+    }
     let summary = train_moving_mnist(config)?;
     println!(
-        "moving_mnist_dreamer backend={} initial_valid_total={:.5} final_valid_total={:.5} best_valid_total={:.5} initial_valid_future={:.5} final_valid_future={:.5} best_valid_future={:.5} final_train_total={:.5} final_train_future={:.5} final_valid_recon_current={:.5} final_valid_recon_future={:.5} final_valid_future_psnr={:.2} final_valid_future_fg_iou={:.3} final_valid_future_motion_ratio={:.3} final_valid_future_stop_mean={:.3} final_valid_future_stop_std={:.3} steps={} run_dir={} artifact_dir={}",
+        "moving_mnist_dreamer backend={} initial_valid_total={:.5} final_valid_total={:.5} best_valid_total={:.5} initial_valid_future={:.5} final_valid_future={:.5} best_valid_future={:.5} final_train_total={:.5} final_train_future={:.5} final_valid_recon_current={:.5} final_valid_recon_future={:.5} final_valid_future_psnr={:.2} final_valid_future_fg_iou={:.3} final_valid_future_motion_ratio={:.3} final_valid_future_stop_mean={:.3} final_valid_future_stop_std={:.3} best_future_step={} best_future_total={:.5} best_future_future={:.5} best_future_psnr={:.2} best_future_fg_iou={:.3} best_future_motion_ratio={:.3} best_future_fix_l1={:.3} best_future_quality={:.3} best_future_checkpoint={} best_quality_step={} best_quality_total={:.5} best_quality_future={:.5} best_quality_psnr={:.2} best_quality_fg_iou={:.3} best_quality_motion_ratio={:.3} best_quality_fix_l1={:.3} best_quality_score={:.3} best_quality_checkpoint={} steps={} run_dir={} artifact_dir={}",
         summary.latent_backend,
         summary.initial_valid_total,
         summary.final_valid_total,
@@ -128,6 +135,34 @@ fn main() -> anyhow::Result<()> {
         summary.final_valid_future_motion_ratio,
         summary.final_valid_future_stop_mean,
         summary.final_valid_future_stop_std,
+        summary.best_future_selection.step,
+        summary.best_future_selection.total,
+        summary.best_future_selection.future,
+        summary.best_future_selection.future_psnr,
+        summary.best_future_selection.future_fg_iou,
+        summary.best_future_selection.future_motion_ratio,
+        summary.best_future_selection.future_fixation_teacher_l1,
+        summary.best_future_selection.quality_score,
+        summary
+            .best_future_selection
+            .checkpoint_base
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "none".to_string()),
+        summary.best_quality_selection.step,
+        summary.best_quality_selection.total,
+        summary.best_quality_selection.future,
+        summary.best_quality_selection.future_psnr,
+        summary.best_quality_selection.future_fg_iou,
+        summary.best_quality_selection.future_motion_ratio,
+        summary.best_quality_selection.future_fixation_teacher_l1,
+        summary.best_quality_selection.quality_score,
+        summary
+            .best_quality_selection
+            .checkpoint_base
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "none".to_string()),
         summary.steps,
         summary
             .run_dir

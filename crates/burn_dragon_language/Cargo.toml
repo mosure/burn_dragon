@@ -73,10 +73,13 @@ urlencoding = { version = "2.1", optional = true }
 burn = { version = "0.21.0-pre.2", default-features = false, features = ["fusion", "ndarray", "std", "wgpu"] }
 burn-autodiff = { version = "0.21.0-pre.2", optional = true }
 burn-ndarray = { version = "0.21.0-pre.2", optional = true }
-burn-train = { version = "0.21.0-pre.2", optional = true, default-features = false, features = ["tui"] }
+burn-train = { version = "0.21.0-pre.2", optional = true, default-features = false }
 burn-collective = { version = "0.21.0-pre.2", optional = true }
 burn-cuda = { version = "0.21.0-pre.2", optional = true, default-features = false, features = ["std"] }
 
 [lib]
 path = "src/lib.rs"
 crate-type = ["rlib"]
+
+[dev-dependencies]
+tempfile = "3"

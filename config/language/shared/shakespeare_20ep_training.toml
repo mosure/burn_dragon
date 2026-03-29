@@ -1,0 +1,7 @@
+[training]
+epochs = 20
+log_frequency = 100
+checkpoint_interval_iters = 410
+
+[optimizer.lr_schedule]
+num_iters = 1640

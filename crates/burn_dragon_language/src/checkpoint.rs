@@ -54,7 +54,7 @@ pub struct LanguageRunConfigSnapshot {
     pub training_launch_mode_requested:
         Option<burn_dragon_train::train::pipeline::TrainingLaunchMode>,
     #[serde(default)]
-    pub training_sequence_kernel_override: Option<burn_dragon_core::SequenceKernelKind>,
+    pub training_sequence_kernel_override: Option<burn_dragon_core::SequenceKernelConfig>,
     #[serde(default)]
     pub arch_version: Option<String>,
     #[serde(default)]
@@ -1166,7 +1166,7 @@ mod tests {
                     "latent_total": 32768,
                     "latent_per_head": 8192,
                     "shared_layer_weights": true,
-                    "sequence_kernel": "bdh_linear_attention"
+                    "sequence_kernel": "linear_attention"
                 },
                 "parallel_spec": {
                     "mode": "single",
@@ -1179,7 +1179,7 @@ mod tests {
                     "checkpoint_format": "unsharded_v1"
                 },
                 "kernel_spec": {
-                    "sequence_kernel": "bdh_linear_attention",
+                    "sequence_kernel": "linear_attention",
                     "fused_kernels_enabled": true,
                     "rollout_fast_steps_per_slow_step": 1,
                     "wgpu_fused_core_recurrent": true,
@@ -1259,11 +1259,11 @@ mod tests {
                 burn_dragon_train::train::pipeline::TrainingLaunchMode::Fresh,
             ),
             training_sequence_kernel_override: Some(
-                burn_dragon_core::SequenceKernelKind::BdhLinearDenseScoreExperimental,
+                burn_dragon_core::SequenceKernelConfig::dense_score_short_context(),
             ),
             overrides: ModelOverrides {
                 sequence_kernel: Some(
-                    burn_dragon_core::SequenceKernelKind::BdhLinearDenseScoreExperimental,
+                    burn_dragon_core::SequenceKernelConfig::dense_score_short_context(),
                 ),
                 ..ModelOverrides::default()
             },
@@ -1274,11 +1274,11 @@ mod tests {
 
         assert_eq!(
             config.training.sequence_kernel_override,
-            Some(burn_dragon_core::SequenceKernelKind::BdhLinearDenseScoreExperimental)
+            Some(burn_dragon_core::SequenceKernelConfig::dense_score_short_context())
         );
         assert_eq!(
             config.model.sequence_kernel,
-            Some(burn_dragon_core::SequenceKernelKind::BdhLinearDenseScoreExperimental)
+            Some(burn_dragon_core::SequenceKernelConfig::dense_score_short_context())
         );
     }
 

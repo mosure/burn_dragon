@@ -30,7 +30,8 @@ pub mod api {
 
     pub mod core {
         pub use burn_dragon_core::api::config::{
-            BDHConfig, SequenceKernelKind, YNeuronRecurrenceConfig,
+            BDHConfig, SequenceKernelConfig, SequenceMemorySystem, SequenceTrainingExecutor,
+            YNeuronRecurrenceConfig,
         };
         pub use burn_dragon_core::api::recurrent::BDH;
         pub use burn_dragon_core::api::state::ModelState;
@@ -93,7 +94,10 @@ pub use bitnet_artifact::{
     BITNET_ARTIFACT_BINARY_MAGIC, LanguageBitNetArtifactBundle, deserialize_bitnet_artifact_binary,
     serialize_bitnet_artifact_binary,
 };
-pub use burn_dragon_core::{BDH, BDHConfig, ModelState, SequenceKernelKind};
+pub use burn_dragon_core::{
+    BDH, BDHConfig, ModelState, SequenceKernelConfig, SequenceMemorySystem,
+    SequenceTrainingExecutor,
+};
 #[cfg(feature = "train")]
 pub use checkpoint::{
     LanguageBitNetArtifactExportReport, LanguageBurnpackExportReport, LanguageRunConfigSnapshot,

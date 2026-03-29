@@ -1,0 +1,8 @@
+# Stage-1 long-run overlay for the frontier ImageNet-1k CUDA launch.
+# This keeps validation/checkpoint cadence short enough to iterate while still
+# being materially longer than the earlier 256-step pilot.
+
+[training]
+schedule_mode = "max_iters"
+max_iters = 2048
+log_frequency = 25

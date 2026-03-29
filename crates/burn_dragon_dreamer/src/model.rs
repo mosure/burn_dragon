@@ -9,7 +9,7 @@ use burn::nn::conv::{Conv2d, Conv2dConfig, ConvTranspose2d, ConvTranspose2dConfi
 use burn::nn::{Linear, LinearConfig};
 use burn::tensor::activation;
 use burn::tensor::backend::Backend;
-use burn::tensor::{Tensor, TensorData};
+use burn::tensor::{Int, Tensor, TensorData};
 use burn_autogaze::FrameFixationTrace;
 use burn_dragon_core::{BDH, BDHConfig, MicroTransformerBlock, ResidualConnectorKind};
 
@@ -19,6 +19,7 @@ pub struct DreamerForward<B: Backend> {
     pub current: Tensor<B, 1>,
     pub future: Tensor<B, 1>,
     pub prior: Tensor<B, 1>,
+    pub shortcut: Tensor<B, 1>,
     pub gaze: Tensor<B, 1>,
     pub query: Tensor<B, 1>,
     pub recon: Tensor<B, 1>,
@@ -56,8 +57,15 @@ pub struct DragonDreamer<B: Backend> {
     transformer_slot_pos_out: Linear<B>,
     transformer_peripheral_token: Linear<B>,
     transformer_fixation_token: Linear<B>,
+    transformer_action_token: Linear<B>,
     transformer_tokenizer_in: Linear<B>,
     transformer_tokenizer_hidden: Linear<B>,
+    transformer_time_pos_in: Linear<B>,
+    transformer_time_pos_out: Linear<B>,
+    transformer_temporal_blocks: Vec<MicroTransformerBlock<B>>,
+    transformer_temporal_out: Linear<B>,
+    transformer_prior_temporal_in: Linear<B>,
+    transformer_prior_delta_gate: Linear<B>,
     transformer_prior_blocks: Vec<MicroTransformerBlock<B>>,
     transformer_posterior_blocks: Vec<MicroTransformerBlock<B>>,
     transformer_prior_gate: Linear<B>,
@@ -104,6 +112,20 @@ pub struct DragonDreamer<B: Backend> {
     use_transformer_baseline: bool,
     #[module(ignore)]
     use_bdh_challenger: bool,
+    #[module(ignore)]
+    passive_full_frame: bool,
+    #[module(ignore)]
+    passive_action_conditioning: bool,
+    #[module(ignore)]
+    passive_interleaved_action_tokens: bool,
+    #[module(ignore)]
+    passive_group_causal_temporal_attention: bool,
+    #[module(ignore)]
+    passive_posterior_slot_targets: bool,
+    #[module(ignore)]
+    passive_joint_future_prediction: bool,
+    #[module(ignore)]
+    passive_teacher_forcing_prefix_steps: usize,
     #[module(ignore)]
     k_fovea: usize,
     #[module(ignore)]
@@ -154,6 +176,16 @@ pub struct DragonDreamer<B: Backend> {
     recon_edge_weight: f32,
     #[module(ignore)]
     recon_motion_weight: f32,
+    #[module(ignore)]
+    passive_autoregressive_loss_weight: f32,
+    #[module(ignore)]
+    passive_shortcut_loss_weight: f32,
+    #[module(ignore)]
+    passive_multi_token_pred_len: usize,
+    #[module(ignore)]
+    passive_multi_token_loss_weight: f32,
+    #[module(ignore)]
+    passive_state_decode_mix: f32,
 }
 
 impl<B: Backend> DragonDreamer<B> {
@@ -235,10 +267,42 @@ impl<B: Backend> DragonDreamer<B> {
                 config.latent_dim.max(1),
             )
             .init(device),
+            transformer_action_token: LinearConfig::new(2, config.latent_dim.max(1)).init(device),
             transformer_tokenizer_in: LinearConfig::new(patch_dim, config.latent_dim.max(1))
                 .init(device),
             transformer_tokenizer_hidden: LinearConfig::new(
                 config.latent_dim.max(1),
+                config.latent_dim.max(1),
+            )
+            .init(device),
+            transformer_time_pos_in: LinearConfig::new(2, config.latent_dim.max(1)).init(device),
+            transformer_time_pos_out: LinearConfig::new(
+                config.latent_dim.max(1),
+                config.latent_dim.max(1),
+            )
+            .init(device),
+            transformer_temporal_blocks: (0..config.transformer_layers.max(1))
+                .map(|_| {
+                    MicroTransformerBlock::new(
+                        config.latent_dim.max(1),
+                        config.transformer_heads.max(1),
+                        4,
+                        device,
+                    )
+                })
+                .collect(),
+            transformer_temporal_out: LinearConfig::new(
+                config.latent_dim.max(1),
+                config.latent_dim.max(1),
+            )
+            .init(device),
+            transformer_prior_temporal_in: LinearConfig::new(
+                config.latent_dim.max(1) * 2,
+                config.latent_dim.max(1),
+            )
+            .init(device),
+            transformer_prior_delta_gate: LinearConfig::new(
+                config.latent_dim.max(1) * 2,
                 config.latent_dim.max(1),
             )
             .init(device),
@@ -407,6 +471,13 @@ impl<B: Backend> DragonDreamer<B> {
                 .init(device),
             use_transformer_baseline: config.latent_backend.is_transformer_baseline(),
             use_bdh_challenger: config.latent_backend.is_bdh_challenger(),
+            passive_full_frame: config.passive_full_frame,
+            passive_action_conditioning: config.passive_action_conditioning,
+            passive_interleaved_action_tokens: config.passive_interleaved_action_tokens,
+            passive_group_causal_temporal_attention: config.passive_group_causal_temporal_attention,
+            passive_posterior_slot_targets: config.passive_posterior_slot_targets,
+            passive_joint_future_prediction: config.passive_joint_future_prediction,
+            passive_teacher_forcing_prefix_steps: config.passive_teacher_forcing_prefix_steps,
             k_fovea: config.k_fovea.max(1),
             crop_size: config.crop_size.max(1),
             peripheral_dim: config.peripheral_dim.max(1),
@@ -432,6 +503,11 @@ impl<B: Backend> DragonDreamer<B> {
             recon_future_weight: config.recon_future_weight,
             recon_edge_weight: config.recon_edge_weight,
             recon_motion_weight: config.recon_motion_weight,
+            passive_autoregressive_loss_weight: config.passive_autoregressive_loss_weight,
+            passive_shortcut_loss_weight: config.passive_shortcut_loss_weight,
+            passive_multi_token_pred_len: config.passive_multi_token_pred_len.max(1),
+            passive_multi_token_loss_weight: config.passive_multi_token_loss_weight.max(0.0),
+            passive_state_decode_mix: config.passive_state_decode_mix.clamp(0.0, 1.0),
         }
     }
 
@@ -439,18 +515,44 @@ impl<B: Backend> DragonDreamer<B> {
         &self,
         clip_frames: Tensor<B, 5>,
         traces: &[FrameFixationTrace],
+        passive_actions: Option<Tensor<B, 3>>,
         teacher_features: Tensor<B, 3>,
         crop_teacher_features: Tensor<B, 3>,
         context_len: usize,
         target_len: usize,
     ) -> DreamerForward<B> {
-        self.forward_internal(
+        self.forward_with_teacher_forcing_prefix(
             clip_frames,
             traces,
+            passive_actions,
             teacher_features,
             crop_teacher_features,
             context_len,
             target_len,
+            None,
+        )
+    }
+
+    pub fn forward_with_teacher_forcing_prefix(
+        &self,
+        clip_frames: Tensor<B, 5>,
+        traces: &[FrameFixationTrace],
+        passive_actions: Option<Tensor<B, 3>>,
+        teacher_features: Tensor<B, 3>,
+        crop_teacher_features: Tensor<B, 3>,
+        context_len: usize,
+        target_len: usize,
+        teacher_forcing_prefix_override: Option<usize>,
+    ) -> DreamerForward<B> {
+        self.forward_internal(
+            clip_frames,
+            traces,
+            passive_actions,
+            teacher_features,
+            crop_teacher_features,
+            context_len,
+            target_len,
+            teacher_forcing_prefix_override,
             false,
         )
         .0
@@ -460,6 +562,7 @@ impl<B: Backend> DragonDreamer<B> {
         &self,
         clip_frames: Tensor<B, 5>,
         traces: &[FrameFixationTrace],
+        _passive_actions: Option<Tensor<B, 3>>,
         teacher_features: Tensor<B, 3>,
         crop_teacher_features: Tensor<B, 3>,
     ) -> DreamerForward<B> {
@@ -467,6 +570,7 @@ impl<B: Backend> DragonDreamer<B> {
             return self.forward(
                 clip_frames,
                 traces,
+                None,
                 teacher_features,
                 crop_teacher_features,
                 1,
@@ -485,6 +589,7 @@ impl<B: Backend> DragonDreamer<B> {
         &self,
         clip_frames: Tensor<B, 5>,
         traces: &[FrameFixationTrace],
+        passive_actions: Option<Tensor<B, 3>>,
         teacher_features: Tensor<B, 3>,
         crop_teacher_features: Tensor<B, 3>,
         context_len: usize,
@@ -493,10 +598,12 @@ impl<B: Backend> DragonDreamer<B> {
         let (forward, debug) = self.forward_internal(
             clip_frames,
             traces,
+            passive_actions,
             teacher_features,
             crop_teacher_features,
             context_len,
             target_len,
+            None,
             true,
         );
         (
@@ -509,30 +616,36 @@ impl<B: Backend> DragonDreamer<B> {
         &self,
         clip_frames: Tensor<B, 5>,
         traces: &[FrameFixationTrace],
+        passive_actions: Option<Tensor<B, 3>>,
         teacher_features: Tensor<B, 3>,
         crop_teacher_features: Tensor<B, 3>,
         context_len: usize,
         target_len: usize,
+        teacher_forcing_prefix_override: Option<usize>,
         capture_debug: bool,
     ) -> (DreamerForward<B>, Option<DreamerDebugOutput<B>>) {
         if self.use_transformer_baseline {
             self.forward_internal_transformer(
                 clip_frames,
                 traces,
+                passive_actions,
                 teacher_features,
                 crop_teacher_features,
                 context_len,
                 target_len,
+                teacher_forcing_prefix_override,
                 capture_debug,
             )
         } else if self.use_bdh_challenger {
             self.forward_internal_bdh_challenger(
                 clip_frames,
                 traces,
+                passive_actions,
                 teacher_features,
                 crop_teacher_features,
                 context_len,
                 target_len,
+                teacher_forcing_prefix_override,
                 capture_debug,
             )
         } else {
@@ -543,6 +656,7 @@ impl<B: Backend> DragonDreamer<B> {
                 crop_teacher_features,
                 context_len,
                 target_len,
+                teacher_forcing_prefix_override,
                 capture_debug,
             )
         }
@@ -579,10 +693,13 @@ impl<B: Backend> DragonDreamer<B> {
             let peripheral = self.encode_peripheral(frame.clone());
             let observed_slots = self.encode_frame_to_slot_tokens(frame.clone());
             let slot_summary = self.summarize_slots(observed_slots.clone());
-            let predicted_fixation =
-                self.predict_fixation_from_slots(observed_slots.clone(), Some(peripheral));
-            let trace_points =
-                fixation_tensor_from_traces::<B>(traces, step, self.k_fovea, &device);
+            let passive_trace =
+                passive_full_frame_fixation_tensor::<B>(batch, self.k_fovea, &device);
+            let trace_points = if self.passive_full_frame {
+                passive_trace.clone()
+            } else {
+                fixation_tensor_from_traces::<B>(traces, step, self.k_fovea, &device)
+            };
             let fixation_points = trace_points
                 .clone()
                 .slice_dim(1, 0..self.k_fovea * 4)
@@ -592,7 +709,11 @@ impl<B: Backend> DragonDreamer<B> {
                 .slice_dim(1, self.k_fovea * 4..self.k_fovea * 4 + 1);
             let fixation_summary =
                 summarize_fixation_set(fixation_points.clone(), fixation_stop.clone());
-            gaze_total = gaze_total + mse_loss(predicted_fixation, trace_points.clone());
+            if !self.passive_full_frame {
+                let predicted_fixation =
+                    self.predict_fixation_from_slots(observed_slots.clone(), Some(peripheral));
+                gaze_total = gaze_total + mse_loss(predicted_fixation, trace_points.clone());
+            }
 
             let (tokenizer_recon, tokenizer_occupancy) =
                 self.decode_frame_from_slots_components(observed_slots.clone(), None);
@@ -628,15 +749,17 @@ impl<B: Backend> DragonDreamer<B> {
                 .detach();
             current_total = current_total + mse_loss(current_pred, current_target);
 
-            let query_pred = self
-                .query_head
-                .forward(Tensor::cat(vec![slot_summary, fixation_summary], 1));
-            let query_target = crop_teacher_features
-                .clone()
-                .slice_dim(1, step..step + 1)
-                .reshape([batch, self.crop_teacher_dim])
-                .detach();
-            query_total = query_total + mse_loss(query_pred, query_target);
+            if !self.passive_full_frame {
+                let query_pred = self
+                    .query_head
+                    .forward(Tensor::cat(vec![slot_summary, fixation_summary], 1));
+                let query_target = crop_teacher_features
+                    .clone()
+                    .slice_dim(1, step..step + 1)
+                    .reshape([batch, self.crop_teacher_dim])
+                    .detach();
+                query_total = query_total + mse_loss(query_pred, query_target);
+            }
 
             let detached_frame = frame.detach();
             previous_target_frame = Some(detached_frame);
@@ -655,6 +778,7 @@ impl<B: Backend> DragonDreamer<B> {
         let recon_future = recon_future_total;
         let recon_edge = recon_edge_total.div_scalar(frame_denom);
         let recon_motion = recon_motion_total.div_scalar(clip_len.saturating_sub(1).max(1) as f32);
+        let shortcut = zero.clone();
         let recon = recon_current.clone().mul_scalar(self.recon_current_weight)
             + recon_edge.clone().mul_scalar(self.recon_edge_weight)
             + recon_motion.clone().mul_scalar(self.recon_motion_weight);
@@ -669,6 +793,7 @@ impl<B: Backend> DragonDreamer<B> {
             current,
             future,
             prior,
+            shortcut,
             gaze,
             query,
             recon,
@@ -690,6 +815,7 @@ impl<B: Backend> DragonDreamer<B> {
         crop_teacher_features: Tensor<B, 3>,
         context_len: usize,
         target_len: usize,
+        _teacher_forcing_prefix_override: Option<usize>,
         capture_debug: bool,
     ) -> (DreamerForward<B>, Option<DreamerDebugOutput<B>>) {
         let device = clip_frames.device();
@@ -882,6 +1008,7 @@ impl<B: Backend> DragonDreamer<B> {
         let recon_edge = recon_edge_total.div_scalar((context_len + target_len) as f32);
         let recon_motion = recon_motion_total
             .div_scalar((context_len + target_len).saturating_sub(1).max(1) as f32);
+        let shortcut = zero.clone();
         let recon = recon_current.clone().mul_scalar(self.recon_current_weight)
             + recon_future.clone().mul_scalar(self.recon_future_weight)
             + recon_edge.clone().mul_scalar(self.recon_edge_weight);
@@ -898,6 +1025,7 @@ impl<B: Backend> DragonDreamer<B> {
             current,
             future,
             prior,
+            shortcut,
             gaze,
             query,
             recon,
@@ -930,10 +1058,12 @@ impl<B: Backend> DragonDreamer<B> {
         &self,
         clip_frames: Tensor<B, 5>,
         traces: &[FrameFixationTrace],
+        passive_actions: Option<Tensor<B, 3>>,
         teacher_features: Tensor<B, 3>,
         crop_teacher_features: Tensor<B, 3>,
         context_len: usize,
         target_len: usize,
+        teacher_forcing_prefix_override: Option<usize>,
         capture_debug: bool,
     ) -> (DreamerForward<B>, Option<DreamerDebugOutput<B>>) {
         let device = clip_frames.device();
@@ -954,6 +1084,25 @@ impl<B: Backend> DragonDreamer<B> {
         let mut recon_future_total = zero.clone();
         let mut recon_edge_total = zero.clone();
         let mut recon_motion_total = zero.clone();
+        let mut passive_multi_token_total = zero.clone();
+        let mut passive_multi_token_terms = 0usize;
+        let passive_autoreg_weight = if self.passive_full_frame && !capture_debug {
+            self.passive_autoregressive_loss_weight.max(0.0)
+        } else {
+            0.0
+        };
+        let mut passive_autoreg_future_total = zero.clone();
+        let mut passive_autoreg_prior_total = zero.clone();
+        let mut passive_autoreg_recon_future_total = zero.clone();
+        let mut passive_autoreg_recon_edge_total = zero.clone();
+        let mut passive_autoreg_recon_motion_total = zero.clone();
+        let passive_shortcut_weight =
+            if self.passive_full_frame && self.passive_joint_future_prediction && !capture_debug {
+                self.passive_shortcut_loss_weight.max(0.0)
+            } else {
+                0.0
+            };
+        let mut passive_shortcut_total = zero.clone();
         let mut context_reference_frames = Vec::new();
         let mut context_reconstruction_frames = Vec::new();
         let mut future_reference_frames = Vec::new();
@@ -964,6 +1113,21 @@ impl<B: Backend> DragonDreamer<B> {
         let mut predicted_fixations = Vec::new();
         let mut previous_real_frame: Option<Tensor<B, 4>> = None;
         let mut previous_target_frame: Option<Tensor<B, 4>> = None;
+        let mut previous_slots_for_prior: Option<Tensor<B, 3>> = None;
+        let mut context_history_slots: Vec<Tensor<B, 3>> = Vec::with_capacity(context_len);
+        let mut context_slot_targets: Vec<Tensor<B, 3>> = Vec::with_capacity(context_len);
+        let use_passive_state_targets =
+            self.passive_full_frame && self.teacher_dim == self.latent_dim;
+        let passive_state_decode_mix = self.passive_state_decode_mix.clamp(0.0, 1.0);
+        let passive_frame_actions = if self.passive_full_frame && self.passive_action_conditioning {
+            passive_actions.map(|actions| {
+                let action_steps = actions.shape().dims::<3>()[1];
+                let usable_steps = action_steps.min(clip_len.max(1));
+                actions.slice_dim(1, 0..usable_steps)
+            })
+        } else {
+            None
+        };
 
         for step in 0..context_len {
             let frame = clip_frames
@@ -971,10 +1135,13 @@ impl<B: Backend> DragonDreamer<B> {
                 .slice_dim(1, step..step + 1)
                 .reshape([batch, channels, height, width]);
             let peripheral = self.encode_peripheral(frame.clone());
-            let predicted_fixation =
-                self.predict_fixation_from_slots(slots.clone(), Some(peripheral.clone()));
-            let trace_points =
-                fixation_tensor_from_traces::<B>(traces, step, self.k_fovea, &device);
+            let passive_trace =
+                passive_full_frame_fixation_tensor::<B>(batch, self.k_fovea, &device);
+            let trace_points = if self.passive_full_frame {
+                passive_trace.clone()
+            } else {
+                fixation_tensor_from_traces::<B>(traces, step, self.k_fovea, &device)
+            };
             let fixation_points = trace_points
                 .clone()
                 .slice_dim(1, 0..self.k_fovea * 4)
@@ -984,36 +1151,62 @@ impl<B: Backend> DragonDreamer<B> {
                 .slice_dim(1, self.k_fovea * 4..self.k_fovea * 4 + 1);
             let fixation_summary =
                 summarize_fixation_set(fixation_points.clone(), fixation_stop.clone());
-            gaze_total = gaze_total + mse_loss(predicted_fixation.clone(), trace_points.clone());
+            let predicted_fixation = if self.passive_full_frame {
+                passive_trace.clone()
+            } else {
+                self.predict_fixation_from_slots(slots.clone(), Some(peripheral.clone()))
+            };
+            if !self.passive_full_frame {
+                gaze_total =
+                    gaze_total + mse_loss(predicted_fixation.clone(), trace_points.clone());
+            }
 
-            let crops = extract_crops(frame.clone(), traces, step, self.crop_size, self.k_fovea);
-            let fovea_tokens = self.encode_fovea_tokens(crops);
             let observed_slots = self.encode_frame_to_slot_tokens(frame.clone());
-            let prior_slots = self.prior_step_slots(slots.clone());
+            let prior_source_slots = slots.clone();
+            let prior_slots =
+                self.prior_step_slots(prior_source_slots.clone(), previous_slots_for_prior.clone());
             let (tokenizer_recon, tokenizer_occupancy) =
                 self.decode_frame_from_slots_components(observed_slots.clone(), None);
-            slots = self.posterior_step_slots(
-                prior_slots.clone(),
-                observed_slots.clone(),
-                peripheral,
-                fovea_tokens,
-                fixation_points,
-                fixation_summary.clone(),
-            );
+            slots = if self.passive_full_frame {
+                self.posterior_step_slots_passive(
+                    prior_slots.clone(),
+                    observed_slots.clone(),
+                    peripheral,
+                )
+            } else {
+                let crops =
+                    extract_crops(frame.clone(), traces, step, self.crop_size, self.k_fovea);
+                let fovea_tokens = self.encode_fovea_tokens(crops);
+                self.posterior_step_slots(
+                    prior_slots.clone(),
+                    observed_slots.clone(),
+                    peripheral,
+                    fovea_tokens,
+                    fixation_points,
+                    fixation_summary.clone(),
+                )
+            };
             let post_summary = self.summarize_slots(slots.clone());
             let (current_recon, current_occupancy) =
                 self.decode_frame_from_slots_components(slots.clone(), None);
-            let current_pred = self.current_head.forward(post_summary.clone());
-            let current_target = teacher_features
-                .clone()
-                .slice_dim(1, step..step + 1)
-                .reshape([batch, self.teacher_dim])
-                .detach();
-            current_total = current_total + mse_loss(current_pred, current_target);
+            if use_passive_state_targets {
+                let current_state_pred =
+                    self.predict_slot_tokens_from_summary(post_summary.clone(), slots.clone());
+                current_total = current_total
+                    + mse_loss_tokens(current_state_pred, observed_slots.clone().detach());
+            } else {
+                let current_pred = self.current_head.forward(post_summary.clone());
+                let current_target = teacher_features
+                    .clone()
+                    .slice_dim(1, step..step + 1)
+                    .reshape([batch, self.teacher_dim])
+                    .detach();
+                current_total = current_total + mse_loss(current_pred, current_target);
+            }
             prior_total = prior_total + mse_loss_tokens(prior_slots, slots.clone().detach());
             prior_terms += 1;
             slot_align_total =
-                slot_align_total + mse_loss_tokens(slots.clone(), observed_slots.detach());
+                slot_align_total + mse_loss_tokens(slots.clone(), observed_slots.clone().detach());
             tokenizer_recon_total = tokenizer_recon_total
                 + tokenizer_reconstruction_loss_frame(tokenizer_recon, frame.clone().detach())
                 + occupancy_loss_frame(tokenizer_occupancy, frame.clone().detach())
@@ -1033,15 +1226,17 @@ impl<B: Backend> DragonDreamer<B> {
                     );
             }
 
-            let query_pred = self
-                .query_head
-                .forward(Tensor::cat(vec![post_summary.clone(), fixation_summary], 1));
-            let query_target = crop_teacher_features
-                .clone()
-                .slice_dim(1, step..step + 1)
-                .reshape([batch, self.crop_teacher_dim])
-                .detach();
-            query_total = query_total + mse_loss(query_pred, query_target);
+            if !self.passive_full_frame {
+                let query_pred = self
+                    .query_head
+                    .forward(Tensor::cat(vec![post_summary.clone(), fixation_summary], 1));
+                let query_target = crop_teacher_features
+                    .clone()
+                    .slice_dim(1, step..step + 1)
+                    .reshape([batch, self.crop_teacher_dim])
+                    .detach();
+                query_total = query_total + mse_loss(query_pred, query_target);
+            }
 
             if capture_debug {
                 context_reference_frames.push(frame.clone().detach().unsqueeze_dim::<5>(1));
@@ -1053,33 +1248,205 @@ impl<B: Backend> DragonDreamer<B> {
             let detached_frame = frame.detach();
             previous_real_frame = Some(detached_frame.clone());
             previous_target_frame = Some(detached_frame);
+            previous_slots_for_prior = Some(prior_source_slots);
+            context_history_slots.push(slots.clone());
+            if self.passive_posterior_slot_targets {
+                context_slot_targets.push(slots.clone().detach());
+            } else {
+                context_slot_targets.push(observed_slots.detach());
+            }
         }
 
-        let mut rollout_slots = slots;
-        let mut previous_rollout_frame = previous_real_frame;
+        let mut future_frames = Vec::with_capacity(target_len);
+        let mut future_slot_targets = Vec::with_capacity(target_len);
+        let mut future_observed_slot_targets = Vec::with_capacity(target_len);
+        let mut target_slots = context_history_slots
+            .last()
+            .expect("passive future targets require context history")
+            .clone()
+            .detach();
+        let mut target_previous_slots = if context_history_slots.len() >= 2 {
+            Some(
+                context_history_slots[context_history_slots.len() - 2]
+                    .clone()
+                    .detach(),
+            )
+        } else {
+            None
+        };
         for step in 0..target_len {
-            rollout_slots = self.prior_step_slots(rollout_slots);
-            let rollout_summary = self.summarize_slots(rollout_slots.clone());
-            let (future_recon, future_occupancy) =
-                self.decode_frame_from_slots_components(rollout_slots.clone(), None);
-            let future_pred = self.future_head.forward(rollout_summary.clone());
             let target_idx = context_len + step;
-            let future_target = teacher_features
-                .clone()
-                .slice_dim(1, target_idx..target_idx + 1)
-                .reshape([batch, self.teacher_dim])
-                .detach();
-            future_total = future_total + mse_loss(future_pred, future_target);
             let future_frame = clip_frames
                 .clone()
                 .slice_dim(1, target_idx..target_idx + 1)
                 .reshape([batch, channels, height, width]);
+            let future_observed_slot_target = self
+                .encode_frame_to_slot_tokens(future_frame.clone().detach())
+                .detach();
             let future_slot_target =
-                self.encode_frame_to_slot_tokens(future_frame.clone().detach());
+                if self.passive_full_frame && self.passive_posterior_slot_targets {
+                    let target_prior_slots = self
+                        .prior_step_slots(target_slots.clone(), target_previous_slots.clone())
+                        .detach();
+                    let target_peripheral = self
+                        .encode_peripheral(future_frame.clone().detach())
+                        .detach();
+                    self.posterior_step_slots_passive(
+                        target_prior_slots,
+                        future_observed_slot_target.clone(),
+                        target_peripheral,
+                    )
+                    .detach()
+                } else {
+                    future_observed_slot_target.clone()
+                };
+            future_frames.push(future_frame);
+            future_observed_slot_targets.push(future_observed_slot_target);
+            future_slot_targets.push(future_slot_target);
+            target_previous_slots = Some(target_slots);
+            target_slots = future_slot_targets
+                .last()
+                .expect("future slot target just pushed")
+                .clone();
+        }
+
+        if self.passive_full_frame
+            && !capture_debug
+            && self.passive_multi_token_loss_weight > 0.0
+            && self.passive_multi_token_pred_len > 1
+        {
+            let mut full_slot_targets =
+                Vec::with_capacity(context_slot_targets.len() + future_slot_targets.len());
+            full_slot_targets.extend(context_slot_targets.iter().cloned());
+            full_slot_targets.extend(future_slot_targets.iter().cloned());
+
+            if full_slot_targets.len() > 1 {
+                let observed_anchors = context_slot_targets.len().saturating_sub(1);
+                for anchor in 0..observed_anchors {
+                    let aux_target_len = (full_slot_targets.len() - anchor - 1)
+                        .min(self.passive_multi_token_pred_len);
+                    if aux_target_len == 0 {
+                        continue;
+                    }
+                    let aux_preds = if self.passive_joint_future_prediction {
+                        self.predict_future_slots_joint_from_context(
+                            &full_slot_targets[..=anchor],
+                            aux_target_len,
+                            passive_frame_actions.clone(),
+                        )
+                    } else {
+                        self.predict_future_slots_from_context(
+                            &full_slot_targets[..=anchor],
+                            aux_target_len,
+                            passive_frame_actions.clone(),
+                            None,
+                            0,
+                        )
+                    };
+
+                    for offset in 0..aux_target_len {
+                        passive_multi_token_total = passive_multi_token_total
+                            + mse_loss_tokens(
+                                aux_preds[offset].clone(),
+                                full_slot_targets[anchor + offset + 1].clone().detach(),
+                            );
+                        passive_multi_token_terms += 1;
+                    }
+                }
+            }
+        }
+
+        let predicted_future_slots = if self.passive_full_frame {
+            let teacher_forcing_prefix_steps = if capture_debug {
+                0
+            } else {
+                teacher_forcing_prefix_override
+                    .unwrap_or(self.passive_teacher_forcing_prefix_steps)
+                    .min(target_len)
+            };
+            Some(if self.passive_joint_future_prediction {
+                self.predict_future_slots_joint_from_context(
+                    &context_history_slots,
+                    target_len,
+                    passive_frame_actions.clone(),
+                )
+            } else {
+                self.predict_future_slots_from_context(
+                    &context_history_slots,
+                    target_len,
+                    passive_frame_actions.clone(),
+                    if capture_debug {
+                        None
+                    } else {
+                        Some(&future_slot_targets)
+                    },
+                    teacher_forcing_prefix_steps,
+                )
+            })
+        } else {
+            None
+        };
+        let autoregressive_future_slots = if self.passive_full_frame && passive_autoreg_weight > 0.0
+        {
+            Some(self.predict_future_slots_from_context(
+                &context_history_slots,
+                target_len,
+                passive_frame_actions.clone(),
+                None,
+                0,
+            ))
+        } else {
+            None
+        };
+        let mut previous_rollout_frame = previous_real_frame.clone();
+        let mut previous_autoreg_frame = previous_real_frame.clone();
+        for step in 0..target_len {
+            let rollout_slots = if self.passive_full_frame {
+                predicted_future_slots
+                    .as_ref()
+                    .expect("passive rollout requires predicted_future_slots")[step]
+                    .clone()
+            } else {
+                let prior_source_slots = slots.clone();
+                slots = self
+                    .prior_step_slots(prior_source_slots.clone(), previous_slots_for_prior.clone());
+                previous_slots_for_prior = Some(prior_source_slots);
+                slots.clone()
+            };
+            let rollout_summary = self.summarize_slots(rollout_slots.clone());
+            let target_idx = context_len + step;
+            let future_frame = future_frames[step].clone();
+            let future_slot_target = future_slot_targets[step].clone();
+            let future_observed_slot_target = future_observed_slot_targets[step].clone();
+            let future_decode_slots = if use_passive_state_targets {
+                let future_state_pred = self.predict_slot_tokens_from_summary(
+                    rollout_summary.clone(),
+                    rollout_slots.clone(),
+                );
+                future_total = future_total
+                    + mse_loss_tokens(
+                        future_state_pred.clone(),
+                        future_slot_target.clone().detach(),
+                    );
+                rollout_slots.clone()
+                    + (future_state_pred - rollout_slots.clone())
+                        .mul_scalar(passive_state_decode_mix)
+            } else {
+                let future_pred = self.future_head.forward(rollout_summary.clone());
+                let future_target = teacher_features
+                    .clone()
+                    .slice_dim(1, target_idx..target_idx + 1)
+                    .reshape([batch, self.teacher_dim])
+                    .detach();
+                future_total = future_total + mse_loss(future_pred, future_target);
+                rollout_slots.clone()
+            };
+            let (future_recon, future_occupancy) =
+                self.decode_frame_from_slots_components(future_decode_slots.clone(), None);
             let (future_tokenizer_recon, future_tokenizer_occupancy) =
-                self.decode_frame_from_slots_components(future_slot_target.clone(), None);
-            prior_total =
-                prior_total + mse_loss_tokens(rollout_slots.clone(), future_slot_target.detach());
+                self.decode_frame_from_slots_components(future_observed_slot_target.clone(), None);
+            prior_total = prior_total
+                + mse_loss_tokens(rollout_slots.clone(), future_slot_target.clone().detach());
             prior_terms += 1;
             tokenizer_recon_total = tokenizer_recon_total
                 + tokenizer_reconstruction_loss_frame(
@@ -1109,10 +1476,88 @@ impl<B: Backend> DragonDreamer<B> {
                         previous_target,
                     );
             }
-            let trace_points =
-                fixation_tensor_from_traces::<B>(traces, target_idx, self.k_fovea, &device);
-            let imagined_predicted_fixation =
-                self.predict_fixation_from_slots(rollout_slots.clone(), None);
+            if let Some(autoregressive_future_slots) = autoregressive_future_slots.as_ref() {
+                let autoreg_slots = autoregressive_future_slots[step].clone();
+                let autoreg_summary = self.summarize_slots(autoreg_slots.clone());
+                let autoreg_decode_slots = if use_passive_state_targets {
+                    let autoreg_state_pred = self.predict_slot_tokens_from_summary(
+                        autoreg_summary.clone(),
+                        autoreg_slots.clone(),
+                    );
+                    passive_autoreg_future_total = passive_autoreg_future_total
+                        + mse_loss_tokens(
+                            autoreg_state_pred.clone(),
+                            future_slot_target.clone().detach(),
+                        );
+                    if passive_shortcut_weight > 0.0 {
+                        let autoreg_mixed_slots = autoreg_slots.clone()
+                            + (autoreg_state_pred.clone() - autoreg_slots.clone())
+                                .mul_scalar(passive_state_decode_mix);
+                        passive_shortcut_total = passive_shortcut_total
+                            + mse_loss_tokens(
+                                future_decode_slots.clone(),
+                                autoreg_mixed_slots.detach(),
+                            );
+                    }
+                    autoreg_slots.clone()
+                        + (autoreg_state_pred - autoreg_slots.clone())
+                            .mul_scalar(passive_state_decode_mix)
+                } else {
+                    let future_target = teacher_features
+                        .clone()
+                        .slice_dim(1, target_idx..target_idx + 1)
+                        .reshape([batch, self.teacher_dim])
+                        .detach();
+                    passive_autoreg_future_total = passive_autoreg_future_total
+                        + mse_loss(self.future_head.forward(autoreg_summary), future_target);
+                    if passive_shortcut_weight > 0.0 {
+                        passive_shortcut_total = passive_shortcut_total
+                            + mse_loss_tokens(
+                                rollout_slots.clone(),
+                                autoreg_slots.clone().detach(),
+                            );
+                    }
+                    autoreg_slots.clone()
+                };
+                let (autoreg_recon, autoreg_occupancy) =
+                    self.decode_frame_from_slots_components(autoreg_decode_slots, None);
+                passive_autoreg_prior_total = passive_autoreg_prior_total
+                    + mse_loss_tokens(autoreg_slots.clone(), future_slot_target.clone().detach());
+                passive_autoreg_recon_future_total = passive_autoreg_recon_future_total
+                    + rollout_reconstruction_loss_frame(
+                        autoreg_recon.clone(),
+                        future_frame.clone().detach(),
+                    )
+                    + occupancy_loss_frame(autoreg_occupancy, future_frame.clone().detach())
+                        .mul_scalar(0.20);
+                passive_autoreg_recon_edge_total = passive_autoreg_recon_edge_total
+                    + edge_mse_loss_frame(autoreg_recon.clone(), future_frame.clone().detach());
+                if let (Some(previous_autoreg), Some(previous_target)) = (
+                    previous_autoreg_frame.clone(),
+                    previous_target_frame.clone(),
+                ) {
+                    passive_autoreg_recon_motion_total = passive_autoreg_recon_motion_total
+                        + motion_mse_loss_frame(
+                            autoreg_recon.clone(),
+                            previous_autoreg,
+                            future_frame.clone().detach(),
+                            previous_target,
+                        );
+                }
+                previous_autoreg_frame = Some(autoreg_recon);
+            }
+            let passive_trace =
+                passive_full_frame_fixation_tensor::<B>(batch, self.k_fovea, &device);
+            let trace_points = if self.passive_full_frame {
+                passive_trace.clone()
+            } else {
+                fixation_tensor_from_traces::<B>(traces, target_idx, self.k_fovea, &device)
+            };
+            let imagined_predicted_fixation = if self.passive_full_frame {
+                passive_trace.clone()
+            } else {
+                self.predict_fixation_from_slots(rollout_slots.clone(), None)
+            };
             let imagined_fixation_points = imagined_predicted_fixation
                 .clone()
                 .slice_dim(1, 0..self.k_fovea * 4)
@@ -1122,18 +1567,20 @@ impl<B: Backend> DragonDreamer<B> {
                 .slice_dim(1, self.k_fovea * 4..self.k_fovea * 4 + 1);
             let imagined_fixation_summary =
                 summarize_fixation_set(imagined_fixation_points, imagined_fixation_stop);
-            gaze_total =
-                gaze_total + mse_loss(imagined_predicted_fixation.clone(), trace_points.clone());
-            let query_pred = self.query_head.forward(Tensor::cat(
-                vec![rollout_summary.clone(), imagined_fixation_summary],
-                1,
-            ));
-            let query_target = crop_teacher_features
-                .clone()
-                .slice_dim(1, target_idx..target_idx + 1)
-                .reshape([batch, self.crop_teacher_dim])
-                .detach();
-            query_total = query_total + mse_loss(query_pred, query_target);
+            if !self.passive_full_frame {
+                gaze_total = gaze_total
+                    + mse_loss(imagined_predicted_fixation.clone(), trace_points.clone());
+                let query_pred = self.query_head.forward(Tensor::cat(
+                    vec![rollout_summary.clone(), imagined_fixation_summary],
+                    1,
+                ));
+                let query_target = crop_teacher_features
+                    .clone()
+                    .slice_dim(1, target_idx..target_idx + 1)
+                    .reshape([batch, self.crop_teacher_dim])
+                    .detach();
+                query_total = query_total + mse_loss(query_pred, query_target);
+            }
             if capture_debug {
                 future_reference_frames.push(future_frame.clone().detach().unsqueeze_dim::<5>(1));
                 future_reconstruction_frames
@@ -1152,7 +1599,14 @@ impl<B: Backend> DragonDreamer<B> {
         let fixation_denom = (context_len + target_len) as f32;
         let current = current_total.div_scalar(context_denom);
         let future = future_total.div_scalar(target_denom);
-        let prior = prior_total.div_scalar(prior_terms.max(1) as f32);
+        let prior = prior_total.div_scalar(prior_terms.max(1) as f32)
+            + passive_autoreg_prior_total
+                .div_scalar(target_denom)
+                .mul_scalar(passive_autoreg_weight)
+            + passive_multi_token_total
+                .div_scalar(passive_multi_token_terms.max(1) as f32)
+                .mul_scalar(self.passive_multi_token_loss_weight);
+        let shortcut = passive_shortcut_total.div_scalar(target_denom);
         let gaze = gaze_total.div_scalar(fixation_denom);
         let query = query_total.div_scalar(fixation_denom);
         let tokenizer_recon = tokenizer_recon_total.div_scalar((context_len + target_len) as f32);
@@ -1162,10 +1616,23 @@ impl<B: Backend> DragonDreamer<B> {
                 .clone()
                 .mul_scalar(self.tokenizer_slot_align_weight);
         let recon_current = recon_current_total.div_scalar(context_denom);
-        let recon_future = recon_future_total.div_scalar(target_denom);
-        let recon_edge = recon_edge_total.div_scalar((context_len + target_len) as f32);
+        let future = future
+            + passive_autoreg_future_total
+                .div_scalar(target_denom)
+                .mul_scalar(passive_autoreg_weight);
+        let recon_future = recon_future_total.div_scalar(target_denom)
+            + passive_autoreg_recon_future_total
+                .div_scalar(target_denom)
+                .mul_scalar(passive_autoreg_weight);
+        let recon_edge = recon_edge_total.div_scalar((context_len + target_len) as f32)
+            + passive_autoreg_recon_edge_total
+                .div_scalar(target_denom)
+                .mul_scalar(passive_autoreg_weight);
         let recon_motion = recon_motion_total
-            .div_scalar((context_len + target_len).saturating_sub(1).max(1) as f32);
+            .div_scalar((context_len + target_len).saturating_sub(1).max(1) as f32)
+            + passive_autoreg_recon_motion_total
+                .div_scalar(target_denom)
+                .mul_scalar(passive_autoreg_weight);
         let recon = recon_current.clone().mul_scalar(self.recon_current_weight)
             + recon_future.clone().mul_scalar(self.recon_future_weight)
             + recon_edge.clone().mul_scalar(self.recon_edge_weight);
@@ -1173,6 +1640,7 @@ impl<B: Backend> DragonDreamer<B> {
         let total = current.clone().mul_scalar(self.current_loss_weight)
             + future.clone().mul_scalar(self.future_loss_weight)
             + prior.clone().mul_scalar(self.prior_loss_weight)
+            + shortcut.clone().mul_scalar(passive_shortcut_weight)
             + gaze.clone().mul_scalar(self.gaze_loss_weight)
             + query.clone().mul_scalar(self.query_loss_weight)
             + tokenizer.clone().mul_scalar(self.tokenizer_loss_weight)
@@ -1183,6 +1651,7 @@ impl<B: Backend> DragonDreamer<B> {
             current,
             future,
             prior,
+            shortcut,
             gaze,
             query,
             recon,
@@ -1498,19 +1967,37 @@ fn fixation_tensor_from_traces<B: Backend>(
     )
 }
 
-fn extract_crops<B: Backend>(
+fn passive_full_frame_fixation_tensor<B: Backend>(
+    batch: usize,
+    k: usize,
+    device: &B::Device,
+) -> Tensor<B, 2> {
+    let mut values = Vec::with_capacity(batch * (k.max(1) * 4 + 1));
+    for _ in 0..batch {
+        for point_idx in 0..k.max(1) {
+            let confidence = if point_idx == 0 { 1.0 } else { 0.0 };
+            values.extend_from_slice(&[0.5, 0.5, 1.0, confidence]);
+        }
+        values.push(1.0);
+    }
+    Tensor::<B, 2>::from_data(TensorData::new(values, [batch, k.max(1) * 4 + 1]), device)
+}
+
+pub fn extract_crops<B: Backend>(
     frame: Tensor<B, 4>,
     traces: &[FrameFixationTrace],
     step: usize,
     crop_size: usize,
     k: usize,
 ) -> Tensor<B, 5> {
-    let [batch, channels, height, width] = frame.shape().dims::<4>();
-    let mut patches = Vec::with_capacity(batch * k.max(1));
+    let device = frame.device();
+    let [batch, _channels, height, width] = frame.shape().dims::<4>();
     let crop = crop_size.max(1);
+    let k = k.max(1);
     let half = crop / 2;
+    let mut x0_values = Vec::with_capacity(batch * k);
+    let mut y0_values = Vec::with_capacity(batch * k);
     for batch_idx in 0..batch {
-        let sample = frame.clone().slice_dim(0, batch_idx..batch_idx + 1);
         let trace = traces
             .get(batch_idx)
             .expect("trace count matches batch size");
@@ -1519,29 +2006,52 @@ fn extract_crops<B: Backend>(
             .get(step)
             .or_else(|| trace.frames.last())
             .expect("trace has at least one frame");
-        for point in frame_trace.points.iter().take(k.max(1)) {
+        for point in frame_trace.points.iter().take(k) {
             let center_x = (point.x * width as f32).round() as isize;
             let center_y = (point.y * height as f32).round() as isize;
-            let x0 = center_x - half as isize;
-            let y0 = center_y - half as isize;
-            let x0 = x0.clamp(0, width.saturating_sub(crop) as isize) as usize;
-            let y0 = y0.clamp(0, height.saturating_sub(crop) as isize) as usize;
-            let patch = sample
-                .clone()
-                .slice_dim(2, y0..(y0 + crop).min(height))
-                .slice_dim(3, x0..(x0 + crop).min(width));
-            let [_, _, patch_h, patch_w] = patch.shape().dims::<4>();
-            let patch = if patch_h == crop && patch_w == crop {
-                patch
-            } else {
-                let mut padded = Tensor::<B, 4>::zeros([1, channels, crop, crop], &frame.device());
-                padded = padded.slice_assign([0..1, 0..channels, 0..patch_h, 0..patch_w], patch);
-                padded
-            };
-            patches.push(patch);
+            let x0 = (center_x - half as isize).clamp(0, width.saturating_sub(crop) as isize);
+            let y0 = (center_y - half as isize).clamp(0, height.saturating_sub(crop) as isize);
+            x0_values.push(x0 as f32);
+            y0_values.push(y0 as f32);
         }
     }
-    Tensor::cat(patches, 0).reshape([batch, k.max(1), channels, crop, crop])
+    sample_fixation_crops_from_top_left(frame, x0_values, y0_values, k, crop, &device)
+}
+
+fn sample_fixation_crops_from_top_left<B: Backend>(
+    frame: Tensor<B, 4>,
+    x0_values: Vec<f32>,
+    y0_values: Vec<f32>,
+    k: usize,
+    crop_size: usize,
+    device: &B::Device,
+) -> Tensor<B, 5> {
+    let [batch, channels, height, width] = frame.shape().dims::<4>();
+    let crop = crop_size.max(1);
+    let mut indices = Vec::with_capacity(batch * k * crop * crop);
+    for batch_idx in 0..batch {
+        for k_idx in 0..k {
+            let base = batch_idx * k + k_idx;
+            let x0 = x0_values[base] as usize;
+            let y0 = y0_values[base] as usize;
+            for y in 0..crop {
+                let row = (y0 + y).min(height.saturating_sub(1));
+                for x in 0..crop {
+                    let col = (x0 + x).min(width.saturating_sub(1));
+                    indices.push((row * width + col) as i64);
+                }
+            }
+        }
+    }
+    let flat = frame.reshape([batch, channels, height * width]);
+    let index =
+        Tensor::<B, 1, Int>::from_data(TensorData::new(indices, [batch * k * crop * crop]), device)
+            .reshape([batch, 1, k * crop * crop])
+            .repeat_dim(1, channels);
+    flat.gather(2, index)
+        .reshape([batch, channels, k, crop, crop])
+        .swap_dims(1, 2)
+        .reshape([batch, k, channels, crop, crop])
 }
 
 #[cfg(test)]
@@ -1581,9 +2091,85 @@ mod tests {
         ];
         let teacher = Tensor::<B, 3>::zeros([2, 6, config.teacher_dim], &device);
         let crop_teacher = Tensor::<B, 3>::zeros([2, 6, config.crop_teacher_dim], &device);
-        let out = model.forward(clip, &traces, teacher, crop_teacher, 4, 2);
+        let out = model.forward(clip, &traces, None, teacher, crop_teacher, 4, 2);
         let total = out.total.into_data().to_vec::<f32>().expect("loss");
         assert!(total[0].is_finite());
+    }
+
+    fn extract_crops_reference<B: Backend>(
+        frame: Tensor<B, 4>,
+        traces: &[FrameFixationTrace],
+        step: usize,
+        crop_size: usize,
+        k: usize,
+    ) -> Tensor<B, 5> {
+        let [batch, channels, height, width] = frame.shape().dims::<4>();
+        let mut patches = Vec::with_capacity(batch * k.max(1));
+        let crop = crop_size.max(1);
+        let half = crop / 2;
+        for batch_idx in 0..batch {
+            let sample = frame.clone().slice_dim(0, batch_idx..batch_idx + 1);
+            let trace = traces
+                .get(batch_idx)
+                .expect("trace count matches batch size");
+            let frame_trace = trace
+                .frames
+                .get(step)
+                .or_else(|| trace.frames.last())
+                .expect("trace has at least one frame");
+            for point in frame_trace.points.iter().take(k.max(1)) {
+                let center_x = (point.x * width as f32).round() as isize;
+                let center_y = (point.y * height as f32).round() as isize;
+                let x0 = (center_x - half as isize).clamp(0, width.saturating_sub(crop) as isize)
+                    as usize;
+                let y0 = (center_y - half as isize).clamp(0, height.saturating_sub(crop) as isize)
+                    as usize;
+                let patch = sample
+                    .clone()
+                    .slice_dim(2, y0..(y0 + crop).min(height))
+                    .slice_dim(3, x0..(x0 + crop).min(width));
+                patches.push(patch);
+            }
+        }
+        Tensor::cat(patches, 0).reshape([batch, k.max(1), channels, crop, crop])
+    }
+
+    #[test]
+    fn batched_extract_crops_matches_reference() {
+        let device = Default::default();
+        let values: Vec<f32> = (0..(2 * 1 * 8 * 8)).map(|v| v as f32 / 255.0).collect();
+        let frame = Tensor::<B, 4>::from_data(TensorData::new(values, [2, 1, 8, 8]), &device);
+        let traces = vec![
+            FrameFixationTrace::new(vec![FixationSet::new(
+                vec![
+                    FixationPoint::new(0.375, 0.375, 1.0, 1.0),
+                    FixationPoint::new(0.625, 0.625, 1.0, 0.8),
+                ],
+                0.0,
+                2,
+            )]),
+            FrameFixationTrace::new(vec![FixationSet::new(
+                vec![
+                    FixationPoint::new(0.5, 0.5, 1.0, 1.0),
+                    FixationPoint::new(0.25, 0.75, 1.0, 0.7),
+                ],
+                0.0,
+                2,
+            )]),
+        ];
+        let expected = extract_crops_reference(frame.clone(), &traces, 0, 4, 2);
+        let actual = extract_crops(frame, &traces, 0, 4, 2);
+        let expected = expected.into_data().to_vec::<f32>().expect("expected");
+        let actual = actual.into_data().to_vec::<f32>().expect("actual");
+        let max_diff = expected
+            .iter()
+            .zip(actual.iter())
+            .map(|(lhs, rhs)| (lhs - rhs).abs())
+            .fold(0.0_f32, f32::max);
+        assert!(
+            max_diff <= 1.0e-5,
+            "batched crop sampler deviated from reference by {max_diff}"
+        );
     }
 
     #[test]
@@ -1664,7 +2250,7 @@ mod tests {
         ];
         let teacher = Tensor::<B, 3>::zeros([2, 6, config.teacher_dim], &device);
         let crop_teacher = Tensor::<B, 3>::zeros([2, 6, config.crop_teacher_dim], &device);
-        let out = model.forward(clip, &traces, teacher, crop_teacher, 4, 2);
+        let out = model.forward(clip, &traces, None, teacher, crop_teacher, 4, 2);
         let total = out.total.into_data().to_vec::<f32>().expect("loss");
         assert!(total[0].is_finite());
     }
@@ -1708,7 +2294,7 @@ mod tests {
         ];
         let teacher = Tensor::<B, 3>::zeros([2, 6, config.teacher_dim], &device);
         let crop_teacher = Tensor::<B, 3>::zeros([2, 6, config.crop_teacher_dim], &device);
-        let out = model.forward(clip, &traces, teacher, crop_teacher, 4, 2);
+        let out = model.forward(clip, &traces, None, teacher, crop_teacher, 4, 2);
         let total = out.total.into_data().to_vec::<f32>().expect("loss");
         assert!(total[0].is_finite());
     }
@@ -1753,7 +2339,56 @@ mod tests {
         ];
         let teacher = Tensor::<B, 3>::zeros([2, 6, config.teacher_dim], &device);
         let crop_teacher = Tensor::<B, 3>::zeros([2, 6, config.crop_teacher_dim], &device);
-        let out = model.forward(clip, &traces, teacher, crop_teacher, 4, 2);
+        let out = model.forward(clip, &traces, None, teacher, crop_teacher, 4, 2);
+        let total = out.total.into_data().to_vec::<f32>().expect("loss");
+        assert!(total[0].is_finite());
+    }
+
+    #[test]
+    fn bdh_challenger_passive_forward_emits_finite_losses() {
+        let device = Default::default();
+        let config = DreamerConfig {
+            latent_backend: crate::DreamerLatentBackend::BdhChallenger,
+            use_bdh_posterior: true,
+            passive_full_frame: true,
+            passive_action_conditioning: true,
+            k_fovea: 1,
+            crop_size: 28,
+            slot_grid_size: 7,
+            latent_dim: 128,
+            peripheral_dim: 96,
+            fovea_dim: 96,
+            teacher_dim: 64,
+            crop_teacher_dim: 1,
+            ..Default::default()
+        };
+        let model = DragonDreamer::<B>::new(config.clone(), &device);
+        let clip = Tensor::<B, 5>::zeros(
+            [2, 6, config.channels, config.frame_size, config.frame_size],
+            &device,
+        );
+        let passive_actions = Some(Tensor::<B, 3>::zeros([2, 6, 2], &device));
+        let traces = vec![
+            FrameFixationTrace::new(vec![
+                FixationSet::new(
+                    vec![FixationPoint::new(0.5, 0.5, 1.0, 1.0)],
+                    0.0,
+                    1
+                );
+                6
+            ]),
+            FrameFixationTrace::new(vec![
+                FixationSet::new(
+                    vec![FixationPoint::new(0.5, 0.5, 1.0, 1.0)],
+                    0.0,
+                    1
+                );
+                6
+            ]),
+        ];
+        let teacher = Tensor::<B, 3>::zeros([2, 6, config.teacher_dim], &device);
+        let crop_teacher = Tensor::<B, 3>::zeros([2, 6, config.crop_teacher_dim], &device);
+        let out = model.forward(clip, &traces, passive_actions, teacher, crop_teacher, 4, 2);
         let total = out.total.into_data().to_vec::<f32>().expect("loss");
         assert!(total[0].is_finite());
     }
@@ -1796,7 +2431,8 @@ mod tests {
         ];
         let teacher = Tensor::<B, 3>::zeros([2, 6, config.teacher_dim], &device);
         let crop_teacher = Tensor::<B, 3>::zeros([2, 6, config.crop_teacher_dim], &device);
-        let (forward, debug) = model.forward_with_debug(clip, &traces, teacher, crop_teacher, 4, 2);
+        let (forward, debug) =
+            model.forward_with_debug(clip, &traces, None, teacher, crop_teacher, 4, 2);
         assert!(forward.recon.into_data().to_vec::<f32>().expect("recon")[0].is_finite());
         assert_eq!(
             debug.context_reconstruction_frames.shape().dims::<5>(),

@@ -3,17 +3,18 @@ use burn::module::{
     ModuleVisitor,
 };
 use burn::tensor::backend::{AutodiffBackend, Backend};
+use serde::de::Deserializer;
+use serde::ser::{SerializeStruct, Serializer};
 use serde::{Deserialize, Serialize};
-
-use crate::model::config::{BDHConfig, SequenceKernelKind};
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum SequenceKernelFamily {
+pub enum SequenceMemorySystem {
     #[default]
     LinearAttention,
-    Rwkv8,
-    Mamba1SelectiveSsm,
+    Rwkv8StateSpace,
+    Mamba1SelectiveScan,
+    Mamba2StateSpaceDuality,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -24,77 +25,107 @@ pub enum SequenceTrainingExecutor {
     DenseScoreShortContext,
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+impl SequenceMemorySystem {
+    pub const fn default_executor(self) -> SequenceTrainingExecutor {
+        match self {
+            Self::LinearAttention
+            | Self::Rwkv8StateSpace
+            | Self::Mamba1SelectiveScan
+            | Self::Mamba2StateSpaceDuality => SequenceTrainingExecutor::Reference,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SequenceKernelConfig {
-    #[serde(default)]
-    pub family: SequenceKernelFamily,
-    #[serde(default)]
+    pub memory_system: SequenceMemorySystem,
     pub executor: SequenceTrainingExecutor,
 }
 
-impl SequenceKernelKind {
-    pub fn family(self) -> SequenceKernelFamily {
-        match self {
-            SequenceKernelKind::BdhLinearAttention
-            | SequenceKernelKind::BdhLinearDenseScoreExperimental => {
-                SequenceKernelFamily::LinearAttention
-            }
-            SequenceKernelKind::Rwkv8StateSpaceExperimental => SequenceKernelFamily::Rwkv8,
-            SequenceKernelKind::MambaSelectiveSsmExperimental => {
-                SequenceKernelFamily::Mamba1SelectiveSsm
-            }
-        }
-    }
-
-    pub fn training_executor(self) -> SequenceTrainingExecutor {
-        match self {
-            SequenceKernelKind::BdhLinearAttention
-            | SequenceKernelKind::Rwkv8StateSpaceExperimental
-            | SequenceKernelKind::MambaSelectiveSsmExperimental => {
-                SequenceTrainingExecutor::Reference
-            }
-            SequenceKernelKind::BdhLinearDenseScoreExperimental => {
-                SequenceTrainingExecutor::DenseScoreShortContext
-            }
-        }
-    }
-
-    pub fn resolved_config(self) -> SequenceKernelConfig {
-        SequenceKernelConfig {
-            family: self.family(),
-            executor: self.training_executor(),
-        }
+impl Default for SequenceKernelConfig {
+    fn default() -> Self {
+        Self::reference(SequenceMemorySystem::LinearAttention)
     }
 }
 
 impl SequenceKernelConfig {
-    pub fn legacy_kind(self) -> Option<SequenceKernelKind> {
-        match (self.family, self.executor) {
-            (SequenceKernelFamily::LinearAttention, SequenceTrainingExecutor::Reference) => {
-                Some(SequenceKernelKind::BdhLinearAttention)
+    pub const fn new(
+        memory_system: SequenceMemorySystem,
+        executor: SequenceTrainingExecutor,
+    ) -> Self {
+        Self {
+            memory_system,
+            executor,
+        }
+    }
+
+    pub const fn reference(memory_system: SequenceMemorySystem) -> Self {
+        Self::new(memory_system, memory_system.default_executor())
+    }
+
+    pub const fn dense_score_short_context() -> Self {
+        Self::new(
+            SequenceMemorySystem::LinearAttention,
+            SequenceTrainingExecutor::DenseScoreShortContext,
+        )
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum SequenceKernelConfigSerde {
+    MemorySystem(SequenceMemorySystem),
+    Config {
+        #[serde(alias = "family")]
+        memory_system: SequenceMemorySystem,
+        #[serde(default)]
+        executor: Option<SequenceTrainingExecutor>,
+    },
+}
+
+impl From<SequenceKernelConfigSerde> for SequenceKernelConfig {
+    fn from(value: SequenceKernelConfigSerde) -> Self {
+        match value {
+            SequenceKernelConfigSerde::MemorySystem(memory_system) => {
+                Self::reference(memory_system)
             }
-            (
-                SequenceKernelFamily::LinearAttention,
-                SequenceTrainingExecutor::DenseScoreShortContext,
-            ) => Some(SequenceKernelKind::BdhLinearDenseScoreExperimental),
-            (SequenceKernelFamily::Rwkv8, SequenceTrainingExecutor::Reference) => {
-                Some(SequenceKernelKind::Rwkv8StateSpaceExperimental)
-            }
-            (SequenceKernelFamily::Mamba1SelectiveSsm, SequenceTrainingExecutor::Reference) => {
-                Some(SequenceKernelKind::MambaSelectiveSsmExperimental)
-            }
-            _ => None,
+            SequenceKernelConfigSerde::Config {
+                memory_system,
+                executor,
+            } => Self::new(
+                memory_system,
+                executor.unwrap_or_else(|| memory_system.default_executor()),
+            ),
         }
     }
 }
 
-impl BDHConfig {
-    pub fn resolved_sequence_kernel_config(&self) -> SequenceKernelConfig {
-        self.sequence_kernel.resolved_config()
+impl<'de> Deserialize<'de> for SequenceKernelConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        SequenceKernelConfigSerde::deserialize(deserializer).map(Into::into)
     }
 }
 
-impl<B: Backend> Module<B> for SequenceKernelFamily {
+impl Serialize for SequenceKernelConfig {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if self.executor == self.memory_system.default_executor() {
+            return self.memory_system.serialize(serializer);
+        }
+
+        let mut state = serializer.serialize_struct("SequenceKernelConfig", 2)?;
+        state.serialize_field("memory_system", &self.memory_system)?;
+        state.serialize_field("executor", &self.executor)?;
+        state.end()
+    }
+}
+
+impl<B: Backend> Module<B> for SequenceMemorySystem {
     type Record = ();
 
     fn collect_devices(&self, devices: Devices<B>) -> Devices<B> {
@@ -122,8 +153,8 @@ impl<B: Backend> Module<B> for SequenceKernelFamily {
     fn into_record(self) -> Self::Record {}
 }
 
-impl<B: AutodiffBackend> AutodiffModule<B> for SequenceKernelFamily {
-    type InnerModule = SequenceKernelFamily;
+impl<B: AutodiffBackend> AutodiffModule<B> for SequenceMemorySystem {
+    type InnerModule = SequenceMemorySystem;
 
     fn valid(&self) -> Self::InnerModule {
         *self
@@ -134,16 +165,16 @@ impl<B: AutodiffBackend> AutodiffModule<B> for SequenceKernelFamily {
     }
 }
 
-impl ModuleDisplayDefault for SequenceKernelFamily {
+impl ModuleDisplayDefault for SequenceMemorySystem {
     fn content(&self, content: Content) -> Option<Content> {
         content
-            .set_top_level_type("SequenceKernelFamily")
+            .set_top_level_type("SequenceMemorySystem")
             .add_formatted(&format!("{self:?}"))
             .optional()
     }
 }
 
-impl ModuleDisplay for SequenceKernelFamily {}
+impl ModuleDisplay for SequenceMemorySystem {}
 
 impl<B: Backend> Module<B> for SequenceTrainingExecutor {
     type Record = ();
@@ -241,8 +272,8 @@ impl ModuleDisplayDefault for SequenceKernelConfig {
         content
             .set_top_level_type("SequenceKernelConfig")
             .add_formatted(&format!(
-                "family={:?}, executor={:?}",
-                self.family, self.executor
+                "memory_system={:?}, executor={:?}",
+                self.memory_system, self.executor
             ))
             .optional()
     }
@@ -255,31 +286,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn legacy_sequence_kernel_kind_round_trips_to_family_executor_split() {
-        for kind in [
-            SequenceKernelKind::BdhLinearAttention,
-            SequenceKernelKind::BdhLinearDenseScoreExperimental,
-            SequenceKernelKind::Rwkv8StateSpaceExperimental,
-            SequenceKernelKind::MambaSelectiveSsmExperimental,
-        ] {
-            let resolved = kind.resolved_config();
-            assert_eq!(resolved.legacy_kind(), Some(kind));
-        }
+    fn default_executor_is_reference_for_memory_systems() {
+        assert_eq!(
+            SequenceKernelConfig::reference(SequenceMemorySystem::LinearAttention),
+            SequenceKernelConfig {
+                memory_system: SequenceMemorySystem::LinearAttention,
+                executor: SequenceTrainingExecutor::Reference,
+            }
+        );
     }
 
     #[test]
-    fn bdh_config_resolves_legacy_sequence_kernel() {
-        let config = BDHConfig {
-            sequence_kernel: SequenceKernelKind::BdhLinearDenseScoreExperimental,
-            ..Default::default()
-        };
-
+    fn dense_score_short_context_is_explicit() {
         assert_eq!(
-            config.resolved_sequence_kernel_config(),
+            SequenceKernelConfig::dense_score_short_context(),
             SequenceKernelConfig {
-                family: SequenceKernelFamily::LinearAttention,
-                executor: SequenceTrainingExecutor::DenseScoreShortContext,
-            }
+                memory_system: SequenceMemorySystem::LinearAttention,
+                executor: SequenceTrainingExecutor::DenseScoreShortContext
+            },
         );
     }
 }

@@ -1,0 +1,7 @@
+[model]
+sequence_kernel = "mamba1_selective_scan"
+
+[model.mamba]
+d_state = 16
+d_conv = 4
+expand = 2

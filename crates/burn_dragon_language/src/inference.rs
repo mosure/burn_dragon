@@ -48,6 +48,13 @@ pub fn build_model_config(overrides: &ModelOverrides, training_block_size: usize
         model_config.sequence_kernel = sequence_kernel;
     }
     if let Some(mamba) = &overrides.mamba {
+        let memory_system = overrides
+            .sequence_kernel
+            .unwrap_or(model_config.sequence_kernel)
+            .memory_system;
+        mamba
+            .validate(memory_system, model_config.n_embd)
+            .unwrap_or_else(|message| panic!("invalid model.mamba override: {message}"));
         model_config.mamba = mamba.clone();
     }
     if let Some(residual_connector) = overrides.residual_connector {
@@ -104,6 +111,19 @@ pub fn build_model_config(overrides: &ModelOverrides, training_block_size: usize
     }
     if let Some(rho) = &overrides.rho {
         model_config.rho = rho.clone();
+    }
+    if matches!(
+        model_config.sequence_kernel.memory_system,
+        burn_dragon_core::SequenceMemorySystem::Mamba1SelectiveScan
+            | burn_dragon_core::SequenceMemorySystem::Mamba2StateSpaceDuality
+    ) {
+        model_config
+            .mamba
+            .validate(
+                model_config.sequence_kernel.memory_system,
+                model_config.n_embd,
+            )
+            .unwrap_or_else(|message| panic!("invalid Mamba sequence kernel config: {message}"));
     }
 
     match overrides.residual_connector {
@@ -346,16 +366,18 @@ mod tests {
     #[test]
     fn model_override_applies_sequence_kernel() {
         let overrides = ModelOverrides {
-            sequence_kernel: Some(
-                burn_dragon_core::SequenceKernelKind::Rwkv8StateSpaceExperimental,
-            ),
+            sequence_kernel: Some(burn_dragon_core::SequenceKernelConfig::reference(
+                burn_dragon_core::SequenceMemorySystem::Rwkv8StateSpace,
+            )),
             ..ModelOverrides::default()
         };
 
         let config = build_model_config(&overrides, 32);
         assert_eq!(
             config.sequence_kernel,
-            burn_dragon_core::SequenceKernelKind::Rwkv8StateSpaceExperimental
+            burn_dragon_core::SequenceKernelConfig::reference(
+                burn_dragon_core::SequenceMemorySystem::Rwkv8StateSpace,
+            )
         );
     }
 

@@ -1,0 +1,39 @@
+{
+  "source": "tiny_hf_vjepa2_random_init",
+  "seed": 7,
+  "context_lengths": [
+    5
+  ],
+  "target_lengths": [
+    3
+  ],
+  "shapes": {
+    "pixel_values_videos": [
+      2,
+      4,
+      1,
+      16,
+      16
+    ],
+    "last_hidden_state": [
+      2,
+      8,
+      24
+    ],
+    "masked_hidden_state": [
+      2,
+      5,
+      24
+    ],
+    "predictor_last_hidden_state": [
+      2,
+      3,
+      24
+    ],
+    "predictor_target_hidden_state": [
+      2,
+      3,
+      24
+    ]
+  }
+}

@@ -7,7 +7,9 @@ use burn::tensor::backend::Backend as BackendTrait;
 use burn::tensor::{Int, Tensor, TensorData};
 #[cfg(any(feature = "cuda", feature = "language-cuda"))]
 use burn_cuda::Cuda;
-use burn_dragon::core::{BDH, BDHConfig, FusedKernelConfig, ModelState, SequenceKernelKind};
+use burn_dragon::core::{
+    BDH, BDHConfig, FusedKernelConfig, ModelState, SequenceKernelConfig, SequenceMemorySystem,
+};
 use burn_ndarray::NdArray;
 use clap::{Parser, ValueEnum};
 use serde::Serialize;
@@ -63,7 +65,7 @@ struct LinearDenseScoreCandidateResult {
 
 #[derive(Debug, Clone, Serialize)]
 struct KernelProbeResult {
-    kernel: SequenceKernelKind,
+    sequence_kernel: SequenceKernelConfig,
     full_forward_ms: f64,
     full_forward_tokens_per_s: f64,
     stateful_full_ms: f64,
@@ -109,7 +111,7 @@ fn sample_tokens<B: BackendTrait>(
     Tensor::<B, 2, Int>::from_data(TensorData::new(tokens, [batch, block]), device)
 }
 
-fn build_config(args: &Args, kernel: SequenceKernelKind) -> BDHConfig {
+fn build_config(args: &Args, kernel: SequenceKernelConfig) -> BDHConfig {
     assert!(
         args.latent_total % args.n_embd == 0,
         "latent_total must be divisible by n_embd"
@@ -382,9 +384,9 @@ fn run_probe<B: BackendTrait>(args: &Args, backend_name: &str, device: &B::Devic
     let chunk_tokens = args.chunk_tokens.max(1);
 
     let results = [
-        SequenceKernelKind::BdhLinearAttention,
-        SequenceKernelKind::BdhLinearDenseScoreExperimental,
-        SequenceKernelKind::Rwkv8StateSpaceExperimental,
+        SequenceKernelConfig::reference(SequenceMemorySystem::LinearAttention),
+        SequenceKernelConfig::dense_score_short_context(),
+        SequenceKernelConfig::reference(SequenceMemorySystem::Rwkv8StateSpace),
     ]
     .into_iter()
     .map(|kernel| {
@@ -438,7 +440,9 @@ fn run_probe<B: BackendTrait>(args: &Args, backend_name: &str, device: &B::Devic
         }
         let logits_chunked = Tensor::cat(chunked_logits, 1);
 
-        let linear_dense_score_candidate = if kernel == SequenceKernelKind::BdhLinearAttention {
+        let linear_dense_score_candidate = if kernel
+            == SequenceKernelConfig::reference(SequenceMemorySystem::LinearAttention)
+        {
             let latent_per_head = args.latent_total / args.n_head.max(1);
             let query = sample_recurrence_query::<B>(
                 args.batch,
@@ -481,7 +485,7 @@ fn run_probe<B: BackendTrait>(args: &Args, backend_name: &str, device: &B::Devic
         };
 
         KernelProbeResult {
-            kernel,
+            sequence_kernel: kernel,
             full_forward_ms,
             full_forward_tokens_per_s: throughput(total_tokens, full_forward_ms),
             stateful_full_ms,

@@ -1,1 +1,35 @@
-extends = ["../experiments/moving_mnist_trm_tiny.toml"]
+extends = ["../base/moving_mnist_pyramid.toml"]
+
+[dataset]
+max_records = 256
+prefetch_batches = 2
+prefetch_workers = 2
+prefetch_to_device = true
+
+[training]
+batch_size = 8
+max_iters = 64
+log_frequency = 8
+rollout_min_steps = 2
+rollout_max_steps = 2
+rollout_backprop_steps = 2
+enable_checkpoints = false
+
+[optimizer]
+weight_decay = 0.0
+
+[vision]
+embed_dim = 48
+steps = 4
+n_head = 4
+projection_dim = 24
+projection_hidden_dim = 48
+
+[mode]
+train_target_frames_min = 2
+train_target_frames_max = 4
+train_target_warmup_steps = 32
+artifact_every = 16
+artifact_max_images = 1
+artifact_future_frames = 12
+artifact_upscale = 4

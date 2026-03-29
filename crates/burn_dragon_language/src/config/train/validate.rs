@@ -540,6 +540,40 @@ impl TrainingConfig {
             initialization.validate().map_err(anyhow::Error::msg)?;
             resolved_model.initialization = initialization.clone();
         }
+        if let Some(sequence_kernel) = self.model.sequence_kernel {
+            resolved_model.sequence_kernel = sequence_kernel;
+        }
+        if let Some(mamba) = &self.model.mamba {
+            let memory_system = self
+                .training
+                .sequence_kernel_override
+                .unwrap_or(
+                    self.model
+                        .sequence_kernel
+                        .unwrap_or(resolved_model.sequence_kernel),
+                )
+                .memory_system;
+            mamba
+                .validate(memory_system, resolved_model.n_embd)
+                .map_err(|message| anyhow!("model.mamba {message}"))?;
+            resolved_model.mamba = mamba.clone();
+        }
+        if matches!(
+            self.training
+                .sequence_kernel_override
+                .unwrap_or(resolved_model.sequence_kernel)
+                .memory_system,
+            burn_dragon_core::SequenceMemorySystem::Mamba1SelectiveScan
+                | burn_dragon_core::SequenceMemorySystem::Mamba2StateSpaceDuality
+        ) {
+            resolved_model
+                .mamba
+                .validate(
+                    resolved_model.sequence_kernel.memory_system,
+                    resolved_model.n_embd,
+                )
+                .map_err(|message| anyhow!("resolved model.mamba {message}"))?;
+        }
         if resolved_model.latent_total() % self.parallel.tensor.size != 0 {
             return Err(anyhow!(
                 "resolved model.latent_total must be divisible by parallel.tensor.size (got latent_total={} tensor_size={})",

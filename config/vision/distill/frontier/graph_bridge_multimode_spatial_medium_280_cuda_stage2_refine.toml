@@ -1,0 +1,19 @@
+# Stage-2 refinement continuation for the promoted ImageNet-1k CUDA run.
+# Warm-starts from the stage-1 checkpoint and uses a shorter cosine horizon
+# with a lower base LR so this stage is a real refinement pass.
+
+[mode]
+student_checkpoint = "runs/vision/ceaseless-story/checkpoint/model-1.bin"
+
+[training]
+schedule_mode = "max_iters"
+max_iters = 4096
+log_frequency = 25
+
+[optimizer]
+learning_rate = 0.0001
+
+[optimizer.lr_schedule]
+type = "cosine"
+min_lr = 0.00001
+num_iters = 4096

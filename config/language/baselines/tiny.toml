@@ -1,1 +1,26 @@
-extends = ["../experiments/tiny_chat_fixedtime_short.toml"]
+[dataset]
+cache_dir = "data/tiny_chat"
+train_split_ratio = 0.95
+type = "tiny_chat"
+max_records = 4096
+
+[training]
+block_size = 256
+batch_size = 64
+max_iters = 300
+epochs = 1
+log_frequency = 20
+
+[optimizer]
+learning_rate = 0.001
+weight_decay = 0.1
+
+[optimizer.lr_schedule]
+type = "cosine"
+min_lr = 0.00005
+num_iters = 300
+
+[generation]
+prompt = "User: hello\nAssistant:"
+temperature = 0.9
+top_k = 1

@@ -15,7 +15,7 @@ type TrainBackend = Autodiff<NdArray<f32>>;
 fn training_forward_backward_from_configs() {
     let config_paths = [
         PathBuf::from("config/language/base.toml"),
-        PathBuf::from("config/language/small.toml"),
+        PathBuf::from("config/language/baselines/small.toml"),
     ];
     let config = load_training_config(&config_paths).expect("load training config");
     let mut model_config = build_model_config(&config.model, config.training.block_size);

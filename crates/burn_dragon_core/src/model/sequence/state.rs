@@ -18,18 +18,24 @@ pub struct MambaState<B: Backend> {
 pub fn mamba_state<B: Backend>(
     layer_state: &LayerState<B>,
     batch: usize,
-    d_inner: usize,
+    ssm_heads: usize,
+    ssm_width: usize,
     d_state: usize,
+    conv_channels: usize,
     d_conv: usize,
     device: &B::Device,
 ) -> MambaState<B> {
     let ssm = match layer_state.rho.as_ref() {
-        Some(state) if state.shape().dims::<4>() == [batch, 1, d_inner, d_state] => state.clone(),
-        _ => Tensor::<B, 4>::zeros([batch, 1, d_inner, d_state], device),
+        Some(state) if state.shape().dims::<4>() == [batch, ssm_heads, ssm_width, d_state] => {
+            state.clone()
+        }
+        _ => Tensor::<B, 4>::zeros([batch, ssm_heads, ssm_width, d_state], device),
     };
     let conv = match layer_state.sequence_aux.as_ref() {
-        Some(state) if state.shape().dims::<4>() == [batch, 1, d_inner, d_conv] => state.clone(),
-        _ => Tensor::<B, 4>::zeros([batch, 1, d_inner, d_conv], device),
+        Some(state) if state.shape().dims::<4>() == [batch, 1, conv_channels, d_conv] => {
+            state.clone()
+        }
+        _ => Tensor::<B, 4>::zeros([batch, 1, conv_channels, d_conv], device),
     };
     MambaState { ssm, conv }
 }

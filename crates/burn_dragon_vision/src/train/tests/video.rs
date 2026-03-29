@@ -15,7 +15,7 @@ fn video_trm_artifact_validate_smoke_writes_mp4_and_legend() {
         .expect("repo root");
     let config_paths = vec![
         repo_root.join("config/vision/base.toml"),
-        repo_root.join("config/vision/video_lejepa/moving_mnist_trm_artifact_validate.toml"),
+        repo_root.join("config/vision/video_lejepa/baselines/smoke.toml"),
     ];
     let config =
         load_vision_training_config(&config_paths).expect("load TRM artifact validate config");

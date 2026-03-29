@@ -11,7 +11,7 @@ const TILE_SCALE: usize = 4;
 const TILE_GAP: usize = 2;
 const CAPTION_HEIGHT: usize = 12;
 const LEGEND_HEIGHT: usize = 72;
-const FRAME_LEGEND_HEIGHT: usize = 28;
+const FRAME_LEGEND_HEIGHT: usize = 44;
 
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct ArtifactMetrics {
@@ -83,6 +83,7 @@ pub(crate) struct FixationSequence {
 
 #[derive(Clone, Debug)]
 pub(crate) struct DreamerArtifactSnapshot {
+    pub passive_full_frame: bool,
     pub current_reference: SequenceTensor,
     pub current_reconstruction: SequenceTensor,
     pub future_reference: SequenceTensor,
@@ -99,6 +100,7 @@ pub(crate) struct DreamerArtifactSnapshot {
 struct ArtifactManifest {
     metrics: ArtifactMetrics,
     latent_backend: String,
+    passive_full_frame: bool,
     crop_size: usize,
     tile_scale: usize,
     current_steps: usize,
@@ -108,6 +110,247 @@ struct ArtifactManifest {
     predicted_fixations: FixationSequence,
 }
 
+pub(crate) struct StreamingArtifactWriter {
+    output_dir: PathBuf,
+    latent_backend: String,
+    passive_full_frame: bool,
+    crop_size: usize,
+    current_steps: Option<usize>,
+    future_steps: Option<usize>,
+    files: Vec<String>,
+    current_reference_chunks: Vec<RgbImage>,
+    current_reconstruction_chunks: Vec<RgbImage>,
+    future_reference_chunks: Vec<RgbImage>,
+    future_reconstruction_chunks: Vec<RgbImage>,
+    fixation_overlay_chunks: Vec<RgbImage>,
+    teacher_label_chunks: Vec<RgbImage>,
+    fovea_read_chunks: Vec<RgbImage>,
+    context_latent_chunks: Vec<RgbImage>,
+    future_latent_chunks: Vec<RgbImage>,
+    teacher_fixations: FixationSequence,
+    predicted_fixations: FixationSequence,
+    next_sample_index: usize,
+}
+
+impl StreamingArtifactWriter {
+    pub(crate) fn new(output_dir: &Path, latent_backend: &str) -> Result<Self> {
+        fs::create_dir_all(output_dir).context("create dreamer artifact output dir")?;
+        Ok(Self {
+            output_dir: output_dir.to_path_buf(),
+            latent_backend: latent_backend.to_string(),
+            passive_full_frame: false,
+            crop_size: 0,
+            current_steps: None,
+            future_steps: None,
+            files: Vec::new(),
+            current_reference_chunks: Vec::new(),
+            current_reconstruction_chunks: Vec::new(),
+            future_reference_chunks: Vec::new(),
+            future_reconstruction_chunks: Vec::new(),
+            fixation_overlay_chunks: Vec::new(),
+            teacher_label_chunks: Vec::new(),
+            fovea_read_chunks: Vec::new(),
+            context_latent_chunks: Vec::new(),
+            future_latent_chunks: Vec::new(),
+            teacher_fixations: FixationSequence {
+                points: Vec::new(),
+                stop_probabilities: Vec::new(),
+            },
+            predicted_fixations: FixationSequence {
+                points: Vec::new(),
+                stop_probabilities: Vec::new(),
+            },
+            next_sample_index: 0,
+        })
+    }
+
+    pub(crate) fn push_snapshot(&mut self, snapshot: &DreamerArtifactSnapshot) -> Result<()> {
+        if self.current_steps.is_none() {
+            self.passive_full_frame = snapshot.passive_full_frame;
+            self.crop_size = snapshot.crop_size;
+            self.current_steps = Some(snapshot.current_reference.steps);
+            self.future_steps = Some(snapshot.future_reference.steps);
+        } else {
+            debug_assert_eq!(self.passive_full_frame, snapshot.passive_full_frame);
+            debug_assert_eq!(self.crop_size, snapshot.crop_size);
+            debug_assert_eq!(self.current_steps, Some(snapshot.current_reference.steps));
+            debug_assert_eq!(self.future_steps, Some(snapshot.future_reference.steps));
+        }
+
+        self.current_reference_chunks.push(sequence_to_image(
+            &snapshot.current_reference,
+            None,
+            None,
+        ));
+        self.current_reconstruction_chunks.push(sequence_to_image(
+            &snapshot.current_reconstruction,
+            None,
+            None,
+        ));
+        self.future_reference_chunks.push(sequence_to_image(
+            &snapshot.future_reference,
+            None,
+            None,
+        ));
+        self.future_reconstruction_chunks.push(sequence_to_image(
+            &snapshot.future_reconstruction,
+            None,
+            None,
+        ));
+
+        if !snapshot.passive_full_frame {
+            self.fixation_overlay_chunks.push(sequence_to_image(
+                &snapshot.current_reference,
+                Some((&snapshot.teacher_fixations, [32, 220, 96])),
+                Some((&snapshot.predicted_fixations, [235, 92, 70])),
+            ));
+            self.teacher_label_chunks.push(
+                snapshot
+                    .teacher_visibility
+                    .as_ref()
+                    .map(|visibility| {
+                        dense_visibility_sheet(
+                            &snapshot.current_reference,
+                            visibility,
+                            [32, 220, 96],
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        visibility_sheet(
+                            &snapshot.current_reference,
+                            &snapshot.teacher_fixations,
+                            snapshot.crop_size,
+                            [32, 220, 96],
+                        )
+                    }),
+            );
+            self.fovea_read_chunks.push(visibility_sheet(
+                &snapshot.current_reference,
+                &snapshot.predicted_fixations,
+                snapshot.crop_size,
+                [235, 92, 70],
+            ));
+        }
+
+        self.context_latent_chunks.push(latent_pca_sheet(
+            &snapshot.context_latents,
+            snapshot.current_reference.height,
+        ));
+        self.future_latent_chunks.push(latent_pca_sheet(
+            &snapshot.future_latents,
+            snapshot.future_reference.height,
+        ));
+
+        self.teacher_fixations
+            .points
+            .extend(snapshot.teacher_fixations.points.clone());
+        self.teacher_fixations
+            .stop_probabilities
+            .extend(snapshot.teacher_fixations.stop_probabilities.clone());
+        self.predicted_fixations
+            .points
+            .extend(snapshot.predicted_fixations.points.clone());
+        self.predicted_fixations
+            .stop_probabilities
+            .extend(snapshot.predicted_fixations.stop_probabilities.clone());
+
+        write_rollout_videos_with_offset(
+            &self.output_dir,
+            snapshot,
+            self.next_sample_index,
+            &mut self.files,
+        )?;
+        self.next_sample_index += snapshot.current_reference.batch;
+        Ok(())
+    }
+
+    pub(crate) fn finish(mut self, metrics: &ArtifactMetrics) -> Result<PathBuf> {
+        save_sheet(
+            &self.output_dir,
+            "current_reference.png",
+            &stack_image_chunks(&self.current_reference_chunks),
+            &mut self.files,
+        )?;
+        save_sheet(
+            &self.output_dir,
+            "current_reconstruction.png",
+            &stack_image_chunks(&self.current_reconstruction_chunks),
+            &mut self.files,
+        )?;
+        save_sheet(
+            &self.output_dir,
+            "future_reference.png",
+            &stack_image_chunks(&self.future_reference_chunks),
+            &mut self.files,
+        )?;
+        save_sheet(
+            &self.output_dir,
+            "future_reconstruction.png",
+            &stack_image_chunks(&self.future_reconstruction_chunks),
+            &mut self.files,
+        )?;
+        if !self.passive_full_frame {
+            save_sheet(
+                &self.output_dir,
+                "fixation_overlays.png",
+                &stack_image_chunks(&self.fixation_overlay_chunks),
+                &mut self.files,
+            )?;
+            save_sheet(
+                &self.output_dir,
+                "autogaze_teacher_label_patches.png",
+                &stack_image_chunks(&self.teacher_label_chunks),
+                &mut self.files,
+            )?;
+            save_sheet(
+                &self.output_dir,
+                "fovea_saccade_reads.png",
+                &stack_image_chunks(&self.fovea_read_chunks),
+                &mut self.files,
+            )?;
+        }
+        save_sheet(
+            &self.output_dir,
+            "current_latent_pca.png",
+            &stack_image_chunks(&self.context_latent_chunks),
+            &mut self.files,
+        )?;
+        save_sheet(
+            &self.output_dir,
+            "future_latent_pca.png",
+            &stack_image_chunks(&self.future_latent_chunks),
+            &mut self.files,
+        )?;
+        save_sheet(
+            &self.output_dir,
+            "artifact_legend.png",
+            &artifact_legend_image(self.passive_full_frame),
+            &mut self.files,
+        )?;
+
+        let manifest = ArtifactManifest {
+            metrics: metrics.clone(),
+            latent_backend: self.latent_backend,
+            passive_full_frame: self.passive_full_frame,
+            crop_size: self.crop_size,
+            tile_scale: TILE_SCALE,
+            current_steps: self.current_steps.unwrap_or(0),
+            future_steps: self.future_steps.unwrap_or(0),
+            files: self.files,
+            teacher_fixations: self.teacher_fixations,
+            predicted_fixations: self.predicted_fixations,
+        };
+        let manifest_path = self.output_dir.join("metrics.json");
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&manifest).context("serialize dreamer artifact manifest")?,
+        )
+        .context("write dreamer artifact manifest")?;
+        Ok(self.output_dir)
+    }
+}
+
+#[cfg(test)]
 pub(crate) fn write_moving_mnist_artifacts(
     output_dir: &Path,
     snapshot: &DreamerArtifactSnapshot,
@@ -141,46 +384,48 @@ pub(crate) fn write_moving_mnist_artifacts(
         &sequence_to_image(&snapshot.future_reconstruction, None, None),
         &mut files,
     )?;
-    save_sheet(
-        output_dir,
-        "fixation_overlays.png",
-        &sequence_to_image(
-            &snapshot.current_reference,
-            Some((&snapshot.teacher_fixations, [32, 220, 96])),
-            Some((&snapshot.predicted_fixations, [235, 92, 70])),
-        ),
-        &mut files,
-    )?;
-    save_sheet(
-        output_dir,
-        "autogaze_teacher_label_patches.png",
-        &snapshot
-            .teacher_visibility
-            .as_ref()
-            .map(|visibility| {
-                dense_visibility_sheet(&snapshot.current_reference, visibility, [32, 220, 96])
-            })
-            .unwrap_or_else(|| {
-                visibility_sheet(
-                    &snapshot.current_reference,
-                    &snapshot.teacher_fixations,
-                    snapshot.crop_size,
-                    [32, 220, 96],
-                )
-            }),
-        &mut files,
-    )?;
-    save_sheet(
-        output_dir,
-        "fovea_saccade_reads.png",
-        &visibility_sheet(
-            &snapshot.current_reference,
-            &snapshot.predicted_fixations,
-            snapshot.crop_size,
-            [235, 92, 70],
-        ),
-        &mut files,
-    )?;
+    if !snapshot.passive_full_frame {
+        save_sheet(
+            output_dir,
+            "fixation_overlays.png",
+            &sequence_to_image(
+                &snapshot.current_reference,
+                Some((&snapshot.teacher_fixations, [32, 220, 96])),
+                Some((&snapshot.predicted_fixations, [235, 92, 70])),
+            ),
+            &mut files,
+        )?;
+        save_sheet(
+            output_dir,
+            "autogaze_teacher_label_patches.png",
+            &snapshot
+                .teacher_visibility
+                .as_ref()
+                .map(|visibility| {
+                    dense_visibility_sheet(&snapshot.current_reference, visibility, [32, 220, 96])
+                })
+                .unwrap_or_else(|| {
+                    visibility_sheet(
+                        &snapshot.current_reference,
+                        &snapshot.teacher_fixations,
+                        snapshot.crop_size,
+                        [32, 220, 96],
+                    )
+                }),
+            &mut files,
+        )?;
+        save_sheet(
+            output_dir,
+            "fovea_saccade_reads.png",
+            &visibility_sheet(
+                &snapshot.current_reference,
+                &snapshot.predicted_fixations,
+                snapshot.crop_size,
+                [235, 92, 70],
+            ),
+            &mut files,
+        )?;
+    }
     save_sheet(
         output_dir,
         "current_latent_pca.png",
@@ -196,7 +441,7 @@ pub(crate) fn write_moving_mnist_artifacts(
     save_sheet(
         output_dir,
         "artifact_legend.png",
-        &artifact_legend_image(),
+        &artifact_legend_image(snapshot.passive_full_frame),
         &mut files,
     )?;
     write_rollout_videos(output_dir, snapshot, &mut files)?;
@@ -204,6 +449,7 @@ pub(crate) fn write_moving_mnist_artifacts(
     let manifest = ArtifactManifest {
         metrics: metrics.clone(),
         latent_backend: latent_backend.to_string(),
+        passive_full_frame: snapshot.passive_full_frame,
         crop_size: snapshot.crop_size,
         tile_scale: TILE_SCALE,
         current_steps: snapshot.current_reference.steps,
@@ -234,9 +480,19 @@ fn save_sheet(
     Ok(())
 }
 
+#[cfg(test)]
 fn write_rollout_videos(
     output_dir: &Path,
     snapshot: &DreamerArtifactSnapshot,
+    files: &mut Vec<String>,
+) -> Result<()> {
+    write_rollout_videos_with_offset(output_dir, snapshot, 0, files)
+}
+
+fn write_rollout_videos_with_offset(
+    output_dir: &Path,
+    snapshot: &DreamerArtifactSnapshot,
+    sample_index_offset: usize,
     files: &mut Vec<String>,
 ) -> Result<()> {
     for sample_idx in 0..snapshot.current_reference.batch {
@@ -260,7 +516,10 @@ fn write_rollout_videos(
             .extension()
             .and_then(|ext| ext.to_str())
             .unwrap_or("avi");
-        let target = output_dir.join(format!("dream_rollout_sample_{sample_idx:02}.{extension}"));
+        let target = output_dir.join(format!(
+            "dream_rollout_sample_{:02}.{extension}",
+            sample_index_offset + sample_idx
+        ));
         if outcome.path != target {
             fs::rename(&outcome.path, &target).with_context(|| {
                 format!(
@@ -275,6 +534,33 @@ fn write_rollout_videos(
         }
     }
     Ok(())
+}
+
+fn stack_image_chunks(chunks: &[RgbImage]) -> RgbImage {
+    if chunks.is_empty() {
+        return RgbImage::from_pixel(1, 1, Rgb([12, 12, 12]));
+    }
+    let width = chunks.iter().map(RgbImage::width).max().unwrap_or(1).max(1);
+    let total_height = chunks
+        .iter()
+        .map(RgbImage::height)
+        .sum::<u32>()
+        .saturating_add((chunks.len().saturating_sub(1) as u32) * TILE_GAP as u32)
+        .max(1);
+    let mut canvas = RgbImage::from_pixel(width, total_height, Rgb([12, 12, 12]));
+    let mut y = 0usize;
+    for chunk in chunks {
+        paste(
+            &mut canvas,
+            chunk,
+            0,
+            y,
+            chunk.width() as usize,
+            chunk.height() as usize,
+        );
+        y += chunk.height() as usize + TILE_GAP;
+    }
+    canvas
 }
 
 fn sequence_to_image(
@@ -338,8 +624,13 @@ fn dream_rollout_frames(
     let phase_h = CAPTION_HEIGHT + 6;
     let panel_w = tile_w;
     let panel_h = tile_h + CAPTION_HEIGHT;
+    let passive_layout = snapshot.passive_full_frame;
     let width = panel_w * 3 + gap * 4;
-    let height = phase_h + panel_h * 2 + gap * 4 + FRAME_LEGEND_HEIGHT;
+    let height = if passive_layout {
+        phase_h + panel_h + gap * 3 + FRAME_LEGEND_HEIGHT
+    } else {
+        phase_h + panel_h * 2 + gap * 4 + FRAME_LEGEND_HEIGHT
+    };
     let mut frames = Vec::with_capacity(total_steps.max(1));
     for step_idx in 0..total_steps {
         let in_context = step_idx < context_steps;
@@ -367,9 +658,6 @@ fn dream_rollout_frames(
 
         let reference = reference_frame_for_step(snapshot, batch_idx, step_idx);
         let dream = dream_frame_for_step(snapshot, batch_idx, step_idx);
-        let teacher_gaze = reference_with_fixations(snapshot, batch_idx, step_idx, [32, 220, 96]);
-        let predicted_gaze = reference_with_fixations(snapshot, batch_idx, step_idx, [235, 92, 70]);
-        let teacher_visible = reference_with_visibility(snapshot, batch_idx, step_idx);
         let error = error_panel(
             &reference,
             &dream,
@@ -378,77 +666,125 @@ fn dream_rollout_frames(
         );
 
         let top_y = phase_h + gap;
-        let bottom_y = phase_h + gap * 2 + panel_h;
-        paste_labeled_panel(
-            &mut canvas,
-            "REFERENCE",
-            &reference,
-            gap,
-            top_y,
-            snapshot.current_reference.width,
-            snapshot.current_reference.height,
-            [210, 210, 220],
-        );
-        paste_labeled_panel(
-            &mut canvas,
-            "AUTOGAZE LABELS",
-            &teacher_gaze,
-            gap * 2 + panel_w,
-            top_y,
-            snapshot.current_reference.width,
-            snapshot.current_reference.height,
-            [32, 220, 96],
-        );
-        paste_labeled_panel(
-            &mut canvas,
-            "DREAMER READS",
-            &predicted_gaze,
-            gap * 3 + panel_w * 2,
-            top_y,
-            snapshot.current_reference.width,
-            snapshot.current_reference.height,
-            [235, 92, 70],
-        );
-        paste_labeled_panel(
-            &mut canvas,
-            "AUTOGAZE VISIBLE",
-            &teacher_visible,
-            gap,
-            bottom_y,
-            snapshot.current_reference.width,
-            snapshot.current_reference.height,
-            [32, 220, 96],
-        );
-        let dream_label = if in_context {
-            "FILTER RECON"
-        } else {
-            "DREAM ROLLOUT"
-        };
-        paste_labeled_panel(
-            &mut canvas,
-            dream_label,
-            &dream,
-            gap * 2 + panel_w,
-            bottom_y,
-            snapshot.current_reference.width,
-            snapshot.current_reference.height,
-            if in_context {
-                [80, 180, 255]
+        if passive_layout {
+            paste_labeled_panel(
+                &mut canvas,
+                "REFERENCE",
+                &reference,
+                gap,
+                top_y,
+                snapshot.current_reference.width,
+                snapshot.current_reference.height,
+                [210, 210, 220],
+            );
+            let dream_label = if in_context {
+                "POSTERIOR RECON"
             } else {
-                [255, 178, 64]
-            },
-        );
-        paste_labeled_panel(
-            &mut canvas,
-            "PIXEL ERROR",
-            &error,
-            gap * 3 + panel_w * 2,
-            bottom_y,
-            snapshot.current_reference.width,
-            snapshot.current_reference.height,
-            [255, 208, 64],
-        );
-        draw_frame_legend(&mut canvas, phase_h + panel_h * 2 + gap * 3, width);
+                "DREAM ROLLOUT"
+            };
+            paste_labeled_panel(
+                &mut canvas,
+                dream_label,
+                &dream,
+                gap * 2 + panel_w,
+                top_y,
+                snapshot.current_reference.width,
+                snapshot.current_reference.height,
+                if in_context {
+                    [80, 180, 255]
+                } else {
+                    [255, 178, 64]
+                },
+            );
+            paste_labeled_panel(
+                &mut canvas,
+                "PIXEL ERROR",
+                &error,
+                gap * 3 + panel_w * 2,
+                top_y,
+                snapshot.current_reference.width,
+                snapshot.current_reference.height,
+                [255, 208, 64],
+            );
+            draw_passive_frame_legend(&mut canvas, phase_h + panel_h + gap * 2, width);
+        } else {
+            let teacher_gaze =
+                reference_with_fixations(snapshot, batch_idx, step_idx, [32, 220, 96]);
+            let predicted_gaze =
+                reference_with_fixations(snapshot, batch_idx, step_idx, [235, 92, 70]);
+            let teacher_visible = reference_with_visibility(snapshot, batch_idx, step_idx);
+            let bottom_y = phase_h + gap * 2 + panel_h;
+            paste_labeled_panel(
+                &mut canvas,
+                "REFERENCE",
+                &reference,
+                gap,
+                top_y,
+                snapshot.current_reference.width,
+                snapshot.current_reference.height,
+                [210, 210, 220],
+            );
+            paste_labeled_panel(
+                &mut canvas,
+                "AUTOGAZE LABELS",
+                &teacher_gaze,
+                gap * 2 + panel_w,
+                top_y,
+                snapshot.current_reference.width,
+                snapshot.current_reference.height,
+                [32, 220, 96],
+            );
+            paste_labeled_panel(
+                &mut canvas,
+                "DREAMER READS",
+                &predicted_gaze,
+                gap * 3 + panel_w * 2,
+                top_y,
+                snapshot.current_reference.width,
+                snapshot.current_reference.height,
+                [235, 92, 70],
+            );
+            paste_labeled_panel(
+                &mut canvas,
+                "AUTOGAZE VISIBLE",
+                &teacher_visible,
+                gap,
+                bottom_y,
+                snapshot.current_reference.width,
+                snapshot.current_reference.height,
+                [32, 220, 96],
+            );
+            let dream_label = if in_context {
+                "POSTERIOR RECON"
+            } else {
+                "DREAM ROLLOUT"
+            };
+            paste_labeled_panel(
+                &mut canvas,
+                dream_label,
+                &dream,
+                gap * 2 + panel_w,
+                bottom_y,
+                snapshot.current_reference.width,
+                snapshot.current_reference.height,
+                if in_context {
+                    [80, 180, 255]
+                } else {
+                    [255, 178, 64]
+                },
+            );
+            paste_labeled_panel(
+                &mut canvas,
+                "PIXEL ERROR",
+                &error,
+                gap * 3 + panel_w * 2,
+                bottom_y,
+                snapshot.current_reference.width,
+                snapshot.current_reference.height,
+                [255, 208, 64],
+            );
+            draw_frame_legend(&mut canvas, phase_h + panel_h * 2 + gap * 3, width);
+        }
         frames.push(ArtifactFrame {
             width,
             height,
@@ -677,50 +1013,93 @@ fn draw_text(canvas: &mut RgbImage, x: usize, y: usize, text: &str, color: [u8; 
     }
 }
 
-fn artifact_legend_image() -> RgbImage {
+fn artifact_legend_image(passive_full_frame: bool) -> RgbImage {
     let width = 520usize;
     let height = LEGEND_HEIGHT + 12;
     let mut canvas = RgbImage::from_pixel(width as u32, height as u32, Rgb([10, 10, 12]));
-    draw_text(
-        &mut canvas,
-        8,
-        8,
-        "GREEN BOXES = OFFICIAL AUTOGAZE FIXATIONS",
-        [32, 220, 96],
-        1,
-    );
-    draw_text(
-        &mut canvas,
-        8,
-        24,
-        "RED BOXES = DREAMER PREDICTED FIXATIONS",
-        [235, 92, 70],
-        1,
-    );
-    draw_text(
-        &mut canvas,
-        8,
-        40,
-        "GREEN MASK = REGIONS AUTOGAZE EXPOSES TO THE ENCODER",
-        [32, 220, 96],
-        1,
-    );
-    draw_text(
-        &mut canvas,
-        8,
-        56,
-        "TOP BAR: GREEN = OBSERVED CONTEXT, ORANGE = DREAMED FUTURE",
-        [255, 178, 64],
-        1,
-    );
-    draw_text(
-        &mut canvas,
-        8,
-        72,
-        "PCA PLOTS USE DOTS ONLY: BLUE = EARLY, ORANGE = LATE",
-        [120, 200, 255],
-        1,
-    );
+    if passive_full_frame {
+        draw_text(
+            &mut canvas,
+            8,
+            8,
+            "PASSIVE BASELINE: NO AUTOGAZE LABELS OR DREAMER READS ARE SHOWN",
+            [210, 210, 220],
+            1,
+        );
+        draw_text(
+            &mut canvas,
+            8,
+            24,
+            "BLUE PANELS = POSTERIOR RECON ON OBSERVED CONTEXT",
+            [80, 180, 255],
+            1,
+        );
+        draw_text(
+            &mut canvas,
+            8,
+            40,
+            "ORANGE PANELS/TOP BAR = AUTOREGRESSIVE DREAMED FUTURE",
+            [255, 178, 64],
+            1,
+        );
+        draw_text(
+            &mut canvas,
+            8,
+            56,
+            "PIXEL ERROR SHOWS ABSOLUTE DIFFERENCE VS REFERENCE FRAME",
+            [255, 208, 64],
+            1,
+        );
+        draw_text(
+            &mut canvas,
+            8,
+            72,
+            "PCA PLOTS USE DOTS ONLY: BLUE = EARLY, ORANGE = LATE",
+            [120, 200, 255],
+            1,
+        );
+    } else {
+        draw_text(
+            &mut canvas,
+            8,
+            8,
+            "GREEN BOXES = OFFICIAL AUTOGAZE FIXATIONS",
+            [32, 220, 96],
+            1,
+        );
+        draw_text(
+            &mut canvas,
+            8,
+            24,
+            "RED BOXES = DREAMER PREDICTED FIXATIONS",
+            [235, 92, 70],
+            1,
+        );
+        draw_text(
+            &mut canvas,
+            8,
+            40,
+            "GREEN MASK = REGIONS AUTOGAZE EXPOSES TO THE ENCODER",
+            [32, 220, 96],
+            1,
+        );
+        draw_text(
+            &mut canvas,
+            8,
+            56,
+            "TOP BAR: GREEN = OBSERVED CONTEXT, ORANGE = DREAMED FUTURE",
+            [255, 178, 64],
+            1,
+        );
+        draw_text(
+            &mut canvas,
+            8,
+            72,
+            "PCA PLOTS USE DOTS ONLY: BLUE = EARLY, ORANGE = LATE",
+            [120, 200, 255],
+            1,
+        );
+    }
     canvas
 }
 
@@ -1152,12 +1531,43 @@ fn draw_frame_legend(canvas: &mut RgbImage, y: usize, width: usize) {
     );
     fill_rect(canvas, 210, y + 8, 10, 10, [235, 92, 70]);
     draw_text(canvas, 226, y + 8, "RED BOX = DREAMER", [210, 210, 220], 1);
-    fill_rect(canvas, 356, y + 8, 10, 10, [255, 178, 64]);
+    fill_rect(canvas, 8, y + 24, 10, 10, [80, 180, 255]);
     draw_text(
         canvas,
-        372,
+        24,
+        y + 24,
+        "BLUE PANEL = POSTERIOR/FILTER RECON",
+        [210, 210, 220],
+        1,
+    );
+    fill_rect(canvas, 266, y + 24, 10, 10, [255, 178, 64]);
+    draw_text(
+        canvas,
+        282,
+        y + 24,
+        "ORANGE PANEL/TOP BAR = DREAMED FUTURE",
+        [210, 210, 220],
+        1,
+    );
+}
+
+fn draw_passive_frame_legend(canvas: &mut RgbImage, y: usize, width: usize) {
+    fill_rect(canvas, 0, y, width, FRAME_LEGEND_HEIGHT, [14, 14, 18]);
+    fill_rect(canvas, 8, y + 8, 10, 10, [80, 180, 255]);
+    draw_text(
+        canvas,
+        24,
         y + 8,
-        "ORANGE FRAMES = DREAMED FUTURE",
+        "BLUE PANEL = POSTERIOR RECON ON OBSERVED CONTEXT",
+        [210, 210, 220],
+        1,
+    );
+    fill_rect(canvas, 8, y + 24, 10, 10, [255, 178, 64]);
+    draw_text(
+        canvas,
+        24,
+        y + 24,
+        "ORANGE PANEL/TOP BAR = AUTOREGRESSIVE DREAMED FUTURE",
         [210, 210, 220],
         1,
     );
@@ -1272,6 +1682,7 @@ mod tests {
             stop_probabilities: vec![vec![0.1, 0.2], vec![0.3, 0.4]],
         };
         let snapshot = DreamerArtifactSnapshot {
+            passive_full_frame: false,
             current_reference: sequence.clone(),
             current_reconstruction: sequence.clone(),
             future_reference: sequence.clone(),
@@ -1353,5 +1764,133 @@ mod tests {
             "expected rollout videos for each sample in {}",
             temp.path().display()
         );
+    }
+
+    #[test]
+    fn passive_moving_mnist_artifacts_omit_active_overlay_files() {
+        let temp = tempdir().expect("temp dir");
+        let sequence = SequenceTensor {
+            data: vec![0.0; 2 * 2 * 1 * 8 * 8],
+            batch: 2,
+            steps: 2,
+            channels: 1,
+            height: 8,
+            width: 8,
+        };
+        let latents = LatentTensor {
+            data: (0..(2 * 2 * 8)).map(|idx| idx as f32 * 0.01).collect(),
+            batch: 2,
+            steps: 2,
+            dim: 8,
+        };
+        let fixations = FixationSequence {
+            points: vec![
+                vec![
+                    vec![FixationPointArtifact {
+                        x: 0.5,
+                        y: 0.5,
+                        scale: 1.0,
+                        confidence: 1.0,
+                    }],
+                    vec![FixationPointArtifact {
+                        x: 0.5,
+                        y: 0.5,
+                        scale: 1.0,
+                        confidence: 1.0,
+                    }],
+                ],
+                vec![
+                    vec![FixationPointArtifact {
+                        x: 0.5,
+                        y: 0.5,
+                        scale: 1.0,
+                        confidence: 1.0,
+                    }],
+                    vec![FixationPointArtifact {
+                        x: 0.5,
+                        y: 0.5,
+                        scale: 1.0,
+                        confidence: 1.0,
+                    }],
+                ],
+            ],
+            stop_probabilities: vec![vec![1.0, 1.0], vec![1.0, 1.0]],
+        };
+        let snapshot = DreamerArtifactSnapshot {
+            passive_full_frame: true,
+            current_reference: sequence.clone(),
+            current_reconstruction: sequence.clone(),
+            future_reference: sequence.clone(),
+            future_reconstruction: sequence,
+            context_latents: latents.clone(),
+            future_latents: latents,
+            teacher_visibility: None,
+            teacher_fixations: fixations.clone(),
+            predicted_fixations: fixations,
+            crop_size: 8,
+        };
+        let metrics = ArtifactMetrics {
+            latent_backend: "transformer_baseline".to_string(),
+            total: 1.0,
+            current: 0.8,
+            future: 0.7,
+            prior: 0.2,
+            gaze: 0.0,
+            query: 0.0,
+            recon: 0.3,
+            tokenizer: 0.15,
+            tokenizer_recon: 0.12,
+            slot_align: 0.09,
+            recon_current: 0.2,
+            recon_future: 0.4,
+            recon_edge: 0.1,
+            recon_motion: 0.05,
+            current_mae: 0.05,
+            future_mae: 0.08,
+            current_psnr: 24.0,
+            future_psnr: 18.0,
+            current_fg_iou: 0.7,
+            future_fg_iou: 0.0,
+            future_frame_std: 0.12,
+            future_latent_std: 0.42,
+            future_motion_mse: 0.06,
+            future_ref_motion_mse: 0.08,
+            future_motion_ratio: 0.0,
+            future_stop_mean: 1.0,
+            future_stop_std: 0.0,
+            future_fixation_motion: 0.0,
+            future_confidence_mean: 1.0,
+            context_fixation_teacher_l1: 0.0,
+            future_fixation_teacher_l1: 0.0,
+        };
+        write_moving_mnist_artifacts(temp.path(), &snapshot, &metrics, "transformer_baseline")
+            .expect("write passive artifacts");
+        for name in [
+            "fixation_overlays.png",
+            "autogaze_teacher_label_patches.png",
+            "fovea_saccade_reads.png",
+        ] {
+            assert!(
+                !temp.path().join(name).exists(),
+                "did not expect passive artifact file {}",
+                temp.path().join(name).display()
+            );
+        }
+        for name in [
+            "current_reference.png",
+            "current_reconstruction.png",
+            "future_reference.png",
+            "future_reconstruction.png",
+            "current_latent_pca.png",
+            "future_latent_pca.png",
+            "artifact_legend.png",
+            "metrics.json",
+        ] {
+            assert!(
+                temp.path().join(name).is_file(),
+                "expected passive artifact file {}",
+                temp.path().join(name).display()
+            );
+        }
     }
 }

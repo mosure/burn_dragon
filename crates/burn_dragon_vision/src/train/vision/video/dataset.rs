@@ -242,6 +242,7 @@ pub struct MovingMnistDigit {
 #[derive(Clone)]
 pub(crate) struct MovingMnistVideoClip {
     frames: Vec<f32>,
+    actions: Vec<f32>,
     label: i64,
 }
 
@@ -415,8 +416,10 @@ impl MovingMnistVideoDataset {
         let pixels_per_frame = frame_size * frame_size;
         let channels = self.config.in_channels.max(1);
         let mut frames = Vec::with_capacity(clip_len * channels * pixels_per_frame);
+        let mut positions = Vec::with_capacity(clip_len);
 
         for _ in 0..clip_len {
+            positions.push((x, y));
             let mut canvas = vec![0.0_f32; pixels_per_frame];
             let x0 = x.round().clamp(0.0, max_offset as f32) as usize;
             let y0 = y.round().clamp(0.0, max_offset as f32) as usize;
@@ -457,8 +460,19 @@ impl MovingMnistVideoDataset {
             }
         }
 
+        let velocity_scale =
+            (self.config.max_velocity.abs() * self.config.frame_stride.max(1) as f32).max(1.0e-3);
+        let mut actions = vec![0.0_f32; clip_len * 2];
+        for step in 0..clip_len.saturating_sub(1) {
+            let dx = positions[step + 1].0 - positions[step].0;
+            let dy = positions[step + 1].1 - positions[step].1;
+            actions[step * 2] = (dx / velocity_scale).clamp(-1.0, 1.0);
+            actions[step * 2 + 1] = (dy / velocity_scale).clamp(-1.0, 1.0);
+        }
+
         MovingMnistVideoClip {
             frames,
+            actions,
             label: i64::from(digit.label),
         }
     }
@@ -530,6 +544,25 @@ impl MovingMnistVideoDataset {
         device: &B::Device,
     ) -> VideoClipBatch<B> {
         self.batch_data_from_indices(indices).into_batch(device)
+    }
+
+    pub fn action_batch_from_indices<B: BackendTrait>(
+        &self,
+        indices: &[usize],
+        device: &B::Device,
+    ) -> Tensor<B, 3> {
+        let clip_len = self.clip_len_with_extra_future(self.config.extra_future_frames);
+        let mut actions = Vec::with_capacity(indices.len() * clip_len * 2);
+        for &index in indices {
+            let clip = self
+                .get(index)
+                .unwrap_or_else(|| panic!("moving mnist index {index} out of bounds"));
+            actions.extend_from_slice(&clip.actions);
+        }
+        Tensor::<B, 3>::from_data(
+            TensorData::new(actions, [indices.len(), clip_len, 2]),
+            device,
+        )
     }
 
     fn batch_data_from_indices(&self, indices: &[usize]) -> MovingMnistVideoBatchData {
@@ -1196,6 +1229,51 @@ mod tests {
         let b = dataset.get(1).expect("clip b");
         assert_eq!(a.label, b.label);
         assert_eq!(a.frames, b.frames);
+        assert_eq!(a.actions, b.actions);
+    }
+
+    #[test]
+    fn moving_mnist_action_batch_is_deterministic_and_bounded() {
+        type Backend = NdArray<f32>;
+        let device = <Backend as BackendTrait>::Device::default();
+        let digit = MovingMnistDigit {
+            pixels: vec![0.5; 4 * 4],
+            label: 1,
+            size: 4,
+        };
+        let dataset = MovingMnistVideoDataset::from_digits(
+            vec![digit; 2],
+            MovingMnistVideoDatasetConfig {
+                split: MovingMnistSplit::Train,
+                frame_size: 8,
+                digit_size: 4,
+                in_channels: 1,
+                context_len: 2,
+                target_len: 3,
+                extra_future_frames: 0,
+                frame_stride: 1,
+                max_records: None,
+                normalize: VisionNormalize::new([0.0; 3], [1.0; 3]),
+                min_velocity: 1.0,
+                max_velocity: 2.0,
+                seed: 17,
+            },
+        )
+        .expect("dataset");
+
+        let actions_a = dataset
+            .action_batch_from_indices::<Backend>(&[1], &device)
+            .to_data()
+            .to_vec::<f32>()
+            .expect("actions a");
+        let actions_b = dataset
+            .action_batch_from_indices::<Backend>(&[1], &device)
+            .to_data()
+            .to_vec::<f32>()
+            .expect("actions b");
+
+        assert_eq!(actions_a, actions_b);
+        assert!(actions_a.iter().all(|value| (-1.0..=1.0).contains(value)));
     }
 
     #[test]

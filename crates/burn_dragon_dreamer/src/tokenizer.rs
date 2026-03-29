@@ -1,17 +1,19 @@
-use crate::checkpoint::{checkpoint_base, load_module_checkpoint, save_module_checkpoint};
-use crate::moving_mnist::{
-    CachedMovingMnistSplit, TrainBackend, load_autogaze_source, load_crop_teacher_source,
-    load_vjepa_source, prepare_run_dir, sample_indices, scalar,
+use crate::checkpoint::load_module_checkpoint;
+use crate::data::{CachedSequenceSplit, sample_indices};
+use crate::run::{prepare_configured_run, save_named_checkpoint, should_run_step};
+use crate::runtime::{
+    Backend, TrainBackend, cuda_device, train_to_runtime_tensor3, train_to_runtime_tensor5,
+};
+use crate::tasks::moving_mnist::{
+    build_cached_moving_mnist_split, build_moving_mnist_tokenizer_datasets, load_autogaze_source,
+    load_crop_teacher_source, load_vjepa_source, uses_crop_teacher, uses_global_teacher,
 };
 use crate::{DragonDreamer, MovingMnistDreamerTrainConfig};
-use anyhow::{Context, Result};
+use anyhow::Result;
+use burn::module::AutodiffModule;
 use burn::optim::{AdamWConfig, GradientsParams, Optimizer};
-use burn_cuda::CudaDevice;
-use burn_dragon_vision::{
-    MovingMnistSplit, MovingMnistVideoDataset, MovingMnistVideoDatasetConfig, VisionNormalize,
-};
+use burn_dragon_vision::MovingMnistSplit;
 use serde::{Deserialize, Serialize};
-use std::fs;
 use std::path::PathBuf;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -43,14 +45,14 @@ struct TokenizerLossSnapshot {
 }
 
 impl TokenizerLossSnapshot {
-    fn add_forward(&mut self, forward: &crate::DreamerForward<TrainBackend>) {
-        self.total += scalar(&forward.total);
-        self.current += scalar(&forward.current);
-        self.query += scalar(&forward.query);
-        self.gaze += scalar(&forward.gaze);
-        self.tokenizer += scalar(&forward.tokenizer);
-        self.tokenizer_recon += scalar(&forward.tokenizer_recon);
-        self.recon_current += scalar(&forward.recon_current);
+    fn add_values(&mut self, values: &[f32]) {
+        self.total += values[0];
+        self.current += values[1];
+        self.query += values[2];
+        self.gaze += values[3];
+        self.tokenizer += values[4];
+        self.tokenizer_recon += values[5];
+        self.recon_current += values[6];
     }
 
     fn div_scalar(mut self, denom: f32) -> Self {
@@ -66,75 +68,104 @@ impl TokenizerLossSnapshot {
     }
 }
 
+fn tokenizer_forward_scalars<B: burn::tensor::backend::Backend>(
+    forward: &crate::DreamerForward<B>,
+) -> Vec<f32> {
+    burn::tensor::Tensor::cat(
+        vec![
+            forward.total.clone(),
+            forward.current.clone(),
+            forward.query.clone(),
+            forward.gaze.clone(),
+            forward.tokenizer.clone(),
+            forward.tokenizer_recon.clone(),
+            forward.recon_current.clone(),
+        ],
+        0,
+    )
+    .detach()
+    .to_data()
+    .convert::<f32>()
+    .into_vec::<f32>()
+    .expect("tokenizer scalar pack")
+}
+
 pub fn train_moving_mnist_tokenizer(
     mut config: MovingMnistDreamerTrainConfig,
 ) -> Result<MovingMnistTokenizerRunSummary> {
-    let device = std::panic::catch_unwind(std::panic::AssertUnwindSafe(CudaDevice::default))
-        .map_err(|_| anyhow::anyhow!("CUDA device initialization failed"))?;
-    let run_dir = prepare_run_dir(&config)?;
-    if let Some(run_dir) = run_dir.as_ref() {
-        fs::write(
-            run_dir.join("config.json"),
-            serde_json::to_vec_pretty(&config).context("serialize tokenizer config")?,
-        )
-        .with_context(|| {
-            format!(
-                "write tokenizer config {}",
-                run_dir.join("config.json").display()
-            )
-        })?;
+    let device = cuda_device()?;
+    let workspace = prepare_configured_run(config.run_root.as_deref(), &config, "tokenizer")?;
+    let run_dir = workspace.run_dir.clone();
+    let checkpoint_dir = workspace.checkpoint_dir.clone();
+
+    let datasets = build_moving_mnist_tokenizer_datasets(&config)?;
+    let train_dataset = datasets.train;
+    let valid_dataset = datasets.valid;
+
+    let train_teacher = load_autogaze_source(&config, MovingMnistSplit::Train, &device)?;
+    let valid_teacher = load_autogaze_source(&config, MovingMnistSplit::Val, &device)?;
+    let use_global_teacher = uses_global_teacher(&config);
+    let use_internal_state_targets = config.model.passive_full_frame
+        && (config.model.current_loss_weight > 0.0 || config.model.future_loss_weight > 0.0);
+    let use_crop_teacher = uses_crop_teacher(&config);
+    if use_internal_state_targets {
+        config.model.teacher_dim = config.model.latent_dim.max(1);
+    } else if !use_global_teacher {
+        config.model.teacher_dim = 1;
     }
-
-    let sequence_len = (config.context_len + config.target_len).max(2);
-    let train_dataset = MovingMnistVideoDataset::new_from_mnist(MovingMnistVideoDatasetConfig {
-        split: MovingMnistSplit::Train,
-        frame_size: config.model.frame_size,
-        digit_size: 12,
-        in_channels: config.model.channels,
-        context_len: sequence_len.saturating_sub(1),
-        target_len: 1,
-        extra_future_frames: 0,
-        frame_stride: 1,
-        max_records: Some(256),
-        normalize: VisionNormalize::new([0.5; 3], [0.5; 3]),
-        min_velocity: config.min_velocity,
-        max_velocity: config.max_velocity,
-        seed: config.train_seed,
-    })?;
-    let valid_dataset = MovingMnistVideoDataset::new_from_mnist(MovingMnistVideoDatasetConfig {
-        split: MovingMnistSplit::Val,
-        frame_size: config.model.frame_size,
-        digit_size: 12,
-        in_channels: config.model.channels,
-        context_len: sequence_len.saturating_sub(1),
-        target_len: 1,
-        extra_future_frames: 0,
-        frame_stride: 1,
-        max_records: Some(128),
-        normalize: VisionNormalize::new([0.5; 3], [0.5; 3]),
-        min_velocity: config.min_velocity,
-        max_velocity: config.max_velocity,
-        seed: config.val_seed,
-    })?;
-
-    let train_teacher = load_autogaze_source(&config, MovingMnistSplit::Train)?;
-    let valid_teacher = load_autogaze_source(&config, MovingMnistSplit::Val)?;
-    let global_teacher = load_vjepa_source(&mut config, &device)?;
-    let crop_teacher = load_crop_teacher_source(&mut config, &device)?;
-    let train_cache = CachedMovingMnistSplit::build(
+    if !use_crop_teacher {
+        config.model.crop_teacher_dim = 1;
+    }
+    let train_global_teacher = if use_global_teacher {
+        Some(load_vjepa_source(
+            &mut config,
+            MovingMnistSplit::Train,
+            &device,
+        )?)
+    } else {
+        None
+    };
+    let valid_global_teacher = if use_global_teacher {
+        Some(load_vjepa_source(
+            &mut config,
+            MovingMnistSplit::Val,
+            &device,
+        )?)
+    } else {
+        None
+    };
+    let train_crop_teacher = if use_crop_teacher {
+        Some(load_crop_teacher_source(
+            &mut config,
+            MovingMnistSplit::Train,
+            &device,
+        )?)
+    } else {
+        None
+    };
+    let valid_crop_teacher = if use_crop_teacher {
+        Some(load_crop_teacher_source(
+            &mut config,
+            MovingMnistSplit::Val,
+            &device,
+        )?)
+    } else {
+        None
+    };
+    let train_cache = build_cached_moving_mnist_split(
         &train_dataset,
-        &global_teacher,
-        &crop_teacher,
-        &train_teacher,
         &config,
+        &train_teacher,
+        train_global_teacher.as_ref(),
+        train_crop_teacher.as_ref(),
         &device,
     );
-    let valid_cache = CachedMovingMnistSplit::build(
+    let valid_cache = build_cached_moving_mnist_split(
         &valid_dataset,
-        &global_teacher,
-        &crop_teacher,
-        &valid_teacher,
         &config,
+        &valid_teacher,
+        valid_global_teacher.as_ref(),
+        valid_crop_teacher.as_ref(),
         &device,
     );
 
@@ -147,14 +178,9 @@ pub fn train_moving_mnist_tokenizer(
         .init::<TrainBackend, DragonDreamer<TrainBackend>>();
 
     let initial_valid =
-        evaluate_tokenizer_validation(&model, &valid_cache, &config, config.valid_batches);
+        evaluate_tokenizer_validation(&model, &valid_cache, &config, config.valid_batches, &device);
     let mut best_valid_total = initial_valid.total;
     let mut final_train_total = initial_valid.total;
-    let checkpoint_dir = run_dir.as_ref().map(|path| path.join("checkpoint"));
-    if let Some(dir) = checkpoint_dir.as_ref() {
-        fs::create_dir_all(dir)
-            .with_context(|| format!("create tokenizer checkpoint dir {}", dir.display()))?;
-    }
     let mut best_checkpoint_base = None;
 
     for step in 0..config.steps {
@@ -166,30 +192,49 @@ pub fn train_moving_mnist_tokenizer(
                 .wrapping_add((step as u64).wrapping_mul(0xA24B_AED4_963E_E407)),
         );
         let batch = train_cache.batch(&indices);
+        let clip_frames = batch.clip_frames;
+        let actions = batch.actions;
+        let traces = batch.traces;
+        let teacher_features = batch.teacher_features;
+        let crop_teacher_features = batch.crop_teacher_features;
         let forward = model.forward_tokenizer_pretrain(
-            batch.clip_frames,
-            &batch.traces,
-            batch.teacher_features,
-            batch.crop_teacher_features,
+            clip_frames,
+            &traces,
+            actions,
+            teacher_features,
+            crop_teacher_features,
         );
-        final_train_total = scalar(&forward.total);
+        let should_read_train_scalars = should_run_step(step, config.steps, config.log_every)
+            || should_run_step(step, config.steps, config.validate_every);
+        let train_scalars = should_read_train_scalars.then(|| tokenizer_forward_scalars(&forward));
+        if let Some(values) = train_scalars.as_ref() {
+            final_train_total = values[0];
+        }
         let grads = GradientsParams::from_grads(forward.total.backward(), &model);
         model = optimizer.step(config.learning_rate, model, grads);
 
-        if (step + 1) % config.log_every.max(1) == 0 {
+        if should_run_step(step, config.steps, config.log_every) {
+            let values = train_scalars
+                .as_ref()
+                .expect("log step should have tokenizer scalar pack");
             println!(
                 "tokenizer step={} train_total={:.5} tokenizer={:.5} tok_recon={:.5} recon_cur={:.5}",
                 step + 1,
                 final_train_total,
-                scalar(&forward.tokenizer),
-                scalar(&forward.tokenizer_recon),
-                scalar(&forward.recon_current),
+                values[4],
+                values[5],
+                values[6],
             );
         }
 
-        if (step + 1) % config.validate_every.max(1) == 0 || step + 1 == config.steps {
-            let valid =
-                evaluate_tokenizer_validation(&model, &valid_cache, &config, config.valid_batches);
+        if should_run_step(step, config.steps, config.validate_every) {
+            let valid = evaluate_tokenizer_validation(
+                &model,
+                &valid_cache,
+                &config,
+                config.valid_batches,
+                &device,
+            );
             println!(
                 "tokenizer valid step={} total={:.5} current={:.5} query={:.5} gaze={:.5} tok={:.5} tok_recon={:.5} recon_cur={:.5}",
                 step + 1,
@@ -203,22 +248,24 @@ pub fn train_moving_mnist_tokenizer(
             );
             if valid.total <= best_valid_total {
                 best_valid_total = valid.total;
-                if let Some(dir) = checkpoint_dir.as_ref() {
-                    let base = checkpoint_base(dir, "tokenizer-best");
-                    save_module_checkpoint::<TrainBackend, _>(&model, &base)?;
-                    best_checkpoint_base = Some(base);
-                }
+                best_checkpoint_base = save_named_checkpoint::<TrainBackend, _>(
+                    &model,
+                    checkpoint_dir.as_deref(),
+                    "tokenizer-best",
+                )?;
             }
         }
     }
 
     let final_valid =
-        evaluate_tokenizer_validation(&model, &valid_cache, &config, config.valid_batches);
-    if let Some(dir) = checkpoint_dir.as_ref() {
-        let final_base = checkpoint_base(dir, "tokenizer-final");
-        save_module_checkpoint::<TrainBackend, _>(&model, &final_base)?;
+        evaluate_tokenizer_validation(&model, &valid_cache, &config, config.valid_batches, &device);
+    if let Some(final_base) = save_named_checkpoint::<TrainBackend, _>(
+        &model,
+        checkpoint_dir.as_deref(),
+        "tokenizer-final",
+    )? {
         if best_checkpoint_base.is_none() {
-            best_checkpoint_base = Some(final_base);
+            best_checkpoint_base = Some(final_base.clone());
         }
     }
 
@@ -241,12 +288,14 @@ pub fn train_moving_mnist_tokenizer(
 
 fn evaluate_tokenizer_validation(
     model: &DragonDreamer<TrainBackend>,
-    dataset: &CachedMovingMnistSplit,
+    dataset: &CachedSequenceSplit<TrainBackend, burn_autogaze::FrameFixationTrace>,
     config: &MovingMnistDreamerTrainConfig,
     batches: usize,
+    device: &<TrainBackend as burn::tensor::backend::Backend>::Device,
 ) -> TokenizerLossSnapshot {
     let mut totals = TokenizerLossSnapshot::default();
     let count = batches.max(1);
+    let runtime_model: DragonDreamer<Backend> = model.valid();
     for batch_idx in 0..count {
         let indices = sample_indices(
             dataset.len(),
@@ -256,13 +305,21 @@ fn evaluate_tokenizer_validation(
                 .wrapping_add((batch_idx as u64).wrapping_mul(0x517C_C1B7_2722_0A95)),
         );
         let batch = dataset.batch(&indices);
-        let forward = model.forward_tokenizer_pretrain(
-            batch.clip_frames,
-            &batch.traces,
-            batch.teacher_features,
-            batch.crop_teacher_features,
+        let clip_frames = train_to_runtime_tensor5(batch.clip_frames, device);
+        let actions = batch
+            .actions
+            .map(|tensor| train_to_runtime_tensor3(tensor, device));
+        let traces = batch.traces;
+        let teacher_features = train_to_runtime_tensor3(batch.teacher_features, device);
+        let crop_teacher_features = train_to_runtime_tensor3(batch.crop_teacher_features, device);
+        let forward = runtime_model.forward_tokenizer_pretrain(
+            clip_frames,
+            &traces,
+            actions,
+            teacher_features,
+            crop_teacher_features,
         );
-        totals.add_forward(&forward);
+        totals.add_values(&tokenizer_forward_scalars(&forward));
     }
     totals.div_scalar(count as f32)
 }

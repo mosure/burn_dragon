@@ -30,6 +30,9 @@ pub fn prepare_language_stage_config(
 ) -> Result<TrainingConfig> {
     let source_path = resolve_relative_to(bundle_config_path, source_config_path);
     let mut config = load_training_config(&[source_path])?;
+    config.run_layout.base_dir = Some(stage_dir.join("runs"));
+    config.run_layout.category = None;
+    config.run_layout.mirror_config_path = false;
     let stage_launch_mode = match &stage.kind {
         ExperimentStageKind::LanguageTrain { launch_mode, .. } => *launch_mode,
         ExperimentStageKind::UniversalityGenerate { .. } => unreachable!(),
@@ -83,7 +86,11 @@ pub fn prepare_language_stage_config(
         }
     }
 
-    let stage_run_root = stage_dir.join("runs");
+    let stage_run_root = config
+        .run_layout
+        .base_dir
+        .clone()
+        .unwrap_or_else(|| stage_dir.join("runs"));
     config.training.resume_run_dir = resolve_resume_run_dir(
         &stage_run_root,
         config.training.resume_run_dir.as_deref(),

@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use burn_dragon_core::SequenceKernelKind;
+use burn_dragon_core::SequenceKernelConfig;
 
 use super::*;
 
@@ -161,7 +161,7 @@ pub struct TrainingHyperparameters {
     #[serde(default = "default_context_strategy")]
     pub context_strategy: ContextStrategyConfig,
     #[serde(default)]
-    pub sequence_kernel_override: Option<SequenceKernelKind>,
+    pub sequence_kernel_override: Option<SequenceKernelConfig>,
     #[serde(default)]
     pub gdpo: Option<burn_dragon_train::GdpoConfig>,
 }

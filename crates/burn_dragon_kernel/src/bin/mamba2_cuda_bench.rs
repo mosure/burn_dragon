@@ -1,0 +1,476 @@
+#[cfg(not(feature = "cuda"))]
+fn main() {
+    eprintln!("mamba2_cuda_bench requires --features cuda");
+    std::process::exit(1);
+}
+
+#[cfg(feature = "cuda")]
+mod app {
+    use std::time::Instant;
+
+    use burn::tensor::backend::Backend as BackendTrait;
+    use burn::tensor::{Distribution, ElementConversion, Tensor, TensorData};
+    use burn_autodiff::Autodiff;
+    use burn_cubecl::cubecl::Runtime;
+    use burn_cubecl::cubecl::cuda::CudaRuntime;
+    use burn_cuda::Cuda;
+    use burn_dragon_kernel::kernels::sequence::mamba2::forward::{
+        CudaSsdCoreMode, Mamba2TensorizedState,
+        tensorized_mamba2_forward_custom_backward_with_cuda_ssd_mode,
+        tensorized_mamba2_forward_direct_graph,
+    };
+    use serde::Serialize;
+
+    type Backend = Cuda<f32, i32>;
+    type AutodiffBackend = Autodiff<Backend>;
+    type Device = <Backend as BackendTrait>::Device;
+
+    #[derive(Clone, Copy, Serialize)]
+    struct BenchCase {
+        name: &'static str,
+        batch: usize,
+        time: usize,
+        d_model: usize,
+        d_state: usize,
+        d_conv: usize,
+        expand: usize,
+        headdim: usize,
+        ngroups: usize,
+    }
+
+    #[derive(Clone, Copy, Serialize)]
+    struct MemorySnapshot {
+        reserved: u64,
+        in_use: u64,
+    }
+
+    #[derive(Serialize)]
+    struct BenchResult {
+        case: BenchCase,
+        warmup: usize,
+        repetitions: usize,
+        graph_forward_ms: f64,
+        wrapper_forward_ms: f64,
+        fused_forward_ms: f64,
+        fused_vs_wrapper_forward_speedup_x: f64,
+        graph_backward_ms: f64,
+        wrapper_backward_ms: f64,
+        fused_backward_ms: f64,
+        fused_vs_wrapper_backward_speedup_x: f64,
+        output_max_abs: f64,
+        conv_state_max_abs: f64,
+        ssm_state_max_abs: f64,
+        memory_before: MemorySnapshot,
+        memory_after: MemorySnapshot,
+    }
+
+    #[derive(Serialize)]
+    struct BenchReport {
+        benchmark: &'static str,
+        backend: &'static str,
+        profile: &'static str,
+        results: Vec<BenchResult>,
+    }
+
+    #[derive(Clone)]
+    struct ParamsAutodiff {
+        d_inner: usize,
+        d_state: usize,
+        d_conv: usize,
+        headdim: usize,
+        ngroups: usize,
+        nheads: usize,
+        norm_eps: f32,
+        in_proj: Tensor<AutodiffBackend, 2>,
+        conv_weight: Tensor<AutodiffBackend, 2>,
+        conv_bias: Tensor<AutodiffBackend, 1>,
+        dt_bias: Tensor<AutodiffBackend, 1>,
+        a_log: Tensor<AutodiffBackend, 1>,
+        d_skip: Tensor<AutodiffBackend, 1>,
+        norm_weight: Tensor<AutodiffBackend, 1>,
+        out_proj: Tensor<AutodiffBackend, 2>,
+    }
+
+    #[derive(Clone)]
+    struct StateAutodiff {
+        conv: Tensor<AutodiffBackend, 4>,
+        ssm: Tensor<AutodiffBackend, 4>,
+    }
+
+    const COMPACT_CASES: &[BenchCase] = &[BenchCase {
+        name: "cuda_b1_t16_dm64_ds8_dc4_e2_h32_g1",
+        batch: 1,
+        time: 16,
+        d_model: 64,
+        d_state: 8,
+        d_conv: 4,
+        expand: 2,
+        headdim: 32,
+        ngroups: 1,
+    }];
+
+    const FULL_CASES: &[BenchCase] = &[
+        BenchCase {
+            name: "cuda_b1_t64_dm256_ds16_dc4_e2_h64_g1",
+            batch: 1,
+            time: 64,
+            d_model: 256,
+            d_state: 16,
+            d_conv: 4,
+            expand: 2,
+            headdim: 64,
+            ngroups: 1,
+        },
+        BenchCase {
+            name: "cuda_b1_t128_dm256_ds16_dc4_e2_h64_g1",
+            batch: 1,
+            time: 128,
+            d_model: 256,
+            d_state: 16,
+            d_conv: 4,
+            expand: 2,
+            headdim: 64,
+            ngroups: 1,
+        },
+    ];
+
+    pub fn main() {
+        let device = Device::default();
+        <Backend as BackendTrait>::seed(&device, 20260328);
+
+        let profile = bench_profile();
+        let warmup = if profile == "full" { 1 } else { 1 };
+        let repetitions = if profile == "full" { 3 } else { 2 };
+        let results = bench_cases(profile)
+            .iter()
+            .copied()
+            .map(|case| run_case(case, &device, warmup, repetitions))
+            .collect::<Vec<_>>();
+
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&BenchReport {
+                benchmark: "burn_dragon_kernel mamba2 cuda analytic backward bench",
+                backend: "cuda",
+                profile,
+                results,
+            })
+            .expect("serialize mamba2 cuda bench report")
+        );
+    }
+
+    fn bench_profile() -> &'static str {
+        match std::env::var("BURN_DRAGON_BENCH_PROFILE")
+            .unwrap_or_else(|_| "compact".to_string())
+            .as_str()
+        {
+            "full" => "full",
+            _ => "compact",
+        }
+    }
+
+    fn bench_cases(profile: &'static str) -> &'static [BenchCase] {
+        if profile == "full" {
+            FULL_CASES
+        } else {
+            COMPACT_CASES
+        }
+    }
+
+    fn run_case(
+        case: BenchCase,
+        device: &Device,
+        warmup: usize,
+        repetitions: usize,
+    ) -> BenchResult {
+        let hidden = Tensor::<AutodiffBackend, 4>::random(
+            [case.batch, 1, case.time, case.d_model],
+            Distribution::Uniform(-0.5, 0.5),
+            device,
+        )
+        .require_grad();
+        let params = build_params_autodiff(case, device);
+        let memory_before = memory_snapshot(device);
+
+        for _ in 0..warmup {
+            let _ = mamba2_tensorized_autodiff_graph(hidden.clone(), &params);
+            let _ = <AutodiffBackend as BackendTrait>::sync(device);
+            let _ = mamba2_tensorized_autodiff_custom_with_mode(
+                hidden.clone(),
+                &params,
+                CudaSsdCoreMode::ForcedDisabled,
+            );
+            let _ = <AutodiffBackend as BackendTrait>::sync(device);
+            let _ = mamba2_tensorized_autodiff_custom_with_mode(
+                hidden.clone(),
+                &params,
+                CudaSsdCoreMode::ForcedEnabled,
+            );
+            let _ = <AutodiffBackend as BackendTrait>::sync(device);
+        }
+
+        let mut graph_forward_ms = 0.0;
+        let mut wrapper_forward_ms = 0.0;
+        let mut fused_forward_ms = 0.0;
+        for _ in 0..repetitions {
+            let _ = <AutodiffBackend as BackendTrait>::sync(device);
+            let started = Instant::now();
+            let _ = mamba2_tensorized_autodiff_graph(hidden.clone(), &params);
+            let _ = <AutodiffBackend as BackendTrait>::sync(device);
+            graph_forward_ms += started.elapsed().as_secs_f64() * 1_000.0;
+
+            let _ = <AutodiffBackend as BackendTrait>::sync(device);
+            let started = Instant::now();
+            let _ = mamba2_tensorized_autodiff_custom_with_mode(
+                hidden.clone(),
+                &params,
+                CudaSsdCoreMode::ForcedDisabled,
+            );
+            let _ = <AutodiffBackend as BackendTrait>::sync(device);
+            wrapper_forward_ms += started.elapsed().as_secs_f64() * 1_000.0;
+
+            let _ = <AutodiffBackend as BackendTrait>::sync(device);
+            let started = Instant::now();
+            let _ = mamba2_tensorized_autodiff_custom_with_mode(
+                hidden.clone(),
+                &params,
+                CudaSsdCoreMode::ForcedEnabled,
+            );
+            let _ = <AutodiffBackend as BackendTrait>::sync(device);
+            fused_forward_ms += started.elapsed().as_secs_f64() * 1_000.0;
+        }
+
+        let mut graph_backward_ms = 0.0;
+        let mut wrapper_backward_ms = 0.0;
+        let mut fused_backward_ms = 0.0;
+        for _ in 0..repetitions {
+            let _ = <AutodiffBackend as BackendTrait>::sync(device);
+            let started = Instant::now();
+            let graph_loss = mamba2_tensorized_autodiff_graph(hidden.clone(), &params)
+                .0
+                .sum();
+            let _ = graph_loss.backward();
+            let _ = <AutodiffBackend as BackendTrait>::sync(device);
+            graph_backward_ms += started.elapsed().as_secs_f64() * 1_000.0;
+
+            let _ = <AutodiffBackend as BackendTrait>::sync(device);
+            let started = Instant::now();
+            let wrapper_loss = mamba2_tensorized_autodiff_custom_with_mode(
+                hidden.clone(),
+                &params,
+                CudaSsdCoreMode::ForcedDisabled,
+            )
+            .0
+            .sum();
+            let _ = wrapper_loss.backward();
+            let _ = <AutodiffBackend as BackendTrait>::sync(device);
+            wrapper_backward_ms += started.elapsed().as_secs_f64() * 1_000.0;
+
+            let _ = <AutodiffBackend as BackendTrait>::sync(device);
+            let started = Instant::now();
+            let fused_loss = mamba2_tensorized_autodiff_custom_with_mode(
+                hidden.clone(),
+                &params,
+                CudaSsdCoreMode::ForcedEnabled,
+            )
+            .0
+            .sum();
+            let _ = fused_loss.backward();
+            let _ = <AutodiffBackend as BackendTrait>::sync(device);
+            fused_backward_ms += started.elapsed().as_secs_f64() * 1_000.0;
+        }
+
+        let (graph_output, graph_state) = mamba2_tensorized_autodiff_graph(hidden.clone(), &params);
+        let (wrapper_output, wrapper_state) = mamba2_tensorized_autodiff_custom_with_mode(
+            hidden.clone(),
+            &params,
+            CudaSsdCoreMode::ForcedDisabled,
+        );
+        let (fused_output, fused_state) = mamba2_tensorized_autodiff_custom_with_mode(
+            hidden,
+            &params,
+            CudaSsdCoreMode::ForcedEnabled,
+        );
+        let _ = <AutodiffBackend as BackendTrait>::sync(device);
+        let memory_after = memory_snapshot(device);
+
+        BenchResult {
+            case,
+            warmup,
+            repetitions,
+            graph_forward_ms: graph_forward_ms / repetitions.max(1) as f64,
+            wrapper_forward_ms: wrapper_forward_ms / repetitions.max(1) as f64,
+            fused_forward_ms: fused_forward_ms / repetitions.max(1) as f64,
+            fused_vs_wrapper_forward_speedup_x: wrapper_forward_ms
+                / fused_forward_ms.max(f64::EPSILON),
+            graph_backward_ms: graph_backward_ms / repetitions.max(1) as f64,
+            wrapper_backward_ms: wrapper_backward_ms / repetitions.max(1) as f64,
+            fused_backward_ms: fused_backward_ms / repetitions.max(1) as f64,
+            fused_vs_wrapper_backward_speedup_x: wrapper_backward_ms
+                / fused_backward_ms.max(f64::EPSILON),
+            output_max_abs: max_abs_4(wrapper_output.clone(), fused_output.clone())
+                .max(max_abs_4(graph_output, fused_output)),
+            conv_state_max_abs: max_abs_4(wrapper_state.conv.clone(), fused_state.conv.clone())
+                .max(max_abs_4(graph_state.conv, fused_state.conv)),
+            ssm_state_max_abs: max_abs_4(wrapper_state.ssm.clone(), fused_state.ssm.clone())
+                .max(max_abs_4(graph_state.ssm, fused_state.ssm)),
+            memory_before,
+            memory_after,
+        }
+    }
+
+    fn build_params_autodiff(case: BenchCase, device: &Device) -> ParamsAutodiff {
+        let d_inner = case.d_model * case.expand;
+        let nheads = d_inner / case.headdim;
+        let conv_dim = d_inner + 2 * case.ngroups * case.d_state;
+        ParamsAutodiff {
+            d_inner,
+            d_state: case.d_state,
+            d_conv: case.d_conv,
+            headdim: case.headdim,
+            ngroups: case.ngroups,
+            nheads,
+            norm_eps: 1.0e-5,
+            in_proj: Tensor::<AutodiffBackend, 2>::random(
+                [
+                    case.d_model,
+                    2 * d_inner + 2 * case.ngroups * case.d_state + nheads,
+                ],
+                Distribution::Uniform(-0.05, 0.05),
+                device,
+            )
+            .require_grad(),
+            conv_weight: Tensor::<AutodiffBackend, 2>::random(
+                [conv_dim, case.d_conv],
+                Distribution::Uniform(-0.05, 0.05),
+                device,
+            )
+            .require_grad(),
+            conv_bias: Tensor::<AutodiffBackend, 1>::zeros([conv_dim], device).require_grad(),
+            dt_bias: Tensor::<AutodiffBackend, 1>::from_data(
+                TensorData::new(vec![0.01; nheads], [nheads]),
+                device,
+            )
+            .require_grad(),
+            a_log: Tensor::<AutodiffBackend, 1>::from_data(
+                TensorData::new(vec![1.0f32.ln(); nheads], [nheads]),
+                device,
+            )
+            .require_grad(),
+            d_skip: Tensor::<AutodiffBackend, 1>::ones([nheads], device).require_grad(),
+            norm_weight: Tensor::<AutodiffBackend, 1>::ones([d_inner], device).require_grad(),
+            out_proj: Tensor::<AutodiffBackend, 2>::random(
+                [d_inner, case.d_model],
+                Distribution::Uniform(-0.05, 0.05),
+                device,
+            )
+            .require_grad(),
+        }
+    }
+
+    fn mamba2_tensorized_autodiff_graph(
+        hidden_states: Tensor<AutodiffBackend, 4>,
+        params: &ParamsAutodiff,
+    ) -> (Tensor<AutodiffBackend, 4>, StateAutodiff) {
+        let batch = hidden_states.shape().dims::<4>()[0];
+        let conv_dim = params.d_inner + 2 * params.ngroups * params.d_state;
+        let device = hidden_states.device();
+        let output = tensorized_mamba2_forward_direct_graph(
+            hidden_states,
+            params.d_inner,
+            params.d_state,
+            params.d_conv,
+            params.headdim,
+            params.ngroups,
+            params.in_proj.clone(),
+            params.conv_weight.clone(),
+            Some(params.conv_bias.clone()),
+            params.dt_bias.clone(),
+            params.a_log.clone(),
+            params.d_skip.clone(),
+            params.norm_weight.clone(),
+            params.norm_eps,
+            params.out_proj.clone(),
+            Some(Mamba2TensorizedState {
+                conv: Tensor::<AutodiffBackend, 4>::zeros(
+                    [batch, 1, conv_dim, params.d_conv],
+                    &device,
+                ),
+                ssm: Tensor::<AutodiffBackend, 4>::zeros(
+                    [batch, params.nheads, params.headdim, params.d_state],
+                    &device,
+                ),
+            }),
+        );
+        (
+            output.context,
+            StateAutodiff {
+                conv: output.state.conv,
+                ssm: output.state.ssm,
+            },
+        )
+    }
+
+    fn mamba2_tensorized_autodiff_custom_with_mode(
+        hidden_states: Tensor<AutodiffBackend, 4>,
+        params: &ParamsAutodiff,
+        cuda_ssd_core_mode: CudaSsdCoreMode,
+    ) -> (Tensor<AutodiffBackend, 4>, StateAutodiff) {
+        let batch = hidden_states.shape().dims::<4>()[0];
+        let conv_dim = params.d_inner + 2 * params.ngroups * params.d_state;
+        let device = hidden_states.device();
+        let output = tensorized_mamba2_forward_custom_backward_with_cuda_ssd_mode(
+            hidden_states,
+            params.d_inner,
+            params.d_state,
+            params.d_conv,
+            params.headdim,
+            params.ngroups,
+            params.in_proj.clone(),
+            params.conv_weight.clone(),
+            Some(params.conv_bias.clone()),
+            params.dt_bias.clone(),
+            params.a_log.clone(),
+            params.d_skip.clone(),
+            params.norm_weight.clone(),
+            params.norm_eps,
+            params.out_proj.clone(),
+            Some(Mamba2TensorizedState {
+                conv: Tensor::<AutodiffBackend, 4>::zeros(
+                    [batch, 1, conv_dim, params.d_conv],
+                    &device,
+                ),
+                ssm: Tensor::<AutodiffBackend, 4>::zeros(
+                    [batch, params.nheads, params.headdim, params.d_state],
+                    &device,
+                ),
+            }),
+            cuda_ssd_core_mode,
+        )
+        .expect("cuda custom backward path available");
+        (
+            output.context,
+            StateAutodiff {
+                conv: output.state.conv,
+                ssm: output.state.ssm,
+            },
+        )
+    }
+
+    fn max_abs_4(lhs: Tensor<AutodiffBackend, 4>, rhs: Tensor<AutodiffBackend, 4>) -> f64 {
+        lhs.sub(rhs).abs().max().into_scalar().elem::<f32>() as f64
+    }
+
+    fn memory_snapshot(device: &Device) -> MemorySnapshot {
+        let usage = <CudaRuntime as Runtime>::client(device).memory_usage();
+        MemorySnapshot {
+            reserved: usage.bytes_reserved,
+            in_use: usage.bytes_in_use,
+        }
+    }
+}
+
+#[cfg(feature = "cuda")]
+fn main() {
+    app::main();
+}

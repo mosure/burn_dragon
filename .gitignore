@@ -31,14 +31,29 @@ config/local/*
 # Keep only curated baseline aliases (`smoke`, `tiny`, `small`, `base`, etc.)
 # visible by default; treat root overlays / experiments / archive as local churn.
 config/language/*
+!config/language/base.toml
 !config/language/baselines/
 !config/language/baselines/**
+!config/language/shared/
+!config/language/shared/**
+config/language/experiments/**
+config/language/bundles/runs/**
 config/vision/distill/*
 !config/vision/distill/baselines/
 !config/vision/distill/baselines/**
+!config/vision/distill/frontier/
+!config/vision/distill/frontier/**
+config/vision/distill/experiments/**
+config/vision/dragon_dreamer/*
+!config/vision/dragon_dreamer/moving_mnist_tokenizer_stage.toml
+!config/vision/dragon_dreamer/moving_mnist_transformer_baseline.toml
+!config/vision/dragon_dreamer/moving_mnist_bdh_challenger.toml
 config/vision/video_lejepa/*
+!config/vision/video_lejepa/base/
+!config/vision/video_lejepa/base/**
 !config/vision/video_lejepa/baselines/
 !config/vision/video_lejepa/baselines/**
+config/vision/video_lejepa/experiments/**
 config/multimodal/
 
 # Local config docs should stay out of normal commits.

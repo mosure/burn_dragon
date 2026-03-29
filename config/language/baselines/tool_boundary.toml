@@ -1,1 +1,86 @@
-extends = ["../experiments/deep_math_tool_boundary_multiscale_clock4_tophalf_summary32_lowresid_eventwrite_fixediters128.toml"]
+[dataset]
+cache_dir = "data/deep_math_tool_boundary"
+train_split_ratio = 0.95
+type = "hugging_face"
+repo_id = "zwhe99/DeepMath-103K"
+format = "parquet"
+train_files = [
+  "data/train-00000-of-00010.parquet",
+  "data/train-00001-of-00010.parquet",
+  "data/train-00002-of-00010.parquet",
+  "data/train-00003-of-00010.parquet",
+  "data/train-00004-of-00010.parquet",
+  "data/train-00005-of-00010.parquet",
+  "data/train-00006-of-00010.parquet",
+  "data/train-00007-of-00010.parquet",
+  "data/train-00008-of-00010.parquet",
+  "data/train-00009-of-00010.parquet",
+]
+validation_files = []
+text_fields = ["question", "final_answer"]
+field_separator = "\n\n"
+template = "Question:\n{question}\n\nTool: search\nObservation: no external result\nAssistant:\n{final_answer}"
+max_records = 512
+
+[dataset.tokenizer]
+type = "char"
+include_unknown = true
+vocab_path = "vocab.json"
+
+[training]
+block_size = 256
+batch_size = 8
+gradient_accumulation_steps = 1
+max_iters = 128
+log_frequency = 32
+
+[optimizer]
+learning_rate = 0.001
+weight_decay = 0.1
+
+[optimizer.lr_schedule]
+type = "cosine"
+min_lr = 0.00005
+num_iters = 128
+
+[generation]
+prompt = "Question:\nWhat is 2 + 2?\n\nTool: search\nObservation: no external result\nAssistant:\n"
+temperature = 0.9
+top_k = 1
+
+[wgpu.training]
+fused_core_recurrent = true
+fused_core_rollout = false
+
+[wgpu.inference]
+fused_core_recurrent = true
+fused_core_rollout = false
+generation_executor = "baseline"
+generation_chunk_tokens = 8
+generation_device_buffer_tokens = 64
+
+[model]
+n_layer = 4
+n_embd = 192
+n_head = 4
+mlp_internal_dim_multiplier = 4
+rollout_fast_steps_per_slow_step = 1
+relu_threshold = 0.0
+dropout = 0.1
+fused_kernels = true
+rotary_embedding = "alibi"
+
+[model.clocked_slow_memory]
+enabled = true
+last_layers = 2
+chunk_tokens = 4
+residual_scale = 1.0
+
+[model.summary_memory]
+enabled = true
+last_layers = 1
+chunk_tokens = 32
+residual_scale = 0.125
+state_decay = 0.75
+state_update_scale = 0.5
+write_trigger_text = "\nTool: search\nObservation: no external result\nAssistant:\n"

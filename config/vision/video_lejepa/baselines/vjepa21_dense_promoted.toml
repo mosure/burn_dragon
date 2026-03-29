@@ -1,1 +1,124 @@
-extends = ["../moving_mnist_vjepa21_dense_wgpu_diag_probe025_recon1_256_wide.toml"]
+[dataset]
+source = "moving_mnist"
+max_records = 512
+prefetch_batches = 2
+prefetch_workers = 2
+prefetch_to_device = false
+
+[dataset.moving_mnist]
+digit_size = 20
+min_velocity = 0.8
+max_velocity = 2.0
+train_seed = 1337
+val_seed = 7331
+
+[training]
+batch_size = 16
+schedule_mode = "max_iters"
+epochs = 1
+max_iters = 256
+log_frequency = 32
+enable_checkpoints = false
+rollout_min_steps = 1
+rollout_max_steps = 1
+rollout_backprop_steps = 1
+ffmpeg_path = "/usr/bin/ffmpeg"
+
+[optimizer]
+learning_rate = 0.001
+weight_decay = 0.0
+
+[optimizer.lr_schedule]
+type = "cosine"
+min_lr = 0.00005
+
+[vision]
+backbone = "dense"
+image_size = 32
+patch_size = 4
+in_channels = 3
+embed_dim = 48
+steps = 2
+n_head = 6
+mlp_internal_dim_multiplier = 2
+dropout = 0.0
+projection_dim = 24
+projection_hidden_dim = 64
+use_cls_token = true
+cls_sync_alpha = 0.0
+num_eyes = 1
+cross_eye_steps = 0
+token_state_norm = true
+pos_encoding = "rope"
+attention_mode = "row_l1"
+use_alibi = false
+fused_kernels = false
+
+[mode]
+type = "video_lejepa"
+paradigm = "vjepa_2_1"
+frame_stride = 1
+artifact_output = "mp4"
+artifact_fps = 6
+artifact_every = 0
+artifact_max_images = 1
+artifact_upscale = 4
+artifact_overwrite = true
+
+[mode.vjepa21]
+clip_frames = 6
+observe_steps = 1
+observe_backprop_steps = 1
+predictor_hidden_dim = 96
+use_mask_token_bias = true
+checkpoint_depths = [1, 2]
+
+[mode.vjepa21.teacher_ema]
+enabled = true
+decay = 0.99
+
+[mode.vjepa21.mask]
+spatial_scale_min = 0.2
+spatial_scale_max = 0.7
+temporal_scale_min = 0.5
+temporal_scale_max = 1.0
+aspect_ratio_min = 0.5
+aspect_ratio_max = 2.0
+num_blocks = 2
+max_context_frames_ratio = 1.0
+
+[mode.vjepa21.loss]
+masked_weight = 1.0
+context_weight = 0.25
+predict_all = true
+weight_distance_loss = true
+offset_context_loss = false
+normalize_targets = true
+loss_exp = 1.0
+
+[mode.loss]
+probe_weight = 0.25
+debug_recon_weight = 1.0
+
+[augment]
+image_size = 32
+resize_short = 32
+min_scale = 1.0
+max_scale = 1.0
+min_aspect_ratio = 1.0
+max_aspect_ratio = 1.0
+flip_prob = 0.0
+color_jitter_prob = 0.0
+brightness = 0.0
+contrast = 0.0
+saturation = 0.0
+hue = 0.0
+grayscale_prob = 0.0
+blur_prob = 0.0
+blur_sigma_min = 0.1
+blur_sigma_max = 2.0
+solarize_prob = 0.0
+solarize_threshold = 128
+
+[wgpu]
+backend = "vulkan"

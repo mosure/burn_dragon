@@ -1,0 +1,19 @@
+extends = ["current_best_large_model.toml"]
+
+[training]
+sequence_kernel_override = { memory_system = "linear_attention", executor = "dense_score_short_context" }
+# Promoted operational dense-score geometry.
+# The larger chunk and microbatch drive materially better CUDA utilization
+# on the current large BDH path than the old 8x128 staging defaults.
+block_size = 256
+tbptt_chunk_size = 256
+tbptt_persist_across_steps = true
+min_logical_block_size = 1024
+batch_size = 12
+gradient_accumulation_steps = 1
+target_effective_batch_size = 12
+seed = 1337
+
+[optimizer]
+learning_rate = 0.0003
+weight_decay = 0.1

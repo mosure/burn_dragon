@@ -6,7 +6,7 @@ use burn_dragon::core::{LowBitMemoryEstimateInput, estimate_low_bit_memory_bucke
 use burn_dragon::core::{RhoCompressionConfig, RhoPrecisionConfig};
 use burn_dragon_language::train::prepare_dataset;
 use burn_dragon_language::{
-    BDH, SequenceKernelKind, TrainingConfig, build_model_config_with_tokenizer,
+    BDH, SequenceMemorySystem, TrainingConfig, build_model_config_with_tokenizer,
     load_training_config,
 };
 use burn_ndarray::NdArray;
@@ -136,10 +136,20 @@ fn build_report(
 }
 
 fn rho_state_elements_per_batch_view(model_config: &burn_dragon_language::BDHConfig) -> u64 {
-    match model_config.sequence_kernel {
-        SequenceKernelKind::MambaSelectiveSsmExperimental => {
-            let mamba = model_config.mamba.resolve(model_config.n_embd);
+    match model_config.sequence_kernel.memory_system {
+        SequenceMemorySystem::Mamba1SelectiveScan => {
+            let mamba = model_config.mamba.resolve(
+                model_config.n_embd,
+                SequenceMemorySystem::Mamba1SelectiveScan,
+            );
             (model_config.n_layer * mamba.d_inner * mamba.d_state) as u64
+        }
+        SequenceMemorySystem::Mamba2StateSpaceDuality => {
+            let mamba = model_config.mamba.resolve(
+                model_config.n_embd,
+                SequenceMemorySystem::Mamba2StateSpaceDuality,
+            );
+            (model_config.n_layer * mamba.nheads * mamba.headdim * mamba.d_state) as u64
         }
         _ => {
             (model_config.n_layer

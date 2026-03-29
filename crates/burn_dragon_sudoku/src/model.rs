@@ -6,7 +6,7 @@ use std::f32::consts::PI;
 
 use burn_dragon_core::{
     BDH, BDHConfig, FusedKernelConfig, HaltHead, ManifoldHyperConnections,
-    ManifoldHyperConnectionsConfig, ModelState, SequenceKernelKind,
+    ManifoldHyperConnectionsConfig, ModelState, SequenceKernelConfig, SequenceMemorySystem,
 };
 use burn_dragon_train::WgpuRuntimeConfig;
 use burn_dragon_train::wgpu::{WgpuFusedCoreOverride, apply_wgpu_fused_core_override};
@@ -142,7 +142,7 @@ impl SudokuModelConfig {
             y_neuron_recurrence: Default::default(),
             clocked_slow_memory: Default::default(),
             summary_memory: Default::default(),
-            sequence_kernel: SequenceKernelKind::default(),
+            sequence_kernel: SequenceKernelConfig::reference(SequenceMemorySystem::LinearAttention),
             mamba: Default::default(),
         }
     }

@@ -1,0 +1,137 @@
+# Medium-width ImageNet-1k graph-bridge single-teacher launch config.
+# Primary teacher: DINOv2 base patch+CLS features.
+
+[dataset]
+imagenet_root = "data/imagenet1k"
+train_dir = "train"
+val_dir = "val"
+prefetch_batches = 8
+prefetch_workers = 12
+prefetch_to_device = true
+cache_decoded = true
+cache_capacity = 2048
+cache_preprocessed = false
+cache_teacher_features_in_memory = false
+
+[training]
+batch_size = 128
+gradient_accumulation_steps = 2
+epochs = 90
+max_iters = 180000
+log_frequency = 100
+device_memory_check_every = 25
+max_device_memory_mb = 98304
+rollout_min_steps = 2
+rollout_max_steps = 4
+rollout_backprop_steps = 4
+
+[optimizer]
+learning_rate = 0.0003
+weight_decay = 0.05
+grad_clip_norm = 1.0
+
+[optimizer.lr_schedule]
+type = "cosine"
+min_lr = 0.00003
+num_iters = 180000
+
+[vision]
+image_size = 280
+patch_size = 14
+backbone = "pyramid"
+in_channels = 3
+embed_dim = 320
+steps = 4
+n_head = 8
+mlp_internal_dim_multiplier = 4
+dropout = 0.0
+projection_dim = 768
+projection_hidden_dim = 1536
+use_cls_token = true
+cls_sync_alpha = 0.0
+num_eyes = 1
+cross_eye_steps = 0
+token_state_norm = true
+pos_encoding = "learned2d"
+pos_max_height = 20
+pos_max_width = 20
+attention_mode = "row_l1"
+allow_softmax_attention = false
+use_alibi = true
+fused_kernels = false
+relu_threshold = 0.0
+
+[vision.trm_graph]
+enabled = true
+coarse_stride = 2
+hub_count = 12
+rank = 12
+value_dim = 64
+local_radius = 1
+local_diagonals = true
+local_self = true
+coarse_local_radius = 1
+coarse_local_diagonals = true
+coarse_local_self = true
+predict_coarse_substeps = 2
+predict_substep_kind = "local_bridge"
+decay = 0.9
+hub_gates = true
+grid_mismatch_policy = "fallback_default"
+
+[vision.trm_graph.bank_schedule.predict]
+patch_local_read = false
+patch_local_write = false
+patch_from_coarse_read = false
+patch_to_coarse_write = false
+patch_to_global_write = false
+
+[mode]
+type = "distill"
+rollout_supervision_frames = 2
+rollout_supervision_stride = 1
+rollout_supervision_groups = 1
+rollout_supervision_include_step1 = true
+rollout_supervision_power = 1.0
+rollout_sampling_power = 0.5
+rollout_improvement_weight = 0.0
+rollout_improvement_margin = 0.0
+
+[mode.teacher]
+type = "features"
+train_cls_path = "data/imagenet1k/features/dinov2_base_280/train_cls.bin"
+train_patch_path = "data/imagenet1k/features/dinov2_base_280/train_patch.bin"
+val_cls_path = "data/imagenet1k/features/dinov2_base_280/val_cls.bin"
+val_patch_path = "data/imagenet1k/features/dinov2_base_280/val_patch.bin"
+feature_dim = 768
+patch_tokens = 400
+
+[mode.loss]
+patch_mse_weight = 1.0
+cls_mse_weight = 0.25
+cls_cosine_weight = 1.0
+rel_weight = 0.1
+rel_tau = 0.07
+rel_sample_tokens = 128
+
+[augment]
+image_size = 280
+resize_short = 320
+min_scale = 1.0
+max_scale = 1.0
+min_aspect_ratio = 1.0
+max_aspect_ratio = 1.0
+flip_prob = 0.0
+color_jitter_prob = 0.0
+brightness = 0.0
+contrast = 0.0
+saturation = 0.0
+hue = 0.0
+grayscale_prob = 0.0
+blur_prob = 0.0
+blur_sigma_min = 0.1
+blur_sigma_max = 2.0
+solarize_prob = 0.0
+solarize_threshold = 128
+normalize_mean = [0.485, 0.456, 0.406]
+normalize_std = [0.229, 0.224, 0.225]

@@ -1,0 +1,2 @@
+[model]
+sequence_kernel = "linear_attention"

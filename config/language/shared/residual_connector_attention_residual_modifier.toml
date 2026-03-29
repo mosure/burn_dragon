@@ -1,0 +1,18 @@
+[model]
+residual_connector = "attention_residual"
+
+[model.mhc]
+enabled = false
+num_streams = 1
+num_views = 1
+mhc_iters = 10
+mhc_tau = 0.05
+add_branch_out_to_residual = true
+dropout = 0.0
+
+[model.attention_residual]
+enabled = true
+num_heads = 4
+history_window = 4
+dropout = 0.0
+recency_bias = 2.0

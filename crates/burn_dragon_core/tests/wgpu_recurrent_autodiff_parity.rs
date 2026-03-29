@@ -2,7 +2,7 @@ use burn::optim::{AdamWConfig, GradientsParams, LearningRate, Optimizer};
 use burn::tensor::backend::Backend;
 use burn::tensor::{Int, Tensor, TensorData};
 use burn_autodiff::Autodiff;
-use burn_dragon_core::{BDH, BDHConfig, FusedKernelConfig, SequenceKernelKind};
+use burn_dragon_core::{BDH, BDHConfig, FusedKernelConfig, SequenceKernelConfig};
 use burn_dragon_kernel::api::recurrent::supports_recurrent_backend;
 use burn_wgpu::{CubeBackend, RuntimeOptions, WgpuRuntime, graphics};
 
@@ -68,7 +68,7 @@ fn build_dense_score_case_config(case: &TrainParityCase, wgpu_rollout_fused: boo
             wgpu_rollout_fused,
             ..Default::default()
         },
-        sequence_kernel: SequenceKernelKind::BdhLinearDenseScoreExperimental,
+        sequence_kernel: SequenceKernelConfig::dense_score_short_context(),
         ..Default::default()
     };
     config.fused_kernels.set_block_sizes(8, 8);

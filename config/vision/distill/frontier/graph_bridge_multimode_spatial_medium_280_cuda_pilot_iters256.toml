@@ -1,0 +1,8 @@
+# Short CUDA pilot for the promoted medium ImageNet-1k multimode spatial recipe.
+# Used to verify loss descent, memory stability, and validation sanity before
+# committing to the full long run.
+
+[training]
+schedule_mode = "max_iters"
+max_iters = 256
+enable_checkpoints = false

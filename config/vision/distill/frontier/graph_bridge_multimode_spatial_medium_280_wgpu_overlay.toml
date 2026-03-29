@@ -1,0 +1,14 @@
+# Memory-safe WGPU launch overrides for full ImageNet-1k multimode spatial training.
+# Keeps the effective batch size constant while reducing on-device staging pressure.
+
+[dataset]
+prefetch_batches = 2
+prefetch_workers = 8
+prefetch_to_device = false
+
+[training]
+batch_size = 32
+gradient_accumulation_steps = 8
+log_frequency = 25
+device_memory_check_every = 5
+max_device_memory_mb = 98304

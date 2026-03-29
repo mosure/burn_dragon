@@ -154,12 +154,16 @@ n_layer = 4
 n_embd = 256
 n_head = 4
 mlp_internal_dim_multiplier = 4
-# sequence kernel: "bdh_linear_attention" (default) or
-# "rwkv8_state_space_experimental" for the experimental decayed normalized
+# sequence kernel: "linear_attention" (default) or
+# "rwkv8_state_space" for the decayed normalized
 # recurrent kernel.
-# sequence_kernel = "bdh_linear_attention"
-# Training-only kernel override belongs under `[training]`:
-# sequence_kernel_override = "bdh_linear_dense_score_experimental"
+# sequence_kernel = "linear_attention"
+# Training-only kernel override belongs under `[training]`.
+# On CUDA short-context language training, plain `linear_attention` is
+# auto-promoted to `{ memory_system = "linear_attention", executor =
+# "dense_score_short_context" }` unless you set
+# `training.sequence_kernel_override` explicitly.
+# sequence_kernel_override = { memory_system = "linear_attention", executor = "dense_score_short_context" }
 # Fast internal recurrent updates per emitted slow token.
 # Supported values: 1, 2, 4, 8, 16.
 rollout_fast_steps_per_slow_step = 1

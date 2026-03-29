@@ -29,6 +29,7 @@ serde_json = "1.0"
 toml = "0.8"
 
 [dev-dependencies]
+criterion = { version = "0.7", features = ["html_reports"] }
 tempfile = "3"
 
 [[bin]]
@@ -42,3 +43,15 @@ path = "src/bin/train_moving_mnist_tokenizer.rs"
 [[bin]]
 name = "export_moving_mnist_teacher_clips"
 path = "src/bin/export_moving_mnist_teacher_clips.rs"
+
+[[bin]]
+name = "train_moving_mnist_bundle"
+path = "src/bin/train_moving_mnist_bundle.rs"
+
+[[bench]]
+name = "cached_sequence"
+harness = false
+
+[[bench]]
+name = "extract_crops"
+harness = false

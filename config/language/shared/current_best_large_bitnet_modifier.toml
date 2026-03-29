@@ -1,0 +1,26 @@
+[model]
+residual_connector = "attention_residual"
+
+[model.attention_residual]
+enabled = true
+num_heads = 4
+history_window = 4
+dropout = 0.0
+recency_bias = 2.0
+
+[model.quant]
+enable = true
+protocol = "bitnet_b158"
+training_mode = "train_kernel_exp"
+inference_mode = "offline_pack"
+weight_format = "ternary158"
+act_format = "int8"
+target_modules = ["decoder_y"]
+decoder_x_mode = "fp16"
+act_grouping = "per_token"
+weight_grouping = "per_tensor"
+strict_bitnet_reference = false
+
+[model.quant.saved_activations]
+mode = "quantized_cache_recompute_exp"
+format = "int8"

@@ -110,6 +110,8 @@ fn tensor_to_f32(view: &TensorView<'_>) -> Result<Vec<f32>> {
 mod tests {
     use super::*;
     use safetensors::tensor::{Dtype, View, serialize_to_file};
+    use serde_json::Value;
+    use std::path::Path;
     use tempfile::NamedTempFile;
 
     #[derive(Clone)]
@@ -169,5 +171,108 @@ mod tests {
         assert_eq!(store.target_len(), 1);
         assert_eq!(store.current_clip(0).expect("current")[0], 1.0);
         assert_eq!(store.future_clip(0).expect("future")[2], 9.0);
+    }
+
+    #[test]
+    fn fixture_store_matches_official_vjepa2_export() {
+        let fixture_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        let store = PrecomputedClipFeatureStore::from_file(
+            fixture_root.join("vjepa2_moving_mnist_feature_store_fixture.safetensors"),
+        )
+        .expect("load V-JEPA2 fixture store");
+        let manifest: Value = serde_json::from_slice(
+            &std::fs::read(fixture_root.join("vjepa2_moving_mnist_feature_store_fixture.json"))
+                .expect("read V-JEPA2 fixture manifest"),
+        )
+        .expect("parse V-JEPA2 fixture manifest");
+
+        assert_eq!(store.clip_count(), 2);
+        assert_eq!(store.context_len(), 2);
+        assert_eq!(store.target_len(), 2);
+        assert_eq!(store.feature_dim(), 1024);
+        assert_eq!(
+            manifest["metadata"]["source"].as_str(),
+            Some("facebook/vjepa2-vitl-fpc64-256")
+        );
+        assert_eq!(manifest["metadata"]["field"].as_str(), Some("encoder"));
+
+        let current0 = store.current_clip(0).expect("current clip 0");
+        let current1 = store.current_clip(1).expect("current clip 1");
+        let future0 = store.future_clip(0).expect("future clip 0");
+        let future1 = store.future_clip(1).expect("future clip 1");
+        let dim = store.feature_dim();
+
+        approx_equal_slice(
+            &current0[..8],
+            &json_array_f32(&manifest["current_clip0_head8"]),
+            1.0e-5,
+        );
+        approx_equal_slice(
+            &current1[dim..dim + 8],
+            &json_array_f32(&manifest["current_clip1_frame1_head8"]),
+            1.0e-5,
+        );
+        approx_equal_slice(
+            &future0[..8],
+            &json_array_f32(&manifest["future_clip0_head8"]),
+            1.0e-5,
+        );
+        approx_equal_slice(
+            &future1[dim..dim + 8],
+            &json_array_f32(&manifest["future_clip1_frame1_head8"]),
+            1.0e-5,
+        );
+
+        let current_sum: f32 = (0..store.clip_count())
+            .flat_map(|index| {
+                store
+                    .current_clip(index)
+                    .expect("fixture current clip")
+                    .iter()
+                    .copied()
+                    .collect::<Vec<_>>()
+            })
+            .sum();
+        let future_sum: f32 = (0..store.clip_count())
+            .flat_map(|index| {
+                store
+                    .future_clip(index)
+                    .expect("fixture future clip")
+                    .iter()
+                    .copied()
+                    .collect::<Vec<_>>()
+            })
+            .sum();
+        assert!(
+            (current_sum - manifest["current_sum"].as_f64().expect("current_sum") as f32).abs()
+                <= 1.0e-3,
+            "current_sum mismatch: actual={current_sum} expected={}",
+            manifest["current_sum"]
+        );
+        assert!(
+            (future_sum - manifest["future_sum"].as_f64().expect("future_sum") as f32).abs()
+                <= 1.0e-3,
+            "future_sum mismatch: actual={future_sum} expected={}",
+            manifest["future_sum"]
+        );
+    }
+
+    fn json_array_f32(value: &Value) -> Vec<f32> {
+        value
+            .as_array()
+            .expect("json array")
+            .iter()
+            .map(|entry| entry.as_f64().expect("json float") as f32)
+            .collect()
+    }
+
+    fn approx_equal_slice(actual: &[f32], expected: &[f32], tolerance: f32) {
+        assert_eq!(actual.len(), expected.len(), "slice length mismatch");
+        for (index, (lhs, rhs)) in actual.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (lhs - rhs).abs() <= tolerance,
+                "value mismatch at index {index}: actual={lhs} expected={rhs} tolerance={tolerance}"
+            );
+        }
     }
 }

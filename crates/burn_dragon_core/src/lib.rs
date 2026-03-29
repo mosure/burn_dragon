@@ -38,9 +38,8 @@ pub mod api {
             LowBitTargetModule, LowBitTrainingMode, LowBitWeightFormat, LowBitWeightGrouping,
             MambaSequenceConfig, ManifoldHyperConnectionCoefficientPolicy,
             ManifoldHyperConnectionsConfig, ResidualConnectorKind, RhoCompressionConfig,
-            RhoCompressionInterval, RhoPrecisionConfig, SequenceKernelConfig, SequenceKernelFamily,
-            SequenceKernelKind, SequenceTrainingExecutor, SummaryMemoryConfig,
-            YNeuronRecurrenceConfig,
+            RhoCompressionInterval, RhoPrecisionConfig, SequenceKernelConfig, SequenceMemorySystem,
+            SequenceTrainingExecutor, SummaryMemoryConfig, YNeuronRecurrenceConfig,
         };
         pub use burn_dragon_kernel::api::projection::LowrankGradInputExecutor;
     }
@@ -95,8 +94,8 @@ pub mod api {
 
         pub mod sequence {
             pub use crate::{
-                MambaSequenceConfig, SequenceKernelConfig, SequenceKernelFamily,
-                SequenceKernelKind, SequenceTrainingExecutor,
+                MambaSequenceConfig, SequenceKernelConfig, SequenceMemorySystem,
+                SequenceTrainingExecutor,
             };
         }
 
@@ -160,22 +159,22 @@ pub use model::{
     PackedLowBitProjectionArtifacts, PackedRhoBlockEncoding, PackedRhoBlockState,
     PackedRhoInt8DeviceState, PackedSavedActivationBuffer, PackedSavedActivationState,
     ResidualConnectorKind, RhoCompressionConfig, RhoCompressionInterval, RhoCompressionQualityGate,
-    RhoCompressionStatsSnapshot, RhoPrecisionConfig, SequenceKernelConfig, SequenceKernelFamily,
-    SequenceKernelKind, SequenceTrainingExecutor, StructuredBankRole, StructuredDenseUpdateOutput,
-    StructuredGridState, StructuredRouteOperation, StructuredRoutePattern, StructuredRouteSpec,
-    StructuredRoutingSpec, StructuredStepMode, StructuredTopologyState, SummaryMemoryConfig,
-    YNeuronRecurrenceConfig, build_low_bit_saved_activation_inventory,
-    estimate_low_bit_memory_buckets, logits_projection_profile_reset,
-    logits_projection_profile_snapshot, low_bit_kernel_capabilities,
-    low_bit_kernel_capabilities_for_backend_name, low_bit_native_decoder_tail_profile_snapshot,
-    low_bit_native_lowrank_profile_snapshot, low_bit_native_projection_profile_reset,
-    low_bit_training_lowrank_memory_profile_snapshot, low_bit_training_quantize_profile_snapshot,
-    lowrank_residual_memory_profile_reset, lowrank_residual_memory_profile_snapshot,
-    lowrank_residual_profile_reset, lowrank_residual_profile_snapshot, lowrank_residual_step,
-    lowrank_residual_step_next, mhc_merge, mhc_merge_with_coefficients, mhc_passthrough,
-    mhc_passthrough_with_coefficients, mhc_split, mhc_split_with_coefficients,
-    near_critical_embedding_initializer, near_critical_embedding_std, near_critical_projection_std,
-    near_critical_residual_output_std, pack_saved_activation_state, resolve_low_bit_kernel_plan,
+    RhoCompressionStatsSnapshot, RhoPrecisionConfig, SequenceKernelConfig, SequenceMemorySystem,
+    SequenceTrainingExecutor, StructuredBankRole, StructuredDenseUpdateOutput, StructuredGridState,
+    StructuredRouteOperation, StructuredRoutePattern, StructuredRouteSpec, StructuredRoutingSpec,
+    StructuredStepMode, StructuredTopologyState, SummaryMemoryConfig, YNeuronRecurrenceConfig,
+    build_low_bit_saved_activation_inventory, estimate_low_bit_memory_buckets,
+    logits_projection_profile_reset, logits_projection_profile_snapshot,
+    low_bit_kernel_capabilities, low_bit_kernel_capabilities_for_backend_name,
+    low_bit_native_decoder_tail_profile_snapshot, low_bit_native_lowrank_profile_snapshot,
+    low_bit_native_projection_profile_reset, low_bit_training_lowrank_memory_profile_snapshot,
+    low_bit_training_quantize_profile_snapshot, lowrank_residual_memory_profile_reset,
+    lowrank_residual_memory_profile_snapshot, lowrank_residual_profile_reset,
+    lowrank_residual_profile_snapshot, lowrank_residual_step, lowrank_residual_step_next,
+    mhc_merge, mhc_merge_with_coefficients, mhc_passthrough, mhc_passthrough_with_coefficients,
+    mhc_split, mhc_split_with_coefficients, near_critical_embedding_initializer,
+    near_critical_embedding_std, near_critical_projection_std, near_critical_residual_output_std,
+    pack_saved_activation_state, resolve_low_bit_kernel_plan,
     resolve_low_bit_kernel_plan_for_backend_name, rho_compression_profile_reset,
     rho_compression_profile_snapshot, rho_compression_snapshot_passes_gate,
     structured_dense_update_tokens, structured_predict_decay, target_major_apply_decay,

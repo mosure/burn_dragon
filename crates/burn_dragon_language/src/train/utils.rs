@@ -168,7 +168,7 @@ pub struct RunConfigOutput {
     training_execution_form: String,
     training_launch_mode_requested: burn_dragon_train::train::pipeline::TrainingLaunchMode,
     #[serde(skip_serializing_if = "Option::is_none")]
-    training_sequence_kernel_override: Option<SequenceKernelKind>,
+    training_sequence_kernel_override: Option<SequenceKernelConfig>,
     optimizer_spec: OptimizerSpec,
     overrides: ModelOverrides,
     model_spec: ModelSpec,
@@ -384,12 +384,109 @@ pub(crate) fn build_state_layout(model_config: &BDHConfig) -> StateLayout {
         .map(|layer_index| {
             let latent_total = model_config.latent_total_for_layer(layer_index);
             let latent_per_head = model_config.latent_per_head_for_layer(layer_index);
-            let mut tensors = if model_config.sequence_kernel
-                == SequenceKernelKind::MambaSelectiveSsmExperimental
-            {
-                let mamba = model_config.mamba.resolve(model_config.n_embd);
-                vec![
-                    StateTensorSpec {
+            let mut tensors = match model_config.sequence_kernel.memory_system {
+                burn_dragon_core::SequenceMemorySystem::Mamba1SelectiveScan => {
+                    let mamba = model_config.mamba.resolve(
+                        model_config.n_embd,
+                        burn_dragon_core::SequenceMemorySystem::Mamba1SelectiveScan,
+                    );
+                    vec![
+                        StateTensorSpec {
+                            name: "rho".to_string(),
+                            axes: vec![
+                                StateAxisSpec {
+                                    name: "batch_views".to_string(),
+                                    size: None,
+                                },
+                                StateAxisSpec {
+                                    name: "streams".to_string(),
+                                    size: Some(1),
+                                },
+                                StateAxisSpec {
+                                    name: "mamba_inner".to_string(),
+                                    size: Some(mamba.d_inner),
+                                },
+                                StateAxisSpec {
+                                    name: "mamba_state".to_string(),
+                                    size: Some(mamba.d_state),
+                                },
+                            ],
+                        },
+                        StateTensorSpec {
+                            name: "sequence_aux".to_string(),
+                            axes: vec![
+                                StateAxisSpec {
+                                    name: "batch_views".to_string(),
+                                    size: None,
+                                },
+                                StateAxisSpec {
+                                    name: "streams".to_string(),
+                                    size: Some(1),
+                                },
+                                StateAxisSpec {
+                                    name: "mamba_inner".to_string(),
+                                    size: Some(mamba.d_inner),
+                                },
+                                StateAxisSpec {
+                                    name: "mamba_conv".to_string(),
+                                    size: Some(mamba.d_conv),
+                                },
+                            ],
+                        },
+                    ]
+                }
+                burn_dragon_core::SequenceMemorySystem::Mamba2StateSpaceDuality => {
+                    let mamba = model_config.mamba.resolve(
+                        model_config.n_embd,
+                        burn_dragon_core::SequenceMemorySystem::Mamba2StateSpaceDuality,
+                    );
+                    vec![
+                        StateTensorSpec {
+                            name: "rho".to_string(),
+                            axes: vec![
+                                StateAxisSpec {
+                                    name: "batch_views".to_string(),
+                                    size: None,
+                                },
+                                StateAxisSpec {
+                                    name: "mamba_heads".to_string(),
+                                    size: Some(mamba.nheads),
+                                },
+                                StateAxisSpec {
+                                    name: "mamba_head_dim".to_string(),
+                                    size: Some(mamba.headdim),
+                                },
+                                StateAxisSpec {
+                                    name: "mamba_state".to_string(),
+                                    size: Some(mamba.d_state),
+                                },
+                            ],
+                        },
+                        StateTensorSpec {
+                            name: "sequence_aux".to_string(),
+                            axes: vec![
+                                StateAxisSpec {
+                                    name: "batch_views".to_string(),
+                                    size: None,
+                                },
+                                StateAxisSpec {
+                                    name: "streams".to_string(),
+                                    size: Some(1),
+                                },
+                                StateAxisSpec {
+                                    name: "mamba_conv_channels".to_string(),
+                                    size: Some(mamba.mamba2_conv_dim()),
+                                },
+                                StateAxisSpec {
+                                    name: "mamba_conv".to_string(),
+                                    size: Some(mamba.d_conv),
+                                },
+                            ],
+                        },
+                    ]
+                }
+                _ => {
+                    vec![StateTensorSpec {
                         name: "rho".to_string(),
                         axes: vec![
                             StateAxisSpec {
@@ -397,65 +494,24 @@ pub(crate) fn build_state_layout(model_config: &BDHConfig) -> StateLayout {
                                 size: None,
                             },
                             StateAxisSpec {
-                                name: "streams".to_string(),
-                                size: Some(1),
+                                name: "heads".to_string(),
+                                size: Some(model_config.n_head),
                             },
                             StateAxisSpec {
-                                name: "mamba_inner".to_string(),
-                                size: Some(mamba.d_inner),
+                                name: "latent_per_head".to_string(),
+                                size: Some(latent_per_head),
                             },
                             StateAxisSpec {
-                                name: "mamba_state".to_string(),
-                                size: Some(mamba.d_state),
+                                name: "dense_dim".to_string(),
+                                size: Some(model_config.n_embd),
                             },
                         ],
-                    },
-                    StateTensorSpec {
-                        name: "sequence_aux".to_string(),
-                        axes: vec![
-                            StateAxisSpec {
-                                name: "batch_views".to_string(),
-                                size: None,
-                            },
-                            StateAxisSpec {
-                                name: "streams".to_string(),
-                                size: Some(1),
-                            },
-                            StateAxisSpec {
-                                name: "mamba_inner".to_string(),
-                                size: Some(mamba.d_inner),
-                            },
-                            StateAxisSpec {
-                                name: "mamba_conv".to_string(),
-                                size: Some(mamba.d_conv),
-                            },
-                        ],
-                    },
-                ]
-            } else {
-                vec![StateTensorSpec {
-                    name: "rho".to_string(),
-                    axes: vec![
-                        StateAxisSpec {
-                            name: "batch_views".to_string(),
-                            size: None,
-                        },
-                        StateAxisSpec {
-                            name: "heads".to_string(),
-                            size: Some(model_config.n_head),
-                        },
-                        StateAxisSpec {
-                            name: "latent_per_head".to_string(),
-                            size: Some(latent_per_head),
-                        },
-                        StateAxisSpec {
-                            name: "dense_dim".to_string(),
-                            size: Some(model_config.n_embd),
-                        },
-                    ],
-                }]
+                    }]
+                }
             };
-            if model_config.sequence_kernel == SequenceKernelKind::Rwkv8StateSpaceExperimental {
+            if model_config.sequence_kernel.memory_system
+                == burn_dragon_core::SequenceMemorySystem::Rwkv8StateSpace
+            {
                 tensors.push(StateTensorSpec {
                     name: "rho_norm".to_string(),
                     axes: vec![
@@ -599,6 +655,7 @@ pub fn write_run_config(
     run_dir: &Path,
     run_name: &str,
     backend_name: &str,
+    effective_training_sequence_kernel_override: Option<SequenceKernelConfig>,
     startup_autotune: Option<&StartupAutotuneReport>,
 ) -> Result<()> {
     fs::create_dir_all(run_dir)
@@ -625,7 +682,7 @@ pub fn write_run_config(
         training_checkpoint_interval_iters: config.training.checkpoint_interval_iters,
         training_execution_form: build_training_execution_form(config),
         training_launch_mode_requested: config.training.launch_mode,
-        training_sequence_kernel_override: config.training.sequence_kernel_override,
+        training_sequence_kernel_override: effective_training_sequence_kernel_override,
         optimizer_spec: build_optimizer_spec(config),
         overrides: config.model.clone(),
         model_spec: build_model_spec(model_config),
@@ -653,7 +710,7 @@ mod tests {
     use crate::tokenizer::TokenizerConfig;
     use burn_dragon_core::{
         BDHConfig, BdhFiringTargetKind, BdhInitializationKind, BdhNeuronGainKind,
-        BdhResidualScalingKind, BdhTopologyPriorKind, SequenceKernelKind,
+        BdhResidualScalingKind, BdhTopologyPriorKind, SequenceKernelConfig,
     };
     use burn_dragon_train::{
         OptimizerConfig, ParallelCheckpointFormat, ParallelConfig, ParallelismKind,
@@ -780,8 +837,16 @@ mod tests {
         model_config.initialization.topology_prior.kind = BdhTopologyPriorKind::ModularBridges;
         model_config.initialization.firing_targets.kind = BdhFiringTargetKind::GaussianEstimate;
 
-        write_run_config(&config, &model_config, &run_dir, "test-run", "cuda", None)
-            .expect("write run config");
+        write_run_config(
+            &config,
+            &model_config,
+            &run_dir,
+            "test-run",
+            "cuda",
+            config.training.sequence_kernel_override,
+            None,
+        )
+        .expect("write run config");
 
         let payload = std::fs::read_to_string(run_dir.join("config.json")).expect("read config");
         let json: Value = serde_json::from_str(&payload).expect("parse config json");
@@ -819,7 +884,7 @@ mod tests {
         );
         assert_eq!(
             json["kernel_spec"]["sequence_kernel"],
-            serde_json::Value::String("bdh_linear_attention".to_string())
+            serde_json::Value::String("linear_attention".to_string())
         );
         assert_eq!(
             json["kernel_spec"]["low_bit_runtime"],
@@ -923,8 +988,16 @@ mod tests {
         model_config.n_head = 4;
         model_config.mlp_internal_dim_multiplier = 128;
 
-        write_run_config(&config, &model_config, &run_dir, "test-run", "cuda", None)
-            .expect("write run config");
+        write_run_config(
+            &config,
+            &model_config,
+            &run_dir,
+            "test-run",
+            "cuda",
+            config.training.sequence_kernel_override,
+            None,
+        )
+        .expect("write run config");
 
         let payload = std::fs::read_to_string(run_dir.join("config.json")).expect("read config");
         let json: Value = serde_json::from_str(&payload).expect("parse config json");
@@ -1039,8 +1112,16 @@ mod tests {
         model_config.n_head = 4;
         model_config.mlp_internal_dim_multiplier = 128;
 
-        write_run_config(&config, &model_config, &run_dir, "test-run", "cuda", None)
-            .expect("write run config");
+        write_run_config(
+            &config,
+            &model_config,
+            &run_dir,
+            "test-run",
+            "cuda",
+            config.training.sequence_kernel_override,
+            None,
+        )
+        .expect("write run config");
 
         let payload = std::fs::read_to_string(run_dir.join("config.json")).expect("read config");
         let json: Value = serde_json::from_str(&payload).expect("parse config json");
@@ -1070,7 +1151,9 @@ mod tests {
         model_config.n_embd = 32;
         model_config.n_head = 2;
         model_config.mlp_internal_dim_multiplier = 4;
-        model_config.sequence_kernel = SequenceKernelKind::Rwkv8StateSpaceExperimental;
+        model_config.sequence_kernel = SequenceKernelConfig::reference(
+            burn_dragon_core::SequenceMemorySystem::Rwkv8StateSpace,
+        );
 
         let layout = super::build_state_layout(&model_config);
         let tensor_names = layout.layers[0]
@@ -1089,7 +1172,9 @@ mod tests {
         model_config.n_layer = 2;
         model_config.n_embd = 32;
         model_config.n_head = 2;
-        model_config.sequence_kernel = SequenceKernelKind::MambaSelectiveSsmExperimental;
+        model_config.sequence_kernel = SequenceKernelConfig::reference(
+            burn_dragon_core::SequenceMemorySystem::Mamba1SelectiveScan,
+        );
         model_config.mamba.expand = 3;
         model_config.mamba.d_state = 8;
         model_config.mamba.d_conv = 5;
@@ -1144,7 +1229,7 @@ mod tests {
                 init_checkpoint_path: None,
                 init_checkpoint_epoch: None,
                 context_strategy: ContextStrategyConfig::Infinite,
-                sequence_kernel_override: Some(SequenceKernelKind::BdhLinearDenseScoreExperimental),
+                sequence_kernel_override: Some(SequenceKernelConfig::dense_score_short_context()),
                 gdpo: None,
             },
             optimizer: OptimizerConfig {
@@ -1173,12 +1258,14 @@ mod tests {
             wgpu: Default::default(),
             run_layout: burn_dragon_train::RunLayoutConfig::default(),
             model: ModelOverrides {
-                sequence_kernel: Some(SequenceKernelKind::BdhLinearAttention),
+                sequence_kernel: Some(SequenceKernelConfig::reference(
+                    burn_dragon_core::SequenceMemorySystem::LinearAttention,
+                )),
                 ..ModelOverrides::default()
             },
         };
         let mut model_config = BDHConfig::default();
-        model_config.sequence_kernel = SequenceKernelKind::BdhLinearDenseScoreExperimental;
+        model_config.sequence_kernel = SequenceKernelConfig::dense_score_short_context();
         model_config.quant = burn_dragon_core::LowBitQuantizationConfig {
             enable: true,
             protocol: burn_dragon_core::BitNetLowBitProtocol::BitnetB158,
@@ -1191,21 +1278,35 @@ mod tests {
             ..Default::default()
         };
 
-        write_run_config(&config, &model_config, &run_dir, "test-run", "cuda", None)
-            .expect("write run config");
+        write_run_config(
+            &config,
+            &model_config,
+            &run_dir,
+            "test-run",
+            "cuda",
+            config.training.sequence_kernel_override,
+            None,
+        )
+        .expect("write run config");
 
         let payload = std::fs::read_to_string(run_dir.join("config.json")).expect("read config");
         let json: Value = serde_json::from_str(&payload).expect("parse config json");
         assert_eq!(
             json["training_sequence_kernel_override"],
-            serde_json::Value::String("bdh_linear_dense_score_experimental".to_string())
+            serde_json::json!({
+                "memory_system": "linear_attention",
+                "executor": "dense_score_short_context"
+            })
         );
         assert_eq!(json["training_execution_form"], "default_stateful");
         assert_eq!(json["training_launch_mode_requested"], "fresh");
         assert_eq!(json["training_checkpoint_interval_iters"], 2000);
         assert_eq!(
             json["kernel_spec"]["sequence_kernel"],
-            serde_json::Value::String("bdh_linear_dense_score_experimental".to_string())
+            serde_json::json!({
+                "memory_system": "linear_attention",
+                "executor": "dense_score_short_context"
+            })
         );
         assert_eq!(
             json["kernel_spec"]["low_bit_runtime"],
@@ -1245,7 +1346,98 @@ mod tests {
         );
         assert_eq!(
             json["overrides"]["sequence_kernel"],
-            serde_json::Value::String("bdh_linear_attention".to_string())
+            serde_json::Value::String("linear_attention".to_string())
+        );
+    }
+
+    #[test]
+    fn write_run_config_can_record_effective_training_sequence_kernel_override() {
+        let dir = tempdir().expect("tempdir");
+        let run_dir = dir.path().join("run");
+        let config = TrainingConfig {
+            dataset: DatasetConfig {
+                cache_dir: dir.path().join("cache"),
+                train_split_ratio: 0.9,
+                validation: None,
+                source: DatasetSourceConfig::Shakespeare { url: None },
+                tokenizer: TokenizerConfig::default(),
+            },
+            training: TrainingHyperparameters {
+                block_size: 64,
+                tbptt_chunk_size: None,
+                tbptt_persist_across_steps: false,
+                min_logical_block_size: None,
+                batch_size: 1,
+                seed: 1337,
+                gradient_accumulation_steps: 1,
+                target_effective_batch_size: None,
+                epochs: None,
+                max_iters: 8,
+                checkpoint_interval_iters: 2000,
+                log_frequency: 1,
+                launch_mode: burn_dragon_train::train::pipeline::TrainingLaunchMode::Fresh,
+                resume_run_dir: None,
+                resume_checkpoint_epoch: None,
+                init_checkpoint_path: None,
+                init_checkpoint_epoch: None,
+                context_strategy: ContextStrategyConfig::Infinite,
+                sequence_kernel_override: None,
+                gdpo: None,
+            },
+            optimizer: OptimizerConfig {
+                name: burn_dragon_train::OptimizerKind::default(),
+                learning_rate: 1.0e-3,
+                weight_decay: 0.0,
+                weight_decay_final: None,
+                lr_schedule: None,
+                schedule_mode: burn_dragon_train::OptimizerScheduleMode::default(),
+                grad_clip_norm: None,
+                grad_clip_value: None,
+                muon: None,
+            },
+            parallel: ParallelConfig::default(),
+            generation: GenerationConfig {
+                prompt: "abc".to_string(),
+                max_tokens: Some(4),
+                max_chars: None,
+                temperature: 1.0,
+                top_k: None,
+                context_strategy: ContextStrategyConfig::Infinite,
+                prompt_tokenizer: Default::default(),
+                decode_tokenizer: Default::default(),
+                output_format: Default::default(),
+            },
+            wgpu: Default::default(),
+            run_layout: burn_dragon_train::RunLayoutConfig::default(),
+            model: ModelOverrides {
+                sequence_kernel: Some(SequenceKernelConfig::reference(
+                    burn_dragon_core::SequenceMemorySystem::LinearAttention,
+                )),
+                ..ModelOverrides::default()
+            },
+        };
+        let mut model_config = BDHConfig::default();
+        model_config.sequence_kernel = SequenceKernelConfig::dense_score_short_context();
+
+        write_run_config(
+            &config,
+            &model_config,
+            &run_dir,
+            "test-run",
+            "cuda",
+            Some(SequenceKernelConfig::dense_score_short_context()),
+            None,
+        )
+        .expect("write run config");
+
+        let payload = std::fs::read_to_string(run_dir.join("config.json")).expect("read config");
+        let json: Value = serde_json::from_str(&payload).expect("parse config json");
+        assert_eq!(
+            json["training_sequence_kernel_override"],
+            serde_json::json!({
+                "memory_system": "linear_attention",
+                "executor": "dense_score_short_context"
+            })
         );
     }
 

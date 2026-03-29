@@ -2,7 +2,7 @@ use super::*;
 
 impl<B: Backend> BDH<B> {
     pub(super) fn rollout_executor_mode(&self) -> RolloutExecutorMode {
-        if self.sequence_kernel.family == SequenceKernelFamily::LinearAttention
+        if self.sequence_kernel.memory_system == SequenceMemorySystem::LinearAttention
             && self.sequence_kernel.executor == SequenceTrainingExecutor::Reference
             && self.kernel.enabled
             && self.kernel.wgpu_recurrent_kernel
@@ -74,8 +74,11 @@ impl<B: Backend> BDH<B> {
         position_mode: RecurrentPositionMode,
         fused_plan: Option<&CompiledRecurrentAttentionPlan<B>>,
     ) -> Tensor<B, 4> {
-        match (self.sequence_kernel.family, self.sequence_kernel.executor) {
-            (SequenceKernelFamily::LinearAttention, SequenceTrainingExecutor::Reference) => {
+        match (
+            self.sequence_kernel.memory_system,
+            self.sequence_kernel.executor,
+        ) {
+            (SequenceMemorySystem::LinearAttention, SequenceTrainingExecutor::Reference) => {
                 let query = match position_mode {
                     RecurrentPositionMode::Sequential => {
                         self.attention.rotate_positions(query, position)
@@ -131,7 +134,7 @@ impl<B: Backend> BDH<B> {
                 context
             }
             (
-                SequenceKernelFamily::LinearAttention,
+                SequenceMemorySystem::LinearAttention,
                 SequenceTrainingExecutor::DenseScoreShortContext,
             ) => {
                 let query = match position_mode {
@@ -198,7 +201,7 @@ impl<B: Backend> BDH<B> {
                 self.write_linear_attention_rho_state(layer_state, rho);
                 context
             }
-            (SequenceKernelFamily::Rwkv8, SequenceTrainingExecutor::Reference) => {
+            (SequenceMemorySystem::Rwkv8StateSpace, SequenceTrainingExecutor::Reference) => {
                 let [batch, heads, _time, latent] = query.shape().dims::<4>();
                 let device = query.device();
                 let initial_state =
@@ -225,7 +228,11 @@ impl<B: Backend> BDH<B> {
                 self.write_rwkv8_sequence_state(layer_state, rho, rho_norm);
                 context
             }
-            (SequenceKernelFamily::Mamba1SelectiveSsm, SequenceTrainingExecutor::Reference) => {
+            (
+                SequenceMemorySystem::Mamba1SelectiveScan
+                | SequenceMemorySystem::Mamba2StateSpaceDuality,
+                SequenceTrainingExecutor::Reference,
+            ) => {
                 let params = self
                     .mamba
                     .as_ref()
@@ -245,37 +252,98 @@ impl<B: Backend> BDH<B> {
                 let initial_state = mamba_state(
                     layer_state,
                     batch,
-                    config.d_inner,
+                    if matches!(
+                        self.sequence_kernel.memory_system,
+                        SequenceMemorySystem::Mamba2StateSpaceDuality
+                    ) {
+                        config.nheads
+                    } else {
+                        1
+                    },
+                    if matches!(
+                        self.sequence_kernel.memory_system,
+                        SequenceMemorySystem::Mamba2StateSpaceDuality
+                    ) {
+                        config.headdim
+                    } else {
+                        config.d_inner
+                    },
                     config.d_state,
+                    if matches!(
+                        self.sequence_kernel.memory_system,
+                        SequenceMemorySystem::Mamba2StateSpaceDuality
+                    ) {
+                        config.mamba2_conv_dim()
+                    } else {
+                        config.d_inner
+                    },
                     config.d_conv,
                     &device,
                 );
-                if self.kernel.enabled
-                    && config.use_fast_path
-                    && use_tensorized_mamba_forward_experimental()
-                {
-                    let output = tensorized_mamba_forward(
-                        value,
-                        config.d_inner,
-                        config.d_state,
-                        config.d_conv,
-                        config.dt_rank,
-                        params.in_proj_tensor(),
-                        params.conv_weight_tensor(),
-                        params.conv_bias_tensor(),
-                        params.x_proj_tensor(),
-                        params.dt_proj_weight_tensor(),
-                        params.dt_proj_bias_tensor(),
-                        params.a_log_tensor(),
-                        params.d_skip_tensor(),
-                        params.out_proj_tensor(),
-                        Some(MambaTensorizedState {
-                            conv: initial_state.conv,
-                            ssm: initial_state.ssm,
-                        }),
-                    );
-                    write_mamba_state(layer_state, output.state.ssm, output.state.conv);
-                    return output.context;
+                if self.kernel.enabled && config.use_fast_path {
+                    if matches!(
+                        self.sequence_kernel.memory_system,
+                        SequenceMemorySystem::Mamba1SelectiveScan
+                    ) && use_tensorized_mamba_forward_experimental()
+                    {
+                        let params = params
+                            .mamba1()
+                            .expect("mamba1 fast path requires mamba1 params");
+                        let output = tensorized_mamba_forward(
+                            value,
+                            config.d_inner,
+                            config.d_state,
+                            config.d_conv,
+                            config.dt_rank,
+                            params.in_proj_tensor(),
+                            params.conv_weight_tensor(),
+                            params.conv_bias_tensor(),
+                            params.x_proj_tensor(),
+                            params.dt_proj_weight_tensor(),
+                            params.dt_proj_bias_tensor(),
+                            params.a_log_tensor(),
+                            params.d_skip_tensor(),
+                            params.out_proj_tensor(),
+                            Some(MambaTensorizedState {
+                                conv: initial_state.conv,
+                                ssm: initial_state.ssm,
+                            }),
+                        );
+                        write_mamba_state(layer_state, output.state.ssm, output.state.conv);
+                        return output.context;
+                    }
+                    if matches!(
+                        self.sequence_kernel.memory_system,
+                        SequenceMemorySystem::Mamba2StateSpaceDuality
+                    ) && use_tensorized_mamba2_forward_experimental()
+                    {
+                        let params = params
+                            .mamba2()
+                            .expect("mamba2 fast path requires mamba2 params");
+                        let output = tensorized_mamba2_forward(
+                            value,
+                            config.d_inner,
+                            config.d_state,
+                            config.d_conv,
+                            config.headdim,
+                            config.ngroups,
+                            params.in_proj_tensor(),
+                            params.conv_weight_tensor(),
+                            params.conv_bias_tensor(),
+                            params.dt_bias_tensor(),
+                            params.a_log_tensor(),
+                            params.d_skip_tensor(),
+                            params.norm_weight_tensor(),
+                            config.norm_eps,
+                            params.out_proj_tensor(),
+                            Some(Mamba2TensorizedState {
+                                conv: initial_state.conv,
+                                ssm: initial_state.ssm,
+                            }),
+                        );
+                        write_mamba_state(layer_state, output.state.ssm, output.state.conv);
+                        return output.context;
+                    }
                 }
                 let (context, next_state) = mamba_reference(
                     value,

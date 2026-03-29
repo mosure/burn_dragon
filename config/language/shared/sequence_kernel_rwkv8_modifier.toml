@@ -1,0 +1,2 @@
+[model]
+sequence_kernel = "rwkv8_state_space"

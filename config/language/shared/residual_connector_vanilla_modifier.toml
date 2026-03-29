@@ -1,0 +1,14 @@
+[model]
+residual_connector = "vanilla"
+
+[model.mhc]
+enabled = false
+num_streams = 1
+num_views = 1
+mhc_iters = 10
+mhc_tau = 0.05
+add_branch_out_to_residual = true
+dropout = 0.0
+
+[model.attention_residual]
+enabled = false

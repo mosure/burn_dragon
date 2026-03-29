@@ -1,0 +1,17 @@
+# Extra-conservative WGPU overlay for short profiling and stall diagnosis.
+# Purpose:
+# - survive first-run CubeCL autotune on the real ImageNet multimode spatial path
+# - keep loader/runtime structure unchanged
+# - trade throughput for reliable instrumentation
+
+[dataset]
+prefetch_batches = 1
+prefetch_workers = 6
+prefetch_to_device = false
+
+[training]
+batch_size = 16
+gradient_accumulation_steps = 16
+log_frequency = 8
+device_memory_check_every = 2
+max_device_memory_mb = 98304

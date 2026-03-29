@@ -6,7 +6,7 @@ pub use burn_dragon_core::{
     BdhTopologyPriorKind, BitNetLowBitProtocol, LowBitActivationFormat, LowBitActivationGrouping,
     LowBitInferenceMode, LowBitSavedActivationMode, LowBitTargetModule, LowBitTrainingMode,
     LowBitWeightFormat, LowBitWeightGrouping, RhoCompressionConfig, RhoPrecisionConfig,
-    SequenceKernelKind,
+    SequenceKernelConfig,
 };
 use serde::{Deserialize, Serialize};
 
@@ -335,7 +335,7 @@ pub struct ModelSpec {
     pub latent_total: usize,
     pub latent_per_head: usize,
     pub shared_layer_weights: bool,
-    pub sequence_kernel: SequenceKernelKind,
+    pub sequence_kernel: SequenceKernelConfig,
     #[serde(default)]
     pub bdh_initialization_kind: BdhInitializationKind,
     #[serde(default)]
@@ -398,7 +398,7 @@ pub struct ParallelSpec {
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct KernelSpec {
-    pub sequence_kernel: SequenceKernelKind,
+    pub sequence_kernel: SequenceKernelConfig,
     pub fused_kernels_enabled: bool,
     pub rollout_fast_steps_per_slow_step: usize,
     pub wgpu_fused_core_recurrent: Option<bool>,

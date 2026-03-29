@@ -1,0 +1,8 @@
+# Shorter profiling overlay for sync-aware timing on the real ImageNet path.
+
+[training]
+schedule_mode = "max_iters"
+epochs = 1
+max_iters = 32
+log_frequency = 1
+device_memory_check_every = 1

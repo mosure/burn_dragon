@@ -52,6 +52,7 @@ where
     )
     .num_epochs(env.epochs)
     .with_training_strategy(LearningStrategy::SingleDevice(env.device.clone()))
+    .with_application_logger(None)
     .with_file_checkpointer(BinFileRecorder::<FullPrecisionSettings>::new())
     .metric_train_numeric(IterationSpeedMetric::new())
     .metric_train_numeric(

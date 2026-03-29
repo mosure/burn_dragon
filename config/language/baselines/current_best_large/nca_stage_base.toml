@@ -1,6 +1,22 @@
 extends = [
-  "../../experiments/nca_prepretrain_large_base.toml",
+  "../../shared/current_best_large_dense_stack.toml",
 ]
+
+[dataset]
+cache_dir = "data/universality/runtime_large"
+train_split_ratio = 0.9
+type = "universality_nca"
+config = "config/universality/nca_paper_aligned_medium.toml"
+
+[dataset.tokenizer]
+type = "pretokenized"
+vocab_size = 50257
+eos_id = 50256
+
+[generation]
+prompt = "0 0 0"
+temperature = 1.0
+top_k = 1
 
 [training]
 # Keep the NCA budget intentionally tiny.

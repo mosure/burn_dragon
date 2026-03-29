@@ -5,6 +5,65 @@ use burn::tensor::{Tensor, TensorData};
 use burn_dragon_core::MicroTransformerBlock;
 
 impl<B: Backend> DragonDreamer<B> {
+    pub(super) fn passive_action_token_for_step(
+        &self,
+        frame_actions: &Option<Tensor<B, 3>>,
+        batch: usize,
+        step: usize,
+    ) -> Option<Tensor<B, 2>> {
+        frame_actions.as_ref().and_then(|actions| {
+            let action_steps = actions.shape().dims::<3>()[1];
+            if action_steps == 0 {
+                return None;
+            }
+            let action_step = step.min(action_steps.saturating_sub(1));
+            Some(
+                activation::gelu(
+                    self.transformer_action_token.forward(
+                        actions
+                            .clone()
+                            .slice_dim(1, action_step..action_step + 1)
+                            .reshape([batch, 2]),
+                    ),
+                )
+                .reshape([batch, self.latent_dim]),
+            )
+        })
+    }
+
+    fn temporal_group_size(&self, has_action_token: bool) -> usize {
+        self.slot_count + usize::from(has_action_token && self.passive_interleaved_action_tokens)
+    }
+
+    fn temporal_group_tokens(
+        &self,
+        slots: Tensor<B, 3>,
+        slot_pos: &Tensor<B, 3>,
+        time_token: Tensor<B, 3>,
+        action_token: Option<Tensor<B, 2>>,
+    ) -> Tensor<B, 4> {
+        let repeated_time = time_token.clone().repeat_dim(1, self.slot_count);
+        if self.passive_interleaved_action_tokens {
+            let slot_tokens = slots + slot_pos.clone() + repeated_time;
+            if let Some(action_token) = action_token {
+                let action_token = action_token.unsqueeze_dim::<3>(1) + time_token;
+                Tensor::cat(vec![slot_tokens, action_token], 1).unsqueeze_dim::<4>(1)
+            } else {
+                slot_tokens.unsqueeze_dim::<4>(1)
+            }
+        } else {
+            let slot_tokens = if let Some(action_token) = action_token {
+                let action_bias = action_token
+                    .unsqueeze_dim::<3>(1)
+                    .repeat_dim(1, self.slot_count);
+                slots + slot_pos.clone() + repeated_time + action_bias
+            } else {
+                slots + slot_pos.clone() + repeated_time
+            };
+            slot_tokens.unsqueeze_dim::<4>(1)
+        }
+    }
+
     pub(super) fn predict_fixation_from_slots(
         &self,
         slots: Tensor<B, 3>,
@@ -111,6 +170,32 @@ impl<B: Backend> DragonDreamer<B> {
         )
     }
 
+    pub(super) fn predict_slot_tokens_from_summary(
+        &self,
+        summary: Tensor<B, 2>,
+        seed_slots: Tensor<B, 3>,
+    ) -> Tensor<B, 3> {
+        let [batch, slot_count, _] = seed_slots.shape().dims::<3>();
+        let summary_hidden =
+            activation::gelu(self.slot_state_from_summary_hidden.forward(summary.clone()));
+        let projected = self
+            .slot_state_from_summary_out
+            .forward(summary_hidden)
+            .reshape([batch, slot_count, self.latent_dim]);
+        let summary_slots = summary.unsqueeze_dim::<3>(1).repeat_dim(1, slot_count);
+        let gate = activation::sigmoid(
+            self.slot_state_mix_gate.forward(
+                Tensor::cat(
+                    vec![seed_slots.clone(), projected.clone(), summary_slots],
+                    2,
+                )
+                .reshape([batch * slot_count, self.latent_dim * 3]),
+            ),
+        )
+        .reshape([batch, slot_count, self.latent_dim]);
+        seed_slots.clone() + gate * (projected - seed_slots)
+    }
+
     pub(super) fn slot_position_embeddings(
         &self,
         batch: usize,
@@ -131,6 +216,27 @@ impl<B: Backend> DragonDreamer<B> {
             }
         }
         Tensor::<B, 2>::from_data(TensorData::new(coords, [self.slot_count, 2]), device)
+            .unsqueeze_dim::<3>(0)
+            .repeat_dim(0, batch)
+    }
+
+    pub(super) fn time_position_embeddings(
+        &self,
+        batch: usize,
+        time: usize,
+        device: &B::Device,
+    ) -> Tensor<B, 3> {
+        let time = time.max(1);
+        let mut coords = Vec::with_capacity(time * 2);
+        let denom = time.saturating_sub(1).max(1) as f32;
+        for step in 0..time {
+            let progress = step as f32 / denom;
+            coords.push(progress);
+            coords.push(progress.mul_add(2.0, -1.0));
+        }
+        let base = Tensor::<B, 2>::from_data(TensorData::new(coords, [time, 2]), device);
+        let hidden = activation::gelu(self.transformer_time_pos_in.forward(base));
+        activation::gelu(self.transformer_time_pos_out.forward(hidden))
             .unsqueeze_dim::<3>(0)
             .repeat_dim(0, batch)
     }
@@ -172,19 +278,280 @@ impl<B: Backend> DragonDreamer<B> {
         hidden
     }
 
-    pub(super) fn prior_step_slots(&self, slots: Tensor<B, 3>) -> Tensor<B, 3> {
+    pub(super) fn apply_slot_blocks_group_causal(
+        &self,
+        tokens: Tensor<B, 3>,
+        blocks: &[MicroTransformerBlock<B>],
+        group_size: usize,
+    ) -> Tensor<B, 3> {
+        let mut hidden = tokens;
+        for block in blocks {
+            hidden = block.forward_group_causal(hidden, group_size);
+        }
+        hidden
+    }
+
+    pub(super) fn apply_temporal_slot_blocks(
+        &self,
+        tokens: Tensor<B, 3>,
+        blocks: &[MicroTransformerBlock<B>],
+        group_size: usize,
+    ) -> Tensor<B, 3> {
+        if self.passive_group_causal_temporal_attention {
+            self.apply_slot_blocks_group_causal(tokens, blocks, group_size)
+        } else {
+            self.apply_slot_blocks(tokens, blocks)
+        }
+    }
+
+    fn predict_next_slots_from_history(
+        &self,
+        history_slots: &[Tensor<B, 3>],
+        frame_actions: Option<Tensor<B, 3>>,
+    ) -> Tensor<B, 3> {
+        let last_slots = history_slots
+            .last()
+            .expect("predict_next_slots_from_history requires history")
+            .clone();
+        let batch = last_slots.shape().dims::<3>()[0];
+        let device = last_slots.device();
+        let slot_pos = self.slot_position_embeddings(batch, &device);
+        let next_step = history_slots.len();
+        let total_steps = next_step + 1;
+        let time_pos = self.time_position_embeddings(batch, total_steps, &device);
+        let has_action_token = frame_actions.is_some();
+        let group_size = self.temporal_group_size(has_action_token);
+
+        let mut context_tokens = Vec::with_capacity(history_slots.len());
+        for (step, slots) in history_slots.iter().enumerate() {
+            let time_token =
+                time_pos
+                    .clone()
+                    .slice_dim(1, step..step + 1)
+                    .reshape([batch, 1, self.latent_dim]);
+            let action_token = self.passive_action_token_for_step(&frame_actions, batch, step);
+            context_tokens.push(self.temporal_group_tokens(
+                slots.clone(),
+                &slot_pos,
+                time_token,
+                action_token,
+            ));
+        }
+
+        let previous_slots = if history_slots.len() >= 2 {
+            Some(history_slots[history_slots.len() - 2].clone())
+        } else {
+            None
+        };
+        let base_slots = self.prior_step_slots(last_slots.clone(), previous_slots);
+        let next_time_token =
+            time_pos
+                .slice_dim(1, next_step..next_step + 1)
+                .reshape([batch, 1, self.latent_dim]);
+        let query_tokens = if let Some(action_token) =
+            self.passive_action_token_for_step(&frame_actions, batch, next_step.saturating_sub(1))
+        {
+            self.temporal_group_tokens(
+                base_slots.clone(),
+                &slot_pos,
+                next_time_token,
+                Some(action_token),
+            )
+        } else {
+            self.temporal_group_tokens(base_slots.clone(), &slot_pos, next_time_token, None)
+        };
+
+        let history_tokens = Tensor::cat(context_tokens, 1);
+        let temporal_tokens = Tensor::cat(vec![history_tokens, query_tokens], 1).reshape([
+            batch,
+            total_steps * group_size,
+            self.latent_dim,
+        ]);
+        let temporal_hidden = self
+            .apply_temporal_slot_blocks(
+                temporal_tokens,
+                &self.transformer_temporal_blocks,
+                group_size,
+            )
+            .reshape([batch, total_steps, group_size, self.latent_dim]);
+        let query_hidden = temporal_hidden
+            .slice_dim(1, next_step..next_step + 1)
+            .slice_dim(2, 0..self.slot_count)
+            .reshape([batch * self.slot_count, self.latent_dim]);
+        let future_delta = activation::gelu(self.transformer_temporal_out.forward(query_hidden))
+            .reshape([batch, self.slot_count, self.latent_dim]);
+        base_slots + future_delta
+    }
+
+    pub(super) fn predict_future_slots_from_context(
+        &self,
+        context_slots: &[Tensor<B, 3>],
+        target_len: usize,
+        frame_actions: Option<Tensor<B, 3>>,
+        teacher_future_slots: Option<&[Tensor<B, 3>]>,
+        teacher_forcing_prefix_steps: usize,
+    ) -> Vec<Tensor<B, 3>> {
+        let target_len = target_len.max(1);
+        let mut history_slots = context_slots.to_vec();
+        let mut outputs = Vec::with_capacity(target_len);
+
+        for step in 0..target_len {
+            let predicted =
+                self.predict_next_slots_from_history(&history_slots, frame_actions.clone());
+            outputs.push(predicted.clone());
+            if let Some(teacher_future_slots) = teacher_future_slots {
+                if step < teacher_forcing_prefix_steps {
+                    history_slots.push(teacher_future_slots[step].clone());
+                } else {
+                    history_slots.push(predicted);
+                }
+            } else {
+                history_slots.push(predicted);
+            }
+        }
+
+        outputs
+    }
+
+    pub(super) fn predict_future_slots_joint_from_context(
+        &self,
+        context_slots: &[Tensor<B, 3>],
+        target_len: usize,
+        frame_actions: Option<Tensor<B, 3>>,
+    ) -> Vec<Tensor<B, 3>> {
+        let target_len = target_len.max(1);
+        let last_slots = context_slots
+            .last()
+            .expect("predict_future_slots_joint_from_context requires history")
+            .clone();
+        let batch = last_slots.shape().dims::<3>()[0];
+        let device = last_slots.device();
+        let history_len = context_slots.len();
+        let total_steps = history_len + target_len;
+
+        let slot_pos = self.slot_position_embeddings(batch, &device);
+        let time_pos = self.time_position_embeddings(batch, total_steps, &device);
+        let has_action_token = frame_actions.is_some();
+        let group_size = self.temporal_group_size(has_action_token);
+
+        let mut packed_steps = Vec::with_capacity(total_steps);
+        for (step, slots) in context_slots.iter().enumerate() {
+            let time_token =
+                time_pos
+                    .clone()
+                    .slice_dim(1, step..step + 1)
+                    .reshape([batch, 1, self.latent_dim]);
+            let action_token = self.passive_action_token_for_step(&frame_actions, batch, step);
+            packed_steps.push(self.temporal_group_tokens(
+                slots.clone(),
+                &slot_pos,
+                time_token,
+                action_token,
+            ));
+        }
+
+        let mut future_seed_slots = Vec::with_capacity(target_len);
+        let mut previous_slots = if history_len >= 2 {
+            Some(context_slots[history_len - 2].clone())
+        } else {
+            None
+        };
+        let mut current_slots = last_slots.clone();
+        for _ in 0..target_len {
+            let next_seed = self.prior_step_slots(current_slots.clone(), previous_slots.clone());
+            previous_slots = Some(current_slots);
+            current_slots = next_seed.clone();
+            future_seed_slots.push(next_seed);
+        }
+
+        for (offset, seed_slots) in future_seed_slots.iter().enumerate() {
+            let future_step = history_len + offset;
+            let time_token = time_pos
+                .clone()
+                .slice_dim(1, future_step..future_step + 1)
+                .reshape([batch, 1, self.latent_dim]);
+            let action_token = self.passive_action_token_for_step(
+                &frame_actions,
+                batch,
+                future_step.saturating_sub(1),
+            );
+            packed_steps.push(self.temporal_group_tokens(
+                seed_slots.clone(),
+                &slot_pos,
+                time_token,
+                action_token,
+            ));
+        }
+
+        let temporal_tokens = Tensor::cat(packed_steps, 1).reshape([
+            batch,
+            total_steps * group_size,
+            self.latent_dim,
+        ]);
+        let temporal_hidden = self
+            .apply_temporal_slot_blocks(
+                temporal_tokens,
+                &self.transformer_temporal_blocks,
+                group_size,
+            )
+            .reshape([batch, total_steps, group_size, self.latent_dim]);
+
+        future_seed_slots
+            .into_iter()
+            .enumerate()
+            .map(|(offset, seed_slots)| {
+                let future_step = history_len + offset;
+                let query_hidden = temporal_hidden
+                    .clone()
+                    .slice_dim(1, future_step..future_step + 1)
+                    .slice_dim(2, 0..self.slot_count)
+                    .reshape([batch * self.slot_count, self.latent_dim]);
+                let future_delta =
+                    activation::gelu(self.transformer_temporal_out.forward(query_hidden))
+                        .reshape([batch, self.slot_count, self.latent_dim]);
+                seed_slots + future_delta
+            })
+            .collect()
+    }
+
+    pub(super) fn prior_step_slots(
+        &self,
+        slots: Tensor<B, 3>,
+        previous_slots: Option<Tensor<B, 3>>,
+    ) -> Tensor<B, 3> {
         let [batch, slot_count, _] = slots.shape().dims::<3>();
-        let positioned = slots.clone() + self.slot_position_embeddings(batch, &slots.device());
+        let temporal_slots = if let Some(previous_slots) = previous_slots {
+            let delta = slots.clone() - previous_slots;
+            let temporal = activation::gelu(
+                self.transformer_prior_temporal_in.forward(
+                    Tensor::cat(vec![slots.clone(), delta.clone()], 2)
+                        .reshape([batch * slot_count, self.latent_dim * 2]),
+                ),
+            )
+            .reshape([batch, slot_count, self.latent_dim]);
+            let delta_gate = activation::sigmoid(
+                self.transformer_prior_delta_gate.forward(
+                    Tensor::cat(vec![slots.clone(), delta.clone()], 2)
+                        .reshape([batch * slot_count, self.latent_dim * 2]),
+                ),
+            )
+            .reshape([batch, slot_count, self.latent_dim]);
+            slots.clone() + temporal + delta_gate * delta
+        } else {
+            slots.clone()
+        };
+        let positioned =
+            temporal_slots.clone() + self.slot_position_embeddings(batch, &temporal_slots.device());
         let updated = self.apply_slot_blocks(positioned, &self.transformer_prior_blocks);
         let updated_slots = updated.slice_dim(1, 0..slot_count);
         let gate = activation::sigmoid(
             self.transformer_prior_gate.forward(
-                Tensor::cat(vec![slots.clone(), updated_slots.clone()], 2)
+                Tensor::cat(vec![temporal_slots.clone(), updated_slots.clone()], 2)
                     .reshape([batch * slot_count, self.latent_dim * 2]),
             ),
         )
         .reshape([batch, slot_count, self.latent_dim]);
-        slots.clone() + gate * (updated_slots - slots)
+        temporal_slots.clone() + gate * (updated_slots - temporal_slots)
     }
 
     pub(super) fn posterior_step_slots(
@@ -228,6 +595,45 @@ impl<B: Backend> DragonDreamer<B> {
         prior_slots.clone() + gate * (updated_slots - prior_slots)
     }
 
+    pub(super) fn posterior_step_slots_passive(
+        &self,
+        prior_slots: Tensor<B, 3>,
+        observed_slots: Tensor<B, 3>,
+        peripheral: Tensor<B, 2>,
+    ) -> Tensor<B, 3> {
+        let [batch, slot_count, _] = prior_slots.shape().dims::<3>();
+        let mixed_slots = observed_slots.clone()
+            + prior_slots
+                .clone()
+                .sub(observed_slots.clone())
+                .mul_scalar(0.10);
+        let slot_tokens =
+            mixed_slots.clone() + self.slot_position_embeddings(batch, &prior_slots.device());
+        let observation_gate = activation::sigmoid(
+            self.transformer_observation_gate.forward(
+                Tensor::cat(vec![prior_slots.clone(), observed_slots.clone()], 2)
+                    .reshape([batch * slot_count, self.latent_dim * 2]),
+            ),
+        )
+        .reshape([batch, slot_count, self.latent_dim]);
+        let slot_tokens =
+            slot_tokens.clone() + observation_gate * (observed_slots.clone() - slot_tokens);
+        let peripheral_token =
+            activation::gelu(self.transformer_peripheral_token.forward(peripheral))
+                .unsqueeze_dim::<3>(1);
+        let fused = Tensor::cat(vec![slot_tokens, peripheral_token], 1);
+        let updated = self.apply_slot_blocks(fused, &self.transformer_posterior_blocks);
+        let updated_slots = updated.slice_dim(1, 0..slot_count);
+        let gate = activation::sigmoid(
+            self.transformer_posterior_gate.forward(
+                Tensor::cat(vec![observed_slots.clone(), updated_slots.clone()], 2)
+                    .reshape([batch * slot_count, self.latent_dim * 2]),
+            ),
+        )
+        .reshape([batch, slot_count, self.latent_dim]);
+        observed_slots.clone() + gate * (updated_slots - observed_slots)
+    }
+
     pub(super) fn decode_frame_from_slots_components(
         &self,
         slots: Tensor<B, 3>,
@@ -235,6 +641,7 @@ impl<B: Backend> DragonDreamer<B> {
     ) -> (Tensor<B, 4>, Tensor<B, 4>) {
         let [batch, _slot_count, _] = slots.shape().dims::<3>();
         let slot_grid = slots
+            .clone()
             .reshape([
                 batch,
                 self.slot_grid_size,

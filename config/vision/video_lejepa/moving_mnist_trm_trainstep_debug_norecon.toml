@@ -1,4 +1,0 @@
-extends = ["moving_mnist_trm_trainstep_debug_base.toml"]
-
-[mode.loss]
-debug_recon_weight = 0.0

@@ -1,0 +1,19 @@
+[model]
+n_layer = 8
+n_embd = 256
+n_head = 4
+latent_total = 65536
+mlp_internal_dim_multiplier = 256
+rollout_fast_steps_per_slow_step = 1
+relu_threshold = 0.0
+dropout = 0.0
+fused_kernels = true
+rotary_embedding = "alibi"
+residual_connector = "vanilla"
+
+[model.attention_residual]
+enabled = false
+num_heads = 4
+history_window = 4
+dropout = 0.0
+recency_bias = 2.0

@@ -15,7 +15,7 @@ pub use core::{
     ParallelPipelineCacheConfig, ParallelPipelineConfig, ParallelSpec, ParallelTensorConfig,
     ParallelismKind, PipelineCacheEvictionKind, PipelineCachePolicy, PipelineCommunicationKind,
     PipelinePartitionKind, PipelineScheduleKind, PipelineSharedWeightSyncKind,
-    PipelineTransportDtype, SequenceKernelKind, StateAxisSpec, StateLayout, StateTensorSpec,
+    PipelineTransportDtype, SequenceKernelConfig, StateAxisSpec, StateLayout, StateTensorSpec,
     TensorParallelAxis, TensorParallelPartitionKind, VisionTeacherVariant, WgpuBackend,
     WgpuGenerationExecutor, WgpuInferenceConfig, WgpuMemoryConfig, WgpuRuntimeConfig,
     WgpuStartupAutotuneConfig, WgpuTrainingConfig,

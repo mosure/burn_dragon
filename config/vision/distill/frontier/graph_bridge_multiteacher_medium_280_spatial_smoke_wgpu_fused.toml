@@ -1,0 +1,6 @@
+[vision]
+fused_kernels = true
+
+[wgpu.training]
+fused_core_recurrent = true
+fused_core_rollout = true

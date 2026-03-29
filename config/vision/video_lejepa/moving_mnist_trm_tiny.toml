@@ -1,1 +1,0 @@
-extends = ["moving_mnist_trm_stageaware_hybrid_compute_floor_dense_b160_vv_noaux_coarsesub1_short.toml"]

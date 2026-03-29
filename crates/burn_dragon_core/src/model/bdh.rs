@@ -20,6 +20,9 @@ use burn_dragon_kernel::api::recurrent::{
 use burn_dragon_kernel::kernels::sequence::mamba::selective_scan_forward::{
     MambaTensorizedState, tensorized_mamba_forward, use_tensorized_mamba_forward_experimental,
 };
+use burn_dragon_kernel::kernels::sequence::mamba2::forward::{
+    Mamba2TensorizedState, tensorized_mamba2_forward, use_tensorized_mamba2_forward_experimental,
+};
 use burn_dragon_kernel::kernels::sequence::rwkv8::forward::{
     tensorized_rwkv8_forward, use_tensorized_rwkv8_forward_experimental,
 };
@@ -82,14 +85,12 @@ use super::sequence::mamba::{
 };
 use super::sequence::rwkv8::recurrent_rwkv8_state_space_reference;
 use super::sequence::state::{mamba_state, write_mamba_state};
-use super::sequence::{SequenceKernelConfig, SequenceKernelFamily, SequenceTrainingExecutor};
+use super::sequence::{SequenceKernelConfig, SequenceMemorySystem, SequenceTrainingExecutor};
 #[cfg(any(feature = "viz", feature = "probe"))]
 use super::state::LayerVizState;
 use super::state::{LayerState, ModelState};
 use super::{ManifoldHyperConnections, mhc_merge_with_coefficients, mhc_split_with_coefficients};
 use crate::experimental::bitnet_reference::PackedWeightArtifact;
-#[cfg(test)]
-use crate::model::config::SequenceKernelKind;
 
 #[derive(Module, Debug)]
 pub struct BDH<B: Backend> {
@@ -254,10 +255,16 @@ impl<B: Backend> BDH<B> {
             .then(|| {
                 BlockAttentionResidual::new(&config.block_attention_residual, config.n_embd, device)
             });
-        let sequence_kernel = config.resolved_sequence_kernel_config();
-        let mamba_config = config.mamba.resolve(config.n_embd);
-        let mamba = (sequence_kernel.family == SequenceKernelFamily::Mamba1SelectiveSsm)
-            .then(|| MambaSequenceParameters::new(mamba_config, device));
+        let sequence_kernel = config.sequence_kernel;
+        let mamba_config = config
+            .mamba
+            .resolve(config.n_embd, sequence_kernel.memory_system);
+        let mamba = matches!(
+            sequence_kernel.memory_system,
+            SequenceMemorySystem::Mamba1SelectiveScan
+                | SequenceMemorySystem::Mamba2StateSpaceDuality
+        )
+        .then(|| MambaSequenceParameters::new(mamba_config, sequence_kernel.memory_system, device));
         let lm_head = Param::from_tensor(initializer.projection_tensor::<B>(
             BdhProjectionRole::LmHead,
             config.n_embd,

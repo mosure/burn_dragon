@@ -71,6 +71,16 @@ pub fn resolve_run_root_for_config_paths(
         run_root = run_root.join(category);
     }
 
+    if let Some(bundle) = normalize_relative_path_option(run_layout.bundle.as_deref()) {
+        run_root = run_root.join("bundles").join(bundle);
+    }
+    if let Some(stage) = normalize_relative_path_option(run_layout.stage.as_deref()) {
+        run_root = run_root.join("stages").join(stage);
+    }
+    if let Some(variant) = normalize_relative_path_option(run_layout.variant.as_deref()) {
+        run_root = run_root.join("variants").join(variant);
+    }
+
     run_root
 }
 
@@ -87,6 +97,7 @@ pub fn derive_run_category_from_config_paths(
 pub fn derive_run_category_from_config_path(domain: &str, config_path: &Path) -> Option<PathBuf> {
     let components: Vec<_> = config_path.components().collect();
     let mut config_root_index = None;
+    let mut local_root_index = None;
 
     for index in 0..components.len().saturating_sub(1) {
         if components[index].as_os_str() == OsStr::new("config")
@@ -94,19 +105,40 @@ pub fn derive_run_category_from_config_path(domain: &str, config_path: &Path) ->
         {
             config_root_index = Some(index);
         }
+        if components[index].as_os_str() == OsStr::new("config")
+            && components[index + 1].as_os_str() == OsStr::new("local")
+        {
+            local_root_index = Some(index);
+        }
     }
 
-    let start = config_root_index?;
     let stem = config_path.file_stem()?;
-    let mut category = PathBuf::new();
+    if let Some(start) = config_root_index {
+        let mut category = PathBuf::new();
+        for component in &components[start + 2..components.len().saturating_sub(1)] {
+            if let Component::Normal(segment) = component {
+                category.push(segment);
+            }
+        }
+        category.push(stem);
+        return normalize_relative_path(&category);
+    }
 
-    for component in &components[start + 2..components.len().saturating_sub(1)] {
+    let start = local_root_index?;
+    let mut category = PathBuf::from("local");
+    let local_components = &components[start + 2..components.len().saturating_sub(1)];
+    let mut local_index = 0usize;
+    if let Some(Component::Normal(segment)) = local_components.first()
+        && *segment == OsStr::new(domain)
+    {
+        local_index = 1;
+    }
+    for component in &local_components[local_index..] {
         if let Component::Normal(segment) = component {
             category.push(segment);
         }
     }
     category.push(stem);
-
     normalize_relative_path(&category)
 }
 
@@ -283,6 +315,10 @@ fn normalize_relative_path(path: &Path) -> Option<PathBuf> {
     (!normalized.as_os_str().is_empty()).then_some(normalized)
 }
 
+fn normalize_relative_path_option(path: Option<&Path>) -> Option<PathBuf> {
+    path.and_then(normalize_relative_path)
+}
+
 fn normalize_run_category(domain: &str, path: &Path) -> Option<PathBuf> {
     let normalized = normalize_relative_path(path)?;
     let mut components = normalized.components();
@@ -321,13 +357,13 @@ mod tests {
             &RunLayoutConfig::default(),
             &[
                 PathBuf::from("config/vision/base.toml"),
-                PathBuf::from("config/vision/video_lejepa/moving_mnist_vjepa21_dense.toml"),
+                PathBuf::from("config/vision/video_lejepa/baselines/vjepa21_dense_promoted.toml"),
             ],
         );
 
         assert_eq!(
             run_root,
-            PathBuf::from("runs/vision/video_lejepa/moving_mnist_vjepa21_dense")
+            PathBuf::from("runs/vision/video_lejepa/baselines/vjepa21_dense_promoted")
         );
     }
 
@@ -346,6 +382,32 @@ mod tests {
     }
 
     #[test]
+    fn mirrors_local_overlay_configs_under_local_namespace() {
+        let derived = derive_run_category_from_config_path(
+            "language",
+            &PathBuf::from("config/local/shakespeare_kernel_ablation/mamba2.toml"),
+        );
+
+        assert_eq!(
+            derived,
+            Some(PathBuf::from("local/shakespeare_kernel_ablation/mamba2"))
+        );
+    }
+
+    #[test]
+    fn mirrors_domain_scoped_local_overlay_without_duplicate_domain_segment() {
+        let derived = derive_run_category_from_config_path(
+            "language",
+            &PathBuf::from("config/local/language/sequence_kernels/mamba2.toml"),
+        );
+
+        assert_eq!(
+            derived,
+            Some(PathBuf::from("local/sequence_kernels/mamba2"))
+        );
+    }
+
+    #[test]
     fn explicit_category_overrides_config_mirroring() {
         let run_root = resolve_run_root_for_config_paths(
             "vision",
@@ -353,9 +415,12 @@ mod tests {
                 base_dir: None,
                 category: Some(PathBuf::from("vjepa/moving_mnist")),
                 mirror_config_path: true,
+                bundle: None,
+                stage: None,
+                variant: None,
             },
             &[PathBuf::from(
-                "config/vision/video_lejepa/moving_mnist_vjepa21_dense.toml",
+                "config/vision/video_lejepa/baselines/vjepa21_dense_promoted.toml",
             )],
         );
 
@@ -370,6 +435,9 @@ mod tests {
                 base_dir: None,
                 category: Some(PathBuf::from("vision/video_lejepa/vjepa21/imagenet1k")),
                 mirror_config_path: false,
+                bundle: None,
+                stage: None,
+                variant: None,
             },
             &[PathBuf::from(
                 "config/vision/video_lejepa/baselines/vjepa21_imagenet1k_dense_long.toml",
@@ -379,6 +447,29 @@ mod tests {
         assert_eq!(
             run_root,
             PathBuf::from("runs/vision/video_lejepa/vjepa21/imagenet1k")
+        );
+    }
+
+    #[test]
+    fn run_layout_appends_bundle_stage_and_variant_segments() {
+        let run_root = resolve_run_root_for_config_paths(
+            "language",
+            &RunLayoutConfig {
+                base_dir: None,
+                category: Some(PathBuf::from("ablations/shakespeare")),
+                mirror_config_path: false,
+                bundle: Some(PathBuf::from("kernel_compare")),
+                stage: Some(PathBuf::from("train")),
+                variant: Some(PathBuf::from("mamba2")),
+            },
+            &[],
+        );
+
+        assert_eq!(
+            run_root,
+            PathBuf::from(
+                "runs/language/ablations/shakespeare/bundles/kernel_compare/stages/train/variants/mamba2"
+            )
         );
     }
 

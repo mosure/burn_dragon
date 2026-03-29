@@ -1,0 +1,52 @@
+[dataset]
+cache_dir = "data/nemotron_climbmix"
+train_split_ratio = 0.9
+type = "hugging_face"
+repo_id = "nvidia/Nemotron-ClimbMix"
+format = "parquet"
+train_files = [
+  "climbmix_small/shard_0.tokenized.parquet",
+  "climbmix_small/shard_1.tokenized.parquet",
+  "climbmix_small/shard_2.tokenized.parquet",
+  "climbmix_small/shard_3.tokenized.parquet",
+]
+validation_files = []
+text_fields = []
+sequence_field = "tokens"
+max_records = 1024
+
+[dataset.tokenizer]
+type = "pretokenized"
+vocab_size = 50257
+eos_id = 50256
+
+[training]
+block_size = 64
+batch_size = 1
+seed = 1337
+gradient_accumulation_steps = 1
+target_effective_batch_size = 1
+sequence_kernel_override = { memory_system = "linear_attention", executor = "dense_score_short_context" }
+
+[optimizer]
+learning_rate = 0.0003
+weight_decay = 0.1
+
+[generation]
+prompt = "464 329 262"
+temperature = 1.0
+top_k = 1
+
+[wgpu]
+backend = "auto"
+
+[wgpu.training]
+fused_core_recurrent = true
+fused_core_rollout = false
+
+[wgpu.inference]
+fused_core_recurrent = true
+fused_core_rollout = false
+generation_executor = "baseline"
+generation_chunk_tokens = 8
+generation_device_buffer_tokens = 64

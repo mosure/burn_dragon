@@ -15,8 +15,8 @@ mod app {
     use burn_cubecl::cubecl::cuda::CudaRuntime;
     use burn_cuda::Cuda;
     use burn_dragon_kernel::kernels::sequence::mamba2::forward::{
-        CudaSsdCoreMode, Mamba2TensorizedState,
-        tensorized_mamba2_forward_custom_backward_with_cuda_ssd_mode,
+        CudaShellCoreMode, CudaSsdCoreMode, Mamba2TensorizedState,
+        tensorized_mamba2_forward_custom_backward_with_cuda_modes,
         tensorized_mamba2_forward_direct_graph,
     };
     use serde::Serialize;
@@ -51,12 +51,16 @@ mod app {
         repetitions: usize,
         graph_forward_ms: f64,
         wrapper_forward_ms: f64,
-        fused_forward_ms: f64,
-        fused_vs_wrapper_forward_speedup_x: f64,
+        ssd_fused_forward_ms: f64,
+        shell_fused_forward_ms: f64,
+        shell_fused_vs_ssd_fused_forward_speedup_x: f64,
+        shell_fused_vs_wrapper_forward_speedup_x: f64,
         graph_backward_ms: f64,
         wrapper_backward_ms: f64,
-        fused_backward_ms: f64,
-        fused_vs_wrapper_backward_speedup_x: f64,
+        ssd_fused_backward_ms: f64,
+        shell_fused_backward_ms: f64,
+        shell_fused_vs_ssd_fused_backward_speedup_x: f64,
+        shell_fused_vs_wrapper_backward_speedup_x: f64,
         output_max_abs: f64,
         conv_state_max_abs: f64,
         ssm_state_max_abs: f64,
@@ -199,19 +203,65 @@ mod app {
                 hidden.clone(),
                 &params,
                 CudaSsdCoreMode::ForcedDisabled,
+                CudaShellCoreMode::ForcedDisabled,
             );
             let _ = <AutodiffBackend as BackendTrait>::sync(device);
             let _ = mamba2_tensorized_autodiff_custom_with_mode(
                 hidden.clone(),
                 &params,
                 CudaSsdCoreMode::ForcedEnabled,
+                CudaShellCoreMode::ForcedDisabled,
             );
+            let _ = <AutodiffBackend as BackendTrait>::sync(device);
+            let _ = mamba2_tensorized_autodiff_custom_with_mode(
+                hidden.clone(),
+                &params,
+                CudaSsdCoreMode::ForcedEnabled,
+                CudaShellCoreMode::ForcedEnabled,
+            );
+            let _ = <AutodiffBackend as BackendTrait>::sync(device);
+
+            let _ = mamba2_tensorized_autodiff_graph(hidden.clone(), &params)
+                .0
+                .sum()
+                .backward();
+            let _ = <AutodiffBackend as BackendTrait>::sync(device);
+            let _ = mamba2_tensorized_autodiff_custom_with_mode(
+                hidden.clone(),
+                &params,
+                CudaSsdCoreMode::ForcedDisabled,
+                CudaShellCoreMode::ForcedDisabled,
+            )
+            .0
+            .sum()
+            .backward();
+            let _ = <AutodiffBackend as BackendTrait>::sync(device);
+            let _ = mamba2_tensorized_autodiff_custom_with_mode(
+                hidden.clone(),
+                &params,
+                CudaSsdCoreMode::ForcedEnabled,
+                CudaShellCoreMode::ForcedDisabled,
+            )
+            .0
+            .sum()
+            .backward();
+            let _ = <AutodiffBackend as BackendTrait>::sync(device);
+            let _ = mamba2_tensorized_autodiff_custom_with_mode(
+                hidden.clone(),
+                &params,
+                CudaSsdCoreMode::ForcedEnabled,
+                CudaShellCoreMode::ForcedEnabled,
+            )
+            .0
+            .sum()
+            .backward();
             let _ = <AutodiffBackend as BackendTrait>::sync(device);
         }
 
         let mut graph_forward_ms = 0.0;
         let mut wrapper_forward_ms = 0.0;
-        let mut fused_forward_ms = 0.0;
+        let mut ssd_fused_forward_ms = 0.0;
+        let mut shell_fused_forward_ms = 0.0;
         for _ in 0..repetitions {
             let _ = <AutodiffBackend as BackendTrait>::sync(device);
             let started = Instant::now();
@@ -225,6 +275,7 @@ mod app {
                 hidden.clone(),
                 &params,
                 CudaSsdCoreMode::ForcedDisabled,
+                CudaShellCoreMode::ForcedDisabled,
             );
             let _ = <AutodiffBackend as BackendTrait>::sync(device);
             wrapper_forward_ms += started.elapsed().as_secs_f64() * 1_000.0;
@@ -235,14 +286,27 @@ mod app {
                 hidden.clone(),
                 &params,
                 CudaSsdCoreMode::ForcedEnabled,
+                CudaShellCoreMode::ForcedDisabled,
             );
             let _ = <AutodiffBackend as BackendTrait>::sync(device);
-            fused_forward_ms += started.elapsed().as_secs_f64() * 1_000.0;
+            ssd_fused_forward_ms += started.elapsed().as_secs_f64() * 1_000.0;
+
+            let _ = <AutodiffBackend as BackendTrait>::sync(device);
+            let started = Instant::now();
+            let _ = mamba2_tensorized_autodiff_custom_with_mode(
+                hidden.clone(),
+                &params,
+                CudaSsdCoreMode::ForcedEnabled,
+                CudaShellCoreMode::ForcedEnabled,
+            );
+            let _ = <AutodiffBackend as BackendTrait>::sync(device);
+            shell_fused_forward_ms += started.elapsed().as_secs_f64() * 1_000.0;
         }
 
         let mut graph_backward_ms = 0.0;
         let mut wrapper_backward_ms = 0.0;
-        let mut fused_backward_ms = 0.0;
+        let mut ssd_fused_backward_ms = 0.0;
+        let mut shell_fused_backward_ms = 0.0;
         for _ in 0..repetitions {
             let _ = <AutodiffBackend as BackendTrait>::sync(device);
             let started = Instant::now();
@@ -259,6 +323,7 @@ mod app {
                 hidden.clone(),
                 &params,
                 CudaSsdCoreMode::ForcedDisabled,
+                CudaShellCoreMode::ForcedDisabled,
             )
             .0
             .sum();
@@ -272,12 +337,27 @@ mod app {
                 hidden.clone(),
                 &params,
                 CudaSsdCoreMode::ForcedEnabled,
+                CudaShellCoreMode::ForcedDisabled,
             )
             .0
             .sum();
             let _ = fused_loss.backward();
             let _ = <AutodiffBackend as BackendTrait>::sync(device);
-            fused_backward_ms += started.elapsed().as_secs_f64() * 1_000.0;
+            ssd_fused_backward_ms += started.elapsed().as_secs_f64() * 1_000.0;
+
+            let _ = <AutodiffBackend as BackendTrait>::sync(device);
+            let started = Instant::now();
+            let fused_loss = mamba2_tensorized_autodiff_custom_with_mode(
+                hidden.clone(),
+                &params,
+                CudaSsdCoreMode::ForcedEnabled,
+                CudaShellCoreMode::ForcedEnabled,
+            )
+            .0
+            .sum();
+            let _ = fused_loss.backward();
+            let _ = <AutodiffBackend as BackendTrait>::sync(device);
+            shell_fused_backward_ms += started.elapsed().as_secs_f64() * 1_000.0;
         }
 
         let (graph_output, graph_state) = mamba2_tensorized_autodiff_graph(hidden.clone(), &params);
@@ -285,11 +365,19 @@ mod app {
             hidden.clone(),
             &params,
             CudaSsdCoreMode::ForcedDisabled,
+            CudaShellCoreMode::ForcedDisabled,
         );
-        let (fused_output, fused_state) = mamba2_tensorized_autodiff_custom_with_mode(
+        let (ssd_fused_output, ssd_fused_state) = mamba2_tensorized_autodiff_custom_with_mode(
+            hidden.clone(),
+            &params,
+            CudaSsdCoreMode::ForcedEnabled,
+            CudaShellCoreMode::ForcedDisabled,
+        );
+        let (shell_fused_output, shell_fused_state) = mamba2_tensorized_autodiff_custom_with_mode(
             hidden,
             &params,
             CudaSsdCoreMode::ForcedEnabled,
+            CudaShellCoreMode::ForcedEnabled,
         );
         let _ = <AutodiffBackend as BackendTrait>::sync(device);
         let memory_after = memory_snapshot(device);
@@ -300,20 +388,41 @@ mod app {
             repetitions,
             graph_forward_ms: graph_forward_ms / repetitions.max(1) as f64,
             wrapper_forward_ms: wrapper_forward_ms / repetitions.max(1) as f64,
-            fused_forward_ms: fused_forward_ms / repetitions.max(1) as f64,
-            fused_vs_wrapper_forward_speedup_x: wrapper_forward_ms
-                / fused_forward_ms.max(f64::EPSILON),
+            ssd_fused_forward_ms: ssd_fused_forward_ms / repetitions.max(1) as f64,
+            shell_fused_forward_ms: shell_fused_forward_ms / repetitions.max(1) as f64,
+            shell_fused_vs_ssd_fused_forward_speedup_x: ssd_fused_forward_ms
+                / shell_fused_forward_ms.max(f64::EPSILON),
+            shell_fused_vs_wrapper_forward_speedup_x: wrapper_forward_ms
+                / shell_fused_forward_ms.max(f64::EPSILON),
             graph_backward_ms: graph_backward_ms / repetitions.max(1) as f64,
             wrapper_backward_ms: wrapper_backward_ms / repetitions.max(1) as f64,
-            fused_backward_ms: fused_backward_ms / repetitions.max(1) as f64,
-            fused_vs_wrapper_backward_speedup_x: wrapper_backward_ms
-                / fused_backward_ms.max(f64::EPSILON),
-            output_max_abs: max_abs_4(wrapper_output.clone(), fused_output.clone())
-                .max(max_abs_4(graph_output, fused_output)),
-            conv_state_max_abs: max_abs_4(wrapper_state.conv.clone(), fused_state.conv.clone())
-                .max(max_abs_4(graph_state.conv, fused_state.conv)),
-            ssm_state_max_abs: max_abs_4(wrapper_state.ssm.clone(), fused_state.ssm.clone())
-                .max(max_abs_4(graph_state.ssm, fused_state.ssm)),
+            ssd_fused_backward_ms: ssd_fused_backward_ms / repetitions.max(1) as f64,
+            shell_fused_backward_ms: shell_fused_backward_ms / repetitions.max(1) as f64,
+            shell_fused_vs_ssd_fused_backward_speedup_x: ssd_fused_backward_ms
+                / shell_fused_backward_ms.max(f64::EPSILON),
+            shell_fused_vs_wrapper_backward_speedup_x: wrapper_backward_ms
+                / shell_fused_backward_ms.max(f64::EPSILON),
+            output_max_abs: max_abs_4(wrapper_output.clone(), shell_fused_output.clone())
+                .max(max_abs_4(
+                    ssd_fused_output.clone(),
+                    shell_fused_output.clone(),
+                ))
+                .max(max_abs_4(graph_output, shell_fused_output)),
+            conv_state_max_abs: max_abs_4(
+                wrapper_state.conv.clone(),
+                shell_fused_state.conv.clone(),
+            )
+            .max(max_abs_4(
+                ssd_fused_state.conv.clone(),
+                shell_fused_state.conv.clone(),
+            ))
+            .max(max_abs_4(graph_state.conv, shell_fused_state.conv)),
+            ssm_state_max_abs: max_abs_4(wrapper_state.ssm.clone(), shell_fused_state.ssm.clone())
+                .max(max_abs_4(
+                    ssd_fused_state.ssm.clone(),
+                    shell_fused_state.ssm.clone(),
+                ))
+                .max(max_abs_4(graph_state.ssm, shell_fused_state.ssm)),
             memory_before,
             memory_after,
         }
@@ -415,11 +524,12 @@ mod app {
         hidden_states: Tensor<AutodiffBackend, 4>,
         params: &ParamsAutodiff,
         cuda_ssd_core_mode: CudaSsdCoreMode,
+        cuda_shell_core_mode: CudaShellCoreMode,
     ) -> (Tensor<AutodiffBackend, 4>, StateAutodiff) {
         let batch = hidden_states.shape().dims::<4>()[0];
         let conv_dim = params.d_inner + 2 * params.ngroups * params.d_state;
         let device = hidden_states.device();
-        let output = tensorized_mamba2_forward_custom_backward_with_cuda_ssd_mode(
+        let output = tensorized_mamba2_forward_custom_backward_with_cuda_modes(
             hidden_states,
             params.d_inner,
             params.d_state,
@@ -446,6 +556,7 @@ mod app {
                 ),
             }),
             cuda_ssd_core_mode,
+            cuda_shell_core_mode,
         )
         .expect("cuda custom backward path available");
         (

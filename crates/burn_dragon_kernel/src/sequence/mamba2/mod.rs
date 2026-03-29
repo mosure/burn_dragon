@@ -1,13 +1,14 @@
 pub mod backward;
 pub mod bench;
 pub mod forward;
+pub mod rmsnorm_runtime;
 pub mod ssd_runtime;
 
 /// Mamba-2 SSD currently ships as a tensorized CUDA/WGPU path. WGPU inference can route the SSD
 /// recurrence core through a custom Cube forward kernel. On CUDA, the default training path uses
-/// the custom analytic backward wrapper, and CUDA can route the SSD recurrence core through custom
-/// fused forward/backward kernels.
-pub const STATUS: &str = "tensorized_forward_default_wgpu_custom_cube_ssd_core_and_default_cuda_custom_analytic_backward_with_fused_ssd_core";
+/// the custom analytic backward wrapper, and CUDA can route the SSD recurrence plus the
+/// depthwise-conv / RMSNorm-gated shell through custom fused cores.
+pub const STATUS: &str = "tensorized_default_wgpu_custom_ssd_forward_and_default_cuda_custom_analytic_backward_with_fused_ssd_and_shell_cores";
 pub const FORWARD_ACCELERATION_AVAILABLE: bool = true;
 pub const BACKWARD_ACCELERATION_AVAILABLE: bool = true;
 pub const CUDA_DEFAULT_TRAIN_PATH: &str = "custom_analytic_backward_wrapper";

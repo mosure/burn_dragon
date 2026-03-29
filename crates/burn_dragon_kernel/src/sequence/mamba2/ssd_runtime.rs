@@ -430,6 +430,7 @@ fn params_tensor_wgpu(
     )
 }
 
+#[cfg(feature = "cuda")]
 fn div_ceil_u32(value: u32, divisor: u32) -> u32 {
     value.div_ceil(divisor)
 }

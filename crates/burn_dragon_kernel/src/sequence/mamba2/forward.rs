@@ -11,7 +11,6 @@ use burn_autodiff::ops::{Backward, OpsKind};
 #[cfg(feature = "cuda")]
 use burn_cubecl::cubecl::cuda::CudaRuntime;
 use burn_cubecl::fusion::FusionCubeRuntime;
-#[cfg(feature = "cuda")]
 use burn_cubecl::tensor::CubeTensor;
 use burn_cubecl::{BoolElement, CubeRuntime};
 use burn_fusion::{Fusion, FusionTensor};
@@ -19,8 +18,19 @@ use burn_wgpu::{CubeBackend, WgpuRuntime};
 
 use crate::fusion_compat::register_fusion_float_tensor;
 use crate::kernels::sequence::mamba::conv::tensorized_mamba_depthwise_conv;
+#[cfg(feature = "cuda")]
+use crate::kernels::sequence::mamba::conv_runtime::{
+    MambaDepthwiseConvCudaForwardOutput, fused_mamba_depthwise_conv_forward_cuda,
+};
 use crate::kernels::sequence::mamba2::backward::{
     Mamba2TensorizedBackwardState, TensorizedMamba2Backward,
+};
+#[cfg(feature = "cuda")]
+use crate::kernels::sequence::mamba2::rmsnorm_runtime::{
+    Mamba2RmsnormGatedCudaForwardOutput, fused_mamba2_rmsnorm_gated_forward_cuda,
+};
+use crate::kernels::sequence::mamba2::rmsnorm_runtime::{
+    Mamba2RmsnormGatedWgpuForwardOutput, fused_mamba2_rmsnorm_gated_forward_wgpu,
 };
 #[cfg(feature = "cuda")]
 use crate::kernels::sequence::mamba2::ssd_runtime::fused_mamba2_ssd_forward_cuda;
@@ -62,11 +72,20 @@ pub struct Mamba2TensorizedOutput<B: BackendTrait> {
 struct Mamba2TensorizedInternalOutput<B: BackendTrait> {
     output: Mamba2TensorizedOutput<B>,
     ssd_state_history: Option<Tensor<B, 6>>,
+    rmsnorm_inv_rms: Option<Tensor<B, 2>>,
 }
 
 #[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CudaSsdCoreMode {
+    RuntimeDefault,
+    ForcedEnabled,
+    ForcedDisabled,
+}
+
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CudaShellCoreMode {
     RuntimeDefault,
     ForcedEnabled,
     ForcedDisabled,
@@ -78,6 +97,15 @@ pub(crate) fn cuda_ssd_core_mode_enabled(mode: CudaSsdCoreMode) -> bool {
         CudaSsdCoreMode::RuntimeDefault => use_tensorized_mamba2_cuda_fused_ssd_core(),
         CudaSsdCoreMode::ForcedEnabled => true,
         CudaSsdCoreMode::ForcedDisabled => false,
+    }
+}
+
+#[cfg(feature = "cuda")]
+pub(crate) fn cuda_shell_core_mode_enabled(mode: CudaShellCoreMode) -> bool {
+    match mode {
+        CudaShellCoreMode::RuntimeDefault => use_tensorized_mamba2_cuda_fused_shell_core(),
+        CudaShellCoreMode::ForcedEnabled => true,
+        CudaShellCoreMode::ForcedDisabled => false,
     }
 }
 
@@ -118,6 +146,18 @@ fn use_tensorized_mamba2_cuda_train_wrapper() -> bool {
 #[cfg(feature = "cuda")]
 pub(crate) fn use_tensorized_mamba2_cuda_fused_ssd_core() -> bool {
     match std::env::var("BURN_DRAGON_MAMBA2_CUDA_FUSED_SSD_CORE")
+        .ok()
+        .as_deref()
+    {
+        Some("0") | Some("false") | Some("FALSE") | Some("off") | Some("OFF") => false,
+        Some(_) => true,
+        None => true,
+    }
+}
+
+#[cfg(feature = "cuda")]
+pub(crate) fn use_tensorized_mamba2_cuda_fused_shell_core() -> bool {
+    match std::env::var("BURN_DRAGON_MAMBA2_CUDA_FUSED_SHELL_CORE")
         .ok()
         .as_deref()
     {
@@ -170,9 +210,10 @@ pub fn tensorized_mamba2_forward<B: BackendTrait>(
             out_proj.clone(),
             state.clone(),
             CudaSsdCoreMode::RuntimeDefault,
+            CudaShellCoreMode::RuntimeDefault,
         ) {
             log_mamba2_path_selection_once(
-                "mamba2 tensorized path: using custom analytic backward wrapper with fused CUDA SSD forward/backward core when available",
+                "mamba2 tensorized path: using custom analytic backward wrapper with fused CUDA SSD and shell cores when available",
             );
             return output;
         }
@@ -311,7 +352,7 @@ pub fn tensorized_mamba2_forward_custom_backward<B: BackendTrait>(
 where
     B::FloatTensorPrimitive: 'static,
 {
-    tensorized_mamba2_forward_custom_backward_with_cuda_ssd_mode(
+    tensorized_mamba2_forward_custom_backward_with_cuda_modes(
         hidden_states,
         d_inner,
         d_state,
@@ -329,6 +370,54 @@ where
         out_proj,
         state,
         CudaSsdCoreMode::RuntimeDefault,
+        CudaShellCoreMode::RuntimeDefault,
+    )
+}
+
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn tensorized_mamba2_forward_custom_backward_with_cuda_modes<B: BackendTrait>(
+    hidden_states: Tensor<B, 4>,
+    d_inner: usize,
+    d_state: usize,
+    d_conv: usize,
+    headdim: usize,
+    ngroups: usize,
+    in_proj: Tensor<B, 2>,
+    conv_weight: Tensor<B, 2>,
+    conv_bias: Option<Tensor<B, 1>>,
+    dt_bias: Tensor<B, 1>,
+    a_log: Tensor<B, 1>,
+    d_skip: Tensor<B, 1>,
+    norm_weight: Tensor<B, 1>,
+    norm_eps: f32,
+    out_proj: Tensor<B, 2>,
+    state: Option<Mamba2TensorizedState<B>>,
+    cuda_ssd_core_mode: CudaSsdCoreMode,
+    cuda_shell_core_mode: CudaShellCoreMode,
+) -> Option<Mamba2TensorizedOutput<B>>
+where
+    B::FloatTensorPrimitive: 'static,
+{
+    try_tensorized_mamba2_autodiff_cube(
+        hidden_states,
+        d_inner,
+        d_state,
+        d_conv,
+        headdim,
+        ngroups,
+        in_proj,
+        conv_weight,
+        conv_bias,
+        dt_bias,
+        a_log,
+        d_skip,
+        norm_weight,
+        norm_eps,
+        out_proj,
+        state,
+        cuda_ssd_core_mode,
+        cuda_shell_core_mode,
     )
 }
 
@@ -356,7 +445,7 @@ pub fn tensorized_mamba2_forward_custom_backward_with_cuda_ssd_mode<B: BackendTr
 where
     B::FloatTensorPrimitive: 'static,
 {
-    try_tensorized_mamba2_autodiff_cube(
+    tensorized_mamba2_forward_custom_backward_with_cuda_modes(
         hidden_states,
         d_inner,
         d_state,
@@ -374,6 +463,7 @@ where
         out_proj,
         state,
         cuda_ssd_core_mode,
+        CudaShellCoreMode::RuntimeDefault,
     )
 }
 
@@ -396,7 +486,7 @@ pub(crate) fn tensorized_mamba2_forward_impl<B: BackendTrait>(
     out_proj: Tensor<B, 2>,
     state: Option<Mamba2TensorizedState<B>>,
 ) -> Mamba2TensorizedOutput<B> {
-    tensorized_mamba2_forward_impl_with_cuda_ssd_mode(
+    tensorized_mamba2_forward_impl_with_cuda_modes(
         hidden_states,
         d_inner,
         d_state,
@@ -414,6 +504,7 @@ pub(crate) fn tensorized_mamba2_forward_impl<B: BackendTrait>(
         out_proj,
         state,
         CudaSsdCoreMode::RuntimeDefault,
+        CudaShellCoreMode::RuntimeDefault,
     )
 }
 
@@ -437,6 +528,49 @@ pub(crate) fn tensorized_mamba2_forward_impl_with_cuda_ssd_mode<B: BackendTrait>
     state: Option<Mamba2TensorizedState<B>>,
     cuda_ssd_core_mode: CudaSsdCoreMode,
 ) -> Mamba2TensorizedOutput<B> {
+    tensorized_mamba2_forward_impl_with_cuda_modes(
+        hidden_states,
+        d_inner,
+        d_state,
+        d_conv,
+        headdim,
+        ngroups,
+        in_proj,
+        conv_weight,
+        conv_bias,
+        dt_bias,
+        a_log,
+        d_skip,
+        norm_weight,
+        norm_eps,
+        out_proj,
+        state,
+        cuda_ssd_core_mode,
+        CudaShellCoreMode::RuntimeDefault,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn tensorized_mamba2_forward_impl_with_cuda_modes<B: BackendTrait>(
+    hidden_states: Tensor<B, 4>,
+    d_inner: usize,
+    d_state: usize,
+    d_conv: usize,
+    headdim: usize,
+    ngroups: usize,
+    in_proj: Tensor<B, 2>,
+    conv_weight: Tensor<B, 2>,
+    conv_bias: Option<Tensor<B, 1>>,
+    dt_bias: Tensor<B, 1>,
+    a_log: Tensor<B, 1>,
+    d_skip: Tensor<B, 1>,
+    norm_weight: Tensor<B, 1>,
+    norm_eps: f32,
+    out_proj: Tensor<B, 2>,
+    state: Option<Mamba2TensorizedState<B>>,
+    cuda_ssd_core_mode: CudaSsdCoreMode,
+    cuda_shell_core_mode: CudaShellCoreMode,
+) -> Mamba2TensorizedOutput<B> {
     tensorized_mamba2_forward_impl_internal_with_cuda_ssd_mode(
         hidden_states,
         d_inner,
@@ -455,6 +589,7 @@ pub(crate) fn tensorized_mamba2_forward_impl_with_cuda_ssd_mode<B: BackendTrait>
         out_proj,
         state,
         cuda_ssd_core_mode,
+        cuda_shell_core_mode,
         false,
     )
     .output
@@ -479,6 +614,7 @@ fn tensorized_mamba2_forward_impl_internal_with_cuda_ssd_mode<B: BackendTrait>(
     out_proj: Tensor<B, 2>,
     state: Option<Mamba2TensorizedState<B>>,
     cuda_ssd_core_mode: CudaSsdCoreMode,
+    cuda_shell_core_mode: CudaShellCoreMode,
     capture_cuda_ssd_state_history: bool,
 ) -> Mamba2TensorizedInternalOutput<B> {
     let [batch, views, time, d_model] = hidden_states.shape().dims::<4>();
@@ -562,12 +698,32 @@ fn tensorized_mamba2_forward_impl_internal_with_cuda_ssd_mode<B: BackendTrait>(
         .slice_dim(2, (d_inner + conv_dim)..in_proj_dim)
         .reshape([batch, time, nheads]);
 
-    let (xbc_conv, final_conv_state) = tensorized_mamba_depthwise_conv(
-        xbc.swap_dims(1, 2).reshape([batch, 1, conv_dim, time]),
-        conv_weight,
-        conv_bias,
-        state.map(|existing| existing.conv),
-    );
+    let xbc_input = xbc.swap_dims(1, 2).reshape([batch, 1, conv_dim, time]);
+    let (xbc_conv, final_conv_state) = if capture_cuda_ssd_state_history {
+        if let Some(output) = try_accelerated_depthwise_conv_forward_core(
+            xbc_input.clone(),
+            conv_weight.clone(),
+            conv_bias.clone(),
+            state.as_ref().map(|existing| existing.conv.clone()),
+            cuda_shell_core_mode,
+        ) {
+            (output.activated, output.next_state)
+        } else {
+            tensorized_mamba_depthwise_conv(
+                xbc_input,
+                conv_weight,
+                conv_bias,
+                state.map(|existing| existing.conv),
+            )
+        }
+    } else {
+        tensorized_mamba_depthwise_conv(
+            xbc_input,
+            conv_weight,
+            conv_bias,
+            state.map(|existing| existing.conv),
+        )
+    };
     let xbc_conv = xbc_conv.swap_dims(2, 3).reshape([batch, time, conv_dim]);
 
     let x = xbc_conv
@@ -644,7 +800,32 @@ fn tensorized_mamba2_forward_impl_internal_with_cuda_ssd_mode<B: BackendTrait>(
         (y_grouped, final_ssm_state, None)
     };
     let y_flat = y_grouped.reshape([batch, time, d_inner]);
-    let gated = rmsnorm_gated(y_flat, z, norm_weight, norm_eps);
+    let (gated, rmsnorm_inv_rms) = if capture_cuda_ssd_state_history {
+        if let Some(output) = try_accelerated_rmsnorm_gated_forward_core(
+            y_flat.clone(),
+            z.clone(),
+            norm_weight.clone(),
+            norm_eps,
+            cuda_shell_core_mode,
+        ) {
+            (output.gated, Some(output.inv_rms))
+        } else {
+            let inv_rms = y_flat
+                .clone()
+                .powf_scalar(2.0)
+                .mean_dim(2)
+                .add_scalar(norm_eps)
+                .sqrt()
+                .recip()
+                .reshape([batch, time]);
+            (
+                rmsnorm_gated_from_inv_rms(y_flat, z, norm_weight, inv_rms.clone()),
+                Some(inv_rms),
+            )
+        }
+    } else {
+        (rmsnorm_gated(y_flat, z, norm_weight, norm_eps), None)
+    };
     let context = gated
         .reshape([batch * time, d_inner])
         .matmul(out_proj)
@@ -659,7 +840,348 @@ fn tensorized_mamba2_forward_impl_internal_with_cuda_ssd_mode<B: BackendTrait>(
             },
         },
         ssd_state_history,
+        rmsnorm_inv_rms,
     }
+}
+
+struct AcceleratedDepthwiseConvForwardOutput<B: BackendTrait> {
+    activated: Tensor<B, 4>,
+    next_state: Tensor<B, 4>,
+}
+
+#[cfg(feature = "cuda")]
+fn try_accelerated_depthwise_conv_forward_core<B: BackendTrait>(
+    x: Tensor<B, 4>,
+    conv_weight: Tensor<B, 2>,
+    conv_bias: Option<Tensor<B, 1>>,
+    state: Option<Tensor<B, 4>>,
+    cuda_shell_core_mode: CudaShellCoreMode,
+) -> Option<AcceleratedDepthwiseConvForwardOutput<B>>
+where
+    B::FloatTensorPrimitive: 'static,
+{
+    if !cuda_shell_core_mode_enabled(cuda_shell_core_mode) {
+        return None;
+    }
+    let conv_bias = conv_bias?;
+    try_accelerated_depthwise_conv_forward_core_cuda_direct(
+        x.clone(),
+        conv_weight.clone(),
+        conv_bias.clone(),
+        state.clone(),
+    )
+    .or_else(|| {
+        try_accelerated_depthwise_conv_forward_core_cuda_fusion::<B, u8>(
+            x.clone(),
+            conv_weight.clone(),
+            conv_bias.clone(),
+            state.clone(),
+        )
+    })
+    .or_else(|| {
+        try_accelerated_depthwise_conv_forward_core_cuda_fusion::<B, u32>(
+            x,
+            conv_weight,
+            conv_bias,
+            state,
+        )
+    })
+}
+
+#[cfg(not(feature = "cuda"))]
+fn try_accelerated_depthwise_conv_forward_core<B: BackendTrait>(
+    _x: Tensor<B, 4>,
+    _conv_weight: Tensor<B, 2>,
+    _conv_bias: Option<Tensor<B, 1>>,
+    _state: Option<Tensor<B, 4>>,
+    _cuda_shell_core_mode: CudaShellCoreMode,
+) -> Option<AcceleratedDepthwiseConvForwardOutput<B>>
+where
+    B::FloatTensorPrimitive: 'static,
+{
+    None
+}
+
+#[cfg(feature = "cuda")]
+fn try_accelerated_depthwise_conv_forward_core_cuda_direct<B: BackendTrait>(
+    x: Tensor<B, 4>,
+    conv_weight: Tensor<B, 2>,
+    conv_bias: Tensor<B, 1>,
+    state: Option<Tensor<B, 4>>,
+) -> Option<AcceleratedDepthwiseConvForwardOutput<B>>
+where
+    B::FloatTensorPrimitive: 'static,
+{
+    let [batch, views, channels, _time] = x.shape().dims::<4>();
+    let d_conv = conv_weight.shape().dims::<2>()[1];
+    let x_raw: CubeTensor<CudaRuntime> = try_cast_primitive::<B, _>(x.into_primitive().tensor())?;
+    let conv_weight_raw: CubeTensor<CudaRuntime> =
+        try_cast_primitive::<B, _>(conv_weight.into_primitive().tensor())?;
+    let conv_bias_raw: CubeTensor<CudaRuntime> =
+        try_cast_primitive::<B, _>(conv_bias.into_primitive().tensor())?;
+    let state_raw: CubeTensor<CudaRuntime> = match state {
+        Some(state) => try_cast_primitive::<B, _>(state.into_primitive().tensor())?,
+        None => {
+            BurnTensor::<CudaCubeBackend, 4>::zeros([batch, views, channels, d_conv], &x_raw.device)
+                .into_primitive()
+                .tensor()
+        }
+    };
+    let output: MambaDepthwiseConvCudaForwardOutput =
+        fused_mamba_depthwise_conv_forward_cuda(x_raw, conv_weight_raw, conv_bias_raw, state_raw);
+    Some(AcceleratedDepthwiseConvForwardOutput {
+        activated: BurnTensor::<B, 4>::from_primitive(TensorPrimitive::Float(try_cast_backend::<
+            B,
+            _,
+        >(
+            output.activated
+        )?)),
+        next_state: BurnTensor::<B, 4>::from_primitive(TensorPrimitive::Float(try_cast_backend::<
+            B,
+            _,
+        >(
+            output.next_state,
+        )?)),
+    })
+}
+
+#[cfg(feature = "cuda")]
+fn try_accelerated_depthwise_conv_forward_core_cuda_fusion<
+    B: BackendTrait,
+    BT: BoolElement + 'static,
+>(
+    x: Tensor<B, 4>,
+    conv_weight: Tensor<B, 2>,
+    conv_bias: Tensor<B, 1>,
+    state: Option<Tensor<B, 4>>,
+) -> Option<AcceleratedDepthwiseConvForwardOutput<B>>
+where
+    B::FloatTensorPrimitive: 'static,
+{
+    if !matches_type::<B::FloatTensorPrimitive, FusionTensor<FusionCubeRuntime<CudaRuntime, BT>>>()
+    {
+        return None;
+    }
+
+    let x_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime, BT>> =
+        try_cast_primitive::<B, _>(x.into_primitive().tensor())?;
+    let client = x_fusion.client.clone();
+    let conv_weight_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime, BT>> =
+        try_cast_primitive::<B, _>(conv_weight.into_primitive().tensor())?;
+    let conv_bias_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime, BT>> =
+        try_cast_primitive::<B, _>(conv_bias.into_primitive().tensor())?;
+    let [batch, views, channels, _time] = client
+        .resolve_tensor_float::<CubeBackend<CudaRuntime, f32, i32, BT>>(x_fusion.clone())
+        .meta
+        .shape
+        .dims::<4>();
+    let d_conv = client
+        .resolve_tensor_float::<CubeBackend<CudaRuntime, f32, i32, BT>>(conv_weight_fusion.clone())
+        .meta
+        .shape
+        .dims::<2>()[1];
+
+    let x_raw = client.resolve_tensor_float::<CubeBackend<CudaRuntime, f32, i32, BT>>(x_fusion);
+    let conv_weight_raw =
+        client.resolve_tensor_float::<CubeBackend<CudaRuntime, f32, i32, BT>>(conv_weight_fusion);
+    let conv_bias_raw =
+        client.resolve_tensor_float::<CubeBackend<CudaRuntime, f32, i32, BT>>(conv_bias_fusion);
+    let state_raw = match state {
+        Some(state) => {
+            let state_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime, BT>> =
+                try_cast_primitive::<B, _>(state.into_primitive().tensor())?;
+            client.resolve_tensor_float::<CubeBackend<CudaRuntime, f32, i32, BT>>(state_fusion)
+        }
+        None => {
+            BurnTensor::<CudaCubeBackend, 4>::zeros([batch, views, channels, d_conv], &x_raw.device)
+                .into_primitive()
+                .tensor()
+        }
+    };
+
+    let output =
+        fused_mamba_depthwise_conv_forward_cuda(x_raw, conv_weight_raw, conv_bias_raw, state_raw);
+    Some(AcceleratedDepthwiseConvForwardOutput {
+        activated: BurnTensor::<B, 4>::from_primitive(TensorPrimitive::Float(try_cast_backend::<
+            B,
+            _,
+        >(
+            register_fusion_float_tensor(&client, output.activated),
+        )?)),
+        next_state: BurnTensor::<B, 4>::from_primitive(TensorPrimitive::Float(try_cast_backend::<
+            B,
+            _,
+        >(
+            register_fusion_float_tensor(&client, output.next_state),
+        )?)),
+    })
+}
+
+struct AcceleratedRmsnormGatedForwardOutput<B: BackendTrait> {
+    gated: Tensor<B, 3>,
+    inv_rms: Tensor<B, 2>,
+}
+
+fn try_accelerated_rmsnorm_gated_forward_core_wgpu<B: BackendTrait>(
+    y: Tensor<B, 3>,
+    z: Tensor<B, 3>,
+    weight: Tensor<B, 1>,
+    eps: f32,
+) -> Option<AcceleratedRmsnormGatedForwardOutput<B>>
+where
+    B::FloatTensorPrimitive: 'static,
+{
+    let y_raw: CubeTensor<WgpuRuntime> = try_cast_primitive::<B, _>(y.into_primitive().tensor())?;
+    let z_raw: CubeTensor<WgpuRuntime> = try_cast_primitive::<B, _>(z.into_primitive().tensor())?;
+    let weight_raw: CubeTensor<WgpuRuntime> =
+        try_cast_primitive::<B, _>(weight.into_primitive().tensor())?;
+    let output: Mamba2RmsnormGatedWgpuForwardOutput =
+        fused_mamba2_rmsnorm_gated_forward_wgpu(y_raw, z_raw, weight_raw, eps);
+    Some(AcceleratedRmsnormGatedForwardOutput {
+        gated: BurnTensor::<B, 3>::from_primitive(TensorPrimitive::Float(
+            try_cast_backend::<B, _>(output.gated)?,
+        )),
+        inv_rms: BurnTensor::<B, 2>::from_primitive(TensorPrimitive::Float(try_cast_backend::<
+            B,
+            _,
+        >(
+            output.inv_rms
+        )?)),
+    })
+}
+
+fn try_accelerated_rmsnorm_gated_forward_core<B: BackendTrait>(
+    y: Tensor<B, 3>,
+    z: Tensor<B, 3>,
+    weight: Tensor<B, 1>,
+    eps: f32,
+    cuda_shell_core_mode: CudaShellCoreMode,
+) -> Option<AcceleratedRmsnormGatedForwardOutput<B>>
+where
+    B::FloatTensorPrimitive: 'static,
+{
+    try_accelerated_rmsnorm_gated_forward_core_wgpu(y.clone(), z.clone(), weight.clone(), eps)
+        .or_else(|| {
+            #[cfg(feature = "cuda")]
+            {
+                try_accelerated_rmsnorm_gated_forward_core_cuda(
+                    y,
+                    z,
+                    weight,
+                    eps,
+                    cuda_shell_core_mode,
+                )
+            }
+            #[cfg(not(feature = "cuda"))]
+            {
+                let _ = cuda_shell_core_mode;
+                None
+            }
+        })
+}
+
+#[cfg(feature = "cuda")]
+fn try_accelerated_rmsnorm_gated_forward_core_cuda<B: BackendTrait>(
+    y: Tensor<B, 3>,
+    z: Tensor<B, 3>,
+    weight: Tensor<B, 1>,
+    eps: f32,
+    cuda_shell_core_mode: CudaShellCoreMode,
+) -> Option<AcceleratedRmsnormGatedForwardOutput<B>>
+where
+    B::FloatTensorPrimitive: 'static,
+{
+    if !cuda_shell_core_mode_enabled(cuda_shell_core_mode) {
+        return None;
+    }
+    try_accelerated_rmsnorm_gated_forward_core_cuda_direct(
+        y.clone(),
+        z.clone(),
+        weight.clone(),
+        eps,
+    )
+    .or_else(|| {
+        try_accelerated_rmsnorm_gated_forward_core_cuda_fusion::<B, u8>(
+            y.clone(),
+            z.clone(),
+            weight.clone(),
+            eps,
+        )
+    })
+    .or_else(|| try_accelerated_rmsnorm_gated_forward_core_cuda_fusion::<B, u32>(y, z, weight, eps))
+}
+
+#[cfg(feature = "cuda")]
+fn try_accelerated_rmsnorm_gated_forward_core_cuda_direct<B: BackendTrait>(
+    y: Tensor<B, 3>,
+    z: Tensor<B, 3>,
+    weight: Tensor<B, 1>,
+    eps: f32,
+) -> Option<AcceleratedRmsnormGatedForwardOutput<B>>
+where
+    B::FloatTensorPrimitive: 'static,
+{
+    let y_raw: CubeTensor<CudaRuntime> = try_cast_primitive::<B, _>(y.into_primitive().tensor())?;
+    let z_raw: CubeTensor<CudaRuntime> = try_cast_primitive::<B, _>(z.into_primitive().tensor())?;
+    let weight_raw: CubeTensor<CudaRuntime> =
+        try_cast_primitive::<B, _>(weight.into_primitive().tensor())?;
+    let output: Mamba2RmsnormGatedCudaForwardOutput =
+        fused_mamba2_rmsnorm_gated_forward_cuda(y_raw, z_raw, weight_raw, eps);
+    Some(AcceleratedRmsnormGatedForwardOutput {
+        gated: BurnTensor::<B, 3>::from_primitive(TensorPrimitive::Float(
+            try_cast_backend::<B, _>(output.gated)?,
+        )),
+        inv_rms: BurnTensor::<B, 2>::from_primitive(TensorPrimitive::Float(try_cast_backend::<
+            B,
+            _,
+        >(
+            output.inv_rms
+        )?)),
+    })
+}
+
+#[cfg(feature = "cuda")]
+fn try_accelerated_rmsnorm_gated_forward_core_cuda_fusion<
+    B: BackendTrait,
+    BT: BoolElement + 'static,
+>(
+    y: Tensor<B, 3>,
+    z: Tensor<B, 3>,
+    weight: Tensor<B, 1>,
+    eps: f32,
+) -> Option<AcceleratedRmsnormGatedForwardOutput<B>>
+where
+    B::FloatTensorPrimitive: 'static,
+{
+    if !matches_type::<B::FloatTensorPrimitive, FusionTensor<FusionCubeRuntime<CudaRuntime, BT>>>()
+    {
+        return None;
+    }
+
+    let y_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime, BT>> =
+        try_cast_primitive::<B, _>(y.into_primitive().tensor())?;
+    let client = y_fusion.client.clone();
+    let z_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime, BT>> =
+        try_cast_primitive::<B, _>(z.into_primitive().tensor())?;
+    let weight_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime, BT>> =
+        try_cast_primitive::<B, _>(weight.into_primitive().tensor())?;
+
+    let y_raw = client.resolve_tensor_float::<CubeBackend<CudaRuntime, f32, i32, BT>>(y_fusion);
+    let z_raw = client.resolve_tensor_float::<CubeBackend<CudaRuntime, f32, i32, BT>>(z_fusion);
+    let weight_raw =
+        client.resolve_tensor_float::<CubeBackend<CudaRuntime, f32, i32, BT>>(weight_fusion);
+    let output = fused_mamba2_rmsnorm_gated_forward_cuda(y_raw, z_raw, weight_raw, eps);
+    Some(AcceleratedRmsnormGatedForwardOutput {
+        gated: BurnTensor::<B, 3>::from_primitive(TensorPrimitive::Float(
+            try_cast_backend::<B, _>(register_fusion_float_tensor(&client, output.gated))?,
+        )),
+        inv_rms: BurnTensor::<B, 2>::from_primitive(TensorPrimitive::Float(try_cast_backend::<
+            B,
+            _,
+        >(
+            register_fusion_float_tensor(&client, output.inv_rms),
+        )?)),
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -681,6 +1203,7 @@ fn try_tensorized_mamba2_autodiff_cube<B: BackendTrait>(
     out_proj: Tensor<B, 2>,
     state: Option<Mamba2TensorizedState<B>>,
     cuda_ssd_core_mode: CudaSsdCoreMode,
+    cuda_shell_core_mode: CudaShellCoreMode,
 ) -> Option<Mamba2TensorizedOutput<B>>
 where
     B::FloatTensorPrimitive: 'static,
@@ -704,6 +1227,7 @@ where
         out_proj.clone(),
         state.clone(),
         cuda_ssd_core_mode,
+        cuda_shell_core_mode,
     )
     .or_else(|| {
         try_tensorized_mamba2_autodiff_wgpu_fusion::<B, u8>(
@@ -724,6 +1248,7 @@ where
             out_proj.clone(),
             state.clone(),
             cuda_ssd_core_mode,
+            cuda_shell_core_mode,
         )
     })
     .or_else(|| {
@@ -745,6 +1270,7 @@ where
             out_proj.clone(),
             state.clone(),
             cuda_ssd_core_mode,
+            cuda_shell_core_mode,
         )
     })
     .or_else(|| {
@@ -769,6 +1295,7 @@ where
                     out_proj.clone(),
                     state.clone(),
                     cuda_ssd_core_mode,
+                    cuda_shell_core_mode,
                 )
                 .or_else(|| {
                     try_tensorized_mamba2_autodiff_cuda_fusion::<B, u8>(
@@ -789,6 +1316,7 @@ where
                         out_proj.clone(),
                         state.clone(),
                         cuda_ssd_core_mode,
+                        cuda_shell_core_mode,
                     )
                 })
                 .or_else(|| {
@@ -810,6 +1338,7 @@ where
                         out_proj,
                         state,
                         cuda_ssd_core_mode,
+                        cuda_shell_core_mode,
                     )
                 })
             } else {
@@ -842,6 +1371,7 @@ fn try_tensorized_mamba2_autodiff_wgpu<B: BackendTrait>(
     out_proj: Tensor<B, 2>,
     state: Option<Mamba2TensorizedState<B>>,
     cuda_ssd_core_mode: CudaSsdCoreMode,
+    cuda_shell_core_mode: CudaShellCoreMode,
 ) -> Option<Mamba2TensorizedOutput<B>>
 where
     B::FloatTensorPrimitive: 'static,
@@ -942,17 +1472,20 @@ where
             _ => None,
         },
         cuda_ssd_core_mode,
+        cuda_shell_core_mode,
         true,
     );
     let Mamba2TensorizedInternalOutput {
         output,
         ssd_state_history,
+        rmsnorm_inv_rms,
     } = internal_output;
     let context_inner = output.context.into_primitive().tensor();
     let conv_inner = output.state.conv.into_primitive().tensor();
     let ssm_inner = output.state.ssm.into_primitive().tensor();
     let ssd_state_history_inner =
         ssd_state_history.map(|history| history.into_primitive().tensor());
+    let rmsnorm_inv_rms_inner = rmsnorm_inv_rms.map(|inv_rms| inv_rms.into_primitive().tensor());
 
     let context_ad = match TensorizedMamba2Backward::<WgpuCubeBackend>(PhantomData)
         .prepare::<NoCheckpointing>([
@@ -982,6 +1515,7 @@ where
                 out_proj: out_proj_inner,
                 initial_conv: initial_conv_inner,
                 initial_ssm: initial_ssm_inner,
+                rmsnorm_inv_rms: rmsnorm_inv_rms_inner,
                 d_inner,
                 d_state,
                 d_conv,
@@ -990,6 +1524,7 @@ where
                 norm_eps,
                 ssd_state_history: ssd_state_history_inner,
                 cuda_ssd_core_mode,
+                cuda_shell_core_mode,
             },
             context_inner,
         ),
@@ -1037,6 +1572,7 @@ fn try_tensorized_mamba2_autodiff_wgpu_fusion<B: BackendTrait, BT: BoolElement +
     out_proj: Tensor<B, 2>,
     state: Option<Mamba2TensorizedState<B>>,
     cuda_ssd_core_mode: CudaSsdCoreMode,
+    cuda_shell_core_mode: CudaShellCoreMode,
 ) -> Option<Mamba2TensorizedOutput<B>>
 where
     B::FloatTensorPrimitive: 'static,
@@ -1170,11 +1706,13 @@ where
             _ => None,
         },
         cuda_ssd_core_mode,
+        cuda_shell_core_mode,
         true,
     );
     let Mamba2TensorizedInternalOutput {
         output,
         ssd_state_history,
+        rmsnorm_inv_rms,
     } = internal_output;
     let context_fusion =
         register_fusion_float_tensor(&fusion_client, output.context.into_primitive().tensor());
@@ -1184,6 +1722,9 @@ where
         register_fusion_float_tensor(&fusion_client, output.state.ssm.into_primitive().tensor());
     let ssd_state_history_fusion = ssd_state_history.map(|history| {
         register_fusion_float_tensor(&fusion_client, history.into_primitive().tensor())
+    });
+    let rmsnorm_inv_rms_fusion = rmsnorm_inv_rms.map(|inv_rms| {
+        register_fusion_float_tensor(&fusion_client, inv_rms.into_primitive().tensor())
     });
 
     let context_ad = match TensorizedMamba2Backward::<WgpuFusionBackend<BT>>(PhantomData)
@@ -1214,6 +1755,7 @@ where
                 out_proj: out_proj_inner,
                 initial_conv: initial_conv_inner,
                 initial_ssm: initial_ssm_inner,
+                rmsnorm_inv_rms: rmsnorm_inv_rms_fusion,
                 d_inner,
                 d_state,
                 d_conv,
@@ -1222,6 +1764,7 @@ where
                 norm_eps,
                 ssd_state_history: ssd_state_history_fusion,
                 cuda_ssd_core_mode,
+                cuda_shell_core_mode,
             },
             context_fusion,
         ),
@@ -1264,6 +1807,7 @@ fn try_tensorized_mamba2_autodiff_cuda_fusion<B: BackendTrait, BT: BoolElement +
     out_proj: Tensor<B, 2>,
     state: Option<Mamba2TensorizedState<B>>,
     cuda_ssd_core_mode: CudaSsdCoreMode,
+    cuda_shell_core_mode: CudaShellCoreMode,
 ) -> Option<Mamba2TensorizedOutput<B>>
 where
     B::FloatTensorPrimitive: 'static,
@@ -1397,11 +1941,13 @@ where
             _ => None,
         },
         cuda_ssd_core_mode,
+        cuda_shell_core_mode,
         true,
     );
     let Mamba2TensorizedInternalOutput {
         output,
         ssd_state_history,
+        rmsnorm_inv_rms,
     } = internal_output;
     let context_fusion =
         register_fusion_float_tensor(&fusion_client, output.context.into_primitive().tensor());
@@ -1411,6 +1957,9 @@ where
         register_fusion_float_tensor(&fusion_client, output.state.ssm.into_primitive().tensor());
     let ssd_state_history_fusion = ssd_state_history.map(|history| {
         register_fusion_float_tensor(&fusion_client, history.into_primitive().tensor())
+    });
+    let rmsnorm_inv_rms_fusion = rmsnorm_inv_rms.map(|inv_rms| {
+        register_fusion_float_tensor(&fusion_client, inv_rms.into_primitive().tensor())
     });
 
     let context_ad = match TensorizedMamba2Backward::<CudaFusionBackend<BT>>(PhantomData)
@@ -1441,6 +1990,7 @@ where
                 out_proj: out_proj_inner,
                 initial_conv: initial_conv_inner,
                 initial_ssm: initial_ssm_inner,
+                rmsnorm_inv_rms: rmsnorm_inv_rms_fusion,
                 d_inner,
                 d_state,
                 d_conv,
@@ -1449,6 +1999,7 @@ where
                 norm_eps,
                 ssd_state_history: ssd_state_history_fusion,
                 cuda_ssd_core_mode,
+                cuda_shell_core_mode,
             },
             context_fusion,
         ),
@@ -1491,6 +2042,7 @@ fn try_tensorized_mamba2_autodiff_cuda<B: BackendTrait>(
     out_proj: Tensor<B, 2>,
     state: Option<Mamba2TensorizedState<B>>,
     cuda_ssd_core_mode: CudaSsdCoreMode,
+    cuda_shell_core_mode: CudaShellCoreMode,
 ) -> Option<Mamba2TensorizedOutput<B>>
 where
     B::FloatTensorPrimitive: 'static,
@@ -1591,17 +2143,20 @@ where
             _ => None,
         },
         cuda_ssd_core_mode,
+        cuda_shell_core_mode,
         true,
     );
     let Mamba2TensorizedInternalOutput {
         output,
         ssd_state_history,
+        rmsnorm_inv_rms,
     } = internal_output;
     let context_inner = output.context.into_primitive().tensor();
     let conv_inner = output.state.conv.into_primitive().tensor();
     let ssm_inner = output.state.ssm.into_primitive().tensor();
     let ssd_state_history_inner =
         ssd_state_history.map(|history| history.into_primitive().tensor());
+    let rmsnorm_inv_rms_inner = rmsnorm_inv_rms.map(|inv_rms| inv_rms.into_primitive().tensor());
 
     let context_ad = match TensorizedMamba2Backward::<CudaCubeBackend>(PhantomData)
         .prepare::<NoCheckpointing>([
@@ -1631,6 +2186,7 @@ where
                 out_proj: out_proj_inner,
                 initial_conv: initial_conv_inner,
                 initial_ssm: initial_ssm_inner,
+                rmsnorm_inv_rms: rmsnorm_inv_rms_inner,
                 d_inner,
                 d_state,
                 d_conv,
@@ -1639,6 +2195,7 @@ where
                 norm_eps,
                 ssd_state_history: ssd_state_history_inner,
                 cuda_ssd_core_mode,
+                cuda_shell_core_mode,
             },
             context_inner,
         ),
@@ -1673,15 +2230,26 @@ fn rmsnorm_gated<B: BackendTrait>(
     weight: Tensor<B, 1>,
     eps: f32,
 ) -> Tensor<B, 3> {
-    let width = weight.shape().dims::<1>()[0];
-    let rms = y
+    let inv_rms = y
         .clone()
         .powf_scalar(2.0)
         .mean_dim(2)
         .add_scalar(eps)
         .sqrt()
-        .reshape([y.shape().dims::<3>()[0], y.shape().dims::<3>()[1], 1]);
-    (y / rms) * weight.reshape([1, 1, width]) * silu(z)
+        .recip()
+        .reshape([y.shape().dims::<3>()[0], y.shape().dims::<3>()[1]]);
+    rmsnorm_gated_from_inv_rms(y, z, weight, inv_rms)
+}
+
+fn rmsnorm_gated_from_inv_rms<B: BackendTrait>(
+    y: Tensor<B, 3>,
+    z: Tensor<B, 3>,
+    weight: Tensor<B, 1>,
+    inv_rms: Tensor<B, 2>,
+) -> Tensor<B, 3> {
+    let [batch, time, _width] = y.shape().dims::<3>();
+    let width = weight.shape().dims::<1>()[0];
+    (y * inv_rms.reshape([batch, time, 1])) * weight.reshape([1, 1, width]) * silu(z)
 }
 
 struct AcceleratedSsdForwardOutput<B: BackendTrait> {
@@ -1878,6 +2446,7 @@ where
     })
 }
 
+#[cfg_attr(not(feature = "cuda"), allow(dead_code))]
 #[cfg(not(feature = "cuda"))]
 fn try_cuda_fused_ssd_forward_core<B: BackendTrait>(
     _x_grouped: Tensor<B, 5>,
@@ -3104,7 +3673,7 @@ mod tests {
 
     #[cfg(feature = "cuda")]
     #[test]
-    fn tensorized_mamba2_fused_ssd_core_matches_tensorized_wrapper_on_cuda_autodiff() {
+    fn tensorized_mamba2_shell_fused_path_matches_tensorized_wrapper_on_cuda_autodiff() {
         type CudaBackend = burn_cuda::Cuda<f32, i32>;
         type CudaAutodiffBackendImpl = Autodiff<CudaBackend>;
 
@@ -3222,7 +3791,7 @@ mod tests {
         let out_proj_fused =
             Tensor::<CudaAutodiffBackendImpl, 2>::from_data(out_proj_data, &device).require_grad();
 
-        let wrapper = tensorized_mamba2_forward_custom_backward_with_cuda_ssd_mode(
+        let wrapper = tensorized_mamba2_forward_custom_backward_with_cuda_modes(
             hidden_wrapper.clone(),
             d_inner,
             d_state,
@@ -3249,9 +3818,10 @@ mod tests {
                 ),
             }),
             CudaSsdCoreMode::ForcedDisabled,
+            CudaShellCoreMode::ForcedDisabled,
         )
         .expect("cuda tensorized wrapper available");
-        let fused = tensorized_mamba2_forward_custom_backward_with_cuda_ssd_mode(
+        let fused = tensorized_mamba2_forward_custom_backward_with_cuda_modes(
             hidden_fused.clone(),
             d_inner,
             d_state,
@@ -3272,8 +3842,9 @@ mod tests {
                 ssm: Tensor::<CudaAutodiffBackendImpl, 4>::from_data(initial_ssm_data, &device),
             }),
             CudaSsdCoreMode::ForcedEnabled,
+            CudaShellCoreMode::ForcedEnabled,
         )
-        .expect("cuda fused ssd path available");
+        .expect("cuda fused shell path available");
 
         let _ = <CudaAutodiffBackendImpl as BackendTrait>::sync(&device);
         assert_close_backend(
@@ -3505,6 +4076,7 @@ mod tests {
                     out_proj: out_proj_inner,
                     initial_conv: initial_conv_inner,
                     initial_ssm: initial_ssm_inner,
+                    rmsnorm_inv_rms: None,
                     ssd_state_history: None,
                     d_inner,
                     d_state,
@@ -3513,6 +4085,7 @@ mod tests {
                     ngroups,
                     norm_eps,
                     cuda_ssd_core_mode: CudaSsdCoreMode::ForcedDisabled,
+                    cuda_shell_core_mode: CudaShellCoreMode::ForcedDisabled,
                 },
                 context_inner,
             ),

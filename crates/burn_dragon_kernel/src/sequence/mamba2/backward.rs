@@ -21,10 +21,19 @@ use burn_wgpu::{CubeBackend, WgpuRuntime};
 
 #[cfg(feature = "cuda")]
 use crate::fusion_compat::register_fusion_float_tensor;
-#[cfg(not(feature = "cuda"))]
-use crate::kernels::sequence::mamba2::forward::CudaSsdCoreMode;
 #[cfg(feature = "cuda")]
-use crate::kernels::sequence::mamba2::forward::{CudaSsdCoreMode, cuda_ssd_core_mode_enabled};
+use crate::kernels::sequence::mamba::conv_runtime::{
+    MambaDepthwiseConvCudaBackwardOutput, MambaDepthwiseConvCudaForwardOutput,
+    fused_mamba_depthwise_conv_backward_cuda, fused_mamba_depthwise_conv_forward_cuda,
+};
+#[cfg(not(feature = "cuda"))]
+use crate::kernels::sequence::mamba2::forward::{CudaShellCoreMode, CudaSsdCoreMode};
+#[cfg(feature = "cuda")]
+use crate::kernels::sequence::mamba2::forward::{
+    CudaShellCoreMode, CudaSsdCoreMode, cuda_shell_core_mode_enabled, cuda_ssd_core_mode_enabled,
+};
+#[cfg(feature = "cuda")]
+use crate::kernels::sequence::mamba2::rmsnorm_runtime::fused_mamba2_rmsnorm_gated_backward_cuda;
 #[cfg(feature = "cuda")]
 use crate::kernels::sequence::mamba2::ssd_runtime::fused_mamba2_ssd_backward_cuda;
 
@@ -37,9 +46,9 @@ type CudaCubeBackend = CubeBackend<CudaRuntime, f32, i32, u8>;
 #[cfg(feature = "cuda")]
 type CudaFusionBackend<BT> = Fusion<CubeBackend<CudaRuntime, f32, i32, BT>>;
 
-/// The Mamba-2 backward path uses a custom analytic backward over the SSD core,
-/// input/output projections, and depthwise causal convolution. On CUDA, the SSD recurrence can
-/// route through fused forward/backward kernels while the projection/conv shell remains tensorized.
+/// The Mamba-2 backward path uses a custom analytic backward over the SSD core and block shell.
+/// On CUDA, the default wrapper can route the SSD recurrence, depthwise causal convolution, and
+/// RMSNorm-gated shell through fused kernels while the GEMM shell remains tensorized.
 pub const AVAILABLE: bool = true;
 
 #[derive(Debug, Clone)]
@@ -55,6 +64,7 @@ pub(crate) struct Mamba2TensorizedBackwardState<FT> {
     pub(crate) out_proj: FT,
     pub(crate) initial_conv: Option<FT>,
     pub(crate) initial_ssm: Option<FT>,
+    pub(crate) rmsnorm_inv_rms: Option<FT>,
     pub(crate) ssd_state_history: Option<FT>,
     pub(crate) d_inner: usize,
     pub(crate) d_state: usize,
@@ -63,6 +73,7 @@ pub(crate) struct Mamba2TensorizedBackwardState<FT> {
     pub(crate) ngroups: usize,
     pub(crate) norm_eps: f32,
     pub(crate) cuda_ssd_core_mode: CudaSsdCoreMode,
+    pub(crate) cuda_shell_core_mode: CudaShellCoreMode,
 }
 
 #[derive(Debug)]
@@ -84,6 +95,7 @@ pub(crate) fn tensorized_mamba2_backward_impl<B>(
     let ngroups = state.ngroups;
     let norm_eps = state.norm_eps;
     let cuda_ssd_core_mode = state.cuda_ssd_core_mode;
+    let cuda_shell_core_mode = state.cuda_shell_core_mode;
 
     let hidden_states_b =
         BurnTensor::<B, 4>::from_primitive(TensorPrimitive::Float(state.hidden_states.clone()));
@@ -117,6 +129,10 @@ pub(crate) fn tensorized_mamba2_backward_impl<B>(
         .initial_ssm
         .as_ref()
         .map(|ssm| BurnTensor::<B, 4>::from_primitive(TensorPrimitive::Float(ssm.clone())));
+    let rmsnorm_inv_rms_b = state
+        .rmsnorm_inv_rms
+        .as_ref()
+        .map(|inv_rms| BurnTensor::<B, 2>::from_primitive(TensorPrimitive::Float(inv_rms.clone())));
     let ssd_state_history_b = state
         .ssd_state_history
         .as_ref()
@@ -143,12 +159,25 @@ pub(crate) fn tensorized_mamba2_backward_impl<B>(
         .clone()
         .swap_dims(1, 2)
         .reshape([batch, 1, conv_dim, time]);
-    let (xbc_preact_raw, xbc_history) = depthwise_conv_preact_with_history(
-        xbc_input,
+    let accelerated_conv_forward = try_cuda_fused_depthwise_conv_forward_core::<B>(
+        xbc_input.clone(),
         conv_weight_b.clone(),
-        Some(conv_bias_b.clone()),
+        conv_bias_b.clone(),
         initial_conv_b.clone(),
+        cuda_shell_core_mode,
     );
+    let (xbc_preact_raw, xbc_history) = match accelerated_conv_forward {
+        Some(output) => (output.preact, None),
+        None => {
+            let (preact, history) = depthwise_conv_preact_with_history(
+                xbc_input.clone(),
+                conv_weight_b.clone(),
+                Some(conv_bias_b.clone()),
+                initial_conv_b.clone(),
+            );
+            (preact, Some(history))
+        }
+    };
     let xbc_conv_raw = silu(xbc_preact_raw.clone());
     let xbc_conv = xbc_conv_raw
         .swap_dims(2, 3)
@@ -213,7 +242,22 @@ pub(crate) fn tensorized_mamba2_backward_impl<B>(
     .reshape([batch, time, ngroups, heads_per_group, headdim])
         + d_skip_grouped.clone() * x_grouped.clone();
     let y_flat = y_grouped.clone().reshape([batch, time, d_inner]);
-    let gated = rmsnorm_gated_forward(y_flat.clone(), z.clone(), norm_weight_b.clone(), norm_eps);
+    let inv_rms = rmsnorm_inv_rms_b.clone().unwrap_or_else(|| {
+        y_flat
+            .clone()
+            .powf_scalar(2.0)
+            .mean_dim(2)
+            .add_scalar(norm_eps)
+            .sqrt()
+            .recip()
+            .reshape([batch, time])
+    });
+    let gated = rmsnorm_gated_forward_from_inv_rms(
+        y_flat.clone(),
+        z.clone(),
+        norm_weight_b.clone(),
+        inv_rms.clone(),
+    );
     let gated_flat = gated.clone().reshape([batch * time, d_inner]);
     let grad_context_flat = grad_output_b.reshape([batch * time, d_model]);
     let grad_out_proj = gated_flat
@@ -221,13 +265,25 @@ pub(crate) fn tensorized_mamba2_backward_impl<B>(
         .swap_dims(0, 1)
         .matmul(grad_context_flat.clone());
     let grad_gated_flat = grad_context_flat.matmul(out_proj_b.clone().swap_dims(0, 1));
-    let (grad_y_flat, grad_z, grad_norm_weight) = rmsnorm_gated_backward(
-        y_flat,
-        z,
-        norm_weight_b.clone(),
-        norm_eps,
-        grad_gated_flat.reshape([batch, time, d_inner]),
-    );
+    let (grad_y_flat, grad_z, grad_norm_weight) = if let Some(fused) =
+        try_cuda_fused_rmsnorm_gated_backward_core::<B>(
+            y_flat.clone(),
+            z.clone(),
+            norm_weight_b.clone(),
+            grad_gated_flat.clone().reshape([batch, time, d_inner]),
+            inv_rms.clone(),
+            cuda_shell_core_mode,
+        ) {
+        (fused.grad_y, fused.grad_z, fused.grad_weight)
+    } else {
+        rmsnorm_gated_backward_from_inv_rms(
+            y_flat,
+            z,
+            norm_weight_b.clone(),
+            inv_rms.clone(),
+            grad_gated_flat.reshape([batch, time, d_inner]),
+        )
+    };
     let grad_y_grouped = grad_y_flat.reshape([batch, time, ngroups, heads_per_group, headdim]);
     let (grad_x_grouped, grad_d_skip, grad_b_group, grad_c_group, grad_dt_grouped, grad_a_log) =
         if let Some(fused) = try_cuda_fused_ssd_backward_core::<B>(
@@ -471,42 +527,63 @@ pub(crate) fn tensorized_mamba2_backward_impl<B>(
     let grad_conv_preact = grad_xbc_conv_raw
         * (conv_sigmoid.clone()
             * (conv_ones.clone() + xbc_preact_raw.clone() * (conv_ones - conv_sigmoid)));
-    let grad_conv_bias = grad_conv_preact
-        .clone()
-        .sum_dim(0)
-        .sum_dim(1)
-        .sum_dim(3)
-        .reshape([conv_dim]);
-    let mut grad_conv_weight_cols = Vec::with_capacity(_d_conv);
-    let mut grad_history =
-        Tensor::<B, 4>::zeros([batch, 1, conv_dim, time + _d_conv], &xbc_history.device());
-    for tap in 0.._d_conv {
-        let history_window = xbc_history.clone().slice_dim(3, tap + 1..tap + 1 + time);
-        let grad_weight_tap = (grad_conv_preact.clone() * history_window.clone())
+    let (grad_conv_weight, grad_conv_bias, grad_xbc) = if let Some(fused) =
+        try_cuda_fused_depthwise_conv_backward_core::<B>(
+            xbc_input,
+            conv_weight_b.clone(),
+            initial_conv_b.clone(),
+            grad_conv_preact.clone(),
+            cuda_shell_core_mode,
+        ) {
+        (
+            fused.grad_weight,
+            fused.grad_bias,
+            fused
+                .grad_x
+                .reshape([batch, conv_dim, time])
+                .swap_dims(1, 2)
+                .reshape([batch, time, conv_dim]),
+        )
+    } else {
+        let xbc_history = xbc_history.expect("tensorized conv fallback should provide history");
+        let grad_conv_bias = grad_conv_preact
+            .clone()
             .sum_dim(0)
             .sum_dim(1)
             .sum_dim(3)
-            .reshape([conv_dim, 1]);
-        grad_conv_weight_cols.push(grad_weight_tap);
+            .reshape([conv_dim]);
+        let mut grad_conv_weight_cols = Vec::with_capacity(_d_conv);
+        let mut grad_history =
+            Tensor::<B, 4>::zeros([batch, 1, conv_dim, time + _d_conv], &xbc_history.device());
+        for tap in 0.._d_conv {
+            let history_window = xbc_history.clone().slice_dim(3, tap + 1..tap + 1 + time);
+            let grad_weight_tap = (grad_conv_preact.clone() * history_window.clone())
+                .sum_dim(0)
+                .sum_dim(1)
+                .sum_dim(3)
+                .reshape([conv_dim, 1]);
+            grad_conv_weight_cols.push(grad_weight_tap);
 
-        let grad_window = grad_conv_preact.clone()
-            * conv_weight_b
-                .clone()
-                .slice_dim(1, tap..tap + 1)
-                .reshape([1, 1, conv_dim, 1]);
-        let updated_history_window =
-            grad_history.clone().slice_dim(3, tap + 1..tap + 1 + time) + grad_window;
-        grad_history = grad_history.slice_assign(
-            [0..batch, 0..1, 0..conv_dim, tap + 1..tap + 1 + time],
-            updated_history_window,
-        );
-    }
-    let grad_conv_weight = Tensor::cat(grad_conv_weight_cols, 1);
-    let grad_xbc = grad_history
-        .slice_dim(3, _d_conv.._d_conv + time)
-        .reshape([batch, conv_dim, time])
-        .swap_dims(1, 2)
-        .reshape([batch, time, conv_dim]);
+            let grad_window = grad_conv_preact.clone()
+                * conv_weight_b
+                    .clone()
+                    .slice_dim(1, tap..tap + 1)
+                    .reshape([1, 1, conv_dim, 1]);
+            let updated_history_window =
+                grad_history.clone().slice_dim(3, tap + 1..tap + 1 + time) + grad_window;
+            grad_history = grad_history.slice_assign(
+                [0..batch, 0..1, 0..conv_dim, tap + 1..tap + 1 + time],
+                updated_history_window,
+            );
+        }
+        let grad_conv_weight = Tensor::cat(grad_conv_weight_cols, 1);
+        let grad_xbc = grad_history
+            .slice_dim(3, _d_conv.._d_conv + time)
+            .reshape([batch, conv_dim, time])
+            .swap_dims(1, 2)
+            .reshape([batch, time, conv_dim]);
+        (grad_conv_weight, grad_conv_bias, grad_xbc)
+    };
     let grad_zxbcdt = Tensor::cat(vec![grad_z, grad_xbc, grad_dt_raw], 2);
     let grad_zxbcdt_flat = grad_zxbcdt.clone().reshape([batch * time, in_proj_dim]);
     let hidden_states_flat = hidden_states_b.clone().reshape([batch * time, d_model]);
@@ -838,6 +915,474 @@ where
         .map(|boxed| *boxed)
 }
 
+struct CudaFusedRmsnormGatedBackwardGrads<B: BackendTrait> {
+    grad_y: Tensor<B, 3>,
+    grad_z: Tensor<B, 3>,
+    grad_weight: Tensor<B, 1>,
+}
+
+#[cfg(feature = "cuda")]
+fn try_cuda_fused_rmsnorm_gated_backward_core<B: BackendTrait>(
+    y: Tensor<B, 3>,
+    z: Tensor<B, 3>,
+    weight: Tensor<B, 1>,
+    grad_output: Tensor<B, 3>,
+    inv_rms: Tensor<B, 2>,
+    cuda_shell_core_mode: CudaShellCoreMode,
+) -> Option<CudaFusedRmsnormGatedBackwardGrads<B>>
+where
+    B::FloatTensorPrimitive: 'static,
+{
+    if !cuda_shell_core_mode_enabled(cuda_shell_core_mode) {
+        return None;
+    }
+    try_cuda_fused_rmsnorm_gated_backward_core_direct(
+        y.clone(),
+        z.clone(),
+        weight.clone(),
+        grad_output.clone(),
+        inv_rms.clone(),
+    )
+    .or_else(|| {
+        try_cuda_fused_rmsnorm_gated_backward_core_fusion::<B, u8>(
+            y.clone(),
+            z.clone(),
+            weight.clone(),
+            grad_output.clone(),
+            inv_rms.clone(),
+        )
+    })
+    .or_else(|| {
+        try_cuda_fused_rmsnorm_gated_backward_core_fusion::<B, u32>(
+            y,
+            z,
+            weight,
+            grad_output,
+            inv_rms,
+        )
+    })
+}
+
+#[cfg(not(feature = "cuda"))]
+fn try_cuda_fused_rmsnorm_gated_backward_core<B: BackendTrait>(
+    _y: Tensor<B, 3>,
+    _z: Tensor<B, 3>,
+    _weight: Tensor<B, 1>,
+    _grad_output: Tensor<B, 3>,
+    _inv_rms: Tensor<B, 2>,
+    _cuda_shell_core_mode: CudaShellCoreMode,
+) -> Option<CudaFusedRmsnormGatedBackwardGrads<B>>
+where
+    B::FloatTensorPrimitive: 'static,
+{
+    None
+}
+
+#[cfg(feature = "cuda")]
+fn try_cuda_fused_rmsnorm_gated_backward_core_direct<B: BackendTrait>(
+    y: Tensor<B, 3>,
+    z: Tensor<B, 3>,
+    weight: Tensor<B, 1>,
+    grad_output: Tensor<B, 3>,
+    inv_rms: Tensor<B, 2>,
+) -> Option<CudaFusedRmsnormGatedBackwardGrads<B>>
+where
+    B::FloatTensorPrimitive: 'static,
+{
+    let y_raw: CubeTensor<CudaRuntime> = try_cast_primitive::<B, _>(y.into_primitive().tensor())?;
+    let z_raw: CubeTensor<CudaRuntime> = try_cast_primitive::<B, _>(z.into_primitive().tensor())?;
+    let weight_raw: CubeTensor<CudaRuntime> =
+        try_cast_primitive::<B, _>(weight.into_primitive().tensor())?;
+    let grad_output_raw: CubeTensor<CudaRuntime> =
+        try_cast_primitive::<B, _>(grad_output.into_primitive().tensor())?;
+    let inv_rms_raw: CubeTensor<CudaRuntime> =
+        try_cast_primitive::<B, _>(inv_rms.into_primitive().tensor())?;
+    let output = fused_mamba2_rmsnorm_gated_backward_cuda(
+        y_raw,
+        z_raw,
+        weight_raw,
+        grad_output_raw,
+        inv_rms_raw,
+    );
+    Some(CudaFusedRmsnormGatedBackwardGrads {
+        grad_y: BurnTensor::<B, 3>::from_primitive(TensorPrimitive::Float(
+            try_cast_backend::<B, _>(output.grad_y)?,
+        )),
+        grad_z: BurnTensor::<B, 3>::from_primitive(TensorPrimitive::Float(
+            try_cast_backend::<B, _>(output.grad_z)?,
+        )),
+        grad_weight: BurnTensor::<B, 1>::from_primitive(TensorPrimitive::Float(
+            try_cast_backend::<B, _>(output.grad_weight)?,
+        )),
+    })
+}
+
+#[cfg(feature = "cuda")]
+fn try_cuda_fused_rmsnorm_gated_backward_core_fusion<B: BackendTrait, BT: BoolElement + 'static>(
+    y: Tensor<B, 3>,
+    z: Tensor<B, 3>,
+    weight: Tensor<B, 1>,
+    grad_output: Tensor<B, 3>,
+    inv_rms: Tensor<B, 2>,
+) -> Option<CudaFusedRmsnormGatedBackwardGrads<B>>
+where
+    B::FloatTensorPrimitive: 'static,
+{
+    if !matches_type::<B::FloatTensorPrimitive, FusionTensor<FusionCubeRuntime<CudaRuntime, BT>>>()
+    {
+        return None;
+    }
+
+    let y_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime, BT>> =
+        try_cast_primitive::<B, _>(y.into_primitive().tensor())?;
+    let client = y_fusion.client.clone();
+    let z_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime, BT>> =
+        try_cast_primitive::<B, _>(z.into_primitive().tensor())?;
+    let weight_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime, BT>> =
+        try_cast_primitive::<B, _>(weight.into_primitive().tensor())?;
+    let grad_output_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime, BT>> =
+        try_cast_primitive::<B, _>(grad_output.into_primitive().tensor())?;
+    let inv_rms_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime, BT>> =
+        try_cast_primitive::<B, _>(inv_rms.into_primitive().tensor())?;
+
+    let y_raw = client.resolve_tensor_float::<CubeBackend<CudaRuntime, f32, i32, BT>>(y_fusion);
+    let z_raw = client.resolve_tensor_float::<CubeBackend<CudaRuntime, f32, i32, BT>>(z_fusion);
+    let weight_raw =
+        client.resolve_tensor_float::<CubeBackend<CudaRuntime, f32, i32, BT>>(weight_fusion);
+    let grad_output_raw =
+        client.resolve_tensor_float::<CubeBackend<CudaRuntime, f32, i32, BT>>(grad_output_fusion);
+    let inv_rms_raw =
+        client.resolve_tensor_float::<CubeBackend<CudaRuntime, f32, i32, BT>>(inv_rms_fusion);
+    let output = fused_mamba2_rmsnorm_gated_backward_cuda(
+        y_raw,
+        z_raw,
+        weight_raw,
+        grad_output_raw,
+        inv_rms_raw,
+    );
+    Some(CudaFusedRmsnormGatedBackwardGrads {
+        grad_y: BurnTensor::<B, 3>::from_primitive(TensorPrimitive::Float(
+            try_cast_backend::<B, _>(register_fusion_float_tensor(&client, output.grad_y))?,
+        )),
+        grad_z: BurnTensor::<B, 3>::from_primitive(TensorPrimitive::Float(
+            try_cast_backend::<B, _>(register_fusion_float_tensor(&client, output.grad_z))?,
+        )),
+        grad_weight: BurnTensor::<B, 1>::from_primitive(TensorPrimitive::Float(
+            try_cast_backend::<B, _>(register_fusion_float_tensor(&client, output.grad_weight))?,
+        )),
+    })
+}
+
+struct CudaFusedDepthwiseConvForwardOutput<B: BackendTrait> {
+    preact: Tensor<B, 4>,
+}
+
+struct CudaFusedDepthwiseConvBackwardGrads<B: BackendTrait> {
+    grad_x: Tensor<B, 4>,
+    grad_weight: Tensor<B, 2>,
+    grad_bias: Tensor<B, 1>,
+}
+
+#[cfg(feature = "cuda")]
+fn try_cuda_fused_depthwise_conv_forward_core<B: BackendTrait>(
+    x: Tensor<B, 4>,
+    conv_weight: Tensor<B, 2>,
+    conv_bias: Tensor<B, 1>,
+    state: Option<Tensor<B, 4>>,
+    cuda_shell_core_mode: CudaShellCoreMode,
+) -> Option<CudaFusedDepthwiseConvForwardOutput<B>>
+where
+    B::FloatTensorPrimitive: 'static,
+{
+    if !cuda_shell_core_mode_enabled(cuda_shell_core_mode) {
+        return None;
+    }
+    try_cuda_fused_depthwise_conv_forward_core_direct(
+        x.clone(),
+        conv_weight.clone(),
+        conv_bias.clone(),
+        state.clone(),
+    )
+    .or_else(|| {
+        try_cuda_fused_depthwise_conv_forward_core_fusion::<B, u8>(
+            x.clone(),
+            conv_weight.clone(),
+            conv_bias.clone(),
+            state.clone(),
+        )
+    })
+    .or_else(|| {
+        try_cuda_fused_depthwise_conv_forward_core_fusion::<B, u32>(
+            x,
+            conv_weight,
+            conv_bias,
+            state,
+        )
+    })
+}
+
+#[cfg(not(feature = "cuda"))]
+fn try_cuda_fused_depthwise_conv_forward_core<B: BackendTrait>(
+    _x: Tensor<B, 4>,
+    _conv_weight: Tensor<B, 2>,
+    _conv_bias: Tensor<B, 1>,
+    _state: Option<Tensor<B, 4>>,
+    _cuda_shell_core_mode: CudaShellCoreMode,
+) -> Option<CudaFusedDepthwiseConvForwardOutput<B>>
+where
+    B::FloatTensorPrimitive: 'static,
+{
+    None
+}
+
+#[cfg(feature = "cuda")]
+fn try_cuda_fused_depthwise_conv_forward_core_direct<B: BackendTrait>(
+    x: Tensor<B, 4>,
+    conv_weight: Tensor<B, 2>,
+    conv_bias: Tensor<B, 1>,
+    state: Option<Tensor<B, 4>>,
+) -> Option<CudaFusedDepthwiseConvForwardOutput<B>>
+where
+    B::FloatTensorPrimitive: 'static,
+{
+    let [batch, views, channels, _time] = x.shape().dims::<4>();
+    let d_conv = conv_weight.shape().dims::<2>()[1];
+    let x_raw: CubeTensor<CudaRuntime> = try_cast_primitive::<B, _>(x.into_primitive().tensor())?;
+    let conv_weight_raw: CubeTensor<CudaRuntime> =
+        try_cast_primitive::<B, _>(conv_weight.into_primitive().tensor())?;
+    let conv_bias_raw: CubeTensor<CudaRuntime> =
+        try_cast_primitive::<B, _>(conv_bias.into_primitive().tensor())?;
+    let state_raw: CubeTensor<CudaRuntime> = match state {
+        Some(state) => try_cast_primitive::<B, _>(state.into_primitive().tensor())?,
+        None => {
+            BurnTensor::<CudaCubeBackend, 4>::zeros([batch, views, channels, d_conv], &x_raw.device)
+                .into_primitive()
+                .tensor()
+        }
+    };
+    let output: MambaDepthwiseConvCudaForwardOutput =
+        fused_mamba_depthwise_conv_forward_cuda(x_raw, conv_weight_raw, conv_bias_raw, state_raw);
+    Some(CudaFusedDepthwiseConvForwardOutput {
+        preact: BurnTensor::<B, 4>::from_primitive(TensorPrimitive::Float(
+            try_cast_backend::<B, _>(output.preact)?,
+        )),
+    })
+}
+
+#[cfg(feature = "cuda")]
+fn try_cuda_fused_depthwise_conv_forward_core_fusion<B: BackendTrait, BT: BoolElement + 'static>(
+    x: Tensor<B, 4>,
+    conv_weight: Tensor<B, 2>,
+    conv_bias: Tensor<B, 1>,
+    state: Option<Tensor<B, 4>>,
+) -> Option<CudaFusedDepthwiseConvForwardOutput<B>>
+where
+    B::FloatTensorPrimitive: 'static,
+{
+    if !matches_type::<B::FloatTensorPrimitive, FusionTensor<FusionCubeRuntime<CudaRuntime, BT>>>()
+    {
+        return None;
+    }
+
+    let x_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime, BT>> =
+        try_cast_primitive::<B, _>(x.into_primitive().tensor())?;
+    let client = x_fusion.client.clone();
+    let conv_weight_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime, BT>> =
+        try_cast_primitive::<B, _>(conv_weight.into_primitive().tensor())?;
+    let conv_bias_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime, BT>> =
+        try_cast_primitive::<B, _>(conv_bias.into_primitive().tensor())?;
+    let x_raw =
+        client.resolve_tensor_float::<CubeBackend<CudaRuntime, f32, i32, BT>>(x_fusion.clone());
+    let [batch, views, channels, _time] = x_raw.meta.shape.dims::<4>();
+    let conv_weight_raw = client
+        .resolve_tensor_float::<CubeBackend<CudaRuntime, f32, i32, BT>>(conv_weight_fusion.clone());
+    let d_conv = conv_weight_raw.meta.shape.dims::<2>()[1];
+    let conv_bias_raw =
+        client.resolve_tensor_float::<CubeBackend<CudaRuntime, f32, i32, BT>>(conv_bias_fusion);
+    let state_raw = match state {
+        Some(state) => {
+            let state_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime, BT>> =
+                try_cast_primitive::<B, _>(state.into_primitive().tensor())?;
+            client.resolve_tensor_float::<CubeBackend<CudaRuntime, f32, i32, BT>>(state_fusion)
+        }
+        None => {
+            BurnTensor::<CudaCubeBackend, 4>::zeros([batch, views, channels, d_conv], &x_raw.device)
+                .into_primitive()
+                .tensor()
+        }
+    };
+    let output =
+        fused_mamba_depthwise_conv_forward_cuda(x_raw, conv_weight_raw, conv_bias_raw, state_raw);
+    Some(CudaFusedDepthwiseConvForwardOutput {
+        preact: BurnTensor::<B, 4>::from_primitive(TensorPrimitive::Float(
+            try_cast_backend::<B, _>(register_fusion_float_tensor(&client, output.preact))?,
+        )),
+    })
+}
+
+#[cfg(feature = "cuda")]
+fn try_cuda_fused_depthwise_conv_backward_core<B: BackendTrait>(
+    x: Tensor<B, 4>,
+    conv_weight: Tensor<B, 2>,
+    state: Option<Tensor<B, 4>>,
+    grad_preact: Tensor<B, 4>,
+    cuda_shell_core_mode: CudaShellCoreMode,
+) -> Option<CudaFusedDepthwiseConvBackwardGrads<B>>
+where
+    B::FloatTensorPrimitive: 'static,
+{
+    if !cuda_shell_core_mode_enabled(cuda_shell_core_mode) {
+        return None;
+    }
+    try_cuda_fused_depthwise_conv_backward_core_direct(
+        x.clone(),
+        conv_weight.clone(),
+        state.clone(),
+        grad_preact.clone(),
+    )
+    .or_else(|| {
+        try_cuda_fused_depthwise_conv_backward_core_fusion::<B, u8>(
+            x.clone(),
+            conv_weight.clone(),
+            state.clone(),
+            grad_preact.clone(),
+        )
+    })
+    .or_else(|| {
+        try_cuda_fused_depthwise_conv_backward_core_fusion::<B, u32>(
+            x,
+            conv_weight,
+            state,
+            grad_preact,
+        )
+    })
+}
+
+#[cfg(not(feature = "cuda"))]
+fn try_cuda_fused_depthwise_conv_backward_core<B: BackendTrait>(
+    _x: Tensor<B, 4>,
+    _conv_weight: Tensor<B, 2>,
+    _state: Option<Tensor<B, 4>>,
+    _grad_preact: Tensor<B, 4>,
+    _cuda_shell_core_mode: CudaShellCoreMode,
+) -> Option<CudaFusedDepthwiseConvBackwardGrads<B>>
+where
+    B::FloatTensorPrimitive: 'static,
+{
+    None
+}
+
+#[cfg(feature = "cuda")]
+fn try_cuda_fused_depthwise_conv_backward_core_direct<B: BackendTrait>(
+    x: Tensor<B, 4>,
+    conv_weight: Tensor<B, 2>,
+    state: Option<Tensor<B, 4>>,
+    grad_preact: Tensor<B, 4>,
+) -> Option<CudaFusedDepthwiseConvBackwardGrads<B>>
+where
+    B::FloatTensorPrimitive: 'static,
+{
+    let [batch, views, channels, _time] = x.shape().dims::<4>();
+    let d_conv = conv_weight.shape().dims::<2>()[1];
+    let x_raw: CubeTensor<CudaRuntime> = try_cast_primitive::<B, _>(x.into_primitive().tensor())?;
+    let conv_weight_raw: CubeTensor<CudaRuntime> =
+        try_cast_primitive::<B, _>(conv_weight.into_primitive().tensor())?;
+    let grad_preact_raw: CubeTensor<CudaRuntime> =
+        try_cast_primitive::<B, _>(grad_preact.into_primitive().tensor())?;
+    let state_raw: CubeTensor<CudaRuntime> = match state {
+        Some(state) => try_cast_primitive::<B, _>(state.into_primitive().tensor())?,
+        None => {
+            BurnTensor::<CudaCubeBackend, 4>::zeros([batch, views, channels, d_conv], &x_raw.device)
+                .into_primitive()
+                .tensor()
+        }
+    };
+    let output: MambaDepthwiseConvCudaBackwardOutput = fused_mamba_depthwise_conv_backward_cuda(
+        x_raw,
+        conv_weight_raw,
+        state_raw,
+        grad_preact_raw,
+    );
+    Some(CudaFusedDepthwiseConvBackwardGrads {
+        grad_x: BurnTensor::<B, 4>::from_primitive(TensorPrimitive::Float(
+            try_cast_backend::<B, _>(output.grad_x)?,
+        )),
+        grad_weight: BurnTensor::<B, 2>::from_primitive(TensorPrimitive::Float(
+            try_cast_backend::<B, _>(output.grad_weight)?,
+        )),
+        grad_bias: BurnTensor::<B, 1>::from_primitive(TensorPrimitive::Float(try_cast_backend::<
+            B,
+            _,
+        >(
+            output.grad_bias
+        )?)),
+    })
+}
+
+#[cfg(feature = "cuda")]
+fn try_cuda_fused_depthwise_conv_backward_core_fusion<B: BackendTrait, BT: BoolElement + 'static>(
+    x: Tensor<B, 4>,
+    conv_weight: Tensor<B, 2>,
+    state: Option<Tensor<B, 4>>,
+    grad_preact: Tensor<B, 4>,
+) -> Option<CudaFusedDepthwiseConvBackwardGrads<B>>
+where
+    B::FloatTensorPrimitive: 'static,
+{
+    if !matches_type::<B::FloatTensorPrimitive, FusionTensor<FusionCubeRuntime<CudaRuntime, BT>>>()
+    {
+        return None;
+    }
+
+    let x_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime, BT>> =
+        try_cast_primitive::<B, _>(x.into_primitive().tensor())?;
+    let client = x_fusion.client.clone();
+    let conv_weight_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime, BT>> =
+        try_cast_primitive::<B, _>(conv_weight.into_primitive().tensor())?;
+    let grad_preact_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime, BT>> =
+        try_cast_primitive::<B, _>(grad_preact.into_primitive().tensor())?;
+    let x_raw =
+        client.resolve_tensor_float::<CubeBackend<CudaRuntime, f32, i32, BT>>(x_fusion.clone());
+    let [batch, views, channels, _time] = x_raw.meta.shape.dims::<4>();
+    let conv_weight_raw = client
+        .resolve_tensor_float::<CubeBackend<CudaRuntime, f32, i32, BT>>(conv_weight_fusion.clone());
+    let d_conv = conv_weight_raw.meta.shape.dims::<2>()[1];
+    let grad_preact_raw =
+        client.resolve_tensor_float::<CubeBackend<CudaRuntime, f32, i32, BT>>(grad_preact_fusion);
+    let state_raw = match state {
+        Some(state) => {
+            let state_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime, BT>> =
+                try_cast_primitive::<B, _>(state.into_primitive().tensor())?;
+            client.resolve_tensor_float::<CubeBackend<CudaRuntime, f32, i32, BT>>(state_fusion)
+        }
+        None => {
+            BurnTensor::<CudaCubeBackend, 4>::zeros([batch, views, channels, d_conv], &x_raw.device)
+                .into_primitive()
+                .tensor()
+        }
+    };
+    let output = fused_mamba_depthwise_conv_backward_cuda(
+        x_raw,
+        conv_weight_raw,
+        state_raw,
+        grad_preact_raw,
+    );
+    Some(CudaFusedDepthwiseConvBackwardGrads {
+        grad_x: BurnTensor::<B, 4>::from_primitive(TensorPrimitive::Float(
+            try_cast_backend::<B, _>(register_fusion_float_tensor(&client, output.grad_x))?,
+        )),
+        grad_weight: BurnTensor::<B, 2>::from_primitive(TensorPrimitive::Float(
+            try_cast_backend::<B, _>(register_fusion_float_tensor(&client, output.grad_weight))?,
+        )),
+        grad_bias: BurnTensor::<B, 1>::from_primitive(TensorPrimitive::Float(try_cast_backend::<
+            B,
+            _,
+        >(
+            register_fusion_float_tensor(&client, output.grad_bias),
+        )?)),
+    })
+}
+
 fn depthwise_conv_preact_with_history<B: BackendTrait>(
     x: Tensor<B, 4>,
     conv_weight: Tensor<B, 2>,
@@ -872,39 +1417,26 @@ fn depthwise_conv_preact_with_history<B: BackendTrait>(
     (preact, history)
 }
 
-fn rmsnorm_gated_forward<B: BackendTrait>(
+fn rmsnorm_gated_forward_from_inv_rms<B: BackendTrait>(
     y: Tensor<B, 3>,
     z: Tensor<B, 3>,
     weight: Tensor<B, 1>,
-    eps: f32,
+    inv_rms: Tensor<B, 2>,
 ) -> Tensor<B, 3> {
     let width = weight.shape().dims::<1>()[0];
-    let rms = y
-        .clone()
-        .powf_scalar(2.0)
-        .mean_dim(2)
-        .add_scalar(eps)
-        .sqrt()
-        .reshape([y.shape().dims::<3>()[0], y.shape().dims::<3>()[1], 1]);
-    (y / rms) * weight.reshape([1, 1, width]) * silu(z)
+    let [batch, time, _width] = y.shape().dims::<3>();
+    (y * inv_rms.reshape([batch, time, 1])) * weight.reshape([1, 1, width]) * silu(z)
 }
 
-fn rmsnorm_gated_backward<B: BackendTrait>(
+fn rmsnorm_gated_backward_from_inv_rms<B: BackendTrait>(
     y: Tensor<B, 3>,
     z: Tensor<B, 3>,
     weight: Tensor<B, 1>,
-    eps: f32,
+    inv_rms: Tensor<B, 2>,
     grad_output: Tensor<B, 3>,
 ) -> (Tensor<B, 3>, Tensor<B, 3>, Tensor<B, 1>) {
     let [batch, time, width] = y.shape().dims::<3>();
-    let rms = y
-        .clone()
-        .powf_scalar(2.0)
-        .mean_dim(2)
-        .add_scalar(eps)
-        .sqrt()
-        .reshape([batch, time, 1]);
-    let inv_rms = rms.clone().recip();
+    let inv_rms = inv_rms.reshape([batch, time, 1]);
     let normalized = y.clone() * inv_rms.clone();
     let gate = silu(z.clone());
     let weighted = normalized.clone() * weight.clone().reshape([1, 1, width]);
@@ -919,8 +1451,10 @@ fn rmsnorm_gated_backward<B: BackendTrait>(
     let dot = (grad_normalized.clone() * y.clone())
         .sum_dim(2)
         .reshape([batch, time, 1]);
-    let denom = (width as f32) * rms.clone().powf_scalar(3.0);
-    let grad_y = grad_normalized * inv_rms - y * dot.div(denom);
+    let grad_y = grad_normalized * inv_rms.clone()
+        - y * dot
+            .mul(inv_rms.clone().powf_scalar(3.0))
+            .div_scalar(width as f32);
 
     let sigmoid_z = activation::sigmoid(z.clone());
     let ones = sigmoid_z.clone().ones_like();

@@ -24,9 +24,10 @@ fn cuda_mamba2_training_geometry_summary(
     if model_config.sequence_kernel.memory_system != SequenceMemorySystem::Mamba2StateSpaceDuality {
         return None;
     }
-    let resolved = model_config
-        .mamba
-        .resolve(model_config.n_embd, SequenceMemorySystem::Mamba2StateSpaceDuality);
+    let resolved = model_config.mamba.resolve(
+        model_config.n_embd,
+        SequenceMemorySystem::Mamba2StateSpaceDuality,
+    );
     Some(format!(
         "cuda mamba2 geometry: micro_batch={} kernel_block={} tokens/micro_batch={} d_inner={} headdim={} nheads={} ngroups={} d_state={} d_conv={}",
         micro_batch_size,
@@ -844,8 +845,8 @@ mod tests {
             ..Default::default()
         };
 
-        let summary = cuda_mamba2_training_geometry_summary(&model_config, 24, 512)
-            .expect("summary");
+        let summary =
+            cuda_mamba2_training_geometry_summary(&model_config, 24, 512).expect("summary");
         assert!(summary.contains("tokens/micro_batch=12288"), "{summary}");
         assert!(summary.contains("headdim=128"), "{summary}");
         assert!(summary.contains("nheads=2"), "{summary}");
@@ -854,9 +855,7 @@ mod tests {
     #[test]
     fn cuda_mamba2_training_geometry_summary_skips_other_kernels() {
         let model_config = burn_dragon_core::BDHConfig {
-            sequence_kernel: SequenceKernelConfig::reference(
-                SequenceMemorySystem::LinearAttention,
-            ),
+            sequence_kernel: SequenceKernelConfig::reference(SequenceMemorySystem::LinearAttention),
             mamba: burn_dragon_core::MambaSequenceConfig {
                 headdim: 128,
                 ngroups: 1,
@@ -865,9 +864,7 @@ mod tests {
             ..Default::default()
         };
 
-        assert!(
-            cuda_mamba2_training_geometry_summary(&model_config, 24, 512).is_none()
-        );
+        assert!(cuda_mamba2_training_geometry_summary(&model_config, 24, 512).is_none());
     }
 
     #[test]

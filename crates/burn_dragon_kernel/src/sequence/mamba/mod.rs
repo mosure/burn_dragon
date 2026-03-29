@@ -1,5 +1,6 @@
 pub mod bench;
 pub mod conv;
+pub mod conv_runtime;
 pub mod selective_scan_backward;
 pub mod selective_scan_forward;
 

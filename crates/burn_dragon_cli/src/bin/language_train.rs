@@ -607,7 +607,11 @@ fn resolve_active_train_window(experiment_log: &Path) -> Result<Option<ActiveTra
         .unwrap_or(0.0);
     let mut step_deltas = Vec::new();
     for window in iteration_times.windows(2) {
-        let [(prev_iteration, prev_elapsed), (next_iteration, next_elapsed)] = window else {
+        let [
+            (prev_iteration, prev_elapsed),
+            (next_iteration, next_elapsed),
+        ] = window
+        else {
             continue;
         };
         let _ = prev_iteration;
@@ -619,9 +623,7 @@ fn resolve_active_train_window(experiment_log: &Path) -> Result<Option<ActiveTra
         return Ok(None);
     }
     let mean_step_secs = step_deltas.iter().sum::<f64>() / step_deltas.len() as f64;
-    step_deltas.sort_by(|left, right| {
-        left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal)
-    });
+    step_deltas.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
     let median_step_secs = step_deltas[step_deltas.len() / 2];
     Ok(Some(ActiveTrainWindow {
         warmup_iterations_skipped,
@@ -800,7 +802,9 @@ fn run_language(prepared: PreparedLanguageCommand) -> Result<()> {
     } else {
         unsafe { std::env::set_var(RUN_ROOT_ENV, &run_root) };
     }
-    let telemetry_run_dir = planned_run.as_ref().map(|planned_run| planned_run.run_dir.clone());
+    let telemetry_run_dir = planned_run
+        .as_ref()
+        .map(|planned_run| planned_run.run_dir.clone());
 
     #[cfg(feature = "language-rerun")]
     let _rerun_guard = if args.rerun {

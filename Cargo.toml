@@ -123,21 +123,13 @@ burn_dragon_web = { path = "crates/burn_dragon_web", version = "0.5.0", default-
 
 
 [dev-dependencies]
-criterion = { version = "0.7", features = ["html_reports"] }
 burn = { version = "0.21.0-pre.2", default-features = false, features = ["fusion", "ndarray", "std", "wgpu"] }
 burn-autodiff = { version = "0.21.0-pre.2" }
 burn-ndarray = "0.21.0-pre.2"
-burn-wgpu = { version = "0.21.0-pre.2", default-features = false, features = ["fusion", "std"] }
-burn-cuda = { version = "0.21.0-pre.2", default-features = false, features = ["std"] }
-bytemuck = { version = "1", features = ["derive"] }
-half = "2"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
-pollster = "0.3"
-rand = "0.8"
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.9"
 tempfile = "3"
-wgpu = "26"
 
 
 [profile.dev.package."*"]
@@ -175,42 +167,3 @@ burn-collective = { path = "vendor/burn-collective-0.21.0-pre.2" }
 [lib]
 path = "src/lib.rs"
 crate-type = ["rlib", "cdylib"]
-
-[[bench]]
-name = "inference"
-harness = false
-path = "bench/inference.rs"
-
-[[bench]]
-name = "train"
-harness = false
-path = "bench/train.rs"
-
-[[bench]]
-name = "vision_pipeline"
-harness = false
-path = "bench/vision_pipeline.rs"
-
-[[bench]]
-name = "vision_train_step"
-harness = false
-path = "bench/vision_train_step.rs"
-required-features = ["benchmark"]
-
-[[bench]]
-name = "vision_mae_train_step"
-harness = false
-path = "bench/vision_mae_train_step.rs"
-required-features = ["benchmark"]
-
-[[bench]]
-name = "vision_lejepa_train_step"
-harness = false
-path = "bench/vision_lejepa_train_step.rs"
-required-features = ["benchmark"]
-
-[[bench]]
-name = "vision_input_projection"
-harness = false
-path = "bench/vision_input_projection.rs"
-required-features = ["benchmark"]

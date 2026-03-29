@@ -10,6 +10,9 @@ pub struct LayerState<B: Backend> {
     pub packed_rho_int8_device: Option<PackedRhoInt8DeviceState<B>>,
     pub rho_norm: Option<Tensor<B, 3>>,
     pub sequence_aux: Option<Tensor<B, 4>>,
+    pub mamba_angle_state: Option<Tensor<B, 3>>,
+    pub mamba_k_state: Option<Tensor<B, 3>>,
+    pub mamba_v_state: Option<Tensor<B, 3>>,
     pub y_neuron_state: Option<Tensor<B, 3>>,
     pub clocked_slow_hidden: Option<Tensor<B, 4>>,
     pub summary_memory_hidden: Option<Tensor<B, 4>>,
@@ -42,6 +45,9 @@ impl<B: Backend> ModelState<B> {
                     packed_rho_int8_device: None,
                     rho_norm: None,
                     sequence_aux: None,
+                    mamba_angle_state: None,
+                    mamba_k_state: None,
+                    mamba_v_state: None,
                     y_neuron_state: None,
                     clocked_slow_hidden: None,
                     summary_memory_hidden: None,
@@ -60,6 +66,9 @@ impl<B: Backend> ModelState<B> {
             layer.packed_rho_int8_device = None;
             layer.rho_norm = None;
             layer.sequence_aux = None;
+            layer.mamba_angle_state = None;
+            layer.mamba_k_state = None;
+            layer.mamba_v_state = None;
             layer.y_neuron_state = None;
             layer.clocked_slow_hidden = None;
             layer.summary_memory_hidden = None;
@@ -88,6 +97,9 @@ impl<B: Backend> ModelState<B> {
                 .map(|state| state.detach());
             layer.rho_norm = layer.rho_norm.take().map(|tensor| tensor.detach());
             layer.sequence_aux = layer.sequence_aux.take().map(|tensor| tensor.detach());
+            layer.mamba_angle_state = layer.mamba_angle_state.take().map(|tensor| tensor.detach());
+            layer.mamba_k_state = layer.mamba_k_state.take().map(|tensor| tensor.detach());
+            layer.mamba_v_state = layer.mamba_v_state.take().map(|tensor| tensor.detach());
             layer.y_neuron_state = layer.y_neuron_state.take().map(|tensor| tensor.detach());
             layer.clocked_slow_hidden = layer
                 .clocked_slow_hidden

@@ -41,7 +41,7 @@ pub mod api {
 pub mod kernels {
     /// Sequence-kernel family namespace used by the language line.
     pub mod sequence {
-        pub use crate::sequence::{linear, mamba, mamba2, rwkv8};
+        pub use crate::sequence::{linear, mamba, mamba2, mamba3, rwkv8};
     }
 
     /// Dense attention and score kernels used by language/vision recurrent executors.

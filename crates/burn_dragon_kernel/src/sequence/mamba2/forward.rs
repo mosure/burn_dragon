@@ -213,7 +213,7 @@ pub fn tensorized_mamba2_forward<B: BackendTrait>(
             CudaShellCoreMode::RuntimeDefault,
         ) {
             log_mamba2_path_selection_once(
-                "mamba2 tensorized path: using custom analytic backward wrapper with fused CUDA SSD and shell cores when available",
+                "mamba2 tensorized path: using custom analytic backward wrapper with fused CUDA SSD and shell cores",
             );
             return output;
         }
@@ -618,6 +618,7 @@ fn tensorized_mamba2_forward_impl_internal_with_cuda_ssd_mode<B: BackendTrait>(
     capture_cuda_ssd_state_history: bool,
 ) -> Mamba2TensorizedInternalOutput<B> {
     let [batch, views, time, d_model] = hidden_states.shape().dims::<4>();
+    let device = hidden_states.device();
     assert_eq!(views, 1, "mamba2 tensorized path expects a single view");
     assert_eq!(
         d_inner % headdim,
@@ -763,41 +764,72 @@ fn tensorized_mamba2_forward_impl_internal_with_cuda_ssd_mode<B: BackendTrait>(
         let a = a_log
             .exp()
             .neg()
-            .reshape([1, 1, ngroups, heads_per_group, 1, 1]);
-        let d_skip = d_skip.reshape([1, 1, ngroups, heads_per_group, 1]);
+            .reshape([1, ngroups, heads_per_group, 1, 1]);
+        let d_skip = d_skip.reshape([1, ngroups, heads_per_group, 1]);
+        let mut ssm_state = initial_ssm
+            .map(|state| state.reshape([batch, ngroups, heads_per_group, headdim, d_state]))
+            .unwrap_or_else(|| {
+                Tensor::<B, 5>::zeros([batch, ngroups, heads_per_group, headdim, d_state], &device)
+            });
+        let mut outputs = Vec::with_capacity(time);
+        let mut state_history = capture_cuda_ssd_state_history.then(|| Vec::with_capacity(time));
 
-        let d_a = (dt_grouped
-            .clone()
-            .reshape([batch, time, ngroups, heads_per_group, 1, 1])
-            * a)
+        for step in 0..time {
+            let x_t = x_grouped.clone().slice_dim(1, step..step + 1).reshape([
+                batch,
+                ngroups,
+                heads_per_group,
+                headdim,
+            ]);
+            let b_t = b_group
+                .clone()
+                .slice_dim(1, step..step + 1)
+                .reshape([batch, ngroups, d_state]);
+            let c_t = c_group
+                .clone()
+                .slice_dim(1, step..step + 1)
+                .reshape([batch, ngroups, d_state]);
+            let dt_t = dt_grouped.clone().slice_dim(1, step..step + 1).reshape([
+                batch,
+                ngroups,
+                heads_per_group,
+            ]);
+
+            let decay = (dt_t
+                .clone()
+                .reshape([batch, ngroups, heads_per_group, 1, 1])
+                * a.clone())
             .exp();
-        let drive = dt_grouped
-            .clone()
-            .reshape([batch, time, ngroups, heads_per_group, 1, 1])
-            * b_group
-                .clone()
-                .reshape([batch, time, ngroups, 1, 1, d_state])
-            * x_grouped
-                .clone()
-                .reshape([batch, time, ngroups, heads_per_group, headdim, 1]);
-        let prefix_a = d_a.clone().cumprod(1);
-        let mut ssm = prefix_a.clone() * drive.div(prefix_a.clone().add_scalar(1.0e-12)).cumsum(1);
-        if let Some(initial_ssm) = initial_ssm {
-            ssm = ssm
-                + prefix_a
-                    * initial_ssm
-                        .reshape([batch, 1, ngroups, heads_per_group, headdim, d_state])
-                        .repeat_dim(1, time);
+            let input_term = dt_t.reshape([batch, ngroups, heads_per_group, 1, 1])
+                * b_t.reshape([batch, ngroups, 1, 1, d_state])
+                * x_t
+                    .clone()
+                    .reshape([batch, ngroups, heads_per_group, headdim, 1]);
+            ssm_state = ssm_state * decay + input_term;
+
+            if let Some(history) = state_history.as_mut() {
+                history.push(ssm_state.clone().reshape([
+                    batch,
+                    1,
+                    ngroups,
+                    heads_per_group,
+                    headdim,
+                    d_state,
+                ]));
+            }
+
+            let y_t = (ssm_state.clone() * c_t.reshape([batch, ngroups, 1, 1, d_state]))
+                .sum_dim(4)
+                .reshape([batch, ngroups, heads_per_group, headdim])
+                + d_skip.clone() * x_t;
+            outputs.push(y_t.reshape([batch, 1, ngroups, heads_per_group, headdim]));
         }
 
-        let y_grouped = (ssm.clone() * c_group.reshape([batch, time, ngroups, 1, 1, d_state]))
-            .sum_dim(5)
-            .reshape([batch, time, ngroups, heads_per_group, headdim])
-            + d_skip * x_grouped.clone();
-        let final_ssm_state = ssm
-            .slice_dim(1, time - 1..time)
-            .reshape([batch, nheads, headdim, d_state]);
-        (y_grouped, final_ssm_state, None)
+        (
+            Tensor::cat(outputs, 1),
+            ssm_state.reshape([batch, nheads, headdim, d_state]),
+            state_history.map(|history| Tensor::cat(history, 1)),
+        )
     };
     let y_flat = y_grouped.reshape([batch, time, d_inner]);
     let (gated, rmsnorm_inv_rms) = if capture_cuda_ssd_state_history {

@@ -1,4 +1,0 @@
-extends = ["cellular_short.toml"]
-
-[mode.memory]
-disable_writes = true

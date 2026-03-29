@@ -6,6 +6,14 @@ use crate::model::low_bit_runtime::{unpack_rho_block_state, unpack_rho_int8_bloc
 use crate::model::sequence::mamba::MambaSequenceConfig;
 use burn::tensor::backend::Backend as BackendTrait;
 use burn::tensor::{Int, TensorData};
+#[cfg(feature = "cuda")]
+use burn_autodiff::Autodiff;
+#[cfg(feature = "cuda")]
+use burn_cuda::Cuda;
+#[cfg(feature = "cuda")]
+use burn_dragon_kernel::kernels::sequence::mamba2::forward::{
+    CudaShellCoreMode, CudaSsdCoreMode, tensorized_mamba2_forward_custom_backward_with_cuda_modes,
+};
 use burn_ndarray::NdArray;
 use std::sync::{Mutex, OnceLock};
 
@@ -29,6 +37,10 @@ fn kernel_mamba1() -> SequenceKernelConfig {
 
 fn kernel_mamba2() -> SequenceKernelConfig {
     SequenceKernelConfig::reference(SequenceMemorySystem::Mamba2StateSpaceDuality)
+}
+
+fn kernel_mamba3() -> SequenceKernelConfig {
+    SequenceKernelConfig::reference(SequenceMemorySystem::Mamba3StateSpaceDuality)
 }
 
 fn recurrence_test_model(config: BDHConfig) -> BDH<RecurrenceBackend> {
@@ -69,7 +81,11 @@ fn recurrence_test_model_with_shape(
         },
         ..Default::default()
     };
-    if kernel.memory_system == SequenceMemorySystem::Mamba2StateSpaceDuality {
+    if matches!(
+        kernel.memory_system,
+        SequenceMemorySystem::Mamba2StateSpaceDuality
+            | SequenceMemorySystem::Mamba3StateSpaceDuality
+    ) {
         config.mamba.headdim = n_embd.max(1);
     }
     recurrence_test_model(config)
@@ -1923,6 +1939,11 @@ fn mamba2_full_forward_matches_token_step_recurrence() {
 }
 
 #[test]
+fn mamba3_full_forward_matches_token_step_recurrence() {
+    assert_full_forward_matches_token_step_recurrence(kernel_mamba3());
+}
+
+#[test]
 fn linear_chunked_recurrence_matches_uninterrupted_state_and_logits() {
     assert_chunked_recurrence_matches_uninterrupted_state(kernel_linear_attention());
 }
@@ -1950,6 +1971,11 @@ fn mamba_chunked_recurrence_matches_uninterrupted_state_and_logits() {
 #[test]
 fn mamba2_chunked_recurrence_matches_uninterrupted_state_and_logits() {
     assert_chunked_recurrence_matches_uninterrupted_state(kernel_mamba2());
+}
+
+#[test]
+fn mamba3_chunked_recurrence_matches_uninterrupted_state_and_logits() {
+    assert_chunked_recurrence_matches_uninterrupted_state(kernel_mamba3());
 }
 
 #[test]
@@ -2393,6 +2419,75 @@ fn mamba2_kernel_tensorized_forward_matches_reference() {
 }
 
 #[test]
+fn mamba2_kernel_tensorized_forward_matches_reference_on_shakespeare_like_shape() {
+    type Backend = NdArray<f32>;
+    let device = <Backend as BackendTrait>::Device::default();
+    let config = MambaSequenceConfig {
+        d_state: 16,
+        d_conv: 4,
+        expand: 2,
+        headdim: 128,
+        ngroups: 1,
+        ..Default::default()
+    }
+    .resolve(128, SequenceMemorySystem::Mamba2StateSpaceDuality);
+    let params = MambaSequenceParameters::<Backend>::new(
+        config,
+        SequenceMemorySystem::Mamba2StateSpaceDuality,
+        &device,
+    );
+    let batch = 1;
+    let time = 64;
+    let d_model = 128;
+    let hidden = Tensor::<Backend, 4>::from_data(
+        TensorData::new(
+            (0..(batch * time * d_model))
+                .map(|idx| ((idx % 257) as f32) / 257.0 - 0.5)
+                .collect::<Vec<_>>(),
+            [batch, 1, time, d_model],
+        ),
+        &device,
+    );
+
+    let (context_host, state_host) = mamba_reference(hidden.clone(), &params, None);
+    let params_mamba2 = params.mamba2().expect("mamba2 params");
+    let tensorized = tensorized_mamba2_forward(
+        hidden,
+        config.d_inner,
+        config.d_state,
+        config.d_conv,
+        config.headdim,
+        config.ngroups,
+        params_mamba2.in_proj_tensor(),
+        params_mamba2.conv_weight_tensor(),
+        params_mamba2.conv_bias_tensor(),
+        params_mamba2.dt_bias_tensor(),
+        params_mamba2.a_log_tensor(),
+        params_mamba2.d_skip_tensor(),
+        params_mamba2.norm_weight_tensor(),
+        config.norm_eps,
+        params_mamba2.out_proj_tensor(),
+        None::<Mamba2TensorizedState<Backend>>,
+    );
+
+    let context_diff = tensor_max_abs_diff(context_host, tensorized.context);
+    let conv_diff = tensor_max_abs_diff(state_host.conv, tensorized.state.conv);
+    let ssm_diff = tensor_max_abs_diff(state_host.ssm, tensorized.state.ssm);
+    assert!(
+        context_diff <= 2.0e-3,
+        "expected realistic mamba2 context parity, max diff {context_diff}"
+    );
+    assert!(
+        conv_diff <= 1.0e-4,
+        "expected realistic mamba2 conv parity, max diff {conv_diff}"
+    );
+    assert!(
+        ssm_diff <= 2.0e-3,
+        "expected realistic mamba2 ssm parity, max diff {ssm_diff}"
+    );
+}
+
+#[test]
 fn linear_dense_score_reference_matches_host_loop_reference_with_decay() {
     type Backend = NdArray<f32>;
     let device = <Backend as BackendTrait>::Device::default();
@@ -2536,6 +2631,9 @@ fn bdh_mhc_two_view_wrapper_matches_manual_layer_contract() {
         packed_rho_int8_device: None,
         rho_norm: None,
         sequence_aux: None,
+        mamba_angle_state: None,
+        mamba_k_state: None,
+        mamba_v_state: None,
         y_neuron_state: None,
         clocked_slow_hidden: None,
         summary_memory_hidden: None,
@@ -2656,6 +2754,9 @@ fn bdh_mhc_dynamic_stream_wrapper_matches_manual_layer_contract() {
         packed_rho_int8_device: None,
         rho_norm: None,
         sequence_aux: None,
+        mamba_angle_state: None,
+        mamba_k_state: None,
+        mamba_v_state: None,
         y_neuron_state: None,
         clocked_slow_hidden: None,
         summary_memory_hidden: None,
@@ -3282,6 +3383,9 @@ fn summary_memory_reads_previous_chunk_instead_of_self_summary() {
         packed_rho_int8_device: None,
         rho_norm: None,
         sequence_aux: None,
+        mamba_angle_state: None,
+        mamba_k_state: None,
+        mamba_v_state: None,
         y_neuron_state: None,
         clocked_slow_hidden: None,
         summary_memory_hidden: None,
@@ -3344,6 +3448,9 @@ fn summary_memory_surprise_gate_preserves_prior_carry_when_chunk_is_unsurprising
         packed_rho_int8_device: None,
         rho_norm: None,
         sequence_aux: None,
+        mamba_angle_state: None,
+        mamba_k_state: None,
+        mamba_v_state: None,
         y_neuron_state: None,
         clocked_slow_hidden: None,
         summary_memory_hidden: None,
@@ -3409,6 +3516,9 @@ fn summary_memory_write_trigger_updates_only_on_event_chunks() {
         packed_rho_int8_device: None,
         rho_norm: None,
         sequence_aux: None,
+        mamba_angle_state: None,
+        mamba_k_state: None,
+        mamba_v_state: None,
         y_neuron_state: None,
         clocked_slow_hidden: None,
         summary_memory_hidden: None,

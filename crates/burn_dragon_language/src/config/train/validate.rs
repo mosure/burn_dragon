@@ -565,6 +565,7 @@ impl TrainingConfig {
                 .memory_system,
             burn_dragon_core::SequenceMemorySystem::Mamba1SelectiveScan
                 | burn_dragon_core::SequenceMemorySystem::Mamba2StateSpaceDuality
+                | burn_dragon_core::SequenceMemorySystem::Mamba3StateSpaceDuality
         ) {
             resolved_model
                 .mamba

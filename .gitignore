@@ -7,6 +7,7 @@ out/
 **/*.rs.bk
 *.pdb
 .venv_*/
+tools/
 
 *.py
 

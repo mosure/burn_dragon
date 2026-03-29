@@ -16,30 +16,51 @@ const PROCESS_GROUP_RUN_DIR_ENV: &str = "BURN_DRAGON_PROCESS_GROUP_RUN_DIR";
 const PROCESS_GROUP_RUN_NAME_ENV: &str = "BURN_DRAGON_PROCESS_GROUP_RUN_NAME";
 const CUDA_LINEAR_DENSE_SCORE_AUTO_BLOCK_LIMIT: usize = 1024;
 
-fn cuda_mamba2_training_geometry_summary(
+fn cuda_mamba_training_geometry_summary(
     model_config: &BDHConfig,
     micro_batch_size: usize,
     training_kernel_block_size: usize,
 ) -> Option<String> {
-    if model_config.sequence_kernel.memory_system != SequenceMemorySystem::Mamba2StateSpaceDuality {
-        return None;
+    match model_config.sequence_kernel.memory_system {
+        SequenceMemorySystem::Mamba2StateSpaceDuality => {
+            let resolved = model_config.mamba.resolve(
+                model_config.n_embd,
+                SequenceMemorySystem::Mamba2StateSpaceDuality,
+            );
+            Some(format!(
+                "cuda mamba2 geometry: micro_batch={} kernel_block={} tokens/micro_batch={} d_inner={} headdim={} nheads={} ngroups={} d_state={} d_conv={}",
+                micro_batch_size,
+                training_kernel_block_size,
+                micro_batch_size.saturating_mul(training_kernel_block_size),
+                resolved.d_inner,
+                resolved.headdim,
+                resolved.nheads,
+                resolved.ngroups,
+                resolved.d_state,
+                resolved.d_conv,
+            ))
+        }
+        SequenceMemorySystem::Mamba3StateSpaceDuality => {
+            let resolved = model_config.mamba.resolve(
+                model_config.n_embd,
+                SequenceMemorySystem::Mamba3StateSpaceDuality,
+            );
+            Some(format!(
+                "cuda mamba3 geometry: micro_batch={} kernel_block={} tokens/micro_batch={} d_inner={} headdim={} nheads={} ngroups={} d_state={} rope_angles={} chunk_size={}",
+                micro_batch_size,
+                training_kernel_block_size,
+                micro_batch_size.saturating_mul(training_kernel_block_size),
+                resolved.d_inner,
+                resolved.headdim,
+                resolved.nheads,
+                resolved.ngroups,
+                resolved.d_state,
+                resolved.num_rope_angles,
+                resolved.chunk_size,
+            ))
+        }
+        _ => None,
     }
-    let resolved = model_config.mamba.resolve(
-        model_config.n_embd,
-        SequenceMemorySystem::Mamba2StateSpaceDuality,
-    );
-    Some(format!(
-        "cuda mamba2 geometry: micro_batch={} kernel_block={} tokens/micro_batch={} d_inner={} headdim={} nheads={} ngroups={} d_state={} d_conv={}",
-        micro_batch_size,
-        training_kernel_block_size,
-        micro_batch_size.saturating_mul(training_kernel_block_size),
-        resolved.d_inner,
-        resolved.headdim,
-        resolved.nheads,
-        resolved.ngroups,
-        resolved.d_state,
-        resolved.d_conv,
-    ))
 }
 
 fn resolve_run_root() -> PathBuf {
@@ -366,19 +387,28 @@ where
         );
     }
     if backend_name.eq_ignore_ascii_case("cuda")
-        && model_config.sequence_kernel.memory_system
-            == SequenceMemorySystem::Mamba2StateSpaceDuality
+        && matches!(
+            model_config.sequence_kernel.memory_system,
+            SequenceMemorySystem::Mamba2StateSpaceDuality
+                | SequenceMemorySystem::Mamba3StateSpaceDuality
+        )
     {
-        if let Some(summary) = cuda_mamba2_training_geometry_summary(
+        if let Some(summary) = cuda_mamba_training_geometry_summary(
             &model_config,
             resolved_config.training.batch_size,
             training_kernel_block_size,
         ) {
             info!("{summary}");
         }
-        warn!(
-            "cuda mamba2 training is on the tensorized SSD path with the custom analytic backward wrapper and fused SSD forward/backward core; projections and depthwise conv still run as tensor ops, so compare tokens/sec and active-train power against mamba1 rather than whole-run mean watts"
-        );
+        match model_config.sequence_kernel.memory_system {
+            SequenceMemorySystem::Mamba2StateSpaceDuality => warn!(
+                "cuda mamba2 training is on the tensorized SSD path with the custom analytic backward wrapper; the fused SSD recurrence core and shell fusion path are enabled by default on CUDA"
+            ),
+            SequenceMemorySystem::Mamba3StateSpaceDuality => warn!(
+                "cuda mamba3 training defaults to the tensorized custom analytical backward wrapper over the chunked SISO path; set BURN_DRAGON_MAMBA3_CUDA_TENSORIZED_TRAIN_WRAPPER=0 to force the direct graph baseline"
+            ),
+            _ => {}
+        }
     }
     let pipeline_plan = if resolved_config.parallel.pipeline.enabled {
         let pipeline_plan =
@@ -846,14 +876,39 @@ mod tests {
         };
 
         let summary =
-            cuda_mamba2_training_geometry_summary(&model_config, 24, 512).expect("summary");
+            cuda_mamba_training_geometry_summary(&model_config, 24, 512).expect("summary");
         assert!(summary.contains("tokens/micro_batch=12288"), "{summary}");
         assert!(summary.contains("headdim=128"), "{summary}");
         assert!(summary.contains("nheads=2"), "{summary}");
     }
 
     #[test]
-    fn cuda_mamba2_training_geometry_summary_skips_other_kernels() {
+    fn cuda_mamba3_training_geometry_summary_reports_resolved_shape() {
+        let model_config = burn_dragon_core::BDHConfig {
+            n_embd: 128,
+            sequence_kernel: SequenceKernelConfig::reference(
+                SequenceMemorySystem::Mamba3StateSpaceDuality,
+            ),
+            mamba: burn_dragon_core::MambaSequenceConfig {
+                headdim: 64,
+                ngroups: 4,
+                rope_fraction: 0.5,
+                chunk_size: 64,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let summary =
+            cuda_mamba_training_geometry_summary(&model_config, 24, 512).expect("summary");
+        assert!(summary.contains("tokens/micro_batch=12288"), "{summary}");
+        assert!(summary.contains("headdim=64"), "{summary}");
+        assert!(summary.contains("nheads=4"), "{summary}");
+        assert!(summary.contains("rope_angles=4"), "{summary}");
+    }
+
+    #[test]
+    fn cuda_mamba_training_geometry_summary_skips_other_kernels() {
         let model_config = burn_dragon_core::BDHConfig {
             sequence_kernel: SequenceKernelConfig::reference(SequenceMemorySystem::LinearAttention),
             mamba: burn_dragon_core::MambaSequenceConfig {
@@ -864,7 +919,7 @@ mod tests {
             ..Default::default()
         };
 
-        assert!(cuda_mamba2_training_geometry_summary(&model_config, 24, 512).is_none());
+        assert!(cuda_mamba_training_geometry_summary(&model_config, 24, 512).is_none());
     }
 
     #[test]

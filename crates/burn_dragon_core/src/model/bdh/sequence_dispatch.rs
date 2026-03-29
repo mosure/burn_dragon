@@ -199,7 +199,8 @@ impl<B: Backend> BDH<B> {
             }
             (
                 SequenceMemorySystem::Mamba1SelectiveScan
-                | SequenceMemorySystem::Mamba2StateSpaceDuality,
+                | SequenceMemorySystem::Mamba2StateSpaceDuality
+                | SequenceMemorySystem::Mamba3StateSpaceDuality,
                 SequenceTrainingExecutor::Reference,
             ) => {
                 let params = self
@@ -218,6 +219,80 @@ impl<B: Backend> BDH<B> {
                 );
                 let config = self.mamba_config.0;
                 let device = value.device();
+                if matches!(
+                    self.sequence_kernel.memory_system,
+                    SequenceMemorySystem::Mamba3StateSpaceDuality
+                ) {
+                    let initial_state = mamba3_state(
+                        layer_state,
+                        batch,
+                        config.nheads,
+                        config.headdim,
+                        config.d_state,
+                        config.num_rope_angles,
+                        &device,
+                    );
+                    if self.kernel.enabled
+                        && config.use_fast_path
+                        && use_tensorized_mamba3_forward_experimental()
+                    {
+                        let params = params
+                            .mamba3()
+                            .expect("mamba3 fast path requires mamba3 params");
+                        let output = tensorized_mamba3_forward(
+                            value,
+                            config.d_inner,
+                            config.d_state,
+                            config.headdim,
+                            config.ngroups,
+                            config.num_rope_angles,
+                            config.norm_eps,
+                            config.a_floor,
+                            config.chunk_size,
+                            params.in_proj_tensor(),
+                            params.dt_bias_tensor(),
+                            params.b_bias_tensor(),
+                            params.c_bias_tensor(),
+                            params.b_norm_weight_tensor(),
+                            params.c_norm_weight_tensor(),
+                            params.d_skip_tensor(),
+                            params.out_proj_tensor(),
+                            Some(Mamba3TensorizedState {
+                                ssm: initial_state.ssm,
+                                angle: initial_state.angle,
+                                k: initial_state.k,
+                                v: initial_state.v,
+                            }),
+                        );
+                        write_mamba3_state(
+                            layer_state,
+                            output.state.ssm,
+                            output.state.angle,
+                            output.state.k,
+                            output.state.v,
+                        );
+                        return output.context;
+                    }
+                    let (context, next_state) = mamba_reference(
+                        value,
+                        params,
+                        Some(MambaReferenceState {
+                            conv: Tensor::<B, 4>::zeros([batch, 1, 0, 0], &device),
+                            ssm: initial_state.ssm,
+                            angle: Some(initial_state.angle),
+                            k: Some(initial_state.k),
+                            v: Some(initial_state.v),
+                        }),
+                    );
+                    write_mamba3_state(
+                        layer_state,
+                        next_state.ssm,
+                        next_state.angle.expect("mamba3 next angle state"),
+                        next_state.k.expect("mamba3 next k state"),
+                        next_state.v.expect("mamba3 next v state"),
+                    );
+                    return context;
+                }
                 let initial_state = mamba_state(
                     layer_state,
                     batch,
@@ -320,6 +395,9 @@ impl<B: Backend> BDH<B> {
                     Some(MambaReferenceState {
                         conv: initial_state.conv,
                         ssm: initial_state.ssm,
+                        angle: None,
+                        k: None,
+                        v: None,
                     }),
                 );
                 write_mamba_state(layer_state, next_state.ssm, next_state.conv);

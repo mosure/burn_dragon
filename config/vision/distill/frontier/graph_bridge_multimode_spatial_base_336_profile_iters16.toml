@@ -1,6 +1,0 @@
-[training]
-schedule_mode = "max_iters"
-epochs = 1
-max_iters = 16
-log_frequency = 1
-device_memory_check_every = 1

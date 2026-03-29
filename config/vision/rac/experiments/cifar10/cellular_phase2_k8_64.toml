@@ -1,8 +1,0 @@
-extends = ["cellular_short.toml"]
-
-[training]
-max_iters = 64
-log_frequency = 8
-
-[mode]
-sample_steps = 8

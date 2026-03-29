@@ -79,16 +79,13 @@ Dataset configuration (built-in presets and Hugging Face examples) is documented
 
 Compile-checked examples:
 
+- [examples/README.md](./examples/README.md)
 - [examples/core_bdh_api.rs](./examples/core_bdh_api.rs)
 - [examples/vision_pyramid_api.rs](./examples/vision_pyramid_api.rs)
-- [examples/vision_encoder_export_api.rs](./examples/vision_encoder_export_api.rs)
 - [examples/stream_api.rs](./examples/stream_api.rs)
 - [examples/multimodal_vl_jepa_api.rs](./examples/multimodal_vl_jepa_api.rs)
-- [examples/multimodal_export_api.rs](./examples/multimodal_export_api.rs)
 - [examples/graph_compiled_executor_api.rs](./examples/graph_compiled_executor_api.rs)
-- [examples/graph_export_api.rs](./examples/graph_export_api.rs)
-- [examples/language_export_api.rs](./examples/language_export_api.rs)
-- [examples/sudoku_export_api.rs](./examples/sudoku_export_api.rs)
+- [examples/checkpoint_export_api.rs](./examples/checkpoint_export_api.rs)
 
 Typical imports:
 

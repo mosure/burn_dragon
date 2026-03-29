@@ -6,6 +6,9 @@ fn main() {
 
 #[cfg(feature = "cuda")]
 mod app {
+    use std::process::{Command, Stdio};
+    use std::thread;
+    use std::time::Duration;
     use std::time::Instant;
 
     use burn::tensor::backend::Backend as BackendTrait;
@@ -19,13 +22,13 @@ mod app {
         tensorized_mamba2_forward_custom_backward_with_cuda_modes,
         tensorized_mamba2_forward_direct_graph,
     };
-    use serde::Serialize;
+    use serde::{Deserialize, Serialize};
 
     type Backend = Cuda<f32, i32>;
     type AutodiffBackend = Autodiff<Backend>;
     type Device = <Backend as BackendTrait>::Device;
 
-    #[derive(Clone, Copy, Serialize)]
+    #[derive(Clone, Copy)]
     struct BenchCase {
         name: &'static str,
         batch: usize,
@@ -38,15 +41,44 @@ mod app {
         ngroups: usize,
     }
 
-    #[derive(Clone, Copy, Serialize)]
+    #[derive(Deserialize, Serialize)]
+    struct BenchCaseReport {
+        name: String,
+        batch: usize,
+        time: usize,
+        d_model: usize,
+        d_state: usize,
+        d_conv: usize,
+        expand: usize,
+        headdim: usize,
+        ngroups: usize,
+    }
+
+    impl From<BenchCase> for BenchCaseReport {
+        fn from(value: BenchCase) -> Self {
+            Self {
+                name: value.name.to_string(),
+                batch: value.batch,
+                time: value.time,
+                d_model: value.d_model,
+                d_state: value.d_state,
+                d_conv: value.d_conv,
+                expand: value.expand,
+                headdim: value.headdim,
+                ngroups: value.ngroups,
+            }
+        }
+    }
+
+    #[derive(Clone, Copy, Deserialize, Serialize)]
     struct MemorySnapshot {
         reserved: u64,
         in_use: u64,
     }
 
-    #[derive(Serialize)]
+    #[derive(Deserialize, Serialize)]
     struct BenchResult {
-        case: BenchCase,
+        case: BenchCaseReport,
         warmup: usize,
         repetitions: usize,
         graph_forward_ms: f64,
@@ -139,16 +171,30 @@ mod app {
     ];
 
     pub fn main() {
-        let device = Device::default();
-        <Backend as BackendTrait>::seed(&device, 20260328);
-
         let profile = bench_profile();
-        let warmup = if profile == "full" { 1 } else { 1 };
-        let repetitions = if profile == "full" { 3 } else { 2 };
+        if let Some(case_name) = child_case_name() {
+            let device = Device::default();
+            <Backend as BackendTrait>::seed(&device, 20260328);
+            let warmup = 1;
+            let repetitions = if profile == "full" { 3 } else { 2 };
+            let case = bench_cases(profile)
+                .iter()
+                .copied()
+                .find(|candidate| candidate.name == case_name)
+                .unwrap_or_else(|| panic!("unknown cuda bench case {case_name}"));
+            println!(
+                "{}",
+                serde_json::to_string(&run_case(case, &device, warmup, repetitions))
+                    .expect("serialize child mamba2 cuda bench result")
+            );
+            return;
+        }
+
+        let timeout = bench_case_timeout(profile);
         let results = bench_cases(profile)
             .iter()
             .copied()
-            .map(|case| run_case(case, &device, warmup, repetitions))
+            .map(|case| run_case_with_timeout(case, profile, timeout))
             .collect::<Vec<_>>();
 
         println!(
@@ -178,6 +224,71 @@ mod app {
             FULL_CASES
         } else {
             COMPACT_CASES
+        }
+    }
+
+    fn child_case_name() -> Option<String> {
+        std::env::var("BURN_DRAGON_BENCH_CHILD_CASE").ok()
+    }
+
+    fn bench_case_timeout(profile: &'static str) -> Duration {
+        let default_secs = if profile == "full" { 180 } else { 45 };
+        let secs = std::env::var("BURN_DRAGON_BENCH_TIMEOUT_SECS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(default_secs);
+        Duration::from_secs(secs)
+    }
+
+    fn run_case_with_timeout(
+        case: BenchCase,
+        profile: &'static str,
+        timeout: Duration,
+    ) -> BenchResult {
+        let mut child = Command::new(std::env::current_exe().expect("current exe"))
+            .env("BURN_DRAGON_BENCH_PROFILE", profile)
+            .env("BURN_DRAGON_BENCH_CHILD_CASE", case.name)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn mamba2 cuda bench child");
+        let started = Instant::now();
+
+        loop {
+            if let Some(status) = child.try_wait().expect("poll mamba2 cuda bench child") {
+                let output = child
+                    .wait_with_output()
+                    .expect("collect mamba2 cuda bench child output");
+                if !status.success() {
+                    panic!(
+                        "mamba2 cuda bench child {} failed: {}",
+                        case.name,
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                }
+                return serde_json::from_slice::<BenchResult>(&output.stdout).unwrap_or_else(
+                    |error| {
+                        panic!(
+                            "parse mamba2 cuda bench child {} output failed: {error}; stdout={}",
+                            case.name,
+                            String::from_utf8_lossy(&output.stdout)
+                        )
+                    },
+                );
+            }
+            if started.elapsed() > timeout {
+                let _ = child.kill();
+                let output = child
+                    .wait_with_output()
+                    .expect("collect timed-out mamba2 cuda bench child output");
+                panic!(
+                    "mamba2 cuda bench child {} exceeded {:?}; stderr={}",
+                    case.name,
+                    timeout,
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            thread::sleep(Duration::from_millis(100));
         }
     }
 
@@ -383,7 +494,7 @@ mod app {
         let memory_after = memory_snapshot(device);
 
         BenchResult {
-            case,
+            case: case.into(),
             warmup,
             repetitions,
             graph_forward_ms: graph_forward_ms / repetitions.max(1) as f64,

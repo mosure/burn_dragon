@@ -18,7 +18,7 @@ use burn_dragon::core::{
     SequenceTrainingExecutor,
 };
 use burn_dragon_kernel::kernels::sequence::{
-    mamba as mamba_kernel, mamba2 as mamba2_kernel, rwkv8 as rwkv8_kernel,
+    mamba as mamba_kernel, mamba2 as mamba2_kernel, mamba3 as mamba3_kernel, rwkv8 as rwkv8_kernel,
 };
 use burn_ndarray::NdArray;
 use clap::{Parser, ValueEnum};
@@ -142,13 +142,14 @@ fn build_config(args: &Args, kernel: SequenceKernelConfig) -> BDHConfig {
     config
 }
 
-fn probe_cases() -> [SequenceKernelConfig; 5] {
+fn probe_cases() -> [SequenceKernelConfig; 6] {
     [
         SequenceKernelConfig::reference(SequenceMemorySystem::LinearAttention),
         SequenceKernelConfig::dense_score_short_context(),
         SequenceKernelConfig::reference(SequenceMemorySystem::Rwkv8StateSpace),
         SequenceKernelConfig::reference(SequenceMemorySystem::Mamba1SelectiveScan),
         SequenceKernelConfig::reference(SequenceMemorySystem::Mamba2StateSpaceDuality),
+        SequenceKernelConfig::reference(SequenceMemorySystem::Mamba3StateSpaceDuality),
     ]
 }
 
@@ -196,6 +197,17 @@ fn implementation_metadata(
                 "{} ({})",
                 mamba2_kernel::UPSTREAM_REPO,
                 mamba2_kernel::UPSTREAM_TARGET_KIND
+            )),
+        ),
+        (SequenceMemorySystem::Mamba3StateSpaceDuality, SequenceTrainingExecutor::Reference) => (
+            mamba3_kernel::STATUS,
+            false,
+            mamba3_kernel::FORWARD_ACCELERATION_AVAILABLE,
+            mamba3_kernel::BACKWARD_ACCELERATION_AVAILABLE,
+            Some(format!(
+                "{} ({})",
+                mamba3_kernel::UPSTREAM_REPO,
+                mamba3_kernel::UPSTREAM_TARGET_KIND
             )),
         ),
         (memory_system, executor) => (

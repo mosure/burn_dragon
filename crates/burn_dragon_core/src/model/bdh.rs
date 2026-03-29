@@ -23,6 +23,9 @@ use burn_dragon_kernel::kernels::sequence::mamba::selective_scan_forward::{
 use burn_dragon_kernel::kernels::sequence::mamba2::forward::{
     Mamba2TensorizedState, tensorized_mamba2_forward, use_tensorized_mamba2_forward_experimental,
 };
+use burn_dragon_kernel::kernels::sequence::mamba3::forward::{
+    Mamba3TensorizedState, tensorized_mamba3_forward, use_tensorized_mamba3_forward_experimental,
+};
 use burn_dragon_kernel::kernels::sequence::rwkv8::forward::{
     tensorized_rwkv8_forward, use_tensorized_rwkv8_forward_experimental,
 };
@@ -84,7 +87,7 @@ use super::sequence::mamba::{
     MambaReferenceState, MambaSequenceParameters, ResolvedMambaSequenceConfig, mamba_reference,
 };
 use super::sequence::rwkv8::recurrent_rwkv8_state_space_reference;
-use super::sequence::state::{mamba_state, write_mamba_state};
+use super::sequence::state::{mamba_state, mamba3_state, write_mamba_state, write_mamba3_state};
 use super::sequence::{SequenceKernelConfig, SequenceMemorySystem, SequenceTrainingExecutor};
 #[cfg(any(feature = "viz", feature = "probe"))]
 use super::state::LayerVizState;
@@ -263,6 +266,7 @@ impl<B: Backend> BDH<B> {
             sequence_kernel.memory_system,
             SequenceMemorySystem::Mamba1SelectiveScan
                 | SequenceMemorySystem::Mamba2StateSpaceDuality
+                | SequenceMemorySystem::Mamba3StateSpaceDuality
         )
         .then(|| MambaSequenceParameters::new(mamba_config, sequence_kernel.memory_system, device));
         let lm_head = Param::from_tensor(initializer.projection_tensor::<B>(

@@ -82,4 +82,20 @@ path = "src/lib.rs"
 crate-type = ["rlib"]
 
 [dev-dependencies]
+criterion = { version = "0.7", features = ["html_reports"] }
+burn-autodiff = "0.21.0-pre.2"
+burn-ndarray = "0.21.0-pre.2"
+burn-wgpu = { version = "0.21.0-pre.2", default-features = false, features = ["fusion", "std"] }
 tempfile = "3"
+
+[[bench]]
+name = "inference"
+harness = false
+path = "benches/inference.rs"
+required-features = ["train"]
+
+[[bench]]
+name = "train"
+harness = false
+path = "benches/train.rs"
+required-features = ["train"]

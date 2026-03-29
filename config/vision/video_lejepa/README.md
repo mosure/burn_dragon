@@ -13,9 +13,8 @@ Curated tracked aliases live under `baselines/`:
 - `baselines/vjepa21_imagenet1k_dense_long.toml`: longer ImageNet-1k V-JEPA 2.1 dense launch
   config using image multi-view clips
 
-Experiment files in this directory are intended to be runnable directly with a single config path.
 The vision loader resolves `extends` relative to the current config file and merges bases before
 the local overrides.
 
-Naming stays stable for existing experiment references, but duplication is now concentrated in the
-base configs instead of copied across each run file.
+Checked-in video LEJEPA configs are limited to `base/` plus promoted `baselines/`. Transfer,
+diagnostic, and temporary experiment overlays belong under `config/local/vision/video_lejepa/`.

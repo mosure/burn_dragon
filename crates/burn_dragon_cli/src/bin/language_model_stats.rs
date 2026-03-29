@@ -151,6 +151,17 @@ fn rho_state_elements_per_batch_view(model_config: &burn_dragon_language::BDHCon
             );
             (model_config.n_layer * mamba.nheads * mamba.headdim * mamba.d_state) as u64
         }
+        SequenceMemorySystem::Mamba3StateSpaceDuality => {
+            let mamba = model_config.mamba.resolve(
+                model_config.n_embd,
+                SequenceMemorySystem::Mamba3StateSpaceDuality,
+            );
+            (model_config.n_layer
+                * (mamba.nheads * mamba.headdim * mamba.d_state
+                    + mamba.nheads * mamba.num_rope_angles
+                    + mamba.nheads * mamba.d_state
+                    + mamba.nheads * mamba.headdim)) as u64
+        }
         _ => {
             (model_config.n_layer
                 * model_config.n_head

@@ -76,6 +76,7 @@ coarse_local_diagonals = true
 coarse_local_self = true
 predict_coarse_substeps = 2
 predict_substep_kind = "local_bridge"
+cls_readout = "hub_and_coarse"
 decay = 0.9
 hub_gates = true
 grid_mismatch_policy = "fallback_default"

@@ -309,198 +309,25 @@ pub(crate) fn tensorized_mamba2_backward_impl<B>(
                 fused.grad_a_log,
             )
         } else {
-            let mut grad_x_grouped = grad_y_grouped.clone() * d_skip_grouped.clone();
-            let grad_d_skip = (grad_y_grouped.clone() * x_grouped.clone())
-                .sum_dim(0)
-                .sum_dim(1)
-                .sum_dim(4)
-                .reshape([nheads]);
-            let mut grad_b_group =
-                Tensor::<B, 4>::zeros([batch, time, ngroups, d_state], &x_grouped.device());
-            let mut grad_c_group =
-                Tensor::<B, 4>::zeros([batch, time, ngroups, d_state], &x_grouped.device());
-            let mut grad_dt_grouped =
-                Tensor::<B, 4>::zeros([batch, time, ngroups, heads_per_group], &x_grouped.device());
-            let mut grad_a_grouped =
-                Tensor::<B, 4>::zeros([batch, time, ngroups, heads_per_group], &x_grouped.device());
-
-            let zero_state = Tensor::<B, 5>::zeros(
-                [batch, ngroups, heads_per_group, headdim, d_state],
-                &x_grouped.device(),
+            let reference = ssd_backward_reference(
+                x_grouped.clone(),
+                b_group.clone(),
+                c_group.clone(),
+                dt_grouped.clone(),
+                a_log_b.clone(),
+                d_skip_b.clone(),
+                initial_ssm_b.clone().map(|state| {
+                    state.reshape([batch, ngroups, heads_per_group, headdim, d_state])
+                }),
+                grad_y_grouped.clone(),
             );
-            let prev_ssm_all = if time > 1 {
-                Tensor::cat(
-                    vec![
-                        initial_ssm_b
-                            .clone()
-                            .unwrap_or_else(|| {
-                                Tensor::<B, 4>::zeros(
-                                    [batch, nheads, headdim, d_state],
-                                    &x_grouped.device(),
-                                )
-                            })
-                            .reshape([batch, 1, ngroups, heads_per_group, headdim, d_state]),
-                        ssm.clone().slice_dim(1, 0..time - 1),
-                    ],
-                    1,
-                )
-            } else {
-                initial_ssm_b
-                    .clone()
-                    .unwrap_or_else(|| {
-                        Tensor::<B, 4>::zeros(
-                            [batch, nheads, headdim, d_state],
-                            &x_grouped.device(),
-                        )
-                    })
-                    .reshape([batch, 1, ngroups, heads_per_group, headdim, d_state])
-            };
-            let mut grad_state_carry = zero_state;
-
-            for t in (0..time).rev() {
-                let grad_y_t = grad_y_grouped.clone().slice_dim(1, t..t + 1).reshape([
-                    batch,
-                    ngroups,
-                    heads_per_group,
-                    headdim,
-                ]);
-                let c_t = c_group
-                    .clone()
-                    .slice_dim(1, t..t + 1)
-                    .reshape([batch, ngroups, d_state]);
-                let x_t = x_grouped.clone().slice_dim(1, t..t + 1).reshape([
-                    batch,
-                    ngroups,
-                    heads_per_group,
-                    headdim,
-                ]);
-                let b_t = b_group
-                    .clone()
-                    .slice_dim(1, t..t + 1)
-                    .reshape([batch, ngroups, d_state]);
-                let dt_t = dt_grouped.clone().slice_dim(1, t..t + 1).reshape([
-                    batch,
-                    ngroups,
-                    heads_per_group,
-                ]);
-                let da_t = d_a.clone().slice_dim(1, t..t + 1).reshape([
-                    batch,
-                    ngroups,
-                    heads_per_group,
-                    1,
-                    1,
-                ]);
-                let state_t = ssm.clone().slice_dim(1, t..t + 1).reshape([
-                    batch,
-                    ngroups,
-                    heads_per_group,
-                    headdim,
-                    d_state,
-                ]);
-                let prev_state_t = prev_ssm_all.clone().slice_dim(1, t..t + 1).reshape([
-                    batch,
-                    ngroups,
-                    heads_per_group,
-                    headdim,
-                    d_state,
-                ]);
-
-                let grad_state_local =
-                    grad_y_t
-                        .clone()
-                        .reshape([batch, ngroups, heads_per_group, headdim, 1])
-                        * c_t.clone().reshape([batch, ngroups, 1, 1, d_state]);
-                let grad_state = grad_state_local + grad_state_carry.clone();
-
-                let grad_c_t =
-                    (grad_y_t
-                        .clone()
-                        .reshape([batch, ngroups, heads_per_group, headdim, 1])
-                        * state_t.clone())
-                    .sum_dim(2)
-                    .sum_dim(3)
-                    .reshape([batch, ngroups, d_state]);
-                grad_c_group = grad_c_group.slice_assign(
-                    [0..batch, t..t + 1, 0..ngroups, 0..d_state],
-                    grad_c_t.reshape([batch, 1, ngroups, d_state]),
-                );
-
-                let grad_da_t = (grad_state.clone() * prev_state_t.clone())
-                    .sum_dim(3)
-                    .sum_dim(4)
-                    .reshape([batch, ngroups, heads_per_group]);
-                let grad_drive_t = grad_state.clone();
-                grad_state_carry = grad_state * da_t.clone();
-
-                let grad_dt_drive_t = (grad_drive_t.clone()
-                    * b_t.clone().reshape([batch, ngroups, 1, 1, d_state])
-                    * x_t
-                        .clone()
-                        .reshape([batch, ngroups, heads_per_group, headdim, 1]))
-                .sum_dim(3)
-                .sum_dim(4)
-                .reshape([batch, ngroups, heads_per_group]);
-                let grad_b_t = (grad_drive_t.clone()
-                    * dt_t
-                        .clone()
-                        .reshape([batch, ngroups, heads_per_group, 1, 1])
-                    * x_t
-                        .clone()
-                        .reshape([batch, ngroups, heads_per_group, headdim, 1]))
-                .sum_dim(2)
-                .sum_dim(3)
-                .reshape([batch, ngroups, d_state]);
-                grad_b_group = grad_b_group.slice_assign(
-                    [0..batch, t..t + 1, 0..ngroups, 0..d_state],
-                    grad_b_t.reshape([batch, 1, ngroups, d_state]),
-                );
-
-                let grad_x_drive_t = (grad_drive_t
-                    * dt_t
-                        .clone()
-                        .reshape([batch, ngroups, heads_per_group, 1, 1])
-                    * b_t.reshape([batch, ngroups, 1, 1, d_state]))
-                .sum_dim(4)
-                .reshape([batch, ngroups, heads_per_group, headdim]);
-                let grad_dt_da_t = grad_da_t.clone()
-                    * da_t.clone().reshape([batch, ngroups, heads_per_group])
-                    * a.clone().reshape([1, ngroups, heads_per_group]);
-                grad_dt_grouped = grad_dt_grouped.slice_assign(
-                    [0..batch, t..t + 1, 0..ngroups, 0..heads_per_group],
-                    (grad_dt_drive_t + grad_dt_da_t).reshape([batch, 1, ngroups, heads_per_group]),
-                );
-                grad_a_grouped = grad_a_grouped.slice_assign(
-                    [0..batch, t..t + 1, 0..ngroups, 0..heads_per_group],
-                    (grad_da_t * da_t.reshape([batch, ngroups, heads_per_group]) * dt_t.clone())
-                        .reshape([batch, 1, ngroups, heads_per_group]),
-                );
-                let updated_grad_x_t = grad_x_grouped.clone().slice_dim(1, t..t + 1).reshape([
-                    batch,
-                    ngroups,
-                    heads_per_group,
-                    headdim,
-                ]) + grad_x_drive_t;
-                grad_x_grouped = grad_x_grouped.slice_assign(
-                    [
-                        0..batch,
-                        t..t + 1,
-                        0..ngroups,
-                        0..heads_per_group,
-                        0..headdim,
-                    ],
-                    updated_grad_x_t.reshape([batch, 1, ngroups, heads_per_group, headdim]),
-                );
-            }
-
-            let grad_a_log =
-                grad_a_grouped.sum_dim(0).sum_dim(1).reshape([nheads]) * a_log_b.clone().exp();
             (
-                grad_x_grouped,
-                grad_d_skip,
-                grad_b_group,
-                grad_c_group,
-                grad_dt_grouped,
-                grad_a_log,
+                reference.grad_x_grouped,
+                reference.grad_d_skip,
+                reference.grad_b_group,
+                reference.grad_c_group,
+                reference.grad_dt_grouped,
+                reference.grad_a_log,
             )
         };
 
@@ -630,6 +457,286 @@ struct CudaFusedSsdBackwardGrads<B: BackendTrait> {
     grad_dt_grouped: Tensor<B, 4>,
     grad_a_log: Tensor<B, 1>,
     grad_d_skip: Tensor<B, 1>,
+}
+
+fn ssd_forward_state_history_reference<B: BackendTrait>(
+    x_grouped: Tensor<B, 5>,
+    b_group: Tensor<B, 4>,
+    dt_grouped: Tensor<B, 4>,
+    a_log: Tensor<B, 1>,
+    initial_ssm: Option<Tensor<B, 5>>,
+) -> Tensor<B, 6> {
+    let [batch, time, ngroups, heads_per_group, headdim] = x_grouped.shape().dims::<5>();
+    let d_state = b_group.shape().dims::<4>()[3];
+    let device = x_grouped.device();
+    let a = a_log
+        .exp()
+        .neg()
+        .reshape([1, ngroups, heads_per_group, 1, 1]);
+    let mut ssm_state = initial_ssm.unwrap_or_else(|| {
+        Tensor::<B, 5>::zeros([batch, ngroups, heads_per_group, headdim, d_state], &device)
+    });
+    let mut history = Vec::with_capacity(time);
+
+    for step in 0..time {
+        let x_t = x_grouped.clone().slice_dim(1, step..step + 1).reshape([
+            batch,
+            ngroups,
+            heads_per_group,
+            headdim,
+        ]);
+        let b_t = b_group
+            .clone()
+            .slice_dim(1, step..step + 1)
+            .reshape([batch, ngroups, d_state]);
+        let dt_t = dt_grouped.clone().slice_dim(1, step..step + 1).reshape([
+            batch,
+            ngroups,
+            heads_per_group,
+        ]);
+
+        let decay = (dt_t
+            .clone()
+            .reshape([batch, ngroups, heads_per_group, 1, 1])
+            * a.clone())
+        .exp();
+        let input_term = dt_t.reshape([batch, ngroups, heads_per_group, 1, 1])
+            * b_t.reshape([batch, ngroups, 1, 1, d_state])
+            * x_t.reshape([batch, ngroups, heads_per_group, headdim, 1]);
+        ssm_state = ssm_state * decay + input_term;
+        history.push(ssm_state.clone().reshape([
+            batch,
+            1,
+            ngroups,
+            heads_per_group,
+            headdim,
+            d_state,
+        ]));
+    }
+
+    Tensor::cat(history, 1)
+}
+
+fn ssd_backward_reference<B: BackendTrait>(
+    x_grouped: Tensor<B, 5>,
+    b_group: Tensor<B, 4>,
+    c_group: Tensor<B, 4>,
+    dt_grouped: Tensor<B, 4>,
+    a_log: Tensor<B, 1>,
+    d_skip: Tensor<B, 1>,
+    initial_ssm: Option<Tensor<B, 5>>,
+    grad_y_grouped: Tensor<B, 5>,
+) -> CudaFusedSsdBackwardGrads<B> {
+    let [batch, time, ngroups, heads_per_group, headdim] = x_grouped.shape().dims::<5>();
+    let d_state = b_group.shape().dims::<4>()[3];
+    let nheads = ngroups * heads_per_group;
+    let device = x_grouped.device();
+    let d_skip_grouped = d_skip.clone().reshape([ngroups, heads_per_group]).reshape([
+        1,
+        1,
+        ngroups,
+        heads_per_group,
+        1,
+    ]);
+    let ssm_history = ssd_forward_state_history_reference(
+        x_grouped.clone(),
+        b_group.clone(),
+        dt_grouped.clone(),
+        a_log.clone(),
+        initial_ssm.clone(),
+    );
+    let prev_ssm_all = if time > 1 {
+        Tensor::cat(
+            vec![
+                initial_ssm
+                    .clone()
+                    .unwrap_or_else(|| {
+                        Tensor::<B, 5>::zeros(
+                            [batch, ngroups, heads_per_group, headdim, d_state],
+                            &device,
+                        )
+                    })
+                    .reshape([batch, 1, ngroups, heads_per_group, headdim, d_state]),
+                ssm_history.clone().slice_dim(1, 0..time - 1),
+            ],
+            1,
+        )
+    } else {
+        initial_ssm
+            .clone()
+            .unwrap_or_else(|| {
+                Tensor::<B, 5>::zeros([batch, ngroups, heads_per_group, headdim, d_state], &device)
+            })
+            .reshape([batch, 1, ngroups, heads_per_group, headdim, d_state])
+    };
+
+    let a = a_log
+        .clone()
+        .exp()
+        .neg()
+        .reshape([1, 1, ngroups, heads_per_group, 1, 1]);
+    let d_a = (dt_grouped
+        .clone()
+        .reshape([batch, time, ngroups, heads_per_group, 1, 1])
+        * a.clone())
+    .exp();
+    let mut grad_x_grouped = grad_y_grouped.clone() * d_skip_grouped;
+    let grad_d_skip = (grad_y_grouped.clone() * x_grouped.clone())
+        .sum_dim(0)
+        .sum_dim(1)
+        .sum_dim(4)
+        .reshape([nheads]);
+    let mut grad_b_group = Tensor::<B, 4>::zeros([batch, time, ngroups, d_state], &device);
+    let mut grad_c_group = Tensor::<B, 4>::zeros([batch, time, ngroups, d_state], &device);
+    let mut grad_dt_grouped =
+        Tensor::<B, 4>::zeros([batch, time, ngroups, heads_per_group], &device);
+    let mut grad_a_grouped =
+        Tensor::<B, 4>::zeros([batch, time, ngroups, heads_per_group], &device);
+    let mut grad_state_carry =
+        Tensor::<B, 5>::zeros([batch, ngroups, heads_per_group, headdim, d_state], &device);
+
+    for t in (0..time).rev() {
+        let grad_y_t = grad_y_grouped.clone().slice_dim(1, t..t + 1).reshape([
+            batch,
+            ngroups,
+            heads_per_group,
+            headdim,
+        ]);
+        let c_t = c_group
+            .clone()
+            .slice_dim(1, t..t + 1)
+            .reshape([batch, ngroups, d_state]);
+        let x_t = x_grouped.clone().slice_dim(1, t..t + 1).reshape([
+            batch,
+            ngroups,
+            heads_per_group,
+            headdim,
+        ]);
+        let b_t = b_group
+            .clone()
+            .slice_dim(1, t..t + 1)
+            .reshape([batch, ngroups, d_state]);
+        let dt_t =
+            dt_grouped
+                .clone()
+                .slice_dim(1, t..t + 1)
+                .reshape([batch, ngroups, heads_per_group]);
+        let da_t =
+            d_a.clone()
+                .slice_dim(1, t..t + 1)
+                .reshape([batch, ngroups, heads_per_group, 1, 1]);
+        let state_t = ssm_history.clone().slice_dim(1, t..t + 1).reshape([
+            batch,
+            ngroups,
+            heads_per_group,
+            headdim,
+            d_state,
+        ]);
+        let prev_state_t = prev_ssm_all.clone().slice_dim(1, t..t + 1).reshape([
+            batch,
+            ngroups,
+            heads_per_group,
+            headdim,
+            d_state,
+        ]);
+
+        let grad_state_local =
+            grad_y_t
+                .clone()
+                .reshape([batch, ngroups, heads_per_group, headdim, 1])
+                * c_t.clone().reshape([batch, ngroups, 1, 1, d_state]);
+        let grad_state = grad_state_local + grad_state_carry.clone();
+
+        let grad_c_t = (grad_y_t
+            .clone()
+            .reshape([batch, ngroups, heads_per_group, headdim, 1])
+            * state_t.clone())
+        .sum_dim(2)
+        .sum_dim(3)
+        .reshape([batch, ngroups, d_state]);
+        grad_c_group = grad_c_group.slice_assign(
+            [0..batch, t..t + 1, 0..ngroups, 0..d_state],
+            grad_c_t.reshape([batch, 1, ngroups, d_state]),
+        );
+
+        let grad_da_t = (grad_state.clone() * prev_state_t.clone())
+            .sum_dim(3)
+            .sum_dim(4)
+            .reshape([batch, ngroups, heads_per_group]);
+        let grad_drive_t = grad_state.clone();
+        grad_state_carry = grad_state * da_t.clone();
+
+        let grad_dt_drive_t = (grad_drive_t.clone()
+            * b_t.clone().reshape([batch, ngroups, 1, 1, d_state])
+            * x_t
+                .clone()
+                .reshape([batch, ngroups, heads_per_group, headdim, 1]))
+        .sum_dim(3)
+        .sum_dim(4)
+        .reshape([batch, ngroups, heads_per_group]);
+        let grad_b_t = (grad_drive_t.clone()
+            * dt_t
+                .clone()
+                .reshape([batch, ngroups, heads_per_group, 1, 1])
+            * x_t
+                .clone()
+                .reshape([batch, ngroups, heads_per_group, headdim, 1]))
+        .sum_dim(2)
+        .sum_dim(3)
+        .reshape([batch, ngroups, d_state]);
+        grad_b_group = grad_b_group.slice_assign(
+            [0..batch, t..t + 1, 0..ngroups, 0..d_state],
+            grad_b_t.reshape([batch, 1, ngroups, d_state]),
+        );
+
+        let grad_x_drive_t = (grad_drive_t
+            * dt_t
+                .clone()
+                .reshape([batch, ngroups, heads_per_group, 1, 1])
+            * b_t.reshape([batch, ngroups, 1, 1, d_state]))
+        .sum_dim(4)
+        .reshape([batch, ngroups, heads_per_group, headdim]);
+        let grad_dt_da_t = grad_da_t.clone()
+            * da_t.clone().reshape([batch, ngroups, heads_per_group])
+            * a.clone().reshape([1, ngroups, heads_per_group]);
+        grad_dt_grouped = grad_dt_grouped.slice_assign(
+            [0..batch, t..t + 1, 0..ngroups, 0..heads_per_group],
+            (grad_dt_drive_t + grad_dt_da_t).reshape([batch, 1, ngroups, heads_per_group]),
+        );
+        grad_a_grouped =
+            grad_a_grouped.slice_assign(
+                [0..batch, t..t + 1, 0..ngroups, 0..heads_per_group],
+                (grad_da_t * da_t.reshape([batch, ngroups, heads_per_group]) * dt_t.clone())
+                    .reshape([batch, 1, ngroups, heads_per_group]),
+            );
+        let updated_grad_x_t = grad_x_grouped.clone().slice_dim(1, t..t + 1).reshape([
+            batch,
+            ngroups,
+            heads_per_group,
+            headdim,
+        ]) + grad_x_drive_t;
+        grad_x_grouped = grad_x_grouped.slice_assign(
+            [
+                0..batch,
+                t..t + 1,
+                0..ngroups,
+                0..heads_per_group,
+                0..headdim,
+            ],
+            updated_grad_x_t.reshape([batch, 1, ngroups, heads_per_group, headdim]),
+        );
+    }
+
+    let grad_a_log =
+        grad_a_grouped.sum_dim(0).sum_dim(1).reshape([nheads]) * a_log.clone().exp().neg();
+    CudaFusedSsdBackwardGrads {
+        grad_x_grouped,
+        grad_b_group,
+        grad_c_group,
+        grad_dt_grouped,
+        grad_a_log,
+        grad_d_skip,
+    }
 }
 
 #[cfg(feature = "cuda")]
@@ -1539,5 +1646,255 @@ impl Backward<NdArrayBackend, 9> for TensorizedMamba2Backward<NdArrayBackend> {
         _checkpointer: &mut Checkpointer,
     ) {
         tensorized_mamba2_backward_impl::<NdArrayBackend>(ops, grads);
+    }
+}
+
+#[cfg(all(test, feature = "cuda"))]
+mod tests {
+    use super::{
+        CudaCubeBackend, ssd_backward_reference, ssd_forward_state_history_reference,
+        try_cuda_fused_ssd_backward_core_direct,
+    };
+    use burn::prelude::ElementConversion;
+    use burn::tensor::backend::Backend as BackendTrait;
+    use burn::tensor::{Tensor, TensorData};
+
+    fn max_abs_diff<const D: usize>(
+        lhs: Tensor<CudaCubeBackend, D>,
+        rhs: Tensor<CudaCubeBackend, D>,
+    ) -> f32 {
+        lhs.sub(rhs).abs().max().into_scalar().elem::<f32>()
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn make_realistic_cuda_inputs() -> (
+        Tensor<CudaCubeBackend, 5>,
+        Tensor<CudaCubeBackend, 4>,
+        Tensor<CudaCubeBackend, 4>,
+        Tensor<CudaCubeBackend, 4>,
+        Tensor<CudaCubeBackend, 1>,
+        Tensor<CudaCubeBackend, 1>,
+        Tensor<CudaCubeBackend, 5>,
+        Tensor<CudaCubeBackend, 5>,
+    ) {
+        let device = <CudaCubeBackend as BackendTrait>::Device::default();
+        let batch = 1;
+        let time = 32;
+        let ngroups = 4;
+        let heads_per_group = 1;
+        let headdim = 64;
+        let d_state = 16;
+        let nheads = ngroups * heads_per_group;
+
+        let x_grouped = Tensor::<CudaCubeBackend, 5>::from_data(
+            TensorData::new(
+                (0..(batch * time * ngroups * heads_per_group * headdim))
+                    .map(|idx| ((idx % 257) as f32) / 257.0 - 0.5)
+                    .collect::<Vec<_>>(),
+                [batch, time, ngroups, heads_per_group, headdim],
+            ),
+            &device,
+        );
+        let b_group = Tensor::<CudaCubeBackend, 4>::from_data(
+            TensorData::new(
+                (0..(batch * time * ngroups * d_state))
+                    .map(|idx| ((idx % 263) as f32) / 263.0 - 0.5)
+                    .collect::<Vec<_>>(),
+                [batch, time, ngroups, d_state],
+            ),
+            &device,
+        );
+        let c_group = Tensor::<CudaCubeBackend, 4>::from_data(
+            TensorData::new(
+                (0..(batch * time * ngroups * d_state))
+                    .map(|idx| ((idx % 269) as f32) / 269.0 - 0.5)
+                    .collect::<Vec<_>>(),
+                [batch, time, ngroups, d_state],
+            ),
+            &device,
+        );
+        let dt_grouped = Tensor::<CudaCubeBackend, 4>::from_data(
+            TensorData::new(
+                (0..(batch * time * ngroups * heads_per_group))
+                    .map(|idx| ((idx % 271) as f32) / 271.0 + 0.05)
+                    .collect::<Vec<_>>(),
+                [batch, time, ngroups, heads_per_group],
+            ),
+            &device,
+        );
+        let a_log = Tensor::<CudaCubeBackend, 1>::from_data(
+            TensorData::new(
+                (0..nheads)
+                    .map(|idx| ((idx % 277) as f32) / 277.0 - 0.25)
+                    .collect::<Vec<_>>(),
+                [nheads],
+            ),
+            &device,
+        );
+        let d_skip = Tensor::<CudaCubeBackend, 1>::from_data(
+            TensorData::new(
+                (0..nheads)
+                    .map(|idx| ((idx % 281) as f32) / 281.0 - 0.25)
+                    .collect::<Vec<_>>(),
+                [nheads],
+            ),
+            &device,
+        );
+        let initial_ssm = Tensor::<CudaCubeBackend, 5>::from_data(
+            TensorData::new(
+                (0..(batch * ngroups * heads_per_group * headdim * d_state))
+                    .map(|idx| ((idx % 283) as f32) / 283.0 - 0.5)
+                    .collect::<Vec<_>>(),
+                [batch, ngroups, heads_per_group, headdim, d_state],
+            ),
+            &device,
+        );
+        let grad_y_grouped = Tensor::<CudaCubeBackend, 5>::from_data(
+            TensorData::new(
+                (0..(batch * time * ngroups * heads_per_group * headdim))
+                    .map(|idx| ((idx % 293) as f32) / 293.0 - 0.5)
+                    .collect::<Vec<_>>(),
+                [batch, time, ngroups, heads_per_group, headdim],
+            ),
+            &device,
+        );
+
+        (
+            x_grouped,
+            b_group,
+            c_group,
+            dt_grouped,
+            a_log,
+            d_skip,
+            initial_ssm,
+            grad_y_grouped,
+        )
+    }
+
+    #[test]
+    fn fused_ssd_backward_with_history_matches_reference_on_cuda_realistic_shape() {
+        let (x_grouped, b_group, c_group, dt_grouped, a_log, d_skip, initial_ssm, grad_y_grouped) =
+            make_realistic_cuda_inputs();
+        let state_history = ssd_forward_state_history_reference(
+            x_grouped.clone(),
+            b_group.clone(),
+            dt_grouped.clone(),
+            a_log.clone(),
+            Some(initial_ssm.clone()),
+        );
+        let reference = ssd_backward_reference(
+            x_grouped.clone(),
+            b_group.clone(),
+            c_group.clone(),
+            dt_grouped.clone(),
+            a_log.clone(),
+            d_skip.clone(),
+            Some(initial_ssm.clone()),
+            grad_y_grouped.clone(),
+        );
+        let fused = try_cuda_fused_ssd_backward_core_direct::<CudaCubeBackend>(
+            x_grouped,
+            b_group,
+            c_group,
+            dt_grouped,
+            a_log,
+            d_skip,
+            Some(initial_ssm),
+            Some(state_history),
+            grad_y_grouped,
+        )
+        .expect("direct cuda fused ssd backward");
+
+        let grad_x_diff = max_abs_diff(reference.grad_x_grouped, fused.grad_x_grouped);
+        let grad_b_diff = max_abs_diff(reference.grad_b_group, fused.grad_b_group);
+        let grad_c_diff = max_abs_diff(reference.grad_c_group, fused.grad_c_group);
+        let grad_dt_diff = max_abs_diff(reference.grad_dt_grouped, fused.grad_dt_grouped);
+        let grad_a_diff = max_abs_diff(reference.grad_a_log, fused.grad_a_log);
+        let grad_d_diff = max_abs_diff(reference.grad_d_skip, fused.grad_d_skip);
+
+        assert!(
+            grad_x_diff <= 5.0e-4,
+            "expected grad_x parity, max diff {grad_x_diff}"
+        );
+        assert!(
+            grad_b_diff <= 5.0e-4,
+            "expected grad_b parity, max diff {grad_b_diff}"
+        );
+        assert!(
+            grad_c_diff <= 5.0e-4,
+            "expected grad_c parity, max diff {grad_c_diff}"
+        );
+        assert!(
+            grad_dt_diff <= 5.0e-4,
+            "expected grad_dt parity, max diff {grad_dt_diff}"
+        );
+        assert!(
+            grad_a_diff <= 5.0e-4,
+            "expected grad_a parity, max diff {grad_a_diff}"
+        );
+        assert!(
+            grad_d_diff <= 5.0e-4,
+            "expected grad_d parity, max diff {grad_d_diff}"
+        );
+    }
+
+    #[test]
+    fn fused_ssd_backward_recompute_matches_reference_on_cuda_realistic_shape() {
+        let (x_grouped, b_group, c_group, dt_grouped, a_log, d_skip, initial_ssm, grad_y_grouped) =
+            make_realistic_cuda_inputs();
+        let reference = ssd_backward_reference(
+            x_grouped.clone(),
+            b_group.clone(),
+            c_group.clone(),
+            dt_grouped.clone(),
+            a_log.clone(),
+            d_skip.clone(),
+            Some(initial_ssm.clone()),
+            grad_y_grouped.clone(),
+        );
+        let fused = try_cuda_fused_ssd_backward_core_direct::<CudaCubeBackend>(
+            x_grouped,
+            b_group,
+            c_group,
+            dt_grouped,
+            a_log,
+            d_skip,
+            Some(initial_ssm),
+            None,
+            grad_y_grouped,
+        )
+        .expect("direct cuda fused ssd backward");
+
+        let grad_x_diff = max_abs_diff(reference.grad_x_grouped, fused.grad_x_grouped);
+        let grad_b_diff = max_abs_diff(reference.grad_b_group, fused.grad_b_group);
+        let grad_c_diff = max_abs_diff(reference.grad_c_group, fused.grad_c_group);
+        let grad_dt_diff = max_abs_diff(reference.grad_dt_grouped, fused.grad_dt_grouped);
+        let grad_a_diff = max_abs_diff(reference.grad_a_log, fused.grad_a_log);
+        let grad_d_diff = max_abs_diff(reference.grad_d_skip, fused.grad_d_skip);
+
+        assert!(
+            grad_x_diff <= 5.0e-4,
+            "expected recompute grad_x parity, max diff {grad_x_diff}"
+        );
+        assert!(
+            grad_b_diff <= 5.0e-4,
+            "expected recompute grad_b parity, max diff {grad_b_diff}"
+        );
+        assert!(
+            grad_c_diff <= 5.0e-4,
+            "expected recompute grad_c parity, max diff {grad_c_diff}"
+        );
+        assert!(
+            grad_dt_diff <= 5.0e-4,
+            "expected recompute grad_dt parity, max diff {grad_dt_diff}"
+        );
+        assert!(
+            grad_a_diff <= 5.0e-4,
+            "expected recompute grad_a parity, max diff {grad_a_diff}"
+        );
+        assert!(
+            grad_d_diff <= 5.0e-4,
+            "expected recompute grad_d parity, max diff {grad_d_diff}"
+        );
     }
 }

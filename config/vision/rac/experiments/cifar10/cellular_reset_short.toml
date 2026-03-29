@@ -1,4 +1,0 @@
-extends = ["cellular_short.toml"]
-
-[mode.memory]
-reset_each_step = true

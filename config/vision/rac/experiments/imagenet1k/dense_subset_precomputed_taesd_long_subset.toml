@@ -1,6 +1,0 @@
-extends = ["dense_subset_precomputed_taesd_medium_subset.toml"]
-
-[training]
-max_iters = 512
-log_frequency = 32
-device_memory_check_every = 32

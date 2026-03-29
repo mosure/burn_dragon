@@ -15,6 +15,7 @@ pub enum SequenceMemorySystem {
     Rwkv8StateSpace,
     Mamba1SelectiveScan,
     Mamba2StateSpaceDuality,
+    Mamba3StateSpaceDuality,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -31,7 +32,8 @@ impl SequenceMemorySystem {
             Self::LinearAttention
             | Self::Rwkv8StateSpace
             | Self::Mamba1SelectiveScan
-            | Self::Mamba2StateSpaceDuality => SequenceTrainingExecutor::Reference,
+            | Self::Mamba2StateSpaceDuality
+            | Self::Mamba3StateSpaceDuality => SequenceTrainingExecutor::Reference,
         }
     }
 }

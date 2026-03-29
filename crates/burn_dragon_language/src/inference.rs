@@ -116,6 +116,7 @@ pub fn build_model_config(overrides: &ModelOverrides, training_block_size: usize
         model_config.sequence_kernel.memory_system,
         burn_dragon_core::SequenceMemorySystem::Mamba1SelectiveScan
             | burn_dragon_core::SequenceMemorySystem::Mamba2StateSpaceDuality
+            | burn_dragon_core::SequenceMemorySystem::Mamba3StateSpaceDuality
     ) {
         model_config
             .mamba

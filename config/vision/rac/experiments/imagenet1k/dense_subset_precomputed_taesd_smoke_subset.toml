@@ -1,8 +1,0 @@
-extends = ["dense_subset_precomputed_taesd_smoke.toml"]
-
-[dataset]
-imagenet_root = "data/imagenet1k_rac_smoke"
-
-[mode.teacher.precomputed_latent]
-train_path = "artifacts/rac_teacher_latents_smoke_subset/train_latent.bin"
-val_path = "artifacts/rac_teacher_latents_smoke_subset/val_latent.bin"

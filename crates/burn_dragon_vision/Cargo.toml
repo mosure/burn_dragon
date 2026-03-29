@@ -91,6 +91,42 @@ path = "src/bin/train.rs"
 required-features = ["cli"]
 
 [dev-dependencies]
+bytemuck = { version = "1", features = ["derive"] }
+burn-autodiff = "0.21.0-pre.2"
 burn_dragon_language = { path = "../burn_dragon_language", version = "0.5.0", default-features = false, features = ["train"] }
 burn-ndarray = { version = "0.21.0-pre.2" }
+criterion = { version = "0.7", features = ["html_reports"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+pollster = "0.3"
 tempfile = "3"
+wgpu = "26"
+
+[[bench]]
+name = "vision_pipeline"
+harness = false
+path = "benches/vision_pipeline.rs"
+required-features = ["benchmark"]
+
+[[bench]]
+name = "vision_train_step"
+harness = false
+path = "benches/vision_train_step.rs"
+required-features = ["benchmark"]
+
+[[bench]]
+name = "vision_mae_train_step"
+harness = false
+path = "benches/vision_mae_train_step.rs"
+required-features = ["benchmark"]
+
+[[bench]]
+name = "vision_lejepa_train_step"
+harness = false
+path = "benches/vision_lejepa_train_step.rs"
+required-features = ["benchmark"]
+
+[[bench]]
+name = "vision_input_projection"
+harness = false
+path = "benches/vision_input_projection.rs"
+required-features = ["benchmark"]

@@ -182,6 +182,7 @@ fn rollout_chunked_generation_matches_baseline_greedy_across_fast_steps() {
             settings,
             4,
             16,
+            None,
             Some(&mut |chunk: &[i64]| streamed.extend_from_slice(chunk)),
         )
         .expect("chunked");

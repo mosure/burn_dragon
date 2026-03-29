@@ -485,6 +485,86 @@ pub(crate) fn build_state_layout(model_config: &BDHConfig) -> StateLayout {
                         },
                     ]
                 }
+                burn_dragon_core::SequenceMemorySystem::Mamba3StateSpaceDuality => {
+                    let mamba = model_config.mamba.resolve(
+                        model_config.n_embd,
+                        burn_dragon_core::SequenceMemorySystem::Mamba3StateSpaceDuality,
+                    );
+                    vec![
+                        StateTensorSpec {
+                            name: "rho".to_string(),
+                            axes: vec![
+                                StateAxisSpec {
+                                    name: "batch_views".to_string(),
+                                    size: None,
+                                },
+                                StateAxisSpec {
+                                    name: "mamba_heads".to_string(),
+                                    size: Some(mamba.nheads),
+                                },
+                                StateAxisSpec {
+                                    name: "mamba_head_dim".to_string(),
+                                    size: Some(mamba.headdim),
+                                },
+                                StateAxisSpec {
+                                    name: "mamba_state".to_string(),
+                                    size: Some(mamba.d_state),
+                                },
+                            ],
+                        },
+                        StateTensorSpec {
+                            name: "mamba_angle_state".to_string(),
+                            axes: vec![
+                                StateAxisSpec {
+                                    name: "batch_views".to_string(),
+                                    size: None,
+                                },
+                                StateAxisSpec {
+                                    name: "mamba_heads".to_string(),
+                                    size: Some(mamba.nheads),
+                                },
+                                StateAxisSpec {
+                                    name: "mamba_rope_angles".to_string(),
+                                    size: Some(mamba.num_rope_angles),
+                                },
+                            ],
+                        },
+                        StateTensorSpec {
+                            name: "mamba_k_state".to_string(),
+                            axes: vec![
+                                StateAxisSpec {
+                                    name: "batch_views".to_string(),
+                                    size: None,
+                                },
+                                StateAxisSpec {
+                                    name: "mamba_heads".to_string(),
+                                    size: Some(mamba.nheads),
+                                },
+                                StateAxisSpec {
+                                    name: "mamba_state".to_string(),
+                                    size: Some(mamba.d_state),
+                                },
+                            ],
+                        },
+                        StateTensorSpec {
+                            name: "mamba_v_state".to_string(),
+                            axes: vec![
+                                StateAxisSpec {
+                                    name: "batch_views".to_string(),
+                                    size: None,
+                                },
+                                StateAxisSpec {
+                                    name: "mamba_heads".to_string(),
+                                    size: Some(mamba.nheads),
+                                },
+                                StateAxisSpec {
+                                    name: "mamba_head_dim".to_string(),
+                                    size: Some(mamba.headdim),
+                                },
+                            ],
+                        },
+                    ]
+                }
                 _ => {
                     vec![StateTensorSpec {
                         name: "rho".to_string(),
@@ -1196,6 +1276,34 @@ mod tests {
             .expect("mamba rho tensor");
         assert_eq!(rho.axes[2].size, Some(96));
         assert_eq!(rho.axes[3].size, Some(8));
+    }
+
+    #[test]
+    fn build_state_layout_records_mamba3_recurrent_state_tensors() {
+        let mut model_config = BDHConfig::default();
+        model_config.n_layer = 2;
+        model_config.n_embd = 128;
+        model_config.n_head = 2;
+        model_config.sequence_kernel = SequenceKernelConfig::reference(
+            burn_dragon_core::SequenceMemorySystem::Mamba3StateSpaceDuality,
+        );
+        model_config.mamba.headdim = 64;
+        model_config.mamba.ngroups = 2;
+        model_config.mamba.d_state = 16;
+        model_config.mamba.rope_fraction = 0.5;
+
+        let layout = super::build_state_layout(&model_config);
+        let layer0 = &layout.layers[0];
+        let tensor_names = layer0
+            .tensors
+            .iter()
+            .map(|tensor| tensor.name.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(tensor_names.contains(&"rho"));
+        assert!(tensor_names.contains(&"mamba_angle_state"));
+        assert!(tensor_names.contains(&"mamba_k_state"));
+        assert!(tensor_names.contains(&"mamba_v_state"));
     }
 
     #[test]

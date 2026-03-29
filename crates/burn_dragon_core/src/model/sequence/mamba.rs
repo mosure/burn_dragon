@@ -1,7 +1,9 @@
 use burn::module::{Module, Param};
 use burn::tensor::backend::Backend;
 use burn::tensor::{Distribution as TensorDistribution, Tensor, TensorData, activation};
-use rand::Rng;
+use burn_dragon_kernel::kernels::sequence::mamba3::forward::{
+    Mamba3TensorizedState, tensorized_mamba3_forward,
+};
 use serde::{Deserialize, Serialize};
 
 use super::config::SequenceMemorySystem;
@@ -57,6 +59,22 @@ fn default_mamba_norm_eps() -> f32 {
     1.0e-5
 }
 
+fn default_mamba_rope_fraction() -> f32 {
+    0.5
+}
+
+fn default_mamba_dt_init_floor() -> f32 {
+    1.0e-4
+}
+
+fn default_mamba_a_floor() -> f32 {
+    1.0e-4
+}
+
+fn default_mamba_chunk_size() -> usize {
+    64
+}
+
 fn default_true() -> bool {
     true
 }
@@ -91,6 +109,20 @@ pub struct MambaSequenceConfig {
     pub a_init_max: f32,
     #[serde(default = "default_mamba_norm_eps")]
     pub norm_eps: f32,
+    #[serde(default = "default_mamba_rope_fraction")]
+    pub rope_fraction: f32,
+    #[serde(default = "default_mamba_dt_init_floor")]
+    pub dt_init_floor: f32,
+    #[serde(default = "default_mamba_a_floor")]
+    pub a_floor: f32,
+    #[serde(default = "default_mamba_chunk_size")]
+    pub chunk_size: usize,
+    #[serde(default)]
+    pub is_outproj_norm: bool,
+    #[serde(default)]
+    pub is_mimo: bool,
+    #[serde(default = "default_mamba_ngroups")]
+    pub mimo_rank: usize,
 }
 
 impl Default for MambaSequenceConfig {
@@ -110,6 +142,13 @@ impl Default for MambaSequenceConfig {
             a_init_min: default_mamba_a_init_min(),
             a_init_max: default_mamba_a_init_max(),
             norm_eps: default_mamba_norm_eps(),
+            rope_fraction: default_mamba_rope_fraction(),
+            dt_init_floor: default_mamba_dt_init_floor(),
+            a_floor: default_mamba_a_floor(),
+            chunk_size: default_mamba_chunk_size(),
+            is_outproj_norm: false,
+            is_mimo: false,
+            mimo_rank: default_mamba_ngroups(),
         }
     }
 }
@@ -132,6 +171,14 @@ pub struct ResolvedMambaSequenceConfig {
     pub a_init_min: f32,
     pub a_init_max: f32,
     pub norm_eps: f32,
+    pub rope_fraction: f32,
+    pub dt_init_floor: f32,
+    pub a_floor: f32,
+    pub chunk_size: usize,
+    pub is_outproj_norm: bool,
+    pub is_mimo: bool,
+    pub mimo_rank: usize,
+    pub num_rope_angles: usize,
 }
 
 impl ResolvedMambaSequenceConfig {
@@ -141,6 +188,13 @@ impl ResolvedMambaSequenceConfig {
 
     pub fn mamba2_in_proj_dim(self) -> usize {
         2 * self.d_inner + 2 * self.ngroups * self.d_state + self.nheads
+    }
+
+    pub fn mamba3_in_proj_dim(self) -> usize {
+        2 * self.d_inner
+            + 2 * self.ngroups * self.mimo_rank * self.d_state
+            + 3 * self.nheads
+            + self.num_rope_angles
     }
 }
 
@@ -169,26 +223,35 @@ impl MambaSequenceConfig {
             return Err("dt_scale must be finite and positive".to_string());
         }
         let d_inner = d_model.max(1) * self.expand.max(1);
-        if matches!(memory_system, SequenceMemorySystem::Mamba2StateSpaceDuality) {
+        if matches!(
+            memory_system,
+            SequenceMemorySystem::Mamba2StateSpaceDuality
+                | SequenceMemorySystem::Mamba3StateSpaceDuality
+        ) {
             if self.headdim == 0 {
-                return Err("headdim must be positive for mamba2_state_space_duality".to_string());
+                return Err(format!("headdim must be positive for {memory_system:?}"));
             }
             if d_inner % self.headdim != 0 {
                 return Err(format!(
-                    "mamba2_state_space_duality requires d_inner divisible by headdim (got d_inner={d_inner} headdim={})",
+                    "{memory_system:?} requires d_inner divisible by headdim (got d_inner={d_inner} headdim={})",
                     self.headdim
                 ));
             }
             let nheads = d_inner / self.headdim;
             if self.ngroups == 0 {
-                return Err("ngroups must be positive for mamba2_state_space_duality".to_string());
+                return Err(format!("ngroups must be positive for {memory_system:?}"));
             }
             if nheads % self.ngroups != 0 {
                 return Err(format!(
-                    "mamba2_state_space_duality requires nheads divisible by ngroups (got nheads={nheads} ngroups={})",
+                    "{memory_system:?} requires nheads divisible by ngroups (got nheads={nheads} ngroups={})",
                     self.ngroups
                 ));
             }
+            if self.norm_eps <= 0.0 || !self.norm_eps.is_finite() {
+                return Err("norm_eps must be finite and positive".to_string());
+            }
+        }
+        if matches!(memory_system, SequenceMemorySystem::Mamba2StateSpaceDuality) {
             if self.a_init_min <= 0.0
                 || self.a_init_max < self.a_init_min
                 || !self.a_init_min.is_finite()
@@ -196,8 +259,34 @@ impl MambaSequenceConfig {
             {
                 return Err("a_init range must be finite, positive, and ordered".to_string());
             }
-            if self.norm_eps <= 0.0 || !self.norm_eps.is_finite() {
-                return Err("norm_eps must be finite and positive".to_string());
+        }
+        if matches!(memory_system, SequenceMemorySystem::Mamba3StateSpaceDuality) {
+            if (self.rope_fraction - 0.5).abs() > 1.0e-6
+                && (self.rope_fraction - 1.0).abs() > 1.0e-6
+            {
+                return Err(
+                    "mamba3_state_space_duality currently supports rope_fraction = 0.5 or 1.0"
+                        .to_string(),
+                );
+            }
+            if self.dt_init_floor <= 0.0 || !self.dt_init_floor.is_finite() {
+                return Err("dt_init_floor must be finite and positive".to_string());
+            }
+            if self.a_floor <= 0.0 || !self.a_floor.is_finite() {
+                return Err("a_floor must be finite and positive".to_string());
+            }
+            if self.chunk_size == 0 {
+                return Err(
+                    "chunk_size must be positive for mamba3_state_space_duality".to_string()
+                );
+            }
+            if self.is_mimo {
+                return Err("mamba3_state_space_duality MIMO is not implemented in burn_dragon yet; set model.mamba.is_mimo = false".to_string());
+            }
+            let split_tensor_size = ((self.d_state as f32) * self.rope_fraction).floor() as usize;
+            let split_tensor_size = split_tensor_size - (split_tensor_size % 2);
+            if split_tensor_size < 2 {
+                return Err("mamba3_state_space_duality requires at least one rotary pair in d_state * rope_fraction".to_string());
             }
         }
         Ok(())
@@ -217,11 +306,23 @@ impl MambaSequenceConfig {
         let d_inner = d_model * expand;
         let dt_rank = self.dt_rank.unwrap_or_else(|| d_model.div_ceil(16)).max(1);
         let headdim = self.headdim.max(1);
-        let nheads = if matches!(memory_system, SequenceMemorySystem::Mamba2StateSpaceDuality) {
+        let nheads = if matches!(
+            memory_system,
+            SequenceMemorySystem::Mamba2StateSpaceDuality
+                | SequenceMemorySystem::Mamba3StateSpaceDuality
+        ) {
             d_inner / headdim
         } else {
             0
         };
+        let split_tensor_size = ((d_state as f32) * self.rope_fraction).floor() as usize;
+        let split_tensor_size = split_tensor_size - (split_tensor_size % 2);
+        let num_rope_angles =
+            if matches!(memory_system, SequenceMemorySystem::Mamba3StateSpaceDuality) {
+                (split_tensor_size / 2).max(1)
+            } else {
+                0
+            };
         ResolvedMambaSequenceConfig {
             d_model,
             d_inner,
@@ -239,6 +340,14 @@ impl MambaSequenceConfig {
             a_init_min: self.a_init_min.max(1.0e-6),
             a_init_max: self.a_init_max.max(self.a_init_min.max(1.0e-6)),
             norm_eps: self.norm_eps.max(1.0e-8),
+            rope_fraction: self.rope_fraction,
+            dt_init_floor: self.dt_init_floor.max(1.0e-6),
+            a_floor: self.a_floor.max(1.0e-6),
+            chunk_size: self.chunk_size.max(1),
+            is_outproj_norm: self.is_outproj_norm,
+            is_mimo: self.is_mimo,
+            mimo_rank: self.mimo_rank.max(1),
+            num_rope_angles,
         }
     }
 }
@@ -347,6 +456,14 @@ impl<B: Backend> Mamba1SequenceParameters<B> {
             a_init_min: default_mamba_a_init_min(),
             a_init_max: default_mamba_a_init_max(),
             norm_eps: default_mamba_norm_eps(),
+            rope_fraction: default_mamba_rope_fraction(),
+            dt_init_floor: default_mamba_dt_init_floor(),
+            a_floor: default_mamba_a_floor(),
+            chunk_size: default_mamba_chunk_size(),
+            is_outproj_norm: false,
+            is_mimo: false,
+            mimo_rank: 1,
+            num_rope_angles: 0,
         }
     }
 
@@ -412,18 +529,28 @@ impl<B: Backend> Mamba2SequenceParameters<B> {
         let in_std = (1.0 / config.d_model.max(1) as f32).sqrt();
         let out_std = (1.0 / config.d_inner.max(1) as f32).sqrt();
         let conv_std = (1.0 / config.d_conv.max(1) as f32).sqrt();
-        let mut rng = rand::thread_rng();
         let log_dt_min = config.dt_min.ln();
         let log_dt_max = config.dt_max.ln();
-        let dt_bias = (0..config.nheads)
-            .map(|_| {
-                let sample = rng.gen_range(log_dt_min..=log_dt_max).exp().max(1.0e-4);
-                sample + (-(-sample).exp_m1()).ln()
-            })
-            .collect::<Vec<_>>();
-        let a_log = (0..config.nheads)
-            .map(|_| rng.gen_range(config.a_init_min..=config.a_init_max).ln())
-            .collect::<Vec<_>>();
+        let dt_sample = Tensor::<B, 1>::random(
+            [config.nheads],
+            TensorDistribution::Uniform(log_dt_min as f64, log_dt_max as f64),
+            device,
+        )
+        .exp()
+        .clamp_min(1.0e-4);
+        let dt_bias = dt_sample
+            .clone()
+            .exp()
+            .sub_scalar(1.0)
+            .clamp_min(1.0e-6)
+            .log();
+        let a_log = Tensor::<B, 1>::random(
+            [config.nheads],
+            TensorDistribution::Uniform(config.a_init_min as f64, config.a_init_max as f64),
+            device,
+        )
+        .clamp_min(1.0e-6)
+        .log();
 
         let in_proj = Param::from_tensor(Tensor::<B, 2>::random(
             [config.d_model, config.mamba2_in_proj_dim()],
@@ -438,14 +565,8 @@ impl<B: Backend> Mamba2SequenceParameters<B> {
         let conv_bias = config
             .conv_bias
             .then(|| Param::from_tensor(Tensor::<B, 1>::zeros([config.mamba2_conv_dim()], device)));
-        let dt_bias = Param::from_tensor(Tensor::<B, 1>::from_data(
-            TensorData::new(dt_bias, [config.nheads]),
-            device,
-        ));
-        let a_log = Param::from_tensor(Tensor::<B, 1>::from_data(
-            TensorData::new(a_log, [config.nheads]),
-            device,
-        ));
+        let dt_bias = Param::from_tensor(Tensor::<B, 1>::from_data(dt_bias.to_data(), device));
+        let a_log = Param::from_tensor(Tensor::<B, 1>::from_data(a_log.to_data(), device));
         let d_skip = Param::from_tensor(Tensor::<B, 1>::ones([config.nheads], device));
         let norm_weight = Param::from_tensor(Tensor::<B, 1>::ones([config.d_inner], device));
         let out_proj = Param::from_tensor(Tensor::<B, 2>::random(
@@ -492,6 +613,14 @@ impl<B: Backend> Mamba2SequenceParameters<B> {
             a_init_min: default_mamba_a_init_min(),
             a_init_max: default_mamba_a_init_max(),
             norm_eps: self.norm_eps,
+            rope_fraction: default_mamba_rope_fraction(),
+            dt_init_floor: default_mamba_dt_init_floor(),
+            a_floor: default_mamba_a_floor(),
+            chunk_size: default_mamba_chunk_size(),
+            is_outproj_norm: false,
+            is_mimo: false,
+            mimo_rank: 1,
+            num_rope_angles: 0,
         }
     }
 
@@ -529,9 +658,162 @@ impl<B: Backend> Mamba2SequenceParameters<B> {
 }
 
 #[derive(Module, Debug)]
+pub struct Mamba3SequenceParameters<B: Backend> {
+    d_model: usize,
+    d_inner: usize,
+    d_state: usize,
+    headdim: usize,
+    ngroups: usize,
+    nheads: usize,
+    norm_eps: f32,
+    num_rope_angles: usize,
+    a_floor: f32,
+    chunk_size: usize,
+    in_proj: Param<Tensor<B, 2>>,
+    dt_bias: Param<Tensor<B, 1>>,
+    b_bias: Param<Tensor<B, 2>>,
+    c_bias: Param<Tensor<B, 2>>,
+    b_norm_weight: Param<Tensor<B, 1>>,
+    c_norm_weight: Param<Tensor<B, 1>>,
+    d_skip: Param<Tensor<B, 1>>,
+    out_proj: Param<Tensor<B, 2>>,
+}
+
+impl<B: Backend> Mamba3SequenceParameters<B> {
+    pub fn new(config: ResolvedMambaSequenceConfig, device: &B::Device) -> Self {
+        let in_std = (1.0 / config.d_model.max(1) as f32).sqrt();
+        let out_std = (1.0 / config.d_inner.max(1) as f32).sqrt();
+        let log_dt_min = config.dt_min.ln();
+        let log_dt_max = config.dt_max.ln();
+        let dt_sample = Tensor::<B, 1>::random(
+            [config.nheads],
+            TensorDistribution::Uniform(log_dt_min as f64, log_dt_max as f64),
+            device,
+        )
+        .exp()
+        .clamp_min(config.dt_init_floor);
+        let dt_bias_values = dt_sample
+            .to_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .expect("mamba3 dt bias init")
+            .into_iter()
+            .map(|dt| dt + (-(-dt).exp_m1()).ln())
+            .collect::<Vec<_>>();
+        let in_proj = Param::from_tensor(Tensor::<B, 2>::random(
+            [config.d_model, config.mamba3_in_proj_dim()],
+            TensorDistribution::Normal(0.0, in_std as f64),
+            device,
+        ));
+        let dt_bias = Param::from_tensor(Tensor::<B, 1>::from_data(
+            TensorData::new(dt_bias_values, [config.nheads]),
+            device,
+        ));
+        let b_bias = Param::from_tensor(Tensor::<B, 2>::ones(
+            [config.nheads, config.d_state],
+            device,
+        ));
+        let c_bias = Param::from_tensor(Tensor::<B, 2>::ones(
+            [config.nheads, config.d_state],
+            device,
+        ));
+        let b_norm_weight = Param::from_tensor(Tensor::<B, 1>::ones([config.d_state], device));
+        let c_norm_weight = Param::from_tensor(Tensor::<B, 1>::ones([config.d_state], device));
+        let d_skip = Param::from_tensor(Tensor::<B, 1>::ones([config.nheads], device));
+        let out_proj = Param::from_tensor(Tensor::<B, 2>::random(
+            [config.d_inner, config.d_model],
+            TensorDistribution::Normal(0.0, out_std as f64),
+            device,
+        ));
+        Self {
+            d_model: config.d_model,
+            d_inner: config.d_inner,
+            d_state: config.d_state,
+            headdim: config.headdim,
+            ngroups: config.ngroups,
+            nheads: config.nheads,
+            norm_eps: config.norm_eps,
+            num_rope_angles: config.num_rope_angles,
+            a_floor: config.a_floor,
+            chunk_size: config.chunk_size,
+            in_proj,
+            dt_bias,
+            b_bias,
+            c_bias,
+            b_norm_weight,
+            c_norm_weight,
+            d_skip,
+            out_proj,
+        }
+    }
+
+    pub fn config(&self) -> ResolvedMambaSequenceConfig {
+        ResolvedMambaSequenceConfig {
+            d_model: self.d_model,
+            d_inner: self.d_inner,
+            d_state: self.d_state,
+            d_conv: default_mamba_d_conv(),
+            dt_rank: self.d_model.div_ceil(16),
+            dt_min: default_mamba_dt_min(),
+            dt_max: default_mamba_dt_max(),
+            dt_scale: default_mamba_dt_scale(),
+            conv_bias: false,
+            use_fast_path: false,
+            headdim: self.headdim,
+            ngroups: self.ngroups,
+            nheads: self.nheads,
+            a_init_min: default_mamba_a_init_min(),
+            a_init_max: default_mamba_a_init_max(),
+            norm_eps: self.norm_eps,
+            rope_fraction: default_mamba_rope_fraction(),
+            dt_init_floor: default_mamba_dt_init_floor(),
+            a_floor: self.a_floor,
+            chunk_size: self.chunk_size,
+            is_outproj_norm: false,
+            is_mimo: false,
+            mimo_rank: 1,
+            num_rope_angles: self.num_rope_angles,
+        }
+    }
+
+    pub fn in_proj_tensor(&self) -> Tensor<B, 2> {
+        self.in_proj.val()
+    }
+
+    pub fn dt_bias_tensor(&self) -> Tensor<B, 1> {
+        self.dt_bias.val()
+    }
+
+    pub fn b_bias_tensor(&self) -> Tensor<B, 2> {
+        self.b_bias.val()
+    }
+
+    pub fn c_bias_tensor(&self) -> Tensor<B, 2> {
+        self.c_bias.val()
+    }
+
+    pub fn b_norm_weight_tensor(&self) -> Tensor<B, 1> {
+        self.b_norm_weight.val()
+    }
+
+    pub fn c_norm_weight_tensor(&self) -> Tensor<B, 1> {
+        self.c_norm_weight.val()
+    }
+
+    pub fn d_skip_tensor(&self) -> Tensor<B, 1> {
+        self.d_skip.val()
+    }
+
+    pub fn out_proj_tensor(&self) -> Tensor<B, 2> {
+        self.out_proj.val()
+    }
+}
+
+#[derive(Module, Debug)]
 pub struct MambaSequenceParameters<B: Backend> {
     mamba1: Option<Mamba1SequenceParameters<B>>,
     mamba2: Option<Mamba2SequenceParameters<B>>,
+    mamba3: Option<Mamba3SequenceParameters<B>>,
 }
 
 impl<B: Backend> MambaSequenceParameters<B> {
@@ -544,10 +826,17 @@ impl<B: Backend> MambaSequenceParameters<B> {
             SequenceMemorySystem::Mamba1SelectiveScan => Self {
                 mamba1: Some(Mamba1SequenceParameters::new(config, device)),
                 mamba2: None,
+                mamba3: None,
             },
             SequenceMemorySystem::Mamba2StateSpaceDuality => Self {
                 mamba1: None,
                 mamba2: Some(Mamba2SequenceParameters::new(config, device)),
+                mamba3: None,
+            },
+            SequenceMemorySystem::Mamba3StateSpaceDuality => Self {
+                mamba1: None,
+                mamba2: None,
+                mamba3: Some(Mamba3SequenceParameters::new(config, device)),
             },
             other => panic!("unsupported memory system {other:?} for mamba params"),
         }
@@ -560,12 +849,19 @@ impl<B: Backend> MambaSequenceParameters<B> {
     pub fn mamba2(&self) -> Option<&Mamba2SequenceParameters<B>> {
         self.mamba2.as_ref()
     }
+
+    pub fn mamba3(&self) -> Option<&Mamba3SequenceParameters<B>> {
+        self.mamba3.as_ref()
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct MambaReferenceState<B: Backend> {
     pub conv: Tensor<B, 4>,
     pub ssm: Tensor<B, 4>,
+    pub angle: Option<Tensor<B, 3>>,
+    pub k: Option<Tensor<B, 3>>,
+    pub v: Option<Tensor<B, 3>>,
 }
 
 fn silu<B: Backend, const D: usize>(values: Tensor<B, D>) -> Tensor<B, D> {
@@ -795,6 +1091,9 @@ fn mamba1_reference<B: Backend>(
         MambaReferenceState {
             conv: conv_state,
             ssm: ssm_state,
+            angle: None,
+            k: None,
+            v: None,
         },
     )
 }
@@ -922,6 +1221,55 @@ fn mamba2_reference<B: Backend>(
         MambaReferenceState {
             conv: conv_state,
             ssm: ssm_state,
+            angle: None,
+            k: None,
+            v: None,
+        },
+    )
+}
+
+fn mamba3_reference<B: Backend>(
+    hidden_states: Tensor<B, 4>,
+    params: &Mamba3SequenceParameters<B>,
+    state: Option<MambaReferenceState<B>>,
+) -> (Tensor<B, 4>, MambaReferenceState<B>) {
+    let config = params.config();
+    let tensorized = tensorized_mamba3_forward(
+        hidden_states,
+        config.d_inner,
+        config.d_state,
+        config.headdim,
+        config.ngroups,
+        config.num_rope_angles,
+        config.norm_eps,
+        config.a_floor,
+        config.chunk_size,
+        params.in_proj_tensor(),
+        params.dt_bias_tensor(),
+        params.b_bias_tensor(),
+        params.c_bias_tensor(),
+        params.b_norm_weight_tensor(),
+        params.c_norm_weight_tensor(),
+        params.d_skip_tensor(),
+        params.out_proj_tensor(),
+        state.map(|state| Mamba3TensorizedState {
+            ssm: state.ssm,
+            angle: state.angle.expect("mamba3 reference requires angle state"),
+            k: state.k.expect("mamba3 reference requires k state"),
+            v: state.v.expect("mamba3 reference requires v state"),
+        }),
+    );
+    (
+        tensorized.context,
+        MambaReferenceState {
+            conv: Tensor::<B, 4>::zeros(
+                [tensorized.state.ssm.shape().dims::<4>()[0], 1, 0, 0],
+                &tensorized.state.ssm.device(),
+            ),
+            ssm: tensorized.state.ssm,
+            angle: Some(tensorized.state.angle),
+            k: Some(tensorized.state.k),
+            v: Some(tensorized.state.v),
         },
     )
 }
@@ -931,9 +1279,10 @@ pub fn mamba_reference<B: Backend>(
     params: &MambaSequenceParameters<B>,
     state: Option<MambaReferenceState<B>>,
 ) -> (Tensor<B, 4>, MambaReferenceState<B>) {
-    match (params.mamba1(), params.mamba2()) {
-        (Some(mamba1), None) => mamba1_reference(hidden_states, mamba1, state),
-        (None, Some(mamba2)) => mamba2_reference(hidden_states, mamba2, state),
+    match (params.mamba1(), params.mamba2(), params.mamba3()) {
+        (Some(mamba1), None, None) => mamba1_reference(hidden_states, mamba1, state),
+        (None, Some(mamba2), None) => mamba2_reference(hidden_states, mamba2, state),
+        (None, None, Some(mamba3)) => mamba3_reference(hidden_states, mamba3, state),
         _ => panic!("invalid mamba parameter bundle"),
     }
 }
@@ -1264,6 +1613,7 @@ mod tests {
         let wrapped = MambaSequenceParameters {
             mamba1: Some(params),
             mamba2: None,
+            mamba3: None,
         };
         let (output, state) = mamba_reference(hidden, &wrapped, None);
         let expected_output = Tensor::<Backend, 4>::from_data(

@@ -1,10 +1,14 @@
 use std::any::{Any, TypeId};
+use std::marker::PhantomData;
 use std::time::Instant;
 
 use burn::tensor::Tensor as BurnTensor;
-use burn::tensor::backend::{AutodiffBackend, Backend as BackendTrait};
+use burn::tensor::backend::Backend as BackendTrait;
 use burn::tensor::{DType, Shape, TensorData, TensorPrimitive};
 use burn_autodiff::Autodiff;
+use burn_autodiff::checkpoint::{base::Checkpointer, strategy::NoCheckpointing};
+use burn_autodiff::grads::Gradients;
+use burn_autodiff::ops::{Backward, Ops, OpsKind};
 use burn_cubecl::cubecl;
 #[cfg(feature = "cuda")]
 use burn_cubecl::cubecl::cuda::CudaRuntime;
@@ -23,17 +27,20 @@ use crate::profiling::{
     profile_snapshot,
 };
 
+mod backward_runtime;
 mod forward_runtime;
 
+use self::backward_runtime::recurrent_attention_autodiff_custom;
 use self::forward_runtime::{
-    try_direct_path_autodiff_cube_runtime, try_direct_path_runtime, try_fusion_path_runtime,
+    try_direct_path_autodiff_cube_runtime, try_direct_path_runtime,
+    try_direct_path_runtime_with_state_history, try_fusion_path_runtime,
 };
 
 const WORKGROUP_SIZE_X: u32 = 64;
 #[cfg(feature = "cuda")]
 const RECURRENT_TILED_WORKGROUP_SIZE_X: u32 = 128;
-#[cfg(feature = "cuda")]
-const RECURRENT_QUERY_TILE: usize = WORKGROUP_SIZE_X as usize;
+#[cfg(not(feature = "cuda"))]
+const RECURRENT_TILED_WORKGROUP_SIZE_X: u32 = WORKGROUP_SIZE_X;
 const META_LEN: usize = 6;
 const RECURRENT_ATTENTION_SHADER: &str = include_str!("recurrent.wgsl");
 type WgpuCubeBackend = CubeBackend<WgpuRuntime, f32, i32, u32>;
@@ -63,6 +70,30 @@ pub struct RecurrentAttentionOutput<B: BackendTrait> {
     pub context: BurnTensor<B, 4>,
     pub rho: BurnTensor<B, 4>,
 }
+
+pub(super) struct RecurrentRuntimeOutput<R: CubeRuntime> {
+    pub context: CubeTensor<R>,
+    pub rho: CubeTensor<R>,
+    pub state_history: Option<CubeTensor<R>>,
+}
+
+pub(super) struct RecurrentAttentionCapturedOutput<B: BackendTrait> {
+    pub context: BurnTensor<B, 4>,
+    pub rho: BurnTensor<B, 4>,
+    pub state_history: BurnTensor<B, 5>,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct RecurrentAttentionBackwardState<T> {
+    pub query: T,
+    pub value: T,
+    pub rho: T,
+    pub decay: T,
+    pub state_history: T,
+}
+
+#[derive(Debug)]
+struct FusedRecurrentAttentionBackward<B>(PhantomData<B>);
 
 #[derive(Debug, Clone)]
 pub struct CompiledRecurrentAttentionPlan<B: BackendTrait> {
@@ -416,6 +447,76 @@ fn recurrent_attention_cube_exact_kernel(
 }
 
 #[cube(launch)]
+fn recurrent_attention_cube_exact_history_kernel(
+    query: &Tensor<Line<f32>>,
+    value: &Tensor<Line<f32>>,
+    rho_state: &mut Tensor<Line<f32>>,
+    decay: &Tensor<Line<f32>>,
+    context: &mut Tensor<Line<f32>>,
+    state_history: &mut Tensor<Line<f32>>,
+    params: &Tensor<Line<f32>>,
+) {
+    let batch = u32::cast_from(params[0]) as usize;
+    let heads = u32::cast_from(params[1]) as usize;
+    let value_heads = u32::cast_from(params[2]) as usize;
+    let time = u32::cast_from(params[3]) as usize;
+    let latent = u32::cast_from(params[4]) as usize;
+    let embd = u32::cast_from(params[5]) as usize;
+
+    let b = CUBE_POS_Z as usize;
+    let h = CUBE_POS_Y as usize;
+    let e = (CUBE_POS_X * CUBE_DIM_X + UNIT_POS_X) as usize;
+    if b >= batch || h >= heads || e >= embd {
+        terminate!();
+    }
+
+    let decay_value = decay[h * decay.stride(0)];
+    let mut value_head = h;
+    if value_heads == 1usize {
+        value_head = 0usize;
+    }
+    let mut t = 0usize;
+    while t < time {
+        let value_index = b * value.stride(0)
+            + value_head * value.stride(1)
+            + t * value.stride(2)
+            + e * value.stride(3);
+        let value_t = value[value_index];
+
+        let mut acc = Line::cast_from(0u32);
+        let mut l = 0usize;
+        while l < latent {
+            let query_index = b * query.stride(0)
+                + h * query.stride(1)
+                + t * query.stride(2)
+                + l * query.stride(3);
+            let rho_index = b * rho_state.stride(0)
+                + h * rho_state.stride(1)
+                + l * rho_state.stride(2)
+                + e * rho_state.stride(3);
+            let history_index = b * state_history.stride(0)
+                + h * state_history.stride(1)
+                + t * state_history.stride(2)
+                + l * state_history.stride(3)
+                + e * state_history.stride(4);
+            let q = query[query_index];
+            let rho_prev = rho_state[rho_index];
+            state_history[history_index] = rho_prev;
+            acc += rho_prev * q;
+            rho_state[rho_index] = (rho_prev + q * value_t) * decay_value;
+            l += 1usize;
+        }
+
+        let out_index = b * context.stride(0)
+            + h * context.stride(1)
+            + t * context.stride(2)
+            + e * context.stride(3);
+        context[out_index] = acc;
+        t += 1usize;
+    }
+}
+
+#[cube(launch)]
 fn recurrent_attention_cube_tiled_kernel(
     query: &Tensor<Line<f32>>,
     value: &Tensor<Line<f32>>,
@@ -525,60 +626,6 @@ where
     Some(cube)
 }
 
-fn extract_autodiff_inner<B, R>(value: B::FloatTensorPrimitive) -> Option<CubeTensor<R>>
-where
-    B: BackendTrait,
-    B::FloatTensorPrimitive: 'static,
-    R: CubeRuntime + 'static,
-{
-    if TypeId::of::<R>() == TypeId::of::<WgpuRuntime>() {
-        let query_ad: WgpuCubeAutodiffTensor = try_cast_primitive::<B, _>(value)?;
-        let inner = <WgpuCubeAutodiffBackend as AutodiffBackend>::inner(query_ad);
-        let boxed: Box<dyn Any> = Box::new(inner);
-        return boxed.downcast::<CubeTensor<R>>().ok().map(|boxed| *boxed);
-    }
-    #[cfg(feature = "cuda")]
-    {
-        if TypeId::of::<R>() == TypeId::of::<CudaRuntime>() {
-            let query_ad: CudaCubeAutodiffTensor = try_cast_primitive::<B, _>(value)?;
-            let inner = <CudaCubeAutodiffBackend as AutodiffBackend>::inner(query_ad);
-            let boxed: Box<dyn Any> = Box::new(inner);
-            return boxed.downcast::<CubeTensor<R>>().ok().map(|boxed| *boxed);
-        }
-    }
-    None
-}
-
-fn wrap_autodiff_inner<B, R>(value: CubeTensor<R>) -> Option<B::FloatTensorPrimitive>
-where
-    B: BackendTrait,
-    B::FloatTensorPrimitive: 'static,
-    R: CubeRuntime + 'static,
-{
-    if TypeId::of::<R>() == TypeId::of::<WgpuRuntime>() {
-        let boxed: Box<dyn Any> = Box::new(value);
-        let inner = boxed
-            .downcast::<CubeTensor<WgpuRuntime>>()
-            .ok()
-            .map(|boxed| *boxed)?;
-        let ad = <WgpuCubeAutodiffBackend as AutodiffBackend>::from_inner(inner);
-        return try_cast_backend::<B, _>(ad);
-    }
-    #[cfg(feature = "cuda")]
-    {
-        if TypeId::of::<R>() == TypeId::of::<CudaRuntime>() {
-            let boxed: Box<dyn Any> = Box::new(value);
-            let inner = boxed
-                .downcast::<CubeTensor<CudaRuntime>>()
-                .ok()
-                .map(|boxed| *boxed)?;
-            let ad = <CudaCubeAutodiffBackend as AutodiffBackend>::from_inner(inner);
-            return try_cast_backend::<B, _>(ad);
-        }
-    }
-    None
-}
-
 #[derive(Clone)]
 struct RecurrentAttentionKernel;
 
@@ -613,6 +660,21 @@ where
         .downcast::<B::FloatTensorPrimitive>()
         .ok()
         .map(|boxed| *boxed)
+}
+
+pub(super) fn try_direct_path_autodiff_cube_runtime_custom<B, R>(
+    query: &BurnTensor<B, 4>,
+    value: &BurnTensor<B, 4>,
+    rho: &BurnTensor<B, 4>,
+    decay: &BurnTensor<B, 1>,
+    meta: &BurnTensor<B, 1>,
+) -> Option<RecurrentAttentionOutput<B>>
+where
+    B: BackendTrait,
+    B::FloatTensorPrimitive: 'static,
+    R: CubeRuntime + 'static,
+{
+    recurrent_attention_autodiff_custom::<B, R>(query, value, rho, decay, meta)
 }
 
 #[cfg(test)]

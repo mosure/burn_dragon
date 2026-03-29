@@ -31,10 +31,10 @@ where
     let decay = resolve_fusion_tensor_runtime::<B, BT, R, 1>(decay)?;
     let meta = resolve_fusion_tensor_runtime::<B, BT, R, 1>(meta)?;
 
-    let (context, rho) = recurrent_attention_runtime::<R>(query, value, rho, decay, meta);
+    let output = recurrent_attention_runtime::<R>(query, value, rho, decay, meta, false);
 
-    let context_fusion = register_fusion_float_tensor(&fusion_client, context);
-    let rho_fusion = register_fusion_float_tensor(&fusion_client, rho);
+    let context_fusion = register_fusion_float_tensor(&fusion_client, output.context);
+    let rho_fusion = register_fusion_float_tensor(&fusion_client, output.rho);
 
     let context_prim = try_cast_backend::<B, _>(context_fusion)?;
     let rho_prim = try_cast_backend::<B, _>(rho_fusion)?;
@@ -87,14 +87,72 @@ where
         return None;
     }
 
-    let (context, rho) = recurrent_attention_runtime::<R>(query, value, rho, decay, meta);
+    let output = recurrent_attention_runtime::<R>(query, value, rho, decay, meta, false);
 
-    let context_prim = try_cast_backend::<B, _>(context)?;
-    let rho_prim = try_cast_backend::<B, _>(rho)?;
+    let context_prim = try_cast_backend::<B, _>(output.context)?;
+    let rho_prim = try_cast_backend::<B, _>(output.rho)?;
 
     Some(RecurrentAttentionOutput {
         context: BurnTensor::<B, 4>::from_primitive(TensorPrimitive::Float(context_prim)),
         rho: BurnTensor::<B, 4>::from_primitive(TensorPrimitive::Float(rho_prim)),
+    })
+}
+
+pub(super) fn try_direct_path_runtime_with_state_history<B, R>(
+    query: &BurnTensor<B, 4>,
+    value: &BurnTensor<B, 4>,
+    rho: &BurnTensor<B, 4>,
+    decay: &BurnTensor<B, 1>,
+    meta: &BurnTensor<B, 1>,
+) -> Option<RecurrentAttentionCapturedOutput<B>>
+where
+    B: BackendTrait,
+    B::FloatTensorPrimitive: 'static,
+    R: CubeRuntime + 'static,
+{
+    let prim_query = query.clone().into_primitive().tensor();
+    let query: CubeTensor<R> = try_cast_primitive::<B, _>(prim_query)?;
+    if query.dtype != DType::F32 {
+        return None;
+    }
+
+    let prim_value = value.clone().into_primitive().tensor();
+    let value: CubeTensor<R> = try_cast_primitive::<B, _>(prim_value)?;
+    if value.dtype != DType::F32 {
+        return None;
+    }
+
+    let prim_rho = rho.clone().into_primitive().tensor();
+    let rho: CubeTensor<R> = try_cast_primitive::<B, _>(prim_rho)?;
+    if rho.dtype != DType::F32 {
+        return None;
+    }
+
+    let prim_decay = decay.clone().into_primitive().tensor();
+    let decay: CubeTensor<R> = try_cast_primitive::<B, _>(prim_decay)?;
+    if decay.dtype != DType::F32 {
+        return None;
+    }
+
+    let prim_meta = meta.clone().into_primitive().tensor();
+    let meta: CubeTensor<R> = try_cast_primitive::<B, _>(prim_meta)?;
+    if meta.dtype != DType::F32 {
+        return None;
+    }
+
+    let output = recurrent_attention_runtime::<R>(query, value, rho, decay, meta, true);
+    let state_history = output.state_history?;
+
+    let context_prim = try_cast_backend::<B, _>(output.context)?;
+    let rho_prim = try_cast_backend::<B, _>(output.rho)?;
+    let state_history_prim = try_cast_backend::<B, _>(state_history)?;
+
+    Some(RecurrentAttentionCapturedOutput {
+        context: BurnTensor::<B, 4>::from_primitive(TensorPrimitive::Float(context_prim)),
+        rho: BurnTensor::<B, 4>::from_primitive(TensorPrimitive::Float(rho_prim)),
+        state_history: BurnTensor::<B, 5>::from_primitive(TensorPrimitive::Float(
+            state_history_prim,
+        )),
     })
 }
 
@@ -110,52 +168,7 @@ where
     B::FloatTensorPrimitive: 'static,
     R: CubeRuntime + 'static,
 {
-    let prim_query = query.clone().into_primitive().tensor();
-    let query_ad: B::FloatTensorPrimitive = try_cast_primitive::<B, _>(prim_query)?;
-    let query: CubeTensor<R> = extract_autodiff_inner::<B, R>(query_ad)?;
-    if query.dtype != DType::F32 {
-        return None;
-    }
-
-    let prim_value = value.clone().into_primitive().tensor();
-    let value_ad: B::FloatTensorPrimitive = try_cast_primitive::<B, _>(prim_value)?;
-    let value: CubeTensor<R> = extract_autodiff_inner::<B, R>(value_ad)?;
-    if value.dtype != DType::F32 {
-        return None;
-    }
-
-    let prim_rho = rho.clone().into_primitive().tensor();
-    let rho_ad: B::FloatTensorPrimitive = try_cast_primitive::<B, _>(prim_rho)?;
-    let rho: CubeTensor<R> = extract_autodiff_inner::<B, R>(rho_ad)?;
-    if rho.dtype != DType::F32 {
-        return None;
-    }
-
-    let prim_decay = decay.clone().into_primitive().tensor();
-    let decay_ad: B::FloatTensorPrimitive = try_cast_primitive::<B, _>(prim_decay)?;
-    let decay: CubeTensor<R> = extract_autodiff_inner::<B, R>(decay_ad)?;
-    if decay.dtype != DType::F32 {
-        return None;
-    }
-
-    let prim_meta = meta.clone().into_primitive().tensor();
-    let meta_ad: B::FloatTensorPrimitive = try_cast_primitive::<B, _>(prim_meta)?;
-    let meta: CubeTensor<R> = extract_autodiff_inner::<B, R>(meta_ad)?;
-    if meta.dtype != DType::F32 {
-        return None;
-    }
-
-    let (context, rho) = recurrent_attention_runtime::<R>(query, value, rho, decay, meta);
-
-    let context_ad = wrap_autodiff_inner::<B, R>(context)?;
-    let rho_ad = wrap_autodiff_inner::<B, R>(rho)?;
-    let context_prim = try_cast_backend::<B, _>(context_ad)?;
-    let rho_prim = try_cast_backend::<B, _>(rho_ad)?;
-
-    Some(RecurrentAttentionOutput {
-        context: BurnTensor::<B, 4>::from_primitive(TensorPrimitive::Float(context_prim)),
-        rho: BurnTensor::<B, 4>::from_primitive(TensorPrimitive::Float(rho_prim)),
-    })
+    super::try_direct_path_autodiff_cube_runtime_custom::<B, R>(query, value, rho, decay, meta)
 }
 
 fn recurrent_attention_runtime<R: CubeRuntime>(
@@ -164,17 +177,29 @@ fn recurrent_attention_runtime<R: CubeRuntime>(
     rho: CubeTensor<R>,
     decay: CubeTensor<R>,
     meta: CubeTensor<R>,
-) -> (CubeTensor<R>, CubeTensor<R>) {
+    capture_state_history: bool,
+) -> RecurrentRuntimeOutput<R> {
     #[cfg(feature = "cuda")]
     {
         if TypeId::of::<R>() == TypeId::of::<CudaRuntime>() {
+            if capture_state_history {
+                return recurrent_attention_cube_exact_runtime::<R>(
+                    query, value, rho, decay, meta, true,
+                );
+            }
             if use_cuda_tiled_recurrent_experimental() {
                 return recurrent_attention_cube_tiled_runtime::<R>(query, value, rho, decay, meta);
             }
-            return recurrent_attention_cube_exact_runtime::<R>(query, value, rho, decay, meta);
+            return recurrent_attention_cube_exact_runtime::<R>(
+                query, value, rho, decay, meta, false,
+            );
         }
     }
-    recurrent_attention_wgsl_runtime::<R>(query, value, rho, decay, meta)
+    if capture_state_history {
+        recurrent_attention_cube_exact_runtime::<R>(query, value, rho, decay, meta, true)
+    } else {
+        recurrent_attention_wgsl_runtime::<R>(query, value, rho, decay, meta)
+    }
 }
 
 pub(super) fn recurrent_attention_wgsl_runtime<R: CubeRuntime>(
@@ -183,7 +208,7 @@ pub(super) fn recurrent_attention_wgsl_runtime<R: CubeRuntime>(
     rho: CubeTensor<R>,
     decay: CubeTensor<R>,
     meta: CubeTensor<R>,
-) -> (CubeTensor<R>, CubeTensor<R>) {
+) -> RecurrentRuntimeOutput<R> {
     let query = into_contiguous(query);
     let value = into_contiguous(value);
     let rho = into_contiguous(rho);
@@ -229,17 +254,21 @@ pub(super) fn recurrent_attention_wgsl_runtime<R: CubeRuntime>(
         });
     }
 
-    (context, rho)
+    RecurrentRuntimeOutput {
+        context,
+        rho,
+        state_history: None,
+    }
 }
 
-#[cfg(feature = "cuda")]
 fn recurrent_attention_cube_exact_runtime<R: CubeRuntime>(
     query: CubeTensor<R>,
     value: CubeTensor<R>,
     rho: CubeTensor<R>,
     decay: CubeTensor<R>,
     meta: CubeTensor<R>,
-) -> (CubeTensor<R>, CubeTensor<R>) {
+    capture_state_history: bool,
+) -> RecurrentRuntimeOutput<R> {
     let query = into_contiguous(query);
     let value = into_contiguous(value);
     let rho = into_contiguous(rho);
@@ -256,6 +285,19 @@ fn recurrent_attention_cube_exact_runtime<R: CubeRuntime>(
         device,
         Shape::new([batch, heads, query.meta.shape.dims::<4>()[2], embd]),
     );
+    let state_history = capture_state_history.then(|| {
+        empty_device::<R, f32>(
+            client.clone(),
+            query.device.clone(),
+            Shape::new([
+                batch,
+                heads,
+                query.meta.shape.dims::<4>()[2],
+                query.meta.shape.dims::<4>()[3],
+                embd,
+            ]),
+        )
+    });
 
     let cube_dim = CubeDim::new_1d(RECURRENT_TILED_WORKGROUP_SIZE_X);
     let cube_count = CubeCount::Static(
@@ -264,19 +306,43 @@ fn recurrent_attention_cube_exact_runtime<R: CubeRuntime>(
         batch as u32,
     );
 
-    let _ = recurrent_attention_cube_exact_kernel::launch::<R>(
-        &client,
-        cube_count,
-        cube_dim,
-        query.as_tensor_arg(1),
-        value.as_tensor_arg(1),
-        rho.as_tensor_arg(1),
-        decay.as_tensor_arg(1),
-        context.as_tensor_arg(1),
-        meta.as_tensor_arg(1),
-    );
+    if let Some(history) = state_history.clone() {
+        let _ = recurrent_attention_cube_exact_history_kernel::launch::<R>(
+            &client,
+            cube_count,
+            cube_dim,
+            query.as_tensor_arg(1),
+            value.as_tensor_arg(1),
+            rho.as_tensor_arg(1),
+            decay.as_tensor_arg(1),
+            context.as_tensor_arg(1),
+            history.as_tensor_arg(1),
+            meta.as_tensor_arg(1),
+        );
+        RecurrentRuntimeOutput {
+            context,
+            rho,
+            state_history: Some(history),
+        }
+    } else {
+        let _ = recurrent_attention_cube_exact_kernel::launch::<R>(
+            &client,
+            cube_count,
+            cube_dim,
+            query.as_tensor_arg(1),
+            value.as_tensor_arg(1),
+            rho.as_tensor_arg(1),
+            decay.as_tensor_arg(1),
+            context.as_tensor_arg(1),
+            meta.as_tensor_arg(1),
+        );
 
-    (context, rho)
+        RecurrentRuntimeOutput {
+            context,
+            rho,
+            state_history: None,
+        }
+    }
 }
 
 #[cfg(feature = "cuda")]
@@ -286,7 +352,7 @@ fn recurrent_attention_cube_tiled_runtime<R: CubeRuntime>(
     rho: CubeTensor<R>,
     decay: CubeTensor<R>,
     meta: CubeTensor<R>,
-) -> (CubeTensor<R>, CubeTensor<R>) {
+) -> RecurrentRuntimeOutput<R> {
     let query = into_contiguous(query);
     let value = into_contiguous(value);
     let rho = into_contiguous(rho);
@@ -321,10 +387,14 @@ fn recurrent_attention_cube_tiled_runtime<R: CubeRuntime>(
         decay.as_tensor_arg(1),
         context.as_tensor_arg(1),
         meta.as_tensor_arg(1),
-        RECURRENT_QUERY_TILE,
+        RECURRENT_TILED_WORKGROUP_SIZE_X as usize,
     );
 
-    (context, rho)
+    RecurrentRuntimeOutput {
+        context,
+        rho,
+        state_history: None,
+    }
 }
 
 #[cfg(feature = "cuda")]

@@ -90,40 +90,7 @@ where
     B::FloatTensorPrimitive: 'static,
     R: CubeRuntime + 'static,
 {
-    let prim_query = query.clone().into_primitive().tensor();
-    let query_ad: B::FloatTensorPrimitive = try_cast_primitive::<B, _>(prim_query)?;
-    let query: CubeTensor<R> = extract_autodiff_inner::<B, R>(query_ad)?;
-    if query.dtype != DType::F32 {
-        return None;
-    }
-
-    let prim_value = value.clone().into_primitive().tensor();
-    let value_ad: B::FloatTensorPrimitive = try_cast_primitive::<B, _>(prim_value)?;
-    let value: CubeTensor<R> = extract_autodiff_inner::<B, R>(value_ad)?;
-    if value.dtype != DType::F32 {
-        return None;
-    }
-
-    let prim_decay = decay.clone().into_primitive().tensor();
-    let decay_ad: B::FloatTensorPrimitive = try_cast_primitive::<B, _>(prim_decay)?;
-    let decay: CubeTensor<R> = extract_autodiff_inner::<B, R>(decay_ad)?;
-    if decay.dtype != DType::F32 {
-        return None;
-    }
-
-    let prim_meta = meta.clone().into_primitive().tensor();
-    let meta_ad: B::FloatTensorPrimitive = try_cast_primitive::<B, _>(prim_meta)?;
-    let meta: CubeTensor<R> = extract_autodiff_inner::<B, R>(meta_ad)?;
-    if meta.dtype != DType::F32 {
-        return None;
-    }
-
-    let output = dense_causal_attention_runtime::<R>(query, value, decay, meta);
-    let output_ad = wrap_autodiff_inner::<B, R>(output)?;
-    let output_prim = try_cast_backend::<B, _>(output_ad)?;
-    Some(BurnTensor::<B, 4>::from_primitive(TensorPrimitive::Float(
-        output_prim,
-    )))
+    super::dense_causal_attention_autodiff_custom::<B, R>(query, value, decay, meta)
 }
 
 pub(super) fn try_fusion_path_autodiff_runtime<B, BT, R>(
@@ -291,7 +258,7 @@ where
     )))
 }
 
-fn dense_causal_attention_runtime<R: CubeRuntime + 'static>(
+pub(crate) fn dense_causal_attention_runtime<R: CubeRuntime + 'static>(
     query: CubeTensor<R>,
     value: CubeTensor<R>,
     decay: CubeTensor<R>,

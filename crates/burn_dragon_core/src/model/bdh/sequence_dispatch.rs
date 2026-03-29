@@ -109,20 +109,6 @@ impl<B: Backend> BDH<B> {
                         )
                     };
                     if let Some(output) = fused {
-                        if B::ad_enabled(&device) {
-                            let (reference_context, reference_rho) = self
-                                .recurrent_attention_reference(
-                                    query.clone(),
-                                    value.clone(),
-                                    initial_rho,
-                                    decay,
-                                );
-                            let context = reference_context.clone() + output.context
-                                - reference_context.detach();
-                            let rho = reference_rho.clone() + output.rho - reference_rho.detach();
-                            self.write_linear_attention_rho_state(layer_state, rho);
-                            return context;
-                        }
                         self.write_linear_attention_rho_state(layer_state, output.rho);
                         return output.context;
                     }
@@ -171,23 +157,6 @@ impl<B: Backend> BDH<B> {
                             initial_rho.clone(),
                             decay.clone(),
                         );
-                        if B::ad_enabled(&device) {
-                            let (reference_context, reference_rho) = self
-                                .recurrent_attention_dense_score_reference(
-                                    query.clone(),
-                                    value.clone(),
-                                    initial_rho,
-                                    decay,
-                                );
-                            let context = reference_context.clone()
-                                + (initial_context.clone() + fused_context)
-                                - reference_context.detach();
-                            self.write_linear_attention_rho_state(
-                                layer_state,
-                                reference_rho.clone() + rho - reference_rho.detach(),
-                            );
-                            return context;
-                        }
                         self.write_linear_attention_rho_state(layer_state, rho);
                         return initial_context + fused_context;
                     }

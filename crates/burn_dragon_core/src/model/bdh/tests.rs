@@ -752,6 +752,86 @@ fn assert_chunked_recurrence_matches_uninterrupted_state_with_shape(
     }
 }
 
+fn assert_recurrent_attention_wrapper_preserves_position_semantics(
+    kernel: SequenceKernelConfig,
+    rotary_embedding: crate::RotaryEmbedding,
+    position_mode: RecurrentPositionMode,
+    position: usize,
+) {
+    let device = <RecurrenceBackend as BackendTrait>::Device::default();
+    let model = recurrence_test_model(BDHConfig {
+        n_layer: 1,
+        n_embd: 4,
+        n_head: 2,
+        mlp_internal_dim_multiplier: 1,
+        vocab_size: 16,
+        dropout: 0.0,
+        sequence_kernel: kernel,
+        fused_kernels: FusedKernelConfig {
+            enabled: true,
+            wgpu_recurrent_kernel: true,
+            wgpu_rollout_fused: true,
+            rotary_embedding,
+            ..Default::default()
+        },
+        ..Default::default()
+    });
+    let mut state = model.init_state();
+    let query = Tensor::<RecurrenceBackend, 4>::from_data(
+        TensorData::new(
+            vec![
+                1.0, 2.0, 2.0, 1.0, 0.5, 1.5, 3.0, 0.5, 1.25, 0.75, 0.25, 1.0,
+            ],
+            [1, 2, 3, 2],
+        ),
+        &device,
+    );
+    let value = Tensor::<RecurrenceBackend, 4>::from_data(
+        TensorData::new(vec![1.0, 0.5, 0.25, 1.5, 2.0, 1.0], [1, 1, 3, 2]),
+        &device,
+    );
+
+    let actual = model.recurrent_attention_with_plan(
+        query.clone(),
+        value.clone(),
+        &mut state.layers[0],
+        position,
+        position_mode,
+        None,
+    );
+    let rotated = match position_mode {
+        RecurrentPositionMode::Sequential => model.attention.rotate_positions(query, position),
+        RecurrentPositionMode::Fixed => model.attention.rotate_positions_fixed(query, position),
+    };
+    let decay = model.attention.alibi_decay();
+    let (expected, expected_rho) = match kernel.executor {
+        SequenceTrainingExecutor::Reference => {
+            model.recurrent_attention_reference(rotated, value, None, decay)
+        }
+        SequenceTrainingExecutor::DenseScoreShortContext => {
+            model.recurrent_attention_dense_score_reference(rotated, value, None, decay)
+        }
+    };
+
+    let context_diff = tensor_max_abs_diff(actual, expected);
+    let actual_rho = state.layers[0]
+        .rho
+        .clone()
+        .expect("rho state written by recurrent wrapper");
+    let rho_diff = tensor_max_abs_diff(actual_rho, expected_rho);
+
+    assert!(
+        context_diff <= 1.0e-4,
+        "expected wrapper context to preserve {:?} positional semantics for {kernel:?}, max diff {context_diff}",
+        position_mode
+    );
+    assert!(
+        rho_diff <= 1.0e-4,
+        "expected wrapper rho to preserve {:?} positional semantics for {kernel:?}, max diff {rho_diff}",
+        position_mode
+    );
+}
+
 #[test]
 fn export_bitnet_static_artifacts_partial_safe_maps_repo_weights_to_roadmap_names() {
     let model = recurrence_test_model(low_bit_export_test_config());
@@ -2356,6 +2436,46 @@ fn linear_dense_score_reference_matches_host_loop_reference_with_decay() {
 
     assert!(tensor_max_abs_diff(context_host, context_dense) <= 1.0e-4);
     assert!(tensor_max_abs_diff(rho_host, rho_dense) <= 1.0e-4);
+}
+
+#[test]
+fn linear_reference_wrapper_preserves_rope_sequential_positions() {
+    assert_recurrent_attention_wrapper_preserves_position_semantics(
+        kernel_linear_attention(),
+        crate::RotaryEmbedding::Rope,
+        RecurrentPositionMode::Sequential,
+        3,
+    );
+}
+
+#[test]
+fn linear_reference_wrapper_preserves_alibi_fixed_positions() {
+    assert_recurrent_attention_wrapper_preserves_position_semantics(
+        kernel_linear_attention(),
+        crate::RotaryEmbedding::Alibi,
+        RecurrentPositionMode::Fixed,
+        5,
+    );
+}
+
+#[test]
+fn linear_dense_score_wrapper_preserves_rope_sequential_positions() {
+    assert_recurrent_attention_wrapper_preserves_position_semantics(
+        kernel_linear_dense_score(),
+        crate::RotaryEmbedding::Rope,
+        RecurrentPositionMode::Sequential,
+        2,
+    );
+}
+
+#[test]
+fn linear_dense_score_wrapper_preserves_alibi_fixed_positions() {
+    assert_recurrent_attention_wrapper_preserves_position_semantics(
+        kernel_linear_dense_score(),
+        crate::RotaryEmbedding::Alibi,
+        RecurrentPositionMode::Fixed,
+        4,
+    );
 }
 
 #[test]

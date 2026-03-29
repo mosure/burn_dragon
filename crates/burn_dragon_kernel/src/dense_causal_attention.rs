@@ -1,9 +1,13 @@
 use std::any::{Any, TypeId};
+use std::marker::PhantomData;
 
 use burn::tensor::Tensor as BurnTensor;
 use burn::tensor::backend::{AutodiffBackend, Backend as BackendTrait};
 use burn::tensor::{DType, Int, Shape, TensorData, TensorPrimitive};
 use burn_autodiff::Autodiff;
+use burn_autodiff::checkpoint::{base::Checkpointer, strategy::NoCheckpointing};
+use burn_autodiff::grads::Gradients;
+use burn_autodiff::ops::{Backward, Ops, OpsKind};
 use burn_cubecl::cubecl;
 #[cfg(feature = "cuda")]
 use burn_cubecl::cubecl::cuda::CudaRuntime;
@@ -18,8 +22,10 @@ use burn_wgpu::{CubeBackend, KernelSource, SourceKernel, SourceTemplate, WgpuRun
 
 use crate::fusion_compat::register_fusion_float_tensor;
 
+mod backward_runtime;
 mod forward_runtime;
 
+use self::backward_runtime::dense_causal_attention_autodiff_custom;
 use self::forward_runtime::{
     try_direct_path_autodiff_cube_runtime, try_direct_path_runtime,
     try_fusion_path_autodiff_runtime, try_fusion_path_runtime,
@@ -50,6 +56,16 @@ type CudaFusionAutodiffBackend<BT> = Autodiff<CudaFusionBackend<BT>>;
 #[cfg(feature = "cuda")]
 type CudaFusionAutodiffTensor<BT> =
     <CudaFusionAutodiffBackend<BT> as BackendTrait>::FloatTensorPrimitive;
+
+#[derive(Debug, Clone)]
+struct DenseCausalAttentionBackwardState<T> {
+    query: T,
+    value: T,
+    decay: T,
+}
+
+#[derive(Debug)]
+struct FusedDenseCausalAttentionBackward<B>(PhantomData<B>);
 
 #[derive(Debug, Clone)]
 pub struct CompiledDenseCausalAttentionPlan<B: BackendTrait> {
@@ -396,60 +412,6 @@ where
         }
         false
     }
-}
-
-fn extract_autodiff_inner<B, R>(value: B::FloatTensorPrimitive) -> Option<CubeTensor<R>>
-where
-    B: BackendTrait,
-    B::FloatTensorPrimitive: 'static,
-    R: CubeRuntime + 'static,
-{
-    if TypeId::of::<R>() == TypeId::of::<WgpuRuntime>() {
-        let query_ad: WgpuCubeAutodiffTensor = try_cast_primitive::<B, _>(value)?;
-        let inner = <WgpuCubeAutodiffBackend as AutodiffBackend>::inner(query_ad);
-        let boxed: Box<dyn Any> = Box::new(inner);
-        return boxed.downcast::<CubeTensor<R>>().ok().map(|boxed| *boxed);
-    }
-    #[cfg(feature = "cuda")]
-    {
-        if TypeId::of::<R>() == TypeId::of::<CudaRuntime>() {
-            let query_ad: CudaCubeAutodiffTensor = try_cast_primitive::<B, _>(value)?;
-            let inner = <CudaCubeAutodiffBackend as AutodiffBackend>::inner(query_ad);
-            let boxed: Box<dyn Any> = Box::new(inner);
-            return boxed.downcast::<CubeTensor<R>>().ok().map(|boxed| *boxed);
-        }
-    }
-    None
-}
-
-fn wrap_autodiff_inner<B, R>(value: CubeTensor<R>) -> Option<B::FloatTensorPrimitive>
-where
-    B: BackendTrait,
-    B::FloatTensorPrimitive: 'static,
-    R: CubeRuntime + 'static,
-{
-    if TypeId::of::<R>() == TypeId::of::<WgpuRuntime>() {
-        let boxed: Box<dyn Any> = Box::new(value);
-        let inner = boxed
-            .downcast::<CubeTensor<WgpuRuntime>>()
-            .ok()
-            .map(|boxed| *boxed)?;
-        let ad = <WgpuCubeAutodiffBackend as AutodiffBackend>::from_inner(inner);
-        return try_cast_backend::<B, _>(ad);
-    }
-    #[cfg(feature = "cuda")]
-    {
-        if TypeId::of::<R>() == TypeId::of::<CudaRuntime>() {
-            let boxed: Box<dyn Any> = Box::new(value);
-            let inner = boxed
-                .downcast::<CubeTensor<CudaRuntime>>()
-                .ok()
-                .map(|boxed| *boxed)?;
-            let ad = <CudaCubeAutodiffBackend as AutodiffBackend>::from_inner(inner);
-            return try_cast_backend::<B, _>(ad);
-        }
-    }
-    None
 }
 
 fn extract_fusion_autodiff_inner<B, BT, R>(

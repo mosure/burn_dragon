@@ -16,6 +16,97 @@ const PROCESS_GROUP_RUN_DIR_ENV: &str = "BURN_DRAGON_PROCESS_GROUP_RUN_DIR";
 const PROCESS_GROUP_RUN_NAME_ENV: &str = "BURN_DRAGON_PROCESS_GROUP_RUN_NAME";
 const CUDA_LINEAR_DENSE_SCORE_AUTO_BLOCK_LIMIT: usize = 1024;
 
+fn cuda_rwkv8_tensorized_scan_threshold_bytes() -> usize {
+    std::env::var("BURN_DRAGON_RWKV8_TENSORIZED_FORWARD_SCAN_THRESHOLD_BYTES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|&value| value > 0)
+        .unwrap_or(4 * 1024 * 1024 * 1024)
+}
+
+fn cuda_rwkv8_tensorized_scratch_bytes(
+    batch: usize,
+    heads: usize,
+    time: usize,
+    latent: usize,
+    embd: usize,
+) -> usize {
+    let bhte = batch
+        .saturating_mul(heads)
+        .saturating_mul(time)
+        .saturating_mul(latent)
+        .saturating_mul(embd);
+    let bhtl = batch
+        .saturating_mul(heads)
+        .saturating_mul(time)
+        .saturating_mul(latent);
+
+    bhte.saturating_mul(3)
+        .saturating_add(bhtl.saturating_mul(2))
+        .saturating_mul(std::mem::size_of::<f32>())
+}
+
+fn cuda_rwkv8_tensorized_chunk_size(
+    batch: usize,
+    heads: usize,
+    time: usize,
+    latent: usize,
+    embd: usize,
+) -> usize {
+    if let Some(explicit) = std::env::var("BURN_DRAGON_RWKV8_TENSORIZED_FORWARD_CHUNK")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|&value| value > 0)
+    {
+        return explicit.min(time.max(1));
+    }
+
+    let threshold_bytes = cuda_rwkv8_tensorized_scan_threshold_bytes();
+    let mut chunk = time.min(128).max(1);
+    while chunk > 1
+        && cuda_rwkv8_tensorized_scratch_bytes(batch, heads, chunk, latent, embd) > threshold_bytes
+    {
+        chunk = chunk.div_ceil(2);
+    }
+    chunk.max(1)
+}
+
+fn cuda_rwkv8_training_geometry_summary(
+    model_config: &BDHConfig,
+    micro_batch_size: usize,
+    training_kernel_block_size: usize,
+) -> Option<String> {
+    if !matches!(
+        model_config.sequence_kernel.memory_system,
+        SequenceMemorySystem::Rwkv8StateSpace
+    ) {
+        return None;
+    }
+
+    let heads = model_config.n_head.max(1);
+    let latent_total = model_config.latent_total_for_layer(0);
+    let latent_per_head = model_config.latent_per_head_for_layer(0);
+    let runtime_chunk = cuda_rwkv8_tensorized_chunk_size(
+        micro_batch_size,
+        heads,
+        training_kernel_block_size,
+        latent_per_head,
+        model_config.n_embd,
+    );
+
+    Some(format!(
+        "cuda rwkv8 geometry: micro_batch={} kernel_block={} tokens/micro_batch={} latent_total={} latent/head={} nheads={} value_heads=1 embd={} runtime_chunk={}",
+        micro_batch_size,
+        training_kernel_block_size,
+        micro_batch_size.saturating_mul(training_kernel_block_size),
+        latent_total,
+        latent_per_head,
+        heads,
+        model_config.n_embd,
+        runtime_chunk,
+    ))
+}
+
 fn cuda_mamba_training_geometry_summary(
     model_config: &BDHConfig,
     micro_batch_size: usize,
@@ -409,6 +500,24 @@ where
             ),
             _ => {}
         }
+    }
+    if backend_name.eq_ignore_ascii_case("cuda")
+        && model_config.fused_kernels.enabled
+        && matches!(
+            model_config.sequence_kernel.memory_system,
+            SequenceMemorySystem::Rwkv8StateSpace
+        )
+    {
+        if let Some(summary) = cuda_rwkv8_training_geometry_summary(
+            &model_config,
+            resolved_config.training.batch_size,
+            training_kernel_block_size,
+        ) {
+            info!("{summary}");
+        }
+        warn!(
+            "cuda rwkv8 training defaults to the tensorized custom analytical backward wrapper over the decayed normalized recurrence; set BURN_DRAGON_RWKV8_TENSORIZED_TRAIN_WRAPPER=0 to force the direct graph baseline"
+        );
     }
     let pipeline_plan = if resolved_config.parallel.pipeline.enabled {
         let pipeline_plan =
@@ -920,6 +1029,24 @@ mod tests {
         };
 
         assert!(cuda_mamba_training_geometry_summary(&model_config, 24, 512).is_none());
+    }
+
+    #[test]
+    fn cuda_rwkv8_training_geometry_summary_reports_resolved_shape() {
+        let model_config = burn_dragon_core::BDHConfig {
+            n_embd: 128,
+            n_head: 4,
+            mlp_internal_dim_multiplier: 4,
+            sequence_kernel: SequenceKernelConfig::reference(SequenceMemorySystem::Rwkv8StateSpace),
+            ..Default::default()
+        };
+
+        let summary =
+            cuda_rwkv8_training_geometry_summary(&model_config, 24, 512).expect("summary");
+        assert!(summary.contains("tokens/micro_batch=12288"), "{summary}");
+        assert!(summary.contains("latent_total=512"), "{summary}");
+        assert!(summary.contains("latent/head=128"), "{summary}");
+        assert!(summary.contains("runtime_chunk=128"), "{summary}");
     }
 
     #[test]

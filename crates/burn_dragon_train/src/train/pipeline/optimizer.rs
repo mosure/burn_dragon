@@ -21,6 +21,18 @@ const MUON_NS_A: f32 = 3.4445;
 const MUON_NS_B: f32 = -4.775;
 const MUON_NS_C: f32 = 2.0315;
 const MUON_EPSILON: f32 = 1.0e-7;
+const DEFAULT_MUON_TARGET_MODULES: &[&str] = &[
+    "encoder",
+    "encoder_v",
+    "decoder",
+    "decoder_x",
+    "decoder_y",
+    "lm_head",
+    "in_proj",
+    "out_proj",
+    "x_proj",
+    "dt_proj_weight",
+];
 
 pub enum ResolvedOptimizer<B, M>
 where
@@ -367,6 +379,7 @@ impl HybridGradAdaptor {
 #[derive(Default)]
 struct MuonTargetCollector {
     ids: HashSet<ParamId>,
+    path: Vec<String>,
 }
 
 impl MuonTargetCollector {
@@ -383,22 +396,22 @@ impl MuonTargetCollector {
         if let Some(target_modules) = target_modules {
             return target_modules.contains(last);
         }
-        matches!(
-            last,
-            "encoder" | "encoder_v" | "decoder" | "decoder_x" | "decoder_y"
-        )
+        DEFAULT_MUON_TARGET_MODULES.contains(&last)
     }
 }
 
 impl<B: BackendTrait> ModuleVisitor<B> for MuonTargetCollector {
-    fn visit_float_with_path<const D: usize>(
-        &mut self,
-        path: &[String],
-        id: ParamId,
-        _tensor: &Tensor<B, D>,
-    ) {
-        if Self::should_route_to_muon::<D>(path, None) {
-            self.ids.insert(id);
+    fn enter_module(&mut self, name: &str, _container_type: &str) {
+        self.path.push(name.to_string());
+    }
+
+    fn exit_module(&mut self, _name: &str, _container_type: &str) {
+        self.path.pop();
+    }
+
+    fn visit_float<const D: usize>(&mut self, param: &Param<Tensor<B, D>>) {
+        if Self::should_route_to_muon::<D>(&self.path, None) {
+            self.ids.insert(param.id);
         }
     }
 }
@@ -406,17 +419,21 @@ impl<B: BackendTrait> ModuleVisitor<B> for MuonTargetCollector {
 struct ConfigurableMuonTargetCollector<'a> {
     ids: HashSet<ParamId>,
     target_modules: Option<&'a HashSet<String>>,
+    path: Vec<String>,
 }
 
 impl<B: BackendTrait> ModuleVisitor<B> for ConfigurableMuonTargetCollector<'_> {
-    fn visit_float_with_path<const D: usize>(
-        &mut self,
-        path: &[String],
-        id: ParamId,
-        _tensor: &Tensor<B, D>,
-    ) {
-        if MuonTargetCollector::should_route_to_muon::<D>(path, self.target_modules) {
-            self.ids.insert(id);
+    fn enter_module(&mut self, name: &str, _container_type: &str) {
+        self.path.push(name.to_string());
+    }
+
+    fn exit_module(&mut self, _name: &str, _container_type: &str) {
+        self.path.pop();
+    }
+
+    fn visit_float<const D: usize>(&mut self, param: &Param<Tensor<B, D>>) {
+        if MuonTargetCollector::should_route_to_muon::<D>(&self.path, self.target_modules) {
+            self.ids.insert(param.id);
         }
     }
 }
@@ -432,6 +449,7 @@ where
     let mut collector = ConfigurableMuonTargetCollector {
         ids: HashSet::new(),
         target_modules,
+        path: Vec::new(),
     };
     module.visit(&mut collector);
     collector.ids
@@ -760,9 +778,12 @@ fn weight_decay_for_step(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use burn::module::ModuleVisitor;
     use crate::{MuonHybridConfig, OptimizerKind, OptimizerScheduleMode};
+    use burn_dragon_core::{BDH, BDHConfig, SequenceKernelConfig, SequenceMemorySystem};
     use burn::tensor::TensorData;
     use burn_ndarray::NdArray;
+    use std::collections::HashMap;
 
     type TestAutodiffBackend = burn_autodiff::Autodiff<NdArray<f32>>;
     type TestBackend = NdArray<f32>;
@@ -859,5 +880,106 @@ mod tests {
         assert!((weight_decay_for_step(0.1, 0.0, 0.5, 10, 1) - 0.1).abs() < 1.0e-6);
         assert!((weight_decay_for_step(0.1, 0.0, 0.5, 10, 5) - 0.1).abs() < 1.0e-6);
         assert!(weight_decay_for_step(0.1, 0.0, 0.5, 10, 10) <= 1.0e-6);
+    }
+
+    #[derive(Default)]
+    struct ParamPathCollector {
+        ids_by_last: HashMap<String, ParamId>,
+        path: Vec<String>,
+    }
+
+    impl<B: BackendTrait> ModuleVisitor<B> for ParamPathCollector {
+        fn enter_module(&mut self, name: &str, _container_type: &str) {
+            self.path.push(name.to_string());
+        }
+
+        fn exit_module(&mut self, _name: &str, _container_type: &str) {
+            self.path.pop();
+        }
+
+        fn visit_float<const D: usize>(&mut self, param: &Param<Tensor<B, D>>) {
+            if let Some(last) = self.path.last() {
+                self.ids_by_last.insert(last.clone(), param.id);
+            }
+        }
+    }
+
+    fn test_bdh_config(memory_system: SequenceMemorySystem) -> BDHConfig {
+        BDHConfig {
+            n_layer: 2,
+            n_embd: 128,
+            n_head: 4,
+            vocab_size: 128,
+            sequence_kernel: SequenceKernelConfig::reference(memory_system),
+            ..BDHConfig::default()
+        }
+    }
+
+    #[test]
+    fn default_muon_targeting_includes_bdh_matrix_weights() {
+        let device = Default::default();
+        let model = BDH::<TestAutodiffBackend>::new(
+            test_bdh_config(SequenceMemorySystem::LinearAttention),
+            &device,
+        );
+        let targets = collect_muon_target_ids(&model, None);
+
+        let mut collector = ParamPathCollector::default();
+        model.visit(&mut collector);
+
+        for required in ["encoder", "encoder_v", "decoder", "lm_head"] {
+            let id = collector
+                .ids_by_last
+                .get(required)
+                .unwrap_or_else(|| panic!("missing path for {required}"));
+            assert!(
+                targets.contains(id),
+                "expected default Muon routing to include {required}"
+            );
+        }
+
+        let time_decay = collector
+            .ids_by_last
+            .get("rwkv_time_decay")
+            .expect("rwkv_time_decay path");
+        assert!(
+            !targets.contains(time_decay),
+            "rwkv_time_decay should stay on the AdamW fallback path"
+        );
+    }
+
+    #[test]
+    fn default_muon_targeting_includes_mamba_projection_weights() {
+        let device = Default::default();
+        let model = BDH::<TestAutodiffBackend>::new(
+            test_bdh_config(SequenceMemorySystem::Mamba3StateSpaceDuality),
+            &device,
+        );
+        let targets = collect_muon_target_ids(&model, None);
+
+        let mut collector = ParamPathCollector::default();
+        model.visit(&mut collector);
+
+        for required in ["in_proj", "out_proj"] {
+            let id = collector
+                .ids_by_last
+                .get(required)
+                .unwrap_or_else(|| panic!("missing path for {required}"));
+            assert!(
+                targets.contains(id),
+                "expected default Muon routing to include {required}"
+            );
+        }
+
+        for excluded in ["b_bias", "c_bias"] {
+            let id = collector
+                .ids_by_last
+                .get(excluded)
+                .unwrap_or_else(|| panic!("missing path for {excluded}"));
+            assert!(
+                !targets.contains(id),
+                "expected {excluded} to stay on the AdamW fallback path"
+            );
+        }
     }
 }

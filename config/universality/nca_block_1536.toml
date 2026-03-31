@@ -1,8 +1,8 @@
-name = "nca_leaderboard_short"
-output_dir = "data/universality/nca_leaderboard_short"
+name = "nca_block_1536"
+output_dir = "data/universality/nca_block_1536"
 seed = 1337
-train_samples = 512
-validation_samples = 128
+train_samples = 192
+validation_samples = 48
 chunk_token_capacity = 262144
 
 [serialization]
@@ -21,7 +21,7 @@ kind = "neural_stochastic"
 weight = 1
 complexity = "simple"
 grid_size = { min = 12, max = 12 }
-steps = { min = 15, max = 15 }
+steps = { min = 41, max = 41 }
 state_count = { min = 10, max = 10 }
 step_stride = { min = 2, max = 2 }
 start_step = { min = 0, max = 0 }
@@ -34,7 +34,7 @@ kind = "neural_stochastic"
 weight = 1
 complexity = "medium"
 grid_size = { min = 12, max = 12 }
-steps = { min = 15, max = 15 }
+steps = { min = 41, max = 41 }
 state_count = { min = 10, max = 10 }
 step_stride = { min = 2, max = 2 }
 start_step = { min = 0, max = 0 }
@@ -47,7 +47,7 @@ kind = "neural_stochastic"
 weight = 1
 complexity = "complex"
 grid_size = { min = 12, max = 12 }
-steps = { min = 15, max = 15 }
+steps = { min = 41, max = 41 }
 state_count = { min = 10, max = 10 }
 step_stride = { min = 2, max = 2 }
 start_step = { min = 0, max = 0 }

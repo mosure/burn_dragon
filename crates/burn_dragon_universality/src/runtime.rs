@@ -135,7 +135,16 @@ impl OnlineNcaCorpus {
         split: SampleSplit,
         sample_index: usize,
     ) -> Result<RuntimeSampleDocument> {
-        let sample = self.generate_raw_sample(split, sample_index)?;
+        self.generate_document_for_epoch(split, 0, sample_index)
+    }
+
+    pub fn generate_document_for_epoch(
+        &self,
+        split: SampleSplit,
+        epoch_index: usize,
+        sample_index: usize,
+    ) -> Result<RuntimeSampleDocument> {
+        let sample = self.generate_raw_sample(split, epoch_index, sample_index)?;
         let tokens = self.encode_tokens_from_sample(&sample)?;
         if tokens.len() != self.document_token_count {
             return Err(anyhow!(
@@ -165,7 +174,16 @@ impl OnlineNcaCorpus {
         split: SampleSplit,
         sample_index: usize,
     ) -> Result<Vec<u32>> {
-        let sample = self.generate_raw_sample(split, sample_index)?;
+        self.generate_document_tokens_for_epoch(split, 0, sample_index)
+    }
+
+    pub fn generate_document_tokens_for_epoch(
+        &self,
+        split: SampleSplit,
+        epoch_index: usize,
+        sample_index: usize,
+    ) -> Result<Vec<u32>> {
+        let sample = self.generate_raw_sample(split, epoch_index, sample_index)?;
         let tokens = self.encode_tokens_from_sample(&sample)?;
         if tokens.len() != self.document_token_count {
             return Err(anyhow!(
@@ -180,6 +198,7 @@ impl OnlineNcaCorpus {
     fn generate_raw_sample(
         &self,
         split: SampleSplit,
+        epoch_index: usize,
         sample_index: usize,
     ) -> Result<crate::nca::NcaSample> {
         let sample_count = self.sample_count(split);
@@ -191,8 +210,14 @@ impl OnlineNcaCorpus {
                 sample_count
             ));
         }
+        let effective_sample_index = match split {
+            SampleSplit::Train => epoch_index
+                .saturating_mul(sample_count)
+                .saturating_add(sample_index),
+            SampleSplit::Validation => sample_index,
+        };
         let mut rng =
-            StdRng::seed_from_u64(derive_sample_seed(self.config.seed, split, sample_index));
+            StdRng::seed_from_u64(derive_sample_seed(self.config.seed, split, effective_sample_index));
         let family = choose_family(&self.config, &mut rng);
         Ok(generate_sample(
             family,
@@ -522,6 +547,32 @@ mod tests {
             .expect("val sample");
         assert_eq!(first.tokens, second.tokens);
         assert_ne!(first.tokens, val.tokens);
+    }
+
+    #[test]
+    fn online_corpus_train_split_changes_across_epochs() {
+        let config = fixed_patch_config();
+        let corpus = OnlineNcaCorpus::new(config).expect("runtime corpus");
+        let epoch0 = corpus
+            .generate_document_for_epoch(SampleSplit::Train, 0, 2)
+            .expect("epoch0 sample");
+        let epoch1 = corpus
+            .generate_document_for_epoch(SampleSplit::Train, 1, 2)
+            .expect("epoch1 sample");
+        assert_ne!(epoch0.tokens, epoch1.tokens);
+    }
+
+    #[test]
+    fn online_corpus_validation_split_stays_fixed_across_epochs() {
+        let config = fixed_patch_config();
+        let corpus = OnlineNcaCorpus::new(config).expect("runtime corpus");
+        let epoch0 = corpus
+            .generate_document_for_epoch(SampleSplit::Validation, 0, 2)
+            .expect("epoch0 validation sample");
+        let epoch5 = corpus
+            .generate_document_for_epoch(SampleSplit::Validation, 5, 2)
+            .expect("epoch5 validation sample");
+        assert_eq!(epoch0.tokens, epoch5.tokens);
     }
 
     #[test]

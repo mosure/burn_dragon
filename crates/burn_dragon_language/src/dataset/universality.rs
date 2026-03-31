@@ -1,8 +1,12 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::sync_channel;
+use std::thread;
 
 use burn::tensor::backend::Backend;
 use memmap2::{Mmap, MmapOptions};
@@ -32,7 +36,7 @@ struct OnTheFlyStorage {
     corpus: Arc<burn_dragon_universality::OnlineNcaCorpus>,
     config_path: PathBuf,
     cache_limit: usize,
-    cache: Arc<Mutex<DocumentRuntimeCache>>,
+    cache: Arc<EpochRuntimeCacheState>,
     train_probe_summary: burn_dragon_universality::RuntimeCorpusSummary,
     validation_probe_summary: burn_dragon_universality::RuntimeCorpusSummary,
 }
@@ -63,20 +67,28 @@ struct CachedChunk {
 }
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
-struct RuntimeDocumentKey {
+struct RuntimeEpochKey {
     split_tag: u8,
-    sample_index: usize,
+    epoch_index: usize,
 }
 
 #[derive(Default)]
-struct DocumentRuntimeCache {
+struct EpochRuntimeCache {
     tick: u64,
-    entries: HashMap<RuntimeDocumentKey, CachedDocument>,
+    total_cached_documents: usize,
+    entries: HashMap<RuntimeEpochKey, CachedEpochDocuments>,
+    building: HashSet<RuntimeEpochKey>,
 }
 
-struct CachedDocument {
-    tokens: Arc<Vec<u32>>,
+struct CachedEpochDocuments {
+    documents: Arc<Vec<Arc<Vec<u32>>>>,
     last_used_tick: u64,
+}
+
+#[derive(Default)]
+struct EpochRuntimeCacheState {
+    inner: Mutex<EpochRuntimeCache>,
+    ready: Condvar,
 }
 
 #[derive(Clone)]
@@ -240,8 +252,12 @@ impl UniversalityDataset {
             storage: UniversalityStorage::OnTheFly(OnTheFlyStorage {
                 corpus: Arc::new(corpus),
                 config_path,
-                cache_limit: runtime_document_cache_limit(batch_size),
-                cache: Arc::new(Mutex::new(DocumentRuntimeCache::default())),
+                cache_limit: runtime_document_cache_limit(
+                    batch_size,
+                    train_probe_summary.sample_count,
+                    validation_probe_summary.sample_count,
+                ),
+                cache: Arc::new(EpochRuntimeCacheState::default()),
                 train_probe_summary,
                 validation_probe_summary,
             }),
@@ -353,6 +369,21 @@ impl TokenSequenceDataset for UniversalityDataset {
         self.copy_token_range(start, dst);
     }
 
+    fn copy_token_range_with_epoch(
+        &self,
+        split: DatasetSplit,
+        epoch_index: usize,
+        start: usize,
+        dst: &mut [u32],
+    ) {
+        match &self.storage {
+            UniversalityStorage::Manifest(storage) => storage.tokens.copy_into(start, dst),
+            UniversalityStorage::OnTheFly(storage) => {
+                storage.copy_into_with_epoch(split, epoch_index, start, self.train_len, dst)
+            }
+        }
+    }
+
     fn train_len(&self) -> usize {
         self.train_len
     }
@@ -369,6 +400,26 @@ impl TokenSequenceDataset for UniversalityDataset {
         self.train_split_ratio
     }
 
+    fn prepare_epoch(&self, split: DatasetSplit, epoch_index: usize) {
+        if let (
+            DatasetSplit::Train,
+            UniversalityStorage::OnTheFly(storage),
+        ) = (split, &self.storage)
+        {
+            storage.prepare_epoch(burn_dragon_universality::SampleSplit::Train, epoch_index);
+        }
+    }
+
+    fn prefetch_epoch(&self, split: DatasetSplit, epoch_index: usize) {
+        if let (
+            DatasetSplit::Train,
+            UniversalityStorage::OnTheFly(storage),
+        ) = (split, &self.storage)
+        {
+            storage.prefetch_epoch(burn_dragon_universality::SampleSplit::Train, epoch_index);
+        }
+    }
+
     fn preferred_logical_document_tokens(&self, _split: DatasetSplit) -> Option<usize> {
         match &self.storage {
             UniversalityStorage::Manifest(storage) => storage.preferred_logical_document_tokens,
@@ -381,6 +432,17 @@ impl TokenSequenceDataset for UniversalityDataset {
 
 impl OnTheFlyStorage {
     fn copy_into(&self, start: usize, train_len: usize, dst: &mut [u32]) {
+        self.copy_into_with_epoch(DatasetSplit::Train, 0, start, train_len, dst);
+    }
+
+    fn copy_into_with_epoch(
+        &self,
+        requested_split: DatasetSplit,
+        epoch_index: usize,
+        start: usize,
+        train_len: usize,
+        dst: &mut [u32],
+    ) {
         let mut remaining = dst.len();
         let mut written = 0usize;
         let mut cursor = start;
@@ -412,7 +474,12 @@ impl OnTheFlyStorage {
             let copy_len = document_token_count
                 .saturating_sub(token_index)
                 .min(remaining);
-            let document_tokens = self.document_tokens(split, sample_index);
+            let effective_epoch_index = match split {
+                burn_dragon_universality::SampleSplit::Train
+                    if matches!(requested_split, DatasetSplit::Train) => epoch_index,
+                _ => 0,
+            };
+            let document_tokens = self.document_tokens(split, sample_index, effective_epoch_index);
             dst[written..written + copy_len]
                 .copy_from_slice(&document_tokens[token_index..token_index + copy_len]);
             written += copy_len;
@@ -425,61 +492,224 @@ impl OnTheFlyStorage {
         &self,
         split: burn_dragon_universality::SampleSplit,
         sample_index: usize,
+        epoch_index: usize,
     ) -> Arc<Vec<u32>> {
-        let key = RuntimeDocumentKey {
+        let documents = self.epoch_documents(split, epoch_index);
+        Arc::clone(
+            documents.get(sample_index).unwrap_or_else(|| {
+                panic!(
+                    "on-the-fly NCA epoch cache out of range: split={split:?} epoch_index={epoch_index} sample_index={sample_index} sample_count={}",
+                    documents.len()
+                )
+            }),
+        )
+    }
+
+    fn prepare_epoch(&self, split: burn_dragon_universality::SampleSplit, epoch_index: usize) {
+        let _ = self.epoch_documents(split, epoch_index);
+    }
+
+    fn prefetch_epoch(&self, split: burn_dragon_universality::SampleSplit, epoch_index: usize) {
+        let key = RuntimeEpochKey {
             split_tag: split_tag(split),
-            sample_index,
+            epoch_index,
         };
-        {
+        let should_spawn = {
             let mut cache = self
                 .cache
+                .inner
+                .lock()
+                .expect("universality runtime cache poisoned");
+            if cache.entries.contains_key(&key) || cache.building.contains(&key) {
+                false
+            } else {
+                cache.building.insert(key);
+                true
+            }
+        };
+        if !should_spawn {
+            return;
+        }
+        let storage = self.clone();
+        if let Err(error) = thread::Builder::new()
+            .name(format!("nca-epoch-prefetch-{epoch_index}"))
+            .spawn(move || {
+                let _ = storage.build_and_store_epoch(key, split, epoch_index);
+            })
+        {
+            self.clear_building_epoch(key);
+            panic!("failed to spawn NCA epoch prefetch thread: {error}");
+        }
+    }
+
+    fn epoch_documents(
+        &self,
+        split: burn_dragon_universality::SampleSplit,
+        epoch_index: usize,
+    ) -> Arc<Vec<Arc<Vec<u32>>>> {
+        let key = RuntimeEpochKey {
+            split_tag: split_tag(split),
+            epoch_index,
+        };
+        loop {
+            let mut cache = self
+                .cache
+                .inner
                 .lock()
                 .expect("universality runtime cache poisoned");
             cache.tick = cache.tick.wrapping_add(1);
             let tick = cache.tick;
             if let Some(entry) = cache.entries.get_mut(&key) {
                 entry.last_used_tick = tick;
-                return Arc::clone(&entry.tokens);
+                return Arc::clone(&entry.documents);
+            }
+            if cache.building.insert(key) {
+                drop(cache);
+                return self.build_and_store_epoch(key, split, epoch_index);
+            }
+            let _unused = self
+                .cache
+                .ready
+                .wait(cache)
+                .expect("universality runtime cache poisoned");
+        }
+    }
+
+    fn build_and_store_epoch(
+        &self,
+        key: RuntimeEpochKey,
+        split: burn_dragon_universality::SampleSplit,
+        epoch_index: usize,
+    ) -> Arc<Vec<Arc<Vec<u32>>>> {
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            Arc::new(self.generate_epoch_documents(split, epoch_index))
+        }));
+        match result {
+            Ok(generated_documents) => {
+                self.store_generated_epoch(key, Arc::clone(&generated_documents));
+                generated_documents
+            }
+            Err(panic_payload) => {
+                self.clear_building_epoch(key);
+                resume_unwind(panic_payload);
             }
         }
+    }
 
-        let generated_tokens = Arc::new(
-            self.corpus
-                .generate_document_tokens(split, sample_index)
-                .unwrap_or_else(|error| {
-                    panic!(
-                        "failed to generate on-the-fly NCA sample split={split:?} sample_index={sample_index}: {error:#}"
-                    )
-                }),
-        );
-
+    fn store_generated_epoch(
+        &self,
+        key: RuntimeEpochKey,
+        generated_documents: Arc<Vec<Arc<Vec<u32>>>>,
+    ) {
         let mut cache = self
             .cache
+            .inner
             .lock()
             .expect("universality runtime cache poisoned");
         cache.tick = cache.tick.wrapping_add(1);
         let tick = cache.tick;
-        if let Some(entry) = cache.entries.get_mut(&key) {
-            entry.last_used_tick = tick;
-            return Arc::clone(&entry.tokens);
-        }
+        cache.building.remove(&key);
         cache.entries.insert(
             key,
-            CachedDocument {
-                tokens: Arc::clone(&generated_tokens),
+            CachedEpochDocuments {
+                documents: Arc::clone(&generated_documents),
                 last_used_tick: tick,
             },
         );
-        while cache.entries.len() > self.cache_limit {
+        cache.total_cached_documents = cache
+            .entries
+            .values()
+            .map(|entry| entry.documents.len())
+            .sum();
+        while cache.total_cached_documents > self.cache_limit {
             let evict_key = cache
                 .entries
                 .iter()
                 .min_by_key(|(_, entry)| entry.last_used_tick)
                 .map(|(key, _)| *key)
                 .expect("universality runtime cache should not be empty");
-            cache.entries.remove(&evict_key);
+            if let Some(removed) = cache.entries.remove(&evict_key) {
+                cache.total_cached_documents = cache
+                    .total_cached_documents
+                    .saturating_sub(removed.documents.len());
+            }
         }
-        generated_tokens
+        self.cache.ready.notify_all();
+    }
+
+    fn clear_building_epoch(&self, key: RuntimeEpochKey) {
+        let mut cache = self
+            .cache
+            .inner
+            .lock()
+            .expect("universality runtime cache poisoned");
+        cache.building.remove(&key);
+        self.cache.ready.notify_all();
+    }
+
+    fn generate_epoch_documents(
+        &self,
+        split: burn_dragon_universality::SampleSplit,
+        epoch_index: usize,
+    ) -> Vec<Arc<Vec<u32>>> {
+        let sample_count = match split {
+            burn_dragon_universality::SampleSplit::Train => self.corpus.train_samples(),
+            burn_dragon_universality::SampleSplit::Validation => self.corpus.validation_samples(),
+        };
+        if sample_count == 0 {
+            return Vec::new();
+        }
+
+        let worker_count = std::thread::available_parallelism()
+            .map(|count| count.get())
+            .unwrap_or(4)
+            .min(sample_count)
+            .clamp(1, 8);
+        let (sender, receiver) =
+            sync_channel::<(usize, Arc<Vec<u32>>)>(worker_count.saturating_mul(2).max(1));
+        let next_index = Arc::new(AtomicUsize::new(0));
+        let mut workers = Vec::with_capacity(worker_count);
+        for _ in 0..worker_count {
+            let sender = sender.clone();
+            let next_index = Arc::clone(&next_index);
+            let corpus = Arc::clone(&self.corpus);
+            workers.push(thread::spawn(move || {
+                loop {
+                    let sample_index = next_index.fetch_add(1, Ordering::Relaxed);
+                    if sample_index >= sample_count {
+                        break;
+                    }
+                    let tokens = Arc::new(
+                        corpus
+                            .generate_document_tokens_for_epoch(split, epoch_index, sample_index)
+                            .unwrap_or_else(|error| {
+                                panic!(
+                                    "failed to generate on-the-fly NCA sample split={split:?} epoch_index={epoch_index} sample_index={sample_index}: {error:#}"
+                                )
+                            }),
+                    );
+                    if sender.send((sample_index, tokens)).is_err() {
+                        return;
+                    }
+                }
+            }));
+        }
+        drop(sender);
+
+        let mut documents = vec![None; sample_count];
+        for _ in 0..sample_count {
+            let (sample_index, tokens) = receiver
+                .recv()
+                .expect("on-the-fly NCA epoch generation channel closed early");
+            documents[sample_index] = Some(tokens);
+        }
+        for worker in workers {
+            let _ = worker.join();
+        }
+        documents
+            .into_iter()
+            .map(|entry| entry.expect("on-the-fly NCA epoch generation missing sample"))
+            .collect()
     }
 }
 
@@ -621,12 +851,24 @@ fn runtime_chunk_cache_limit() -> usize {
         .unwrap_or(DEFAULT_RUNTIME_CHUNK_CACHE_LIMIT)
 }
 
-fn runtime_document_cache_limit(batch_size: usize) -> usize {
+fn runtime_document_cache_limit(
+    batch_size: usize,
+    train_samples: usize,
+    validation_samples: usize,
+) -> usize {
     std::env::var("BDH_UNIVERSALITY_RUNTIME_DOCUMENT_CACHE_LIMIT")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|value| *value > 0)
-        .unwrap_or_else(|| DEFAULT_RUNTIME_DOCUMENT_CACHE_LIMIT.max(batch_size.saturating_mul(4)))
+        .unwrap_or_else(|| {
+            DEFAULT_RUNTIME_DOCUMENT_CACHE_LIMIT
+                .max(batch_size.saturating_mul(8))
+                .max(
+                    train_samples
+                        .saturating_mul(2)
+                        .saturating_add(validation_samples),
+                )
+        })
 }
 
 fn fixed_manifest_logical_document_tokens(
@@ -766,14 +1008,16 @@ mod tests {
         config.chunk_token_capacity = 128;
         config.name = "dataset".to_string();
         let report = generate_nca_corpus(&config).expect("generate corpus");
-        let error = UniversalityDataset::new(
+        let error = match UniversalityDataset::new(
             &report.manifest_path,
             512,
             2,
             0.9,
             &pretokenized_tokenizer(),
-        )
-        .expect_err("manifest should reject overlong block size");
+        ) {
+            Ok(_) => panic!("manifest should reject overlong block size"),
+            Err(error) => error,
+        };
         assert!(
             error
                 .to_string()

@@ -14,7 +14,7 @@ use tracing::warn;
 
 const PROCESS_GROUP_RUN_DIR_ENV: &str = "BURN_DRAGON_PROCESS_GROUP_RUN_DIR";
 const PROCESS_GROUP_RUN_NAME_ENV: &str = "BURN_DRAGON_PROCESS_GROUP_RUN_NAME";
-const CUDA_LINEAR_DENSE_SCORE_AUTO_BLOCK_LIMIT: usize = 1024;
+const CUDA_LINEAR_DENSE_SCORE_AUTO_BLOCK_LIMIT: usize = 2048;
 
 fn cuda_rwkv8_tensorized_scan_threshold_bytes() -> usize {
     std::env::var("BURN_DRAGON_RWKV8_TENSORIZED_FORWARD_SCAN_THRESHOLD_BYTES")
@@ -621,6 +621,12 @@ where
     let steps_per_epoch = schedule.steps_per_epoch;
     let total_epochs = schedule.total_epochs;
     let total_steps = schedule.total_steps;
+    let run_root = resolve_run_root();
+    let (run_dir, run_name) = resolve_run_artifacts(&parallel_runtime, &run_root, training)?;
+    let resume_checkpoint_epoch = resolve_resume_checkpoint_epoch(training, &run_dir)?;
+    let resume_consumed_steps = resume_checkpoint_epoch
+        .unwrap_or_default()
+        .saturating_mul(steps_per_epoch);
 
     info!(
         "train schedule: dataset_steps_per_epoch={dataset_steps_per_epoch}, logical_steps_per_epoch={steps_per_epoch}, checkpoint_interval_iters={}, total_steps={total_steps}, epochs={total_epochs}, source={}",
@@ -639,6 +645,7 @@ where
                     training.min_logical_block_size,
                     training.seed,
                 )
+                .with_initial_consumed_steps(resume_consumed_steps)
                 .with_summary_event_token_ids(summary_event_token_ids.clone()),
             )
         } else {
@@ -650,6 +657,7 @@ where
                     steps_per_epoch,
                     Some(total_steps),
                 )
+                .with_initial_consumed_steps(resume_consumed_steps)
                 .with_summary_event_token_ids(summary_event_token_ids.clone()),
             )
         };
@@ -689,10 +697,6 @@ where
     };
     let scheduler =
         resolve_lr_scheduler(optimizer_cfg, total_steps, scheduler_iters, &model_config)?;
-
-    let run_root = resolve_run_root();
-    let (run_dir, run_name) = resolve_run_artifacts(&parallel_runtime, &run_root, training)?;
-    let resume_checkpoint_epoch = resolve_resume_checkpoint_epoch(training, &run_dir)?;
     if parallel_runtime.is_primary() {
         write_latest_run(&run_root, &run_name)?;
         write_run_config(
@@ -1138,6 +1142,34 @@ mod tests {
         assert_eq!(effective, explicit);
         assert_eq!(recorded_override, Some(explicit));
         assert!(reason.is_none());
+    }
+
+    #[test]
+    fn long_context_cuda_linear_attention_still_auto_promotes_through_2048() {
+        let (effective, recorded_override, reason) = resolve_effective_training_sequence_kernel(
+            SequenceKernelConfig::reference(SequenceMemorySystem::LinearAttention),
+            None,
+            "cuda",
+            2048,
+        );
+
+        assert_eq!(effective, SequenceKernelConfig::dense_score_short_context());
+        assert_eq!(
+            recorded_override,
+            Some(SequenceKernelConfig::dense_score_short_context())
+        );
+        assert!(reason.is_some());
+
+        let (effective_too_large, _, _) = resolve_effective_training_sequence_kernel(
+            SequenceKernelConfig::reference(SequenceMemorySystem::LinearAttention),
+            None,
+            "cuda",
+            2049,
+        );
+        assert_eq!(
+            effective_too_large,
+            SequenceKernelConfig::reference(SequenceMemorySystem::LinearAttention)
+        );
     }
 
     #[test]

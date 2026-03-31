@@ -10,8 +10,8 @@ config = "config/universality/nca_paper_aligned_medium.toml"
 
 [dataset.tokenizer]
 type = "pretokenized"
-vocab_size = 50257
-eos_id = 50256
+vocab_size = 10003
+eos_id = 10002
 
 [generation]
 prompt = "0 0 0"

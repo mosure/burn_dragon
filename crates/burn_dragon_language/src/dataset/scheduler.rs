@@ -1,6 +1,9 @@
 use std::mem::size_of;
-use std::sync::Arc;
+use std::collections::BTreeMap;
+use std::sync::mpsc::{Receiver, sync_channel};
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
 use burn::data::dataloader::{DataLoader, DataLoaderIterator, Progress};
@@ -25,6 +28,27 @@ pub trait TokenSequenceDataset: Send + Sync {
 
     /// Copy a contiguous token range into `dst`.
     fn copy_token_range(&self, start: usize, dst: &mut [u32]);
+
+    /// Copy a contiguous token range into `dst`, with epoch context when the dataset wants to
+    /// expose deterministic fresh data each epoch. By default, datasets ignore the epoch.
+    fn copy_token_range_with_epoch(
+        &self,
+        split: DatasetSplit,
+        epoch_index: usize,
+        start: usize,
+        dst: &mut [u32],
+    ) {
+        let _ = (split, epoch_index);
+        self.copy_token_range(start, dst);
+    }
+
+    /// Ensure a specific epoch slice is ready for consumption before the GPU requests it.
+    /// Datasets without epoch-aware generation can ignore this.
+    fn prepare_epoch(&self, _split: DatasetSplit, _epoch_index: usize) {}
+
+    /// Opportunistically begin preparing a future epoch in the background.
+    /// Datasets without epoch-aware generation can ignore this.
+    fn prefetch_epoch(&self, _split: DatasetSplit, _epoch_index: usize) {}
 
     /// Number of tokens reserved for the training split from the start of the corpus.
     fn train_len(&self) -> usize;
@@ -95,20 +119,23 @@ pub fn sample_batch<B: Backend, T: TokenSequenceDataset + ?Sized>(
         dataset.batch_size(),
         dataset.block_size(),
         None,
+        0,
         device,
     )
 }
 
 /// Sample a random batch with an explicit batch/block shape from any dataset implementing
 /// [`TokenSequenceDataset`].
-pub fn sample_batch_with_shape<B: Backend, T: TokenSequenceDataset + ?Sized>(
+fn sample_host_batch_with_shape<T>(
     dataset: &T,
     split: DatasetSplit,
     batch_size: usize,
     block_size: usize,
-    summary_event_token_ids: Option<&[u32]>,
-    device: &B::Device,
-) -> SequenceBatch<B> {
+    epoch_index: usize,
+) -> HostSequenceBatch
+where
+    T: TokenSequenceDataset + ?Sized,
+{
     let prof_enabled = crate::train::profile::enabled();
     let cpu_start = prof_enabled.then(Instant::now);
     let (offset, span) = dataset.split_offset_and_span(split);
@@ -146,7 +173,7 @@ pub fn sample_batch_with_shape<B: Backend, T: TokenSequenceDataset + ?Sized>(
                     let start =
                         offset + doc_index.saturating_mul(document_span) + start_in_document;
                     let mut sample = vec![0u32; block_size + 1];
-                    dataset.copy_token_range(start, &mut sample);
+                    dataset.copy_token_range_with_epoch(split, epoch_index, start, &mut sample);
                     for t in 0..block_size {
                         input_row[t] = sample[t] as i64;
                         target_row[t] = sample[t + 1] as i64;
@@ -166,7 +193,7 @@ pub fn sample_batch_with_shape<B: Backend, T: TokenSequenceDataset + ?Sized>(
                 rng.gen_range(0..=max_start_in_document)
             };
             let start = offset + doc_index.saturating_mul(document_span) + start_in_document;
-            dataset.copy_token_range(start, &mut sample);
+            dataset.copy_token_range_with_epoch(split, epoch_index, start, &mut sample);
             for t in 0..block_size {
                 inputs[batch_idx * block_size + t] = sample[t] as i64;
                 targets[batch_idx * block_size + t] = sample[t + 1] as i64;
@@ -188,7 +215,7 @@ pub fn sample_batch_with_shape<B: Backend, T: TokenSequenceDataset + ?Sized>(
                     };
                     let start = offset + start_offset;
                     let mut sample = vec![0u32; block_size + 1];
-                    dataset.copy_token_range(start, &mut sample);
+                    dataset.copy_token_range_with_epoch(split, epoch_index, start, &mut sample);
                     for t in 0..block_size {
                         input_row[t] = sample[t] as i64;
                         target_row[t] = sample[t + 1] as i64;
@@ -204,7 +231,7 @@ pub fn sample_batch_with_shape<B: Backend, T: TokenSequenceDataset + ?Sized>(
                 rng.gen_range(0..=max_start)
             };
             let start = offset + start_offset;
-            dataset.copy_token_range(start, &mut sample);
+            dataset.copy_token_range_with_epoch(split, epoch_index, start, &mut sample);
             for t in 0..block_size {
                 inputs[batch_idx * block_size + t] = sample[t] as i64;
                 targets[batch_idx * block_size + t] = sample[t + 1] as i64;
@@ -212,33 +239,33 @@ pub fn sample_batch_with_shape<B: Backend, T: TokenSequenceDataset + ?Sized>(
         }
     }
 
-    let cpu_ns = cpu_start
-        .map(|start| start.elapsed().as_nanos())
-        .unwrap_or_default();
+    HostSequenceBatch {
+        inputs,
+        targets,
+        dataloader_cpu_ns: cpu_start
+            .map(|start| start.elapsed().as_nanos())
+            .unwrap_or_default(),
+        reset_stream_state: false,
+    }
+}
 
-    let tensor_copy_start = prof_enabled.then(Instant::now);
-    let summary_event_mask = summary_event_mask_tensor::<B>(
-        &inputs,
+pub fn sample_batch_with_shape<B: Backend, T: TokenSequenceDataset + ?Sized>(
+    dataset: &T,
+    split: DatasetSplit,
+    batch_size: usize,
+    block_size: usize,
+    summary_event_token_ids: Option<&[u32]>,
+    epoch_index: usize,
+    device: &B::Device,
+) -> SequenceBatch<B> {
+    let host = sample_host_batch_with_shape(dataset, split, batch_size, block_size, epoch_index);
+    finalize_host_batch_on_device::<B>(
+        host,
         batch_size,
         block_size,
         summary_event_token_ids,
         device,
-    );
-    let inputs_tensor =
-        Tensor::<B, 2, Int>::from_data(TensorData::new(inputs, [batch_size, block_size]), device);
-    let targets_tensor =
-        Tensor::<B, 2, Int>::from_data(TensorData::new(targets, [batch_size, block_size]), device);
-    let tensor_copy_ns = tensor_copy_start
-        .map(|start| start.elapsed().as_nanos())
-        .unwrap_or_default();
-
-    if prof_enabled {
-        let values = batch_size.saturating_mul(block_size);
-        let copy_bytes = (values.saturating_mul(2).saturating_mul(size_of::<i64>())) as u128;
-        crate::train::profile::record_dataloader(cpu_ns, tensor_copy_ns, copy_bytes, 0);
-    }
-
-    SequenceBatch::new(inputs_tensor, targets_tensor, summary_event_mask)
+    )
 }
 
 /// Batched token inputs and targets for language modeling.
@@ -248,6 +275,131 @@ pub struct SequenceBatch<B: Backend> {
     pub targets: Tensor<B, 2, Int>,
     pub summary_event_mask: Option<Tensor<B, 2, Int>>,
     pub reset_stream_state: bool,
+}
+
+struct HostSequenceBatch {
+    inputs: Vec<i64>,
+    targets: Vec<i64>,
+    dataloader_cpu_ns: u128,
+    reset_stream_state: bool,
+}
+
+struct RandomPrefetch {
+    receiver: Option<Receiver<(usize, HostSequenceBatch)>>,
+    workers: Vec<JoinHandle<()>>,
+    pending: BTreeMap<usize, HostSequenceBatch>,
+    next_index: usize,
+}
+
+impl RandomPrefetch {
+    fn spawn(
+        dataset: Arc<dyn TokenSequenceDataset>,
+        split: DatasetSplit,
+        batch_size: usize,
+        block_size: usize,
+        steps_per_epoch: usize,
+        absolute_step_start: usize,
+        total_steps: Option<usize>,
+        depth: usize,
+        workers: usize,
+    ) -> Self {
+        let worker_count = workers.max(1);
+        let current_epoch = absolute_step_start / steps_per_epoch.max(1);
+        dataset.prepare_epoch(split, current_epoch);
+        dataset.prefetch_epoch(split, current_epoch.saturating_add(1));
+        dataset.prefetch_epoch(split, current_epoch.saturating_add(2));
+        let (sender, receiver) =
+            sync_channel::<(usize, HostSequenceBatch)>(depth.max(worker_count));
+        let next_task = Arc::new(AtomicUsize::new(absolute_step_start));
+        let mut handles = Vec::with_capacity(worker_count);
+        for _ in 0..worker_count {
+            let sender = sender.clone();
+            let dataset = Arc::clone(&dataset);
+            let next_task = Arc::clone(&next_task);
+            handles.push(thread::spawn(move || {
+                loop {
+                    let task_index = next_task.fetch_add(1, Ordering::Relaxed);
+                    if let Some(limit) = total_steps {
+                        if task_index >= limit {
+                            break;
+                        }
+                    }
+                    let epoch_index = task_index / steps_per_epoch.max(1);
+                    dataset.prefetch_epoch(split, epoch_index.saturating_add(1));
+                    let batch = sample_host_batch_with_shape(
+                        dataset.as_ref(),
+                        split,
+                        batch_size,
+                        block_size,
+                        epoch_index,
+                    );
+                    if sender.send((task_index, batch)).is_err() {
+                        return;
+                    }
+                }
+            }));
+        }
+        drop(sender);
+        let mut prefetch = Self {
+            receiver: Some(receiver),
+            workers: handles,
+            pending: BTreeMap::new(),
+            next_index: absolute_step_start,
+        };
+        prefetch.prime(worker_count.min(depth.max(1)).min(4));
+        prefetch
+    }
+
+    fn seek_to(&mut self, absolute_step: usize) {
+        self.next_index = absolute_step;
+        self.pending.retain(|index, _| *index >= absolute_step);
+    }
+
+    fn recv(&mut self) -> Option<HostSequenceBatch> {
+        if let Some(batch) = self.pending.remove(&self.next_index) {
+            self.next_index = self.next_index.saturating_add(1);
+            return Some(batch);
+        }
+        loop {
+            let (index, batch) = self.receiver.as_ref()?.recv().ok()?;
+            if index == self.next_index {
+                self.next_index = self.next_index.saturating_add(1);
+                return Some(batch);
+            }
+            self.pending.insert(index, batch);
+        }
+    }
+
+    fn prime(&mut self, target_ready: usize) {
+        if target_ready == 0 {
+            return;
+        }
+        while self.contiguous_ready() < target_ready {
+            let Some((index, batch)) = self.receiver.as_ref().and_then(|receiver| receiver.recv().ok()) else {
+                break;
+            };
+            self.pending.insert(index, batch);
+        }
+    }
+
+    fn contiguous_ready(&self) -> usize {
+        let mut count = 0usize;
+        let mut index = self.next_index;
+        while self.pending.contains_key(&index) {
+            count = count.saturating_add(1);
+            index = index.saturating_add(1);
+        }
+        count
+    }
+}
+
+impl Drop for RandomPrefetch {
+    fn drop(&mut self) {
+        let _ = self.receiver.take();
+        for worker in self.workers.drain(..) {
+            let _ = worker.join();
+        }
+    }
 }
 
 impl<B: Backend> SequenceBatch<B> {
@@ -270,6 +422,77 @@ impl<B: Backend> SequenceBatch<B> {
     }
 }
 
+fn dataset_prefetch_depth() -> usize {
+    std::env::var("BDH_DATASET_PREFETCH_DEPTH")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(8)
+}
+
+fn dataset_prefetch_workers() -> usize {
+    std::env::var("BDH_DATASET_PREFETCH_WORKERS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or_else(|| {
+            let cpus = std::thread::available_parallelism()
+                .map(|count| count.get())
+                .unwrap_or(4);
+            if cpus >= 24 {
+                8
+            } else if cpus >= 12 {
+                4
+            } else {
+                2
+            }
+        })
+}
+
+fn finalize_host_batch_on_device<B: Backend>(
+    host: HostSequenceBatch,
+    batch_size: usize,
+    block_size: usize,
+    summary_event_token_ids: Option<&[u32]>,
+    device: &B::Device,
+) -> SequenceBatch<B> {
+    let HostSequenceBatch {
+        inputs,
+        targets,
+        dataloader_cpu_ns,
+        reset_stream_state,
+    } = host;
+    let prof_enabled = crate::train::profile::enabled();
+    let tensor_copy_start = prof_enabled.then(Instant::now);
+    let summary_event_mask = summary_event_mask_tensor::<B>(
+        &inputs,
+        batch_size,
+        block_size,
+        summary_event_token_ids,
+        device,
+    );
+    let inputs_tensor =
+        Tensor::<B, 2, Int>::from_data(TensorData::new(inputs, [batch_size, block_size]), device);
+    let targets_tensor =
+        Tensor::<B, 2, Int>::from_data(TensorData::new(targets, [batch_size, block_size]), device);
+    let tensor_copy_ns = tensor_copy_start
+        .map(|start| start.elapsed().as_nanos())
+        .unwrap_or_default();
+
+    if prof_enabled {
+        let values = batch_size.saturating_mul(block_size);
+        let copy_bytes = (values.saturating_mul(2).saturating_mul(size_of::<i64>())) as u128;
+        crate::train::profile::record_dataloader(
+            dataloader_cpu_ns,
+            tensor_copy_ns,
+            copy_bytes,
+            0,
+        );
+    }
+
+    SequenceBatch::new(inputs_tensor, targets_tensor, summary_event_mask)
+        .with_reset_stream_state(reset_stream_state)
+}
+
 /// Data loader that produces random sequences from any `TokenSequenceDataset`.
 pub struct RandomDataLoader<B: Backend> {
     dataset: Arc<dyn TokenSequenceDataset>,
@@ -279,6 +502,8 @@ pub struct RandomDataLoader<B: Backend> {
     total_steps: Option<usize>,
     consumed_steps: Option<Arc<AtomicUsize>>,
     summary_event_token_ids: Option<Vec<u32>>,
+    prefetch: Arc<Mutex<Option<RandomPrefetch>>>,
+    seed: u64,
 }
 
 pub struct StreamingDataLoader<B: Backend> {
@@ -303,6 +528,8 @@ impl<B: Backend> Clone for RandomDataLoader<B> {
             total_steps: self.total_steps,
             consumed_steps: self.consumed_steps.as_ref().map(Arc::clone),
             summary_event_token_ids: self.summary_event_token_ids.clone(),
+            prefetch: Arc::clone(&self.prefetch),
+            seed: self.seed,
         }
     }
 }
@@ -347,6 +574,8 @@ impl<B: Backend> RandomDataLoader<B> {
             total_steps,
             consumed_steps,
             summary_event_token_ids: None,
+            prefetch: Arc::new(Mutex::new(None)),
+            seed: 0,
         }
     }
 
@@ -355,6 +584,14 @@ impl<B: Backend> RandomDataLoader<B> {
         summary_event_token_ids: Option<Vec<u32>>,
     ) -> Self {
         self.summary_event_token_ids = summary_event_token_ids;
+        self
+    }
+
+    pub fn with_initial_consumed_steps(self, initial_steps: usize) -> Self {
+        if let (Some(limit), Some(consumed_steps)) = (self.total_steps, self.consumed_steps.as_ref())
+        {
+            consumed_steps.store(initial_steps.min(limit), Ordering::Relaxed);
+        }
         self
     }
 }
@@ -449,6 +686,14 @@ impl<B: Backend> StreamingDataLoader<B> {
         self.summary_event_token_ids = summary_event_token_ids;
         self
     }
+
+    pub fn with_initial_consumed_steps(self, initial_steps: usize) -> Self {
+        if let (Some(limit), Some(consumed_steps)) = (self.total_steps, self.consumed_steps.as_ref())
+        {
+            consumed_steps.store(initial_steps.min(limit), Ordering::Relaxed);
+        }
+        self
+    }
 }
 
 impl<B> DataLoader<B, SequenceBatch<B>> for RandomDataLoader<B>
@@ -468,16 +713,49 @@ where
             } else {
                 self.steps_per_epoch
             };
+        let absolute_step_start = self
+            .consumed_steps
+            .as_ref()
+            .map(|counter| counter.load(Ordering::Relaxed))
+            .unwrap_or_default();
+        let use_persistent_prefetch =
+            dataset_prefetch_depth() > 0 && steps_total > 1 && self.split == DatasetSplit::Train;
+        if use_persistent_prefetch {
+            let mut slot = self.prefetch.lock().expect("random prefetch lock");
+            if slot.is_none() {
+                *slot = Some(RandomPrefetch::spawn(
+                    Arc::clone(&self.dataset),
+                    self.split,
+                    self.dataset.batch_size(),
+                    self.dataset.block_size(),
+                    self.steps_per_epoch,
+                    absolute_step_start,
+                    self.total_steps,
+                    dataset_prefetch_depth(),
+                    dataset_prefetch_workers(),
+                ));
+            } else if let Some(prefetch) = slot.as_mut() {
+                prefetch.seek_to(absolute_step_start);
+            }
+        }
 
         Box::new(RandomIterator {
             dataset: Arc::clone(&self.dataset),
             split: self.split,
             device: self.device.clone(),
+            batch_size: self.dataset.batch_size(),
+            block_size: self.dataset.block_size(),
             steps_total,
             step: 0,
             total_steps: self.total_steps,
             consumed_steps: self.consumed_steps.clone(),
             summary_event_token_ids: self.summary_event_token_ids.clone(),
+            epoch_index: self
+                .consumed_steps
+                .as_ref()
+                .map(|counter| counter.load(Ordering::Relaxed) / self.steps_per_epoch.max(1))
+                .unwrap_or_default(),
+            prefetch: use_persistent_prefetch.then(|| Arc::clone(&self.prefetch)),
         })
     }
 
@@ -494,6 +772,8 @@ where
             total_steps: self.total_steps,
             consumed_steps: self.consumed_steps.as_ref().map(Arc::clone),
             summary_event_token_ids: self.summary_event_token_ids.clone(),
+            prefetch: Arc::clone(&self.prefetch),
+            seed: self.seed,
         })
     }
 
@@ -512,6 +792,8 @@ where
             total_steps,
             consumed_steps,
             summary_event_token_ids: self.summary_event_token_ids.clone(),
+            prefetch: Arc::new(Mutex::new(None)),
+            seed: self.seed,
         })
     }
 }
@@ -532,6 +814,7 @@ struct StreamingIterator<B: Backend> {
     num_documents: usize,
     document_start: usize,
     document_stride: usize,
+    epoch_index: usize,
 }
 
 impl<B: Backend> Iterator for StreamingIterator<B> {
@@ -585,7 +868,12 @@ impl<B: Backend> Iterator for StreamingIterator<B> {
                     let doc_start = offset + doc_idx.saturating_mul(document_span);
                     let start = doc_start + chunk_index_in_document.saturating_mul(block_size);
                     let mut sample = vec![0u32; block_size + 1];
-                    self.dataset.copy_token_range(start, &mut sample);
+                    self.dataset.copy_token_range_with_epoch(
+                        self.split,
+                        self.epoch_index,
+                        start,
+                        &mut sample,
+                    );
                     for t in 0..block_size {
                         input_row[t] = sample[t] as i64;
                         target_row[t] = sample[t + 1] as i64;
@@ -601,7 +889,12 @@ impl<B: Backend> Iterator for StreamingIterator<B> {
                 % self.num_documents.max(1);
             let doc_start = offset + doc_idx.saturating_mul(document_span);
             let start = doc_start + self.chunk_index_in_document.saturating_mul(block_size);
-            self.dataset.copy_token_range(start, &mut sample);
+            self.dataset.copy_token_range_with_epoch(
+                self.split,
+                self.epoch_index,
+                start,
+                &mut sample,
+            );
             for t in 0..block_size {
                 inputs[batch_idx * block_size + t] = sample[t] as i64;
                 targets[batch_idx * block_size + t] = sample[t + 1] as i64;
@@ -708,6 +1001,7 @@ where
             num_documents,
             document_start,
             document_stride,
+            epoch_index,
         })
     }
 
@@ -868,6 +1162,7 @@ mod streaming_tests {
                 dataset.batch_size,
                 dataset.block_size,
                 None,
+                0,
                 &device,
             );
             let inputs = batch
@@ -938,11 +1233,15 @@ struct RandomIterator<B: Backend> {
     dataset: Arc<dyn TokenSequenceDataset>,
     split: DatasetSplit,
     device: B::Device,
+    batch_size: usize,
+    block_size: usize,
     steps_total: usize,
     step: usize,
     total_steps: Option<usize>,
     consumed_steps: Option<Arc<AtomicUsize>>,
     summary_event_token_ids: Option<Vec<u32>>,
+    epoch_index: usize,
+    prefetch: Option<Arc<Mutex<Option<RandomPrefetch>>>>,
 }
 
 impl<B: Backend> Iterator for RandomIterator<B> {
@@ -952,7 +1251,19 @@ impl<B: Backend> Iterator for RandomIterator<B> {
         if self.step >= self.steps_total {
             return None;
         }
-        self.step += 1;
+
+        let host = if let Some(prefetch) = self.prefetch.as_ref() {
+            let mut slot = prefetch.lock().expect("random prefetch lock");
+            slot.as_mut()?.recv()?
+        } else {
+            sample_host_batch_with_shape(
+                &*self.dataset,
+                self.split,
+                self.batch_size,
+                self.block_size,
+                self.epoch_index,
+            )
+        };
 
         if let Some(counter) = &self.consumed_steps {
             if let Some(limit) = self.total_steps {
@@ -965,11 +1276,12 @@ impl<B: Backend> Iterator for RandomIterator<B> {
             }
         }
 
-        Some(sample_batch_with_shape::<B, _>(
-            &*self.dataset,
-            self.split,
-            self.dataset.batch_size(),
-            self.dataset.block_size(),
+        self.step += 1;
+
+        Some(finalize_host_batch_on_device::<B>(
+            host,
+            self.batch_size,
+            self.block_size,
             self.summary_event_token_ids.as_deref(),
             &self.device,
         ))
@@ -979,5 +1291,126 @@ impl<B: Backend> Iterator for RandomIterator<B> {
 impl<B: Backend> DataLoaderIterator<SequenceBatch<B>> for RandomIterator<B> {
     fn progress(&self) -> Progress {
         Progress::new(self.step, self.steps_total)
+    }
+}
+
+#[cfg(test)]
+mod random_loader_tests {
+    use super::*;
+    use burn_ndarray::NdArray;
+
+    use crate::tokenizer::{PretokenizedTokenizerConfig, TokenizerConfig, TokenizerKind};
+
+    type TestBackend = NdArray<f32>;
+
+    #[derive(Clone)]
+    struct EpochAwareDataset {
+        block_size: usize,
+        batch_size: usize,
+        tokenizer: SharedTokenizer,
+    }
+
+    impl TokenSequenceDataset for EpochAwareDataset {
+        fn tokenizer(&self) -> SharedTokenizer {
+            self.tokenizer.clone()
+        }
+
+        fn token_count(&self) -> usize {
+            64
+        }
+
+        fn copy_token_range(&self, start: usize, dst: &mut [u32]) {
+            self.copy_token_range_with_epoch(DatasetSplit::Train, 0, start, dst);
+        }
+
+        fn copy_token_range_with_epoch(
+            &self,
+            _split: DatasetSplit,
+            epoch_index: usize,
+            _start: usize,
+            dst: &mut [u32],
+        ) {
+            let base = (epoch_index as u32).saturating_mul(100);
+            for (idx, value) in dst.iter_mut().enumerate() {
+                *value = base.saturating_add(idx as u32);
+            }
+        }
+
+        fn train_len(&self) -> usize {
+            64
+        }
+
+        fn block_size(&self) -> usize {
+            self.block_size
+        }
+
+        fn batch_size(&self) -> usize {
+            self.batch_size
+        }
+
+        fn train_split_ratio(&self) -> f32 {
+            1.0
+        }
+    }
+
+    fn tiny_pretokenized_tokenizer() -> SharedTokenizer {
+        TokenizerConfig {
+            vocab_path: None,
+            kind: TokenizerKind::Pretokenized(PretokenizedTokenizerConfig {
+                vocab_size: 512,
+                bos_id: None,
+                eos_id: Some(511),
+                pad_id: None,
+                unk_id: None,
+            }),
+        }
+        .fit(std::iter::empty())
+        .expect("tokenizer")
+    }
+
+    #[test]
+    fn random_loader_resume_offset_advances_epoch_aware_samples() {
+        let device = <TestBackend as Backend>::Device::default();
+        let dataset = Arc::new(EpochAwareDataset {
+            block_size: 4,
+            batch_size: 1,
+            tokenizer: tiny_pretokenized_tokenizer(),
+        });
+
+        let first_epoch_batch = RandomDataLoader::<TestBackend>::new(
+            Arc::clone(&dataset),
+            DatasetSplit::Train,
+            &device,
+            4,
+            Some(8),
+        )
+        .iter()
+        .next()
+        .expect("first epoch batch")
+        .inputs
+        .to_data()
+        .convert::<i64>()
+        .into_vec::<i64>()
+        .expect("first epoch tokens");
+
+        let resumed_batch = RandomDataLoader::<TestBackend>::new(
+            Arc::clone(&dataset),
+            DatasetSplit::Train,
+            &device,
+            4,
+            Some(8),
+        )
+        .with_initial_consumed_steps(4)
+        .iter()
+        .next()
+        .expect("resumed batch")
+        .inputs
+        .to_data()
+        .convert::<i64>()
+        .into_vec::<i64>()
+        .expect("resumed tokens");
+
+        assert_eq!(first_epoch_batch, vec![0, 1, 2, 3]);
+        assert_eq!(resumed_batch, vec![100, 101, 102, 103]);
     }
 }

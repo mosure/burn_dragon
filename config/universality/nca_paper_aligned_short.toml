@@ -12,8 +12,8 @@ preview_samples = 8
 
 [tokenization]
 type = "patch_token_ids"
-vocab_size = 50257
-eos_id = 50256
+vocab_size = 10003
+eos_id = 10002
 frame_special_tokens = true
 
 [[families]]

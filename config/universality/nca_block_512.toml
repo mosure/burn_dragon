@@ -1,5 +1,5 @@
-name = "nca_leaderboard_short"
-output_dir = "data/universality/nca_leaderboard_short"
+name = "nca_block_512"
+output_dir = "data/universality/nca_block_512"
 seed = 1337
 train_samples = 512
 validation_samples = 128

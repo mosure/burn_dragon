@@ -204,6 +204,7 @@ where
                 batch_size,
                 block_size,
                 summary_event_token_ids,
+                0,
                 device,
             );
             let output = burn_train::TrainStep::step(&model, batch);

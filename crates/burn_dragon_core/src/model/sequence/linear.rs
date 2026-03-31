@@ -1,6 +1,8 @@
 use burn::tensor::backend::Backend;
 use burn::tensor::{Int, Tensor};
 
+const DENSE_SCORE_REFERENCE_ROW_CHUNK: usize = 256;
+
 pub fn expand_attention_values_to_heads<B: Backend>(
     value: Tensor<B, 4>,
     heads: usize,
@@ -57,6 +59,86 @@ pub fn recurrent_attention_reference<B: Backend>(
 }
 
 pub fn recurrent_attention_dense_score_reference<B: Backend>(
+    query: Tensor<B, 4>,
+    value: Tensor<B, 4>,
+    rho_state: Option<Tensor<B, 4>>,
+    decay: Option<Tensor<B, 1>>,
+) -> (Tensor<B, 4>, Tensor<B, 4>) {
+    let [batch, heads, time, latent] = query.shape().dims::<4>();
+    let n_embd = value.shape().dims::<4>()[3];
+    let device = value.device();
+
+    if time <= DENSE_SCORE_REFERENCE_ROW_CHUNK {
+        return recurrent_attention_dense_score_reference_full(query, value, rho_state, decay);
+    }
+
+    let value = expand_attention_values_to_heads(value, heads);
+    let rho_state =
+        rho_state.filter(|state| state.shape().dims::<4>() == [batch, heads, latent, n_embd]);
+    let query_key = query.clone().swap_dims(2, 3);
+    let pos_col = Tensor::<B, 1, Int>::arange(0..time as i64, &device)
+        .float()
+        .reshape([1, 1, 1, time]);
+    let decay_heads = decay.clone().map(|tensor| tensor.reshape([1, heads, 1, 1]));
+
+    let rho = recurrent_attention_dense_score_final_rho_reference(
+        query.clone(),
+        value.clone(),
+        rho_state.clone(),
+        decay.clone(),
+    );
+
+    let mut outputs: Vec<Tensor<B, 4>> =
+        Vec::with_capacity(time.div_ceil(DENSE_SCORE_REFERENCE_ROW_CHUNK));
+    for start in (0..time).step_by(DENSE_SCORE_REFERENCE_ROW_CHUNK) {
+        let end = (start + DENSE_SCORE_REFERENCE_ROW_CHUNK).min(time);
+        let rows = end.saturating_sub(start);
+        let q_chunk = query.clone().slice_dim(2, start..end);
+        let mut score_chunk = q_chunk
+            .clone()
+            .matmul(query_key.clone())
+            .tril(start as i64 - 1);
+        let initial_context_chunk = if let Some(decay_heads) = decay_heads.clone() {
+            let pos_row = Tensor::<B, 1, Int>::arange(start as i64..end as i64, &device)
+                .float()
+                .reshape([1, 1, rows, 1]);
+            let diff = (pos_row.clone() - pos_col.clone())
+                .tril(start as i64 - 1)
+                .repeat_dim(1, heads);
+            let decay_score = decay_heads.clone().repeat_dim(2, rows).repeat_dim(3, time);
+            score_chunk = score_chunk * decay_score.powf(diff);
+
+            if let Some(rho_state) = rho_state.clone() {
+                let decay_state = decay_heads
+                    .clone()
+                    .repeat_dim(2, rows)
+                    .powf(pos_row.repeat_dim(1, heads));
+                q_chunk
+                    .clone()
+                    .mul(decay_state)
+                    .matmul(rho_state)
+                    .reshape([batch, heads, rows, n_embd])
+            } else {
+                Tensor::<B, 4>::zeros([batch, heads, rows, n_embd], &device)
+            }
+        } else if let Some(rho_state) = rho_state.clone() {
+            q_chunk
+                .clone()
+                .matmul(rho_state)
+                .reshape([batch, heads, rows, n_embd])
+        } else {
+            Tensor::<B, 4>::zeros([batch, heads, rows, n_embd], &device)
+        };
+
+        let chunk_context =
+            initial_context_chunk + score_chunk.matmul(value.clone()).reshape([batch, heads, rows, n_embd]);
+        outputs.push(chunk_context);
+    }
+
+    (Tensor::cat(outputs, 2), rho)
+}
+
+fn recurrent_attention_dense_score_reference_full<B: Backend>(
     query: Tensor<B, 4>,
     value: Tensor<B, 4>,
     rho_state: Option<Tensor<B, 4>>,
@@ -221,5 +303,106 @@ pub fn recurrent_attention_dense_score_initial_context_reference<B: Backend>(
         query
             .matmul(rho_state)
             .reshape([batch, heads, time, n_embd])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use burn::tensor::TensorData;
+    use burn_ndarray::NdArray;
+
+    type TestBackend = NdArray<f32>;
+
+    fn tensor4(values: Vec<f32>, shape: [usize; 4]) -> Tensor<TestBackend, 4> {
+        Tensor::<TestBackend, 4>::from_data(TensorData::new(values, shape), &Default::default())
+    }
+
+    fn max_abs_diff(lhs: Tensor<TestBackend, 4>, rhs: Tensor<TestBackend, 4>) -> f32 {
+        let lhs = lhs
+            .into_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .expect("lhs vec");
+        let rhs = rhs
+            .into_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .expect("rhs vec");
+        lhs.into_iter()
+            .zip(rhs)
+            .map(|(left, right)| (left - right).abs())
+            .fold(0.0f32, f32::max)
+    }
+
+    #[test]
+    fn chunked_dense_score_reference_matches_full_without_decay() {
+        let shape = [2, 3, 320, 8];
+        let value_shape = [2, 1, 320, 8];
+        let query = tensor4(
+            (0..shape.iter().product::<usize>())
+                .map(|index| (index % 97) as f32 / 97.0)
+                .collect(),
+            shape,
+        );
+        let value = tensor4(
+            (0..value_shape.iter().product::<usize>())
+                .map(|index| ((index * 3) % 89) as f32 / 89.0)
+                .collect(),
+            value_shape,
+        );
+
+        let (chunked_context, chunked_rho) =
+            recurrent_attention_dense_score_reference(query.clone(), value.clone(), None, None);
+        let (full_context, full_rho) =
+            recurrent_attention_dense_score_reference_full(query, value, None, None);
+
+        assert!(max_abs_diff(chunked_context, full_context) < 1.0e-4);
+        assert!(max_abs_diff(chunked_rho, full_rho) < 1.0e-4);
+    }
+
+    #[test]
+    fn chunked_dense_score_reference_matches_full_with_decay_and_state() {
+        let shape = [1, 4, 384, 6];
+        let value_shape = [1, 1, 384, 5];
+        let rho_shape = [1, 4, 6, 5];
+        let query = tensor4(
+            (0..shape.iter().product::<usize>())
+                .map(|index| ((index * 5) % 113) as f32 / 113.0)
+                .collect(),
+            shape,
+        );
+        let value = tensor4(
+            (0..value_shape.iter().product::<usize>())
+                .map(|index| ((index * 7) % 101) as f32 / 101.0)
+                .collect(),
+            value_shape,
+        );
+        let rho_state = tensor4(
+            (0..rho_shape.iter().product::<usize>())
+                .map(|index| ((index * 11) % 79) as f32 / 79.0)
+                .collect(),
+            rho_shape,
+        );
+        let decay = Tensor::<TestBackend, 1>::from_data(
+            TensorData::new(vec![0.91f32, 0.93, 0.95, 0.97], [4]),
+            &Default::default(),
+        );
+
+        let (chunked_context, chunked_rho) = recurrent_attention_dense_score_reference(
+            query.clone(),
+            value.clone(),
+            Some(rho_state.clone()),
+            Some(decay.clone()),
+        );
+        let (full_context, full_rho) = recurrent_attention_dense_score_reference_full(
+            query,
+            value,
+            Some(rho_state),
+            Some(decay),
+        );
+
+        assert!(max_abs_diff(chunked_context, full_context) < 2.0e-4);
+        assert!(max_abs_diff(chunked_rho, full_rho) < 2.0e-4);
     }
 }

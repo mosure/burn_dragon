@@ -13,7 +13,7 @@ use crate::manifest::{
     UniversalitySampleRecord, complexity_histogram, family_counts, write_manifest,
     write_sample_records,
 };
-use crate::nca::{compute_sample_stats, generate_sample, patch_token_ids, serialize_sample};
+use crate::nca::{compute_sample_stats, generate_sample, serialize_sample};
 use crate::stats::CorpusStats;
 use crate::tokenize::CorpusTokenizer;
 

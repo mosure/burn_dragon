@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use crate::config::{NcaCorpusConfig, NcaFamilyConfig, NcaFamilyKind};
 use crate::manifest::{SampleSplit, UniversalityTokenizerManifest};
-use crate::nca::{compute_sample_stats, generate_sample, patch_token_ids, serialize_sample};
+use crate::nca::{compute_sample_stats, generate_sample, serialize_sample};
 use crate::stats::{ComplexityHistogramBin, SampleStats, build_complexity_histogram};
 use crate::tokenize::CorpusTokenizer;
 
@@ -203,9 +203,9 @@ impl OnlineNcaCorpus {
 
     fn encode_tokens_from_sample(&self, sample: &crate::nca::NcaSample) -> Result<Vec<u32>> {
         match self.tokenizer.as_ref() {
-            CorpusTokenizer::PatchTokenIds { .. } => {
-                self.tokenizer.encode_patch_sample(sample, &self.config.serialization)
-            }
+            CorpusTokenizer::PatchTokenIds { .. } => self
+                .tokenizer
+                .encode_patch_sample(sample, &self.config.serialization),
             _ => Err(anyhow!(
                 "on-the-fly NCA training currently requires patch_token_ids tokenization"
             )),
@@ -344,15 +344,15 @@ fn adapt_config_for_min_logical_document_tokens(
                 config.serialization.patch_size
             ));
         }
-        let frame_tokens =
-            (grid / config.serialization.patch_size) * (grid / config.serialization.patch_size)
-                + match &config.tokenization {
-                    crate::config::NcaTokenizationConfig::PatchTokenIds {
-                        frame_special_tokens,
-                        ..
-                    } => usize::from(*frame_special_tokens) * 2,
-                    _ => 0,
-                };
+        let frame_tokens = (grid / config.serialization.patch_size)
+            * (grid / config.serialization.patch_size)
+            + match &config.tokenization {
+                crate::config::NcaTokenizationConfig::PatchTokenIds {
+                    frame_special_tokens,
+                    ..
+                } => usize::from(*frame_special_tokens) * 2,
+                _ => 0,
+            };
         payload_alignment = lcm_usize(payload_alignment, frame_tokens)
             .ok_or_else(|| anyhow!("on-the-fly NCA payload alignment overflow"))?;
         patches_per_frame.push(frame_tokens);

@@ -44,13 +44,11 @@ impl CorpusTokenizer {
                 vocab_size,
                 eos_id,
                 frame_special_tokens,
-            } => {
-                Ok(Self::PatchTokenIds {
-                    vocab_size: *vocab_size,
-                    eos_id: *eos_id,
-                    frame_special_tokens: *frame_special_tokens,
-                })
-            }
+            } => Ok(Self::PatchTokenIds {
+                vocab_size: *vocab_size,
+                eos_id: *eos_id,
+                frame_special_tokens: *frame_special_tokens,
+            }),
             NcaTokenizationConfig::RustBpe {
                 vocab_path,
                 mergeable_vocab_size,
@@ -180,7 +178,8 @@ impl CorpusTokenizer {
                     .ok_or_else(|| anyhow!("patch token vocabulary overflow"))?;
                 let frame_token_overhead = usize::from(*frame_special_tokens) * 2;
                 let mut tokens = Vec::with_capacity(
-                    sample.frames.len() * (patches_per_row * patches_per_col + frame_token_overhead)
+                    sample.frames.len()
+                        * (patches_per_row * patches_per_col + frame_token_overhead)
                         + usize::from(eos_id.is_some()),
                 );
                 let frame_start_id = (*frame_special_tokens).then_some(patch_vocab_size);
@@ -257,8 +256,7 @@ impl CorpusTokenizer {
                 vocab_size: *vocab_size,
                 bos_id: None,
                 eos_id: *eos_id,
-                frame_start_id: None,
-                frame_end_id: None,
+                frame_special_tokens: false,
                 pad_id: None,
                 unk_id: None,
                 tokenizer_id: "gpt2_byte_compatible".to_string(),
@@ -267,25 +265,20 @@ impl CorpusTokenizer {
                 vocab_size,
                 eos_id,
                 frame_special_tokens,
-            } => {
-                let frame_start_id = (*frame_special_tokens).then_some(10_000);
-                let frame_end_id = frame_start_id.map(|id| id + 1);
-                UniversalityTokenizerManifest {
-                    family: TokenizerFamily::PatchTokenIds,
-                    vocab_size: *vocab_size,
-                    bos_id: None,
-                    eos_id: *eos_id,
-                    frame_start_id,
-                    frame_end_id,
-                    pad_id: None,
-                    unk_id: None,
-                    tokenizer_id: if *frame_special_tokens {
-                        "patch_token_ids:framed".to_string()
-                    } else {
-                        "patch_token_ids".to_string()
-                    },
-                }
-            }
+            } => UniversalityTokenizerManifest {
+                family: TokenizerFamily::PatchTokenIds,
+                vocab_size: *vocab_size,
+                bos_id: None,
+                eos_id: *eos_id,
+                frame_special_tokens: *frame_special_tokens,
+                pad_id: None,
+                unk_id: None,
+                tokenizer_id: if *frame_special_tokens {
+                    "patch_token_ids:framed".to_string()
+                } else {
+                    "patch_token_ids".to_string()
+                },
+            },
             Self::RustBpe {
                 mergeable_vocab_size,
                 bos_id,
@@ -305,8 +298,7 @@ impl CorpusTokenizer {
                     vocab_size: (*mergeable_vocab_size).max(special_max.saturating_add(1)),
                     bos_id: *bos_id,
                     eos_id: *eos_id,
-                    frame_start_id: None,
-                    frame_end_id: None,
+                    frame_special_tokens: false,
                     pad_id: *pad_id,
                     unk_id: *unk_id,
                     tokenizer_id: tokenizer_id.clone(),
@@ -393,6 +385,9 @@ mod tests {
         let tokens = tokenizer
             .encode_patch_sample(&sample, &serialization)
             .expect("patch sample tokens");
-        assert_eq!(tokens, vec![10_000, 1_234, 10_001, 10_000, 4_321, 10_001, 50_256]);
+        assert_eq!(
+            tokens,
+            vec![10_000, 1_234, 10_001, 10_000, 4_321, 10_001, 50_256]
+        );
     }
 }

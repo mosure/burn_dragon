@@ -1,14 +1,14 @@
-name = "nca_paper_aligned_smoke"
-output_dir = "data/universality/nca_paper_aligned_smoke"
+name = "nca_leaderboard_short"
+output_dir = "data/universality/nca_leaderboard_short"
 seed = 1337
-train_samples = 32
-validation_samples = 8
-chunk_token_capacity = 16384
+train_samples = 512
+validation_samples = 128
+chunk_token_capacity = 262144
 
 [serialization]
 patch_size = 2
 include_observable_header = true
-preview_samples = 6
+preview_samples = 8
 
 [tokenization]
 type = "patch_token_ids"
@@ -21,36 +21,36 @@ kind = "neural_stochastic"
 weight = 1
 complexity = "simple"
 grid_size = { min = 12, max = 12 }
-steps = { min = 10, max = 10 }
+steps = { min = 15, max = 15 }
 state_count = { min = 10, max = 10 }
 step_stride = { min = 2, max = 2 }
 start_step = { min = 0, max = 0 }
 identity_bias = { min = 0.0, max = 0.0 }
 temperature = { min = 0.0, max = 0.0 }
-rule_filter = { metric = "gzip", threshold = 0.0, upper_bound = 0.30, max_attempts = 256 }
+rule_filter = { metric = "gzip", threshold = 0.0, upper_bound = 0.30, max_attempts = 256, scoring_examples = 10 }
 
 [[families]]
 kind = "neural_stochastic"
 weight = 1
 complexity = "medium"
 grid_size = { min = 12, max = 12 }
-steps = { min = 10, max = 10 }
+steps = { min = 15, max = 15 }
 state_count = { min = 10, max = 10 }
 step_stride = { min = 2, max = 2 }
 start_step = { min = 0, max = 0 }
 identity_bias = { min = 0.0, max = 0.0 }
 temperature = { min = 0.0, max = 0.0 }
-rule_filter = { metric = "gzip", threshold = 0.30, upper_bound = 0.50, max_attempts = 256 }
+rule_filter = { metric = "gzip", threshold = 0.30, upper_bound = 0.50, max_attempts = 256, scoring_examples = 10 }
 
 [[families]]
 kind = "neural_stochastic"
 weight = 1
 complexity = "complex"
 grid_size = { min = 12, max = 12 }
-steps = { min = 10, max = 10 }
+steps = { min = 15, max = 15 }
 state_count = { min = 10, max = 10 }
 step_stride = { min = 2, max = 2 }
 start_step = { min = 0, max = 0 }
 identity_bias = { min = 0.0, max = 0.0 }
 temperature = { min = 0.0, max = 0.0 }
-rule_filter = { metric = "gzip", threshold = 0.50, upper_bound = 1.0, max_attempts = 256 }
+rule_filter = { metric = "gzip", threshold = 0.50, upper_bound = 1.0, max_attempts = 256, scoring_examples = 10 }

@@ -14,6 +14,7 @@ preview_samples = 8
 type = "patch_token_ids"
 vocab_size = 50257
 eos_id = 50256
+frame_special_tokens = true
 
 [[families]]
 kind = "neural_stochastic"

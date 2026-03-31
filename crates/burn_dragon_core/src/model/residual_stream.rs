@@ -103,6 +103,7 @@ impl LowRankResidualStepMode {
         }
     }
 
+    #[cfg(any(feature = "viz", feature = "probe"))]
     const fn full_output_relu_native() -> Self {
         Self {
             native_projection_relu_fused: true,
@@ -618,11 +619,12 @@ where
                 .map(|_| pack_saved_activation_state(&attn, saved_activation_config.format))
         })
         .flatten();
+    let attn_bytes = tensor_bytes(&attn);
     if memory_prof_enabled {
         lowrank_residual_memory_record_stage::<B>(
             |profile| &mut profile.after_attention_norm,
             &current.device(),
-            tensor_bytes(&current) + tensor_bytes(&x_neuron) + tensor_bytes(&attn),
+            tensor_bytes(&current) + tensor_bytes(&x_neuron) + attn_bytes,
         );
     }
 
@@ -633,7 +635,7 @@ where
     ) && low_bit_plan.y_weight_format.is_some()
     {
         let mut y_latent = packed_lowrank_projection_training_native(
-            attn.clone(),
+            attn,
             encoder_v,
             low_bit_plan
                 .y_weight_format
@@ -655,13 +657,13 @@ where
     } else if let Some(artifact) = packed_artifacts.y {
         let mut y_latent = match packed_artifacts.runtime {
             LowBitKernelRuntimeKind::PackedNativeInference => packed_lowrank_projection_native(
-                attn.clone(),
+                attn,
                 artifact,
                 low_bit_plan.y_activation_format,
                 encoder_v.shape().dims::<4>()[3],
             ),
             _ => packed_lowrank_projection_reference(
-                attn.clone(),
+                attn,
                 artifact,
                 low_bit_plan.y_activation_format,
                 encoder_v.shape().dims::<4>()[3],
@@ -673,9 +675,9 @@ where
         apply_latent(y_latent)
     } else {
         let y_input = if let Some(format) = low_bit_plan.y_activation_format {
-            fake_quantize_activation_ste(attn.clone(), format)
+            fake_quantize_activation_ste(attn, format)
         } else {
-            attn.clone()
+            attn
         };
         let y_weight = if let Some(format) = low_bit_plan.y_weight_format {
             fake_quantize_weight_ste(encoder_v, format)
@@ -707,10 +709,7 @@ where
         lowrank_residual_memory_record_stage::<B>(
             |profile| &mut profile.after_y_projection,
             &current.device(),
-            tensor_bytes(&current)
-                + tensor_bytes(&x_neuron)
-                + tensor_bytes(&attn)
-                + tensor_bytes(&y_gate),
+            tensor_bytes(&current) + tensor_bytes(&x_neuron) + attn_bytes + tensor_bytes(&y_gate),
         );
     }
     let y_post_quant_start = prof_enabled.then(Instant::now);
@@ -728,10 +727,7 @@ where
         lowrank_residual_memory_record_stage::<B>(
             |profile| &mut profile.after_y_post_quant,
             &current.device(),
-            tensor_bytes(&current)
-                + tensor_bytes(&x_neuron)
-                + tensor_bytes(&attn)
-                + tensor_bytes(&y_gate),
+            tensor_bytes(&current) + tensor_bytes(&x_neuron) + attn_bytes + tensor_bytes(&y_gate),
         );
     }
     let y_neuron_start = prof_enabled.then(Instant::now);
@@ -750,11 +746,12 @@ where
     if let Some(start) = y_neuron_start {
         y_neuron_ns = start.elapsed().as_nanos();
     }
+    let y_neuron_bytes = tensor_bytes(&y_neuron);
     if memory_prof_enabled {
         lowrank_residual_memory_record_stage::<B>(
             |profile| &mut profile.after_y_neuron,
             &current.device(),
-            tensor_bytes(&current) + tensor_bytes(&attn) + tensor_bytes(&y_neuron),
+            tensor_bytes(&current) + attn_bytes + y_neuron_bytes,
         );
     }
     let y_neuron_out = keep_aux.then(|| y_neuron.clone());
@@ -772,7 +769,7 @@ where
     ) && low_bit_plan.residual_weight_format.is_some()
     {
         packed_decoder_tail_training_native(
-            y_neuron.clone(),
+            y_neuron,
             decoder,
             low_bit_plan
                 .residual_weight_format
@@ -784,9 +781,9 @@ where
     } else if let Some(artifact) = packed_artifacts.residual {
         match packed_artifacts.runtime {
             LowBitKernelRuntimeKind::PackedNativeInference => {
-                packed_decoder_tail_native(y_neuron.clone(), artifact, None)
+                packed_decoder_tail_native(y_neuron, artifact, None)
             }
-            _ => packed_decoder_tail_reference(y_neuron.clone(), artifact, None),
+            _ => packed_decoder_tail_reference(y_neuron, artifact, None),
         }
     } else {
         let decoder = if let Some(format) = low_bit_plan.residual_weight_format {
@@ -794,7 +791,7 @@ where
         } else {
             decoder
         };
-        decode_y_neuron_tail(y_neuron.clone(), decoder)
+        decode_y_neuron_tail(y_neuron, decoder)
     };
     if let Some(start) = decoder_tail_start {
         decoder_tail_ns = start.elapsed().as_nanos();
@@ -803,7 +800,7 @@ where
         lowrank_residual_memory_record_stage::<B>(
             |profile| &mut profile.after_decoder_tail,
             &current.device(),
-            tensor_bytes(&current) + tensor_bytes(&y_neuron) + tensor_bytes(&mlp_out),
+            tensor_bytes(&current) + y_neuron_bytes + tensor_bytes(&mlp_out),
         );
     }
     let mlp_norm_start = prof_enabled.then(Instant::now);
@@ -815,7 +812,7 @@ where
         lowrank_residual_memory_record_stage::<B>(
             |profile| &mut profile.after_mlp_norm,
             &current.device(),
-            tensor_bytes(&current) + tensor_bytes(&y_neuron) + tensor_bytes(&mlp_out),
+            tensor_bytes(&current) + y_neuron_bytes + tensor_bytes(&mlp_out),
         );
     }
     let residual_delta_out = if keep_metric_aux {
@@ -934,6 +931,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(any(feature = "viz", feature = "probe"))]
 pub fn lowrank_residual_step_branch_thresholds_relu_native<B, FAttn, FNorm, FAct>(
     current: Tensor<B, 4>,
     encoder: Tensor<B, 4>,

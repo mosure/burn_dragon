@@ -6,7 +6,7 @@ use crate::model::state::LayerState;
 #[derive(Debug, Clone)]
 pub struct Rwkv8State<B: Backend> {
     pub rho: Option<Tensor<B, 4>>,
-    pub rho_norm: Tensor<B, 3>,
+    pub rho_norm: Option<Tensor<B, 3>>,
 }
 
 #[derive(Debug, Clone)]

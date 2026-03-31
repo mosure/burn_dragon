@@ -204,8 +204,7 @@ impl OnlineNcaCorpus {
     fn encode_tokens_from_sample(&self, sample: &crate::nca::NcaSample) -> Result<Vec<u32>> {
         match self.tokenizer.as_ref() {
             CorpusTokenizer::PatchTokenIds { .. } => {
-                let patch_tokens = patch_token_ids(sample, &self.config.serialization);
-                self.tokenizer.encode_patch_tokens(&patch_tokens)
+                self.tokenizer.encode_patch_sample(sample, &self.config.serialization)
             }
             _ => Err(anyhow!(
                 "on-the-fly NCA training currently requires patch_token_ids tokenization"
@@ -259,7 +258,11 @@ impl OnlineNcaCorpus {
 
 pub fn fixed_document_token_count(config: &NcaCorpusConfig) -> Result<usize> {
     match &config.tokenization {
-        crate::config::NcaTokenizationConfig::PatchTokenIds { eos_id, .. } => {
+        crate::config::NcaTokenizationConfig::PatchTokenIds {
+            eos_id,
+            frame_special_tokens,
+            ..
+        } => {
             let mut expected: Option<usize> = None;
             for (index, family) in config.families.iter().enumerate() {
                 let grid =
@@ -274,8 +277,10 @@ pub fn fixed_document_token_count(config: &NcaCorpusConfig) -> Result<usize> {
                 }
                 let patches_per_frame = (grid / config.serialization.patch_size)
                     * (grid / config.serialization.patch_size);
+                let frame_token_count =
+                    patches_per_frame.saturating_add(usize::from(*frame_special_tokens) * 2);
                 let token_count = steps
-                    .checked_mul(patches_per_frame)
+                    .checked_mul(frame_token_count)
                     .and_then(|value| value.checked_add(usize::from(eos_id.is_some())))
                     .ok_or_else(|| anyhow!("on-the-fly NCA token length overflow"))?;
                 if let Some(previous) = expected {
@@ -339,11 +344,18 @@ fn adapt_config_for_min_logical_document_tokens(
                 config.serialization.patch_size
             ));
         }
-        let patches =
-            (grid / config.serialization.patch_size) * (grid / config.serialization.patch_size);
-        payload_alignment = lcm_usize(payload_alignment, patches)
+        let frame_tokens =
+            (grid / config.serialization.patch_size) * (grid / config.serialization.patch_size)
+                + match &config.tokenization {
+                    crate::config::NcaTokenizationConfig::PatchTokenIds {
+                        frame_special_tokens,
+                        ..
+                    } => usize::from(*frame_special_tokens) * 2,
+                    _ => 0,
+                };
+        payload_alignment = lcm_usize(payload_alignment, frame_tokens)
             .ok_or_else(|| anyhow!("on-the-fly NCA payload alignment overflow"))?;
-        patches_per_frame.push(patches);
+        patches_per_frame.push(frame_tokens);
     }
 
     let target_payload_tokens = desired_payload_tokens
@@ -490,9 +502,9 @@ mod tests {
     fn online_corpus_reports_fixed_document_token_count() {
         let config = fixed_patch_config();
         let corpus = OnlineNcaCorpus::new(config).expect("runtime corpus");
-        assert_eq!(corpus.document_token_count(), 361);
-        assert_eq!(corpus.train_token_count(), 8 * 361);
-        assert_eq!(corpus.val_token_count(), 4 * 361);
+        assert_eq!(corpus.document_token_count(), 381);
+        assert_eq!(corpus.train_token_count(), 8 * 381);
+        assert_eq!(corpus.val_token_count(), 4 * 381);
     }
 
     #[test]
@@ -523,7 +535,7 @@ mod tests {
             .generate_document(SampleSplit::Train, 0)
             .expect("train sample");
         assert_eq!(doc.token_count, 4105);
-        assert_eq!(doc.stats.steps, 114);
+        assert_eq!(doc.stats.steps, 108);
         assert!(doc.stats.mean_transition_rate.is_finite());
         assert!(doc.stats.mean_transition_rate > 0.0);
         assert!(doc.stats.unique_frames > 1);

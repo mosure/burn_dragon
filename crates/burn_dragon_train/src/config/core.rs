@@ -318,6 +318,7 @@ pub struct LowBitModelSpec {
     pub weight_format: LowBitWeightFormat,
     pub activation_format: LowBitActivationFormat,
     pub decoder_x_mode: LowBitWeightFormat,
+    pub encoder_mode: Option<LowBitWeightFormat>,
     pub activation_grouping: LowBitActivationGrouping,
     pub weight_grouping: LowBitWeightGrouping,
     pub strict_bitnet_reference: bool,

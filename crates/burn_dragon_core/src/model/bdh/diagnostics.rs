@@ -1,4 +1,5 @@
 use super::*;
+use crate::model::bdh_support::LanguageMhcSplitBindings;
 
 impl<B: Backend> BDH<B> {
     pub fn collect_language_mhc_diagnostics_with_state(
@@ -185,18 +186,22 @@ impl<B: Backend> BDH<B> {
                 residual_history.as_slice(),
                 mhc_coefficients,
             );
+            let LanguageMhcSplitBindings {
+                branch_input: split_branch_input,
+                merge: merge_bindings,
+            } = bindings;
             let branch_input = if !self.y_neuron_recurrence.enabled
                 && self.summary_memory_applies_to_layer(layer_idx)
             {
                 self.forward_branch_summary_memory(
-                    bindings.branch_input.clone(),
+                    split_branch_input,
                     layer_state,
                     start_pos,
                     summary_event_mask.clone(),
                 )
             } else {
                 layer_state.summary_memory_hidden = None;
-                bindings.branch_input.clone()
+                split_branch_input
             };
 
             if self.clocked_slow_memory_applies_to_layer(layer_idx) {
@@ -212,7 +217,7 @@ impl<B: Backend> BDH<B> {
                 );
                 let next = self.merge_language_residuals_for_layer(
                     branch_out,
-                    bindings,
+                    merge_bindings,
                     &connector,
                     mhc_coefficients,
                 );
@@ -391,7 +396,7 @@ impl<B: Backend> BDH<B> {
                 ]);
                 let next = self.merge_language_residuals_for_layer(
                     branch_out,
-                    bindings,
+                    merge_bindings,
                     &connector,
                     mhc_coefficients,
                 );
@@ -466,7 +471,7 @@ impl<B: Backend> BDH<B> {
                     .reshape([branch_batch, branch_views, branch_time, branch_dim]);
             let next = self.merge_language_residuals_for_layer(
                 branch_out,
-                bindings,
+                merge_bindings,
                 &connector,
                 mhc_coefficients,
             );
@@ -542,16 +547,20 @@ impl<B: Backend> BDH<B> {
                 residual_history.as_slice(),
                 mhc_coefficients,
             );
+            let LanguageMhcSplitBindings {
+                branch_input: split_branch_input,
+                merge: merge_bindings,
+            } = bindings;
             let branch_input = if self.summary_memory_applies_to_layer(layer_idx) {
                 self.forward_branch_summary_memory(
-                    bindings.branch_input.clone(),
+                    split_branch_input,
                     layer_state,
                     start_pos,
                     summary_event_mask.clone(),
                 )
             } else {
                 layer_state.summary_memory_hidden = None;
-                bindings.branch_input.clone()
+                split_branch_input
             };
 
             if self.clocked_slow_memory_applies_to_layer(layer_idx) {
@@ -564,7 +573,7 @@ impl<B: Backend> BDH<B> {
                 );
                 let next = self.merge_language_residuals_for_layer(
                     branch_out,
-                    bindings,
+                    merge_bindings,
                     &connector,
                     mhc_coefficients,
                 );
@@ -642,7 +651,7 @@ impl<B: Backend> BDH<B> {
             let branch_out = next.reshape([branch_batch, branch_views, branch_time, branch_dim]);
             let next = self.merge_language_residuals_for_layer(
                 branch_out,
-                bindings,
+                merge_bindings,
                 &connector,
                 mhc_coefficients,
             );
@@ -706,17 +715,17 @@ impl<B: Backend> BDH<B> {
                 residual_history.as_slice(),
                 mhc_coefficients,
             );
+            let LanguageMhcSplitBindings {
+                branch_input,
+                merge: merge_bindings,
+            } = bindings;
             layer_state.clocked_slow_hidden = None;
             layer_state.summary_memory_hidden = None;
 
             let [branch_batch, branch_views, branch_time, branch_dim] =
-                bindings.branch_input.shape().dims::<4>();
+                branch_input.shape().dims::<4>();
             let flat_batch = branch_batch * branch_views;
-            let branch_flat =
-                bindings
-                    .branch_input
-                    .clone()
-                    .reshape([flat_batch, 1, branch_time, branch_dim]);
+            let branch_flat = branch_input.reshape([flat_batch, 1, branch_time, branch_dim]);
             let (encoder, encoder_v, decoder, latent) = self.layer_lowrank_weights(layer_idx);
             let heads = self.n_head;
             let latent_pattern = &self.kernel.block_sparse.latent;
@@ -777,7 +786,7 @@ impl<B: Backend> BDH<B> {
                     next.reshape([branch_batch, branch_views, branch_time, branch_dim]);
                 let next = self.merge_language_residuals_for_layer(
                     branch_out,
-                    bindings,
+                    merge_bindings,
                     &connector,
                     mhc_coefficients,
                 );
@@ -930,7 +939,7 @@ impl<B: Backend> BDH<B> {
             ]);
             let next = self.merge_language_residuals_for_layer(
                 branch_out,
-                bindings,
+                merge_bindings,
                 &connector,
                 mhc_coefficients,
             );

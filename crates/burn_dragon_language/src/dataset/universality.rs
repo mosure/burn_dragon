@@ -24,6 +24,7 @@ enum UniversalityStorage {
 struct ManifestStorage {
     tokens: Arc<ChunkedTokens>,
     manifest_path: PathBuf,
+    preferred_logical_document_tokens: Option<usize>,
 }
 
 #[derive(Clone)]
@@ -103,6 +104,24 @@ impl UniversalityDataset {
         let manifest =
             burn_dragon_universality::load_manifest(&manifest_path).map_err(io::Error::other)?;
         validate_tokenizer_against_manifest(tokenizer.as_ref(), &manifest.tokenizer)?;
+        let preferred_logical_document_tokens =
+            fixed_manifest_logical_document_tokens(&manifest).map_err(io::Error::other)?;
+        if matches!(
+            manifest.corpus_kind,
+            burn_dragon_universality::CorpusKind::Nca
+        ) && matches!(
+            preferred_logical_document_tokens,
+            Some(logical_document_tokens) if block_size > logical_document_tokens
+        ) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "training.block_size={} exceeds prepared NCA logical document length {}; regenerate the manifest with longer single-rule rollouts",
+                    block_size,
+                    preferred_logical_document_tokens.unwrap_or_default()
+                ),
+            ));
+        }
 
         let manifest_dir = manifest_path
             .parent()
@@ -146,6 +165,7 @@ impl UniversalityDataset {
                     cache: Arc::new(Mutex::new(ChunkRuntimeCache::default())),
                 }),
                 manifest_path,
+                preferred_logical_document_tokens,
             }),
             train_len: manifest.train_token_count,
             token_count: manifest.token_count,
@@ -351,7 +371,7 @@ impl TokenSequenceDataset for UniversalityDataset {
 
     fn preferred_logical_document_tokens(&self, _split: DatasetSplit) -> Option<usize> {
         match &self.storage {
-            UniversalityStorage::Manifest(_) => None,
+            UniversalityStorage::Manifest(storage) => storage.preferred_logical_document_tokens,
             UniversalityStorage::OnTheFly(storage) => {
                 Some(storage.corpus.document_token_count().saturating_sub(1))
             }
@@ -609,6 +629,46 @@ fn runtime_document_cache_limit(batch_size: usize) -> usize {
         .unwrap_or_else(|| DEFAULT_RUNTIME_DOCUMENT_CACHE_LIMIT.max(batch_size.saturating_mul(4)))
 }
 
+fn fixed_manifest_logical_document_tokens(
+    manifest: &burn_dragon_universality::UniversalityCorpusManifest,
+) -> io::Result<Option<usize>> {
+    let train_samples = manifest.stats.train_samples;
+    let val_samples = manifest.stats.validation_samples;
+    let train_doc_tokens = if train_samples > 0 {
+        let per_doc = manifest.train_token_count / train_samples;
+        (manifest.train_token_count % train_samples == 0).then_some(per_doc)
+    } else {
+        None
+    };
+    let val_doc_tokens = if val_samples > 0 {
+        let per_doc = manifest.val_token_count / val_samples;
+        (manifest.val_token_count % val_samples == 0).then_some(per_doc)
+    } else {
+        None
+    };
+    let document_token_count = match (train_doc_tokens, val_doc_tokens) {
+        (Some(train), Some(val)) if train == val => Some(train),
+        (Some(train), None) => Some(train),
+        (None, Some(val)) => Some(val),
+        (None, None) => None,
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "universality manifest has inconsistent prepared document lengths across splits",
+            ));
+        }
+    };
+
+    match document_token_count {
+        Some(0) => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "universality manifest document token count must be > 0",
+        )),
+        Some(count) => Ok(Some(count.saturating_sub(1))),
+        None => Ok(None),
+    }
+}
+
 fn mmap_as_u32_slice(mmap: &Mmap, len: usize) -> &[u32] {
     debug_assert_eq!(mmap.len(), len * 4);
     #[cfg(not(target_endian = "little"))]
@@ -672,17 +732,12 @@ mod tests {
     fn universality_dataset_loads_generated_manifest() {
         let dir = tempdir().expect("tempdir");
         let corpus_dir = dir.path().join("corpus");
-        let config = NcaCorpusConfig {
-            output_dir: corpus_dir.clone(),
-            seed: 1337,
-            name: "dataset".to_string(),
-            train_samples: 4,
-            validation_samples: 2,
-            chunk_token_capacity: 128,
-            serialization: NcaSerializationConfig::default(),
-            tokenization: NcaTokenizationConfig::default(),
-            families: burn_dragon_universality::config::default_families(),
-        };
+        let mut config = fixed_runtime_config();
+        config.output_dir = corpus_dir.clone();
+        config.train_samples = 4;
+        config.validation_samples = 2;
+        config.chunk_token_capacity = 128;
+        config.name = "dataset".to_string();
         let report = generate_nca_corpus(&config).expect("generate corpus");
         let dataset =
             UniversalityDataset::new(&report.manifest_path, 16, 2, 0.9, &pretokenized_tokenizer())
@@ -691,9 +746,40 @@ mod tests {
             dataset.token_count(),
             report.train_token_count + report.val_token_count
         );
+        assert_eq!(
+            dataset.preferred_logical_document_tokens(DatasetSplit::Train),
+            Some(380)
+        );
         let mut buffer = vec![0u32; 17];
         dataset.copy_token_range(0, &mut buffer);
         assert!(buffer.iter().any(|value| *value != 0));
+    }
+
+    #[test]
+    fn nca_manifest_rejects_block_sizes_longer_than_prepared_document() {
+        let dir = tempdir().expect("tempdir");
+        let corpus_dir = dir.path().join("corpus");
+        let mut config = fixed_runtime_config();
+        config.output_dir = corpus_dir.clone();
+        config.train_samples = 4;
+        config.validation_samples = 2;
+        config.chunk_token_capacity = 128;
+        config.name = "dataset".to_string();
+        let report = generate_nca_corpus(&config).expect("generate corpus");
+        let error = UniversalityDataset::new(
+            &report.manifest_path,
+            512,
+            2,
+            0.9,
+            &pretokenized_tokenizer(),
+        )
+        .expect_err("manifest should reject overlong block size");
+        assert!(
+            error
+                .to_string()
+                .contains("exceeds prepared NCA logical document length"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
@@ -713,7 +799,7 @@ mod tests {
         .expect("load on-the-fly dataset");
         assert_eq!(
             dataset.preferred_logical_document_tokens(DatasetSplit::Train),
-            Some(360)
+            Some(380)
         );
 
         let mut first = vec![0u32; 32];

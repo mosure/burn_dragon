@@ -39,6 +39,10 @@ pub struct UniversalityTokenizerManifest {
     #[serde(default)]
     pub eos_id: Option<u32>,
     #[serde(default)]
+    pub frame_start_id: Option<u32>,
+    #[serde(default)]
+    pub frame_end_id: Option<u32>,
+    #[serde(default)]
     pub pad_id: Option<u32>,
     #[serde(default)]
     pub unk_id: Option<u32>,

@@ -158,6 +158,7 @@ pub fn detach_model_state<B: Backend>(state: &ModelState<B>) -> ModelState<B> {
             .layers
             .iter()
             .map(|layer| LayerState {
+                persist_sequence_state: layer.persist_sequence_state,
                 rho: layer.rho.clone().map(Tensor::detach),
                 packed_rho: layer.packed_rho.clone(),
                 packed_rho_int8_device: layer
@@ -191,6 +192,7 @@ pub fn model_state_inner<B: AutodiffBackend>(state: &ModelState<B>) -> ModelStat
             .layers
             .iter()
             .map(|layer| LayerState {
+                persist_sequence_state: layer.persist_sequence_state,
                 rho: layer.rho.clone().map(Tensor::inner),
                 packed_rho: layer.packed_rho.clone(),
                 packed_rho_int8_device: layer.packed_rho_int8_device.clone().map(|state| {
@@ -230,6 +232,7 @@ pub fn model_state_from_inner<B: AutodiffBackend>(
             .layers
             .into_iter()
             .map(|layer| LayerState {
+                persist_sequence_state: layer.persist_sequence_state,
                 rho: layer.rho.map(Tensor::from_inner),
                 packed_rho: layer.packed_rho,
                 packed_rho_int8_device: layer.packed_rho_int8_device.map(|state| {

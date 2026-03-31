@@ -5,6 +5,7 @@ use crate::model::low_bit_runtime::{PackedRhoBlockState, PackedRhoInt8DeviceStat
 
 #[derive(Debug, Clone)]
 pub struct LayerState<B: Backend> {
+    pub persist_sequence_state: bool,
     pub rho: Option<Tensor<B, 4>>,
     pub packed_rho: Option<PackedRhoBlockState>,
     pub packed_rho_int8_device: Option<PackedRhoInt8DeviceState<B>>,
@@ -37,9 +38,18 @@ pub struct LayerVizState<B: Backend> {
 
 impl<B: Backend> ModelState<B> {
     pub fn new(num_layers: usize) -> Self {
+        Self::with_sequence_state_persistence(num_layers, true)
+    }
+
+    pub fn new_ephemeral(num_layers: usize) -> Self {
+        Self::with_sequence_state_persistence(num_layers, false)
+    }
+
+    fn with_sequence_state_persistence(num_layers: usize, persist_sequence_state: bool) -> Self {
         Self {
             layers: (0..num_layers)
                 .map(|_| LayerState {
+                    persist_sequence_state,
                     rho: None,
                     packed_rho: None,
                     packed_rho_int8_device: None,

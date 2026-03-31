@@ -778,10 +778,10 @@ fn weight_decay_for_step(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use burn::module::ModuleVisitor;
     use crate::{MuonHybridConfig, OptimizerKind, OptimizerScheduleMode};
-    use burn_dragon_core::{BDH, BDHConfig, SequenceKernelConfig, SequenceMemorySystem};
+    use burn::module::ModuleVisitor;
     use burn::tensor::TensorData;
+    use burn_dragon_core::{BDH, BDHConfig, SequenceKernelConfig, SequenceMemorySystem};
     use burn_ndarray::NdArray;
     use std::collections::HashMap;
 

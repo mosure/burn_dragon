@@ -1,9 +1,23 @@
+use std::sync::Once;
+
 #[cfg(feature = "cuda")]
 use super::cuda::try_raw_cuda_pack_activation_codes_i8x4;
 use super::wgpu::{
     packed_decoder_tail_packed_dot_wgsl_runtime, packed_lowrank_projection_packed_dot_wgsl_runtime,
 };
 use super::*;
+
+fn low_bit_training_debug_enabled() -> bool {
+    std::env::var_os("BDH_STAGE_PROFILE_LOWBIT_DEBUG").is_some()
+}
+
+fn emit_lowrank_training_debug_once(message: impl FnOnce() -> String) {
+    if !low_bit_training_debug_enabled() {
+        return;
+    }
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| eprintln!("{message}", message = message()));
+}
 
 #[derive(Debug, Clone, Copy)]
 struct PackedLowrankTrainingShape {
@@ -1057,9 +1071,10 @@ fn fused_packed_lowrank_training_autodiff_cuda<C: CheckpointStrategy>(
     relu_threshold: Option<f32>,
 ) -> CudaCubeAutodiffTensor<C> {
     let input_inner = <CudaCubeAutodiffBackend<C> as AutodiffBackend>::inner(input.clone());
+    let weight_inner = <CudaCubeAutodiffBackend<C> as AutodiffBackend>::inner(weight.clone());
     let [batch, input_heads, time, _] = input_inner.meta.shape.dims::<4>();
     let heads = weight_codes.meta.shape.dims::<3>()[0];
-    let [_, _, embd, latent] = input_inner.meta.shape.dims::<4>();
+    let [outer, _, embd, latent] = weight_inner.meta.shape.dims::<4>();
     let input_device = input_codes.device.clone();
     let input_codes_tensor = BurnTensor::<CudaCubeBackend, 4, Int>::from_primitive(
         try_cast_int_backend::<CudaCubeBackend, _>(input_codes.clone())
@@ -1076,12 +1091,10 @@ fn fused_packed_lowrank_training_autodiff_cuda<C: CheckpointStrategy>(
         }
     } else {
         let weight_float =
-            BurnTensor::<CudaCubeBackend, 4>::from_primitive(TensorPrimitive::Float(
-                <CudaCubeAutodiffBackend<C> as AutodiffBackend>::inner(weight.clone()),
-            ));
+            BurnTensor::<CudaCubeBackend, 4>::from_primitive(TensorPrimitive::Float(weight_inner));
         let weight_transposed_float = try_cast_float_primitive::<CudaCubeBackend, _>(
             weight_float
-                .slice([0..1, 0..heads, 0..embd, 0..latent])
+                .slice([0..outer, 0..heads, 0..embd, 0..latent])
                 .reshape([heads, embd, latent])
                 .swap_dims(1, 2)
                 .into_primitive()
@@ -1550,6 +1563,50 @@ where
         return try_cast_float_backend::<B, _>(output)
             .map(|prim| BurnTensor::from_primitive(TensorPrimitive::Float(prim)));
     }
+    #[cfg(feature = "cuda")]
+    {
+        let no_ckpt_input = try_cast_float_primitive::<B, CudaCubeAutodiffTensor<NoCheckpointing>>(
+            input.clone().into_primitive().tensor(),
+        )
+        .is_some();
+        let no_ckpt_weight =
+            try_cast_float_primitive::<B, CudaCubeAutodiffTensor<NoCheckpointing>>(
+                weight.clone().into_primitive().tensor(),
+            )
+            .is_some();
+        let bal_input =
+            try_cast_float_primitive::<B, CudaCubeAutodiffTensor<BalancedCheckpointing>>(
+                input.clone().into_primitive().tensor(),
+            )
+            .is_some();
+        let bal_weight =
+            try_cast_float_primitive::<B, CudaCubeAutodiffTensor<BalancedCheckpointing>>(
+                weight.clone().into_primitive().tensor(),
+            )
+            .is_some();
+        let input_codes_cuda = try_cast_int_primitive::<B, CubeTensor<CudaRuntime>>(
+            input_codes.clone().into_primitive(),
+        )
+        .is_some();
+        let weight_codes_cuda = try_cast_int_primitive::<B, CubeTensor<CudaRuntime>>(
+            weight_codes.clone().into_primitive(),
+        )
+        .is_some();
+        emit_lowrank_training_debug_once(|| {
+            format!(
+                "low-bit fused training cast miss: backend={} float_prim={} int_prim={} no_ckpt_input={} no_ckpt_weight={} bal_input={} bal_weight={} input_codes_cuda={} weight_codes_cuda={}",
+                core::any::type_name::<B>(),
+                core::any::type_name::<B::FloatTensorPrimitive>(),
+                core::any::type_name::<B::IntTensorPrimitive>(),
+                no_ckpt_input,
+                no_ckpt_weight,
+                bal_input,
+                bal_weight,
+                input_codes_cuda,
+                weight_codes_cuda,
+            )
+        });
+    }
     None
 }
 
@@ -1570,28 +1627,45 @@ where
 {
     let _use_balanced_checkpointing = core::any::type_name::<B>().contains("BalancedCheckpointing");
     #[cfg(feature = "cuda")]
-    if let (
-        Some(input_ad),
-        Some(weight_ad),
-        Some(input_codes_inner),
-        Some(weight_codes_inner),
-        Some(projection_scale_inner),
-    ) = (
-        try_cast_float_primitive::<B, CudaCubeAutodiffTensor>(
-            _input.clone().into_primitive().tensor(),
-        ),
-        try_cast_float_primitive::<B, CudaCubeAutodiffTensor>(
-            _weight.clone().into_primitive().tensor(),
-        ),
-        try_cast_int_primitive::<B, CubeTensor<CudaRuntime>>(_input_codes.clone().into_primitive()),
-        try_cast_int_primitive::<B, CubeTensor<CudaRuntime>>(
-            _weight_codes.clone().into_primitive(),
-        ),
+    fn try_cast_cuda_projection_scale<B: BackendTrait, C: CheckpointStrategy>(
+        projection_scale: &BurnTensor<B, 1>,
+    ) -> Option<CubeTensor<CudaRuntime>>
+    where
+        B::FloatTensorPrimitive: 'static,
+    {
         try_cast_float_primitive::<B, CubeTensor<CudaRuntime>>(
-            _projection_scale.clone().into_primitive().tensor(),
-        ),
-    ) {
-        let output = if _use_balanced_checkpointing {
+            projection_scale.clone().into_primitive().tensor(),
+        )
+        .or_else(|| {
+            try_cast_float_primitive::<B, CudaCubeAutodiffTensor<C>>(
+                projection_scale.clone().into_primitive().tensor(),
+            )
+            .map(|tensor| <CudaCubeAutodiffBackend<C> as AutodiffBackend>::inner(tensor))
+        })
+    }
+    #[cfg(feature = "cuda")]
+    if _use_balanced_checkpointing {
+        let output = if let (
+            Some(input_ad),
+            Some(weight_ad),
+            Some(input_codes_inner),
+            Some(weight_codes_inner),
+            Some(projection_scale_inner),
+        ) = (
+            try_cast_float_primitive::<B, CudaCubeAutodiffTensor<BalancedCheckpointing>>(
+                _input.clone().into_primitive().tensor(),
+            ),
+            try_cast_float_primitive::<B, CudaCubeAutodiffTensor<BalancedCheckpointing>>(
+                _weight.clone().into_primitive().tensor(),
+            ),
+            try_cast_int_primitive::<B, CubeTensor<CudaRuntime>>(
+                _input_codes.clone().into_primitive(),
+            ),
+            try_cast_int_primitive::<B, CubeTensor<CudaRuntime>>(
+                _weight_codes.clone().into_primitive(),
+            ),
+            try_cast_cuda_projection_scale::<B, BalancedCheckpointing>(_projection_scale),
+        ) {
             fused_packed_lowrank_training_autodiff_cuda::<BalancedCheckpointing>(
                 input_ad,
                 weight_ad,
@@ -1605,21 +1679,95 @@ where
                 _relu_threshold,
             )
         } else {
-            fused_packed_lowrank_training_autodiff_cuda::<NoCheckpointing>(
-                input_ad,
-                weight_ad,
-                input_codes_inner,
-                weight_codes_inner,
-                _activation_scale,
-                1.0,
-                Some(projection_scale_inner),
-                _latent_out,
-                _pack_activation_state_to_host,
-                _relu_threshold,
-            )
+            return None;
         };
         return try_cast_float_backend::<B, _>(output)
             .map(|prim| BurnTensor::from_primitive(TensorPrimitive::Float(prim)));
+    }
+    #[cfg(feature = "cuda")]
+    if let (
+        Some(input_ad),
+        Some(weight_ad),
+        Some(input_codes_inner),
+        Some(weight_codes_inner),
+        Some(projection_scale_inner),
+    ) = (
+        try_cast_float_primitive::<B, CudaCubeAutodiffTensor<NoCheckpointing>>(
+            _input.clone().into_primitive().tensor(),
+        ),
+        try_cast_float_primitive::<B, CudaCubeAutodiffTensor<NoCheckpointing>>(
+            _weight.clone().into_primitive().tensor(),
+        ),
+        try_cast_int_primitive::<B, CubeTensor<CudaRuntime>>(_input_codes.clone().into_primitive()),
+        try_cast_int_primitive::<B, CubeTensor<CudaRuntime>>(
+            _weight_codes.clone().into_primitive(),
+        ),
+        try_cast_cuda_projection_scale::<B, NoCheckpointing>(_projection_scale),
+    ) {
+        let output = fused_packed_lowrank_training_autodiff_cuda::<NoCheckpointing>(
+            input_ad,
+            weight_ad,
+            input_codes_inner,
+            weight_codes_inner,
+            _activation_scale,
+            1.0,
+            Some(projection_scale_inner),
+            _latent_out,
+            _pack_activation_state_to_host,
+            _relu_threshold,
+        );
+        return try_cast_float_backend::<B, _>(output)
+            .map(|prim| BurnTensor::from_primitive(TensorPrimitive::Float(prim)));
+    }
+    #[cfg(feature = "cuda")]
+    {
+        let no_ckpt_input = try_cast_float_primitive::<B, CudaCubeAutodiffTensor<NoCheckpointing>>(
+            _input.clone().into_primitive().tensor(),
+        )
+        .is_some();
+        let no_ckpt_weight =
+            try_cast_float_primitive::<B, CudaCubeAutodiffTensor<NoCheckpointing>>(
+                _weight.clone().into_primitive().tensor(),
+            )
+            .is_some();
+        let bal_input =
+            try_cast_float_primitive::<B, CudaCubeAutodiffTensor<BalancedCheckpointing>>(
+                _input.clone().into_primitive().tensor(),
+            )
+            .is_some();
+        let bal_weight =
+            try_cast_float_primitive::<B, CudaCubeAutodiffTensor<BalancedCheckpointing>>(
+                _weight.clone().into_primitive().tensor(),
+            )
+            .is_some();
+        let input_codes_cuda = try_cast_int_primitive::<B, CubeTensor<CudaRuntime>>(
+            _input_codes.clone().into_primitive(),
+        )
+        .is_some();
+        let weight_codes_cuda = try_cast_int_primitive::<B, CubeTensor<CudaRuntime>>(
+            _weight_codes.clone().into_primitive(),
+        )
+        .is_some();
+        let proj_no_ckpt =
+            try_cast_cuda_projection_scale::<B, NoCheckpointing>(_projection_scale).is_some();
+        let proj_bal =
+            try_cast_cuda_projection_scale::<B, BalancedCheckpointing>(_projection_scale).is_some();
+        emit_lowrank_training_debug_once(|| {
+            format!(
+                "low-bit fused training device-scale cast miss: backend={} float_prim={} int_prim={} no_ckpt_input={} no_ckpt_weight={} bal_input={} bal_weight={} input_codes_cuda={} weight_codes_cuda={} proj_no_ckpt={} proj_bal={}",
+                core::any::type_name::<B>(),
+                core::any::type_name::<B::FloatTensorPrimitive>(),
+                core::any::type_name::<B::IntTensorPrimitive>(),
+                no_ckpt_input,
+                no_ckpt_weight,
+                bal_input,
+                bal_weight,
+                input_codes_cuda,
+                weight_codes_cuda,
+                proj_no_ckpt,
+                proj_bal,
+            )
+        });
     }
     None
 }

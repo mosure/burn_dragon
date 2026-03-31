@@ -1,4 +1,5 @@
 use super::*;
+use crate::model::bdh_support::LanguageMhcSplitBindings;
 #[cfg(not(any(feature = "viz", feature = "probe")))]
 use crate::model::residual_stream::lowrank_residual_step_next_branch_thresholds_relu_native;
 
@@ -99,16 +100,20 @@ impl<B: Backend> BDH<B> {
                 pipeline_state.residual_history.as_slice(),
                 mhc_coefficients,
             );
+            let LanguageMhcSplitBindings {
+                branch_input: split_branch_input,
+                merge: merge_bindings,
+            } = bindings;
             let branch_input = if self.summary_memory_applies_to_layer(layer_idx) {
                 self.forward_branch_summary_memory(
-                    bindings.branch_input.clone(),
+                    split_branch_input,
                     layer_state,
                     start_pos,
                     summary_event_mask.clone(),
                 )
             } else {
                 layer_state.summary_memory_hidden = None;
-                bindings.branch_input.clone()
+                split_branch_input
             };
 
             if self.clocked_slow_memory_applies_to_layer(layer_idx) {
@@ -121,7 +126,7 @@ impl<B: Backend> BDH<B> {
                 );
                 let next = self.merge_language_residuals_for_layer(
                     branch_out,
-                    bindings,
+                    merge_bindings,
                     &connector,
                     mhc_coefficients,
                 );
@@ -151,7 +156,16 @@ impl<B: Backend> BDH<B> {
             } else {
                 None
             };
-            let fused_recurrent_plan = if self.kernel.enabled
+            let fused_recurrent_plan = if matches!(
+                (
+                    self.sequence_kernel.memory_system,
+                    self.sequence_kernel.executor,
+                ),
+                (
+                    SequenceMemorySystem::LinearAttention,
+                    SequenceTrainingExecutor::Reference,
+                )
+            ) && self.kernel.enabled
                 && self.kernel.wgpu_recurrent_kernel
                 && supports_recurrent_backend::<B>()
             {
@@ -167,6 +181,11 @@ impl<B: Backend> BDH<B> {
             } else {
                 None
             };
+            let rwkv_decay = matches!(
+                self.sequence_kernel.memory_system,
+                SequenceMemorySystem::Rwkv8StateSpace
+            )
+            .then(|| self.rwkv_decay(latent));
             #[cfg(any(feature = "viz", feature = "probe"))]
             let output = lowrank_residual_step_branch_thresholds_relu_native(
                 branch_flat.clone(),
@@ -186,14 +205,18 @@ impl<B: Backend> BDH<B> {
                 self.kernel.lowrank_grad_input_executor,
                 sparse_mask.clone(),
                 |query, value| {
-                    self.recurrent_attention_with_plan(
-                        query,
-                        value,
-                        layer_state,
-                        start_pos,
-                        position_mode,
-                        fused_recurrent_plan.as_ref(),
-                    )
+                    if let Some(decay) = rwkv_decay.as_ref() {
+                        self.recurrent_rwkv8_with_decay(query, value, layer_state, decay.clone())
+                    } else {
+                        self.recurrent_attention_with_plan(
+                            query,
+                            value,
+                            layer_state,
+                            start_pos,
+                            position_mode,
+                            fused_recurrent_plan.as_ref(),
+                        )
+                    }
                 },
                 |values| activation::relu(values),
                 |values| self.norm.forward(values),
@@ -217,14 +240,18 @@ impl<B: Backend> BDH<B> {
                 self.kernel.lowrank_grad_input_executor,
                 sparse_mask.clone(),
                 |query, value| {
-                    self.recurrent_attention_with_plan(
-                        query,
-                        value,
-                        layer_state,
-                        start_pos,
-                        position_mode,
-                        fused_recurrent_plan.as_ref(),
-                    )
+                    if let Some(decay) = rwkv_decay.as_ref() {
+                        self.recurrent_rwkv8_with_decay(query, value, layer_state, decay.clone())
+                    } else {
+                        self.recurrent_attention_with_plan(
+                            query,
+                            value,
+                            layer_state,
+                            start_pos,
+                            position_mode,
+                            fused_recurrent_plan.as_ref(),
+                        )
+                    }
                 },
                 |values| activation::relu(values),
                 |values| self.norm.forward(values),
@@ -300,7 +327,7 @@ impl<B: Backend> BDH<B> {
                     .reshape([branch_batch, branch_views, branch_time, branch_dim]);
             let next = self.merge_language_residuals_for_layer(
                 branch_out,
-                bindings,
+                merge_bindings,
                 &connector,
                 mhc_coefficients,
             );

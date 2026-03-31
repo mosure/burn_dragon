@@ -258,7 +258,7 @@ fn generate_neural_stochastic_sample(
         .upper_bound
         .or_else(|| default_rule_filter_for_band(family.complexity).upper_bound)
         .unwrap_or(1.0);
-    let scoring_examples = filter.scoring_examples.unwrap_or(steps).max(steps);
+    let scoring_examples = filter.scoring_examples.unwrap_or(steps).max(1);
     let target = 0.5 * (lower + upper);
 
     let mut best_distance = f32::INFINITY;
@@ -1020,6 +1020,7 @@ fn family_kind_label(kind: NcaFamilyKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::NcaRuleFilterConfig;
 
     #[test]
     fn neural_stochastic_generation_is_stable_for_fixed_seed() {
@@ -1097,5 +1098,32 @@ mod tests {
         let patch_vocab = (sample.state_count as u32)
             .pow((serialization.patch_size * serialization.patch_size) as u32);
         assert!(tokens.iter().all(|&token| token < patch_vocab));
+    }
+
+    #[test]
+    fn neural_stochastic_rule_filter_can_score_shorter_rollouts_than_output_examples() {
+        let family = NcaFamilyConfig {
+            kind: NcaFamilyKind::NeuralStochastic,
+            weight: 1,
+            complexity: NcaComplexityBand::Medium,
+            grid_size: Some(UsizeRangeConfig { min: 12, max: 12 }),
+            steps: Some(UsizeRangeConfig { min: 15, max: 15 }),
+            state_count: Some(UsizeRangeConfig { min: 10, max: 10 }),
+            step_stride: Some(UsizeRangeConfig { min: 2, max: 2 }),
+            start_step: Some(UsizeRangeConfig { min: 0, max: 0 }),
+            identity_bias: Some(FloatRangeConfig { min: 0.0, max: 0.0 }),
+            temperature: Some(FloatRangeConfig { min: 0.0, max: 0.0 }),
+            rule_filter: Some(NcaRuleFilterConfig {
+                scoring_examples: Some(10),
+                ..default_rule_filter_for_band(NcaComplexityBand::Medium)
+            }),
+        };
+        let serialization = NcaSerializationConfig::default();
+        let mut rng = StdRng::seed_from_u64(2026);
+        let sample = generate_sample(&family, &serialization, &mut rng);
+        assert_eq!(sample.frames.len(), 15);
+        assert_eq!(sample.step_stride, 2);
+        assert_eq!(sample.start_step, 0);
+        assert!(sample.gzip_complexity_ratio.is_finite());
     }
 }

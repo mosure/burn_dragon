@@ -180,6 +180,8 @@ pub enum NcaTokenizationConfig {
         vocab_size: usize,
         #[serde(default = "default_gpt2_eos_id")]
         eos_id: Option<u32>,
+        #[serde(default = "default_true")]
+        frame_special_tokens: bool,
     },
     RustBpe {
         vocab_path: PathBuf,
@@ -200,6 +202,7 @@ impl Default for NcaTokenizationConfig {
         Self::PatchTokenIds {
             vocab_size: default_gpt2_vocab_size(),
             eos_id: default_gpt2_eos_id(),
+            frame_special_tokens: default_true(),
         }
     }
 }
@@ -297,7 +300,11 @@ impl NcaCorpusConfig {
                     ));
                 }
             }
-            NcaTokenizationConfig::PatchTokenIds { vocab_size, eos_id } => {
+            NcaTokenizationConfig::PatchTokenIds {
+                vocab_size,
+                eos_id,
+                frame_special_tokens,
+            } => {
                 if *vocab_size < 2 {
                     return Err(anyhow!(
                         "tokenization.vocab_size must be >= 2 for patch_token_ids"
@@ -314,7 +321,8 @@ impl NcaCorpusConfig {
                         (self.serialization.patch_size * self.serialization.patch_size) as u32,
                     )
                     .ok_or_else(|| anyhow!("patch token vocabulary overflow"))?;
-                let special_budget = usize::from(eos_id.is_some());
+                let frame_special_budget = usize::from(*frame_special_tokens) * 2;
+                let special_budget = usize::from(eos_id.is_some()) + frame_special_budget;
                 if patch_vocab_size.saturating_add(special_budget) > *vocab_size {
                     return Err(anyhow!(
                         "tokenization.vocab_size={} is too small for patch_token_ids (need at least {} states^patch_cells + specials = {})",
@@ -322,6 +330,17 @@ impl NcaCorpusConfig {
                         patch_states,
                         patch_vocab_size + special_budget
                     ));
+                }
+                if *frame_special_tokens {
+                    let frame_start_id = patch_vocab_size as u32;
+                    let frame_end_id = frame_start_id
+                        .checked_add(1)
+                        .ok_or_else(|| anyhow!("patch frame special token overflow"))?;
+                    if matches!(eos_id, Some(id) if *id == frame_start_id || *id == frame_end_id) {
+                        return Err(anyhow!(
+                            "tokenization.eos_id collides with patch frame special token ids"
+                        ));
+                    }
                 }
             }
             NcaTokenizationConfig::RustBpe {

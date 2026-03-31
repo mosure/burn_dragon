@@ -221,6 +221,7 @@ pub(crate) fn build_model_spec(model_config: &BDHConfig) -> ModelSpec {
             weight_format: model_config.quant.weight_format,
             activation_format: model_config.quant.act_format,
             decoder_x_mode: model_config.quant.decoder_x_mode,
+            encoder_mode: model_config.quant.encoder_mode,
             activation_grouping: model_config.quant.act_grouping,
             weight_grouping: model_config.quant.weight_grouping,
             strict_bitnet_reference: model_config.quant.strict_bitnet_reference,

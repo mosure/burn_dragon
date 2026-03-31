@@ -62,7 +62,7 @@ fn cuda_rwkv8_tensorized_chunk_size(
     }
 
     let threshold_bytes = cuda_rwkv8_tensorized_scan_threshold_bytes();
-    let mut chunk = time.min(128).max(1);
+    let mut chunk = time.min(64).max(1);
     while chunk > 1
         && cuda_rwkv8_tensorized_scratch_bytes(batch, heads, chunk, latent, embd) > threshold_bytes
     {
@@ -1046,7 +1046,7 @@ mod tests {
         assert!(summary.contains("tokens/micro_batch=12288"), "{summary}");
         assert!(summary.contains("latent_total=512"), "{summary}");
         assert!(summary.contains("latent/head=128"), "{summary}");
-        assert!(summary.contains("runtime_chunk=128"), "{summary}");
+        assert!(summary.contains("runtime_chunk=64"), "{summary}");
     }
 
     #[test]

@@ -12,21 +12,21 @@ use crate::experimental::bitnet_reference::{
 use crate::model::low_bit_runtime::{
     cache_decoder_tail_artifact, cache_lowrank_projection_artifact,
 };
+use crate::model::sequence::SequenceMemorySystem;
 use crate::model::sequence::mamba::MambaSequenceParameters;
 use crate::model::{
     AttentionResidual, BDH, BlockAttentionResidual, DragonNorm, LowBitWeightFormat,
-    ManifoldHyperConnections, attention::Attention, fake_quantize_weight_ste,
+    ManifoldHyperConnections, fake_quantize_weight_ste,
 };
 
 #[derive(Module, Debug)]
 pub struct BdhBitNetDeployScaffold<B: Backend> {
     embed: Embedding<B>,
     norm: DragonNorm<B>,
-    attention: Attention<B>,
     mhc_shared: Option<ManifoldHyperConnections<B>>,
     attention_residual_shared: Option<AttentionResidual<B>>,
     block_attention_residual_shared: Option<BlockAttentionResidual<B>>,
-    rwkv_time_decay: Param<Tensor<B, 2>>,
+    rwkv_time_decay: Option<Param<Tensor<B, 2>>>,
     mamba: Option<MambaSequenceParameters<B>>,
     lm_head: Param<Tensor<B, 2>>,
 }
@@ -45,11 +45,12 @@ impl<B: Backend> BDH<B> {
         BdhBitNetDeployScaffold {
             embed: self.embed.clone(),
             norm: self.norm.clone(),
-            attention: self.attention.clone(),
             mhc_shared: self.mhc_shared.clone(),
             attention_residual_shared: self.attention_residual_shared.clone(),
             block_attention_residual_shared: self.block_attention_residual_shared.clone(),
-            rwkv_time_decay: self.rwkv_time_decay.clone(),
+            rwkv_time_decay: (self.sequence_kernel.memory_system
+                == SequenceMemorySystem::Rwkv8StateSpace)
+                .then(|| self.rwkv_time_decay.clone()),
             mamba: self.mamba.clone(),
             lm_head: self.lm_head.clone(),
         }

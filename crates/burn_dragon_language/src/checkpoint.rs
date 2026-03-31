@@ -8,11 +8,12 @@ use burn::module::Module;
 use burn::record::{BinFileRecorder, FullPrecisionSettings, Recorder};
 use burn::tensor::backend::Backend as BackendTrait;
 use burn_dragon_checkpoint::{
-    BurnpackBundleExportOptions, BurnpackBundleExportReport, apply_burnpack_part_bytes,
-    export_model_to_burnpack_bundle, format_checkpoint_load_error, load_json_snapshot,
-    resolve_checkpoint_base as resolve_checkpoint_base_shared,
+    BurnpackBundleExportOptions, BurnpackBundleExportReport, BurnpackFloatPrecision,
+    BurnpackLoadPolicy, BurnpackPrecisionPreference, apply_burnpack_part_bytes,
+    convert_burnpack_precision, export_model_to_burnpack_bundle, format_checkpoint_load_error,
+    load_json_snapshot, resolve_checkpoint_base as resolve_checkpoint_base_shared,
     resolve_checkpoint_run_dir as resolve_checkpoint_run_dir_shared, run_snapshot_path,
-    save_model_to_burnpack, write_json_snapshot,
+    write_json_snapshot,
 };
 use burn_dragon_train::train::metrics::MetricsSinkSpec;
 use burn_dragon_train::train::pipeline::resolve_latest_run_dir_in as resolve_latest_run_dir_shared;
@@ -91,6 +92,13 @@ pub struct LanguageBitNetArtifactExportReport {
     pub run_dir: Option<PathBuf>,
     pub artifact_path: PathBuf,
     pub bundle: LanguageBitNetArtifactBundle,
+}
+
+#[derive(Debug, Clone)]
+struct BurnpackApplySummary {
+    applied: Vec<String>,
+    unused: Vec<String>,
+    error_count: usize,
 }
 
 fn bitnet_artifact_path_is_supported(path: &Path) -> bool {
@@ -206,9 +214,83 @@ fn export_bitnet_deploy_base_burnpack_bytes(model: &BDH<ExportBackend>) -> Resul
     let temp_dir = tempfile::tempdir().context("create temp dir for BitNet deploy scaffold")?;
     let burnpack_base = temp_dir.path().join("bitnet_deploy_base");
     let scaffold = model.export_bitnet_deploy_scaffold();
-    let burnpack_path = save_model_to_burnpack(&scaffold, &burnpack_base)
-        .map_err(|err| anyhow!("failed to serialize BitNet deploy scaffold burnpack: {err}"))?;
-    fs::read(&burnpack_path).with_context(|| format!("failed to read {}", burnpack_path.display()))
+    let report = export_model_to_burnpack_bundle(
+        &scaffold,
+        &burnpack_base,
+        &BurnpackBundleExportOptions {
+            precision: BurnpackFloatPrecision::F16,
+            max_part_size_mib: None,
+            overwrite_parts: false,
+            keep_intermediate_f32: false,
+            ..BurnpackBundleExportOptions::default()
+        },
+    )
+    .map_err(|err| anyhow!("failed to serialize BitNet deploy scaffold burnpack: {err}"))?;
+    fs::read(&report.burnpack_path)
+        .with_context(|| format!("failed to read {}", report.burnpack_path.display()))
+}
+
+fn convert_burnpack_bytes_precision(
+    burnpack_bytes: &[u8],
+    precision: BurnpackFloatPrecision,
+) -> Result<Vec<u8>> {
+    let temp_dir = tempfile::tempdir().context("create temp dir for burnpack conversion")?;
+    let source = temp_dir.path().join("source_f16.bpk");
+    fs::write(&source, burnpack_bytes)
+        .with_context(|| format!("failed to write {}", source.display()))?;
+    let converted = convert_burnpack_precision(
+        &source,
+        &temp_dir.path().join("converted"),
+        precision,
+        BurnpackLoadPolicy::default().with_precision(BurnpackPrecisionPreference::PreferF32),
+    )
+    .map_err(|err| anyhow!("failed to convert burnpack precision: {err}"))?;
+    fs::read(&converted).with_context(|| format!("failed to read {}", converted.display()))
+}
+
+fn backend_requires_f32_burnpack_apply<B: BackendTrait>() -> bool {
+    let backend = std::any::type_name::<B>();
+    backend.contains("burn_ndarray::NdArray") || backend.contains("burn_ndarray")
+}
+
+fn apply_deploy_base_burnpack_bytes_to_model<B: BackendTrait>(
+    model: &mut BDH<B>,
+    deploy_base_burnpack: Vec<u8>,
+) -> Result<BurnpackApplySummary> {
+    let deploy_base_burnpack = if backend_requires_f32_burnpack_apply::<B>() {
+        convert_burnpack_bytes_precision(&deploy_base_burnpack, BurnpackFloatPrecision::F32)
+            .context("convert BitNet deploy scaffold burnpack to backend-compatible f32")?
+    } else {
+        deploy_base_burnpack
+    };
+    match apply_burnpack_part_bytes(model, deploy_base_burnpack.clone()) {
+        Ok(result) => Ok(BurnpackApplySummary {
+            applied: result.applied,
+            unused: result.unused,
+            error_count: result.errors.len(),
+        }),
+        Err(err) if err.contains("Unsupported dtype F16") => {
+            let converted = convert_burnpack_bytes_precision(
+                &deploy_base_burnpack,
+                BurnpackFloatPrecision::F32,
+            )
+            .context("convert BitNet deploy scaffold burnpack to f32 fallback")?;
+            apply_burnpack_part_bytes(model, converted)
+                .map(|result| BurnpackApplySummary {
+                    applied: result.applied,
+                    unused: result.unused,
+                    error_count: result.errors.len(),
+                })
+                .map_err(|retry_err| {
+                    anyhow!(
+                        "failed to apply BitNet deploy scaffold burnpack after f16->f32 fallback: {retry_err}"
+                    )
+                })
+        }
+        Err(err) => Err(anyhow!(
+            "failed to apply BitNet deploy scaffold burnpack: {err}"
+        )),
+    }
 }
 
 pub fn apply_bitnet_artifact_bundle_to_model<B: BackendTrait>(
@@ -217,12 +299,11 @@ pub fn apply_bitnet_artifact_bundle_to_model<B: BackendTrait>(
     device: &B::Device,
 ) -> Result<()> {
     if let Some(deploy_base_burnpack) = artifact_bundle.deploy_base_burnpack.clone() {
-        let apply_result = apply_burnpack_part_bytes(model, deploy_base_burnpack)
-            .map_err(|err| anyhow!("failed to apply BitNet deploy scaffold burnpack: {err}"))?;
-        if !apply_result.errors.is_empty() {
+        let apply_result = apply_deploy_base_burnpack_bytes_to_model(model, deploy_base_burnpack)?;
+        if apply_result.error_count > 0 {
             return Err(anyhow!(
                 "BitNet deploy scaffold burnpack reported {} apply errors",
-                apply_result.errors.len()
+                apply_result.error_count
             ));
         }
         if !apply_result.unused.is_empty() {
@@ -740,7 +821,7 @@ mod tests {
     use burn::tensor::{Int, Tensor};
     use burn_dragon_checkpoint::{
         BurnpackFloatPrecision, burnpack_parts_manifest_path, checkpoint_bin_path,
-        manifest_is_complete,
+        manifest_is_complete, save_model_to_burnpack,
     };
     use burn_dragon_train::{
         OptimizerConfig, OptimizerKind, OptimizerScheduleMode, WgpuRuntimeConfig,
@@ -892,6 +973,136 @@ mod tests {
         assert!(report.bundle.static_weights.encoder.is_some());
         assert_eq!(report.bundle.kernel_abi_version, Some(1));
         assert!(report.artifact_path.is_file());
+    }
+
+    #[test]
+    fn bitnet_deploy_scaffold_burnpack_uses_smaller_f16_payload() {
+        let dir = tempdir().expect("tempdir");
+        let device = <ExportBackend as BackendTrait>::Device::default();
+        ExportBackend::seed(&device, 1337);
+        let config = test_config(dir.path().join("cache"));
+        let tokenizer = config
+            .dataset
+            .tokenizer
+            .fit(["All the world's a stage"].into_iter())
+            .expect("fit tokenizer");
+        let model_config = crate::build_model_config_with_tokenizer(
+            &config.model,
+            config.training.block_size,
+            tokenizer.as_ref(),
+        )
+        .expect("build model config with tokenizer");
+        let model = BDH::<ExportBackend>::new(model_config, &device);
+        let scaffold = model.export_bitnet_deploy_scaffold();
+        let f32_burnpack = save_model_to_burnpack(&scaffold, &dir.path().join("scaffold_f32"))
+            .expect("write f32 scaffold burnpack");
+        let f32_bytes = fs::read(&f32_burnpack).expect("read f32 scaffold burnpack");
+        let f16_bytes =
+            super::export_bitnet_deploy_base_burnpack_bytes(&model).expect("export f16 scaffold");
+
+        assert!(
+            f16_bytes.len() < f32_bytes.len(),
+            "expected f16 scaffold burnpack to be smaller than f32 (f16={}, f32={})",
+            f16_bytes.len(),
+            f32_bytes.len()
+        );
+        assert!(
+            f16_bytes.windows(3).any(|window| window == b"F16"),
+            "expected scaffold burnpack metadata to encode f16 tensors"
+        );
+    }
+
+    #[test]
+    fn bitnet_deploy_scaffold_only_applies_fp_remainder() {
+        let dir = tempdir().expect("tempdir");
+        let tokenizer = test_config(dir.path().join("cache"))
+            .dataset
+            .tokenizer
+            .fit(["All the world's a stage"].into_iter())
+            .expect("fit tokenizer");
+        let device = <ExportBackend as BackendTrait>::Device::default();
+
+        let mut dy_config = test_config(dir.path().join("cache_dy"));
+        dy_config.model.quant = Some(burn_dragon_core::LowBitQuantizationConfig {
+            enable: true,
+            protocol: burn_dragon_core::BitNetLowBitProtocol::BitnetB158,
+            weight_format: burn_dragon_core::LowBitWeightFormat::Int8,
+            act_format: burn_dragon_core::LowBitActivationFormat::Int8,
+            target_modules: vec![burn_dragon_core::LowBitTargetModule::DecoderY],
+            decoder_x_mode: burn_dragon_core::LowBitWeightFormat::Fp16,
+            ..Default::default()
+        });
+        let dy_model_config = crate::build_model_config_with_tokenizer(
+            &dy_config.model,
+            dy_config.training.block_size,
+            tokenizer.as_ref(),
+        )
+        .expect("build dy model config");
+        ExportBackend::seed(&device, 1337);
+        let dy_model = BDH::<ExportBackend>::new(dy_model_config.clone(), &device);
+        let dy_scaffold_bytes =
+            super::export_bitnet_deploy_base_burnpack_bytes(&dy_model).expect("export dy scaffold");
+        let mut dy_apply_model = BDH::<ExportBackend>::new(dy_model_config, &device);
+        let dy_apply = super::apply_deploy_base_burnpack_bytes_to_model(
+            &mut dy_apply_model,
+            dy_scaffold_bytes,
+        )
+        .expect("apply dy scaffold");
+
+        let mut xy_config = test_config(dir.path().join("cache_xy"));
+        xy_config.model.quant = Some(burn_dragon_core::LowBitQuantizationConfig {
+            enable: true,
+            protocol: burn_dragon_core::BitNetLowBitProtocol::BitnetB158,
+            weight_format: burn_dragon_core::LowBitWeightFormat::Int8,
+            act_format: burn_dragon_core::LowBitActivationFormat::Int8,
+            target_modules: vec![
+                burn_dragon_core::LowBitTargetModule::DecoderX,
+                burn_dragon_core::LowBitTargetModule::DecoderY,
+                burn_dragon_core::LowBitTargetModule::Encoder,
+            ],
+            decoder_x_mode: burn_dragon_core::LowBitWeightFormat::Int8,
+            encoder_mode: Some(burn_dragon_core::LowBitWeightFormat::Int8),
+            ..Default::default()
+        });
+        let xy_model_config = crate::build_model_config_with_tokenizer(
+            &xy_config.model,
+            xy_config.training.block_size,
+            tokenizer.as_ref(),
+        )
+        .expect("build x+y+enc model config");
+        ExportBackend::seed(&device, 1337);
+        let xy_model = BDH::<ExportBackend>::new(xy_model_config.clone(), &device);
+        let xy_scaffold_bytes =
+            super::export_bitnet_deploy_base_burnpack_bytes(&xy_model).expect("export xy scaffold");
+        let mut xy_apply_model = BDH::<ExportBackend>::new(xy_model_config, &device);
+        let xy_apply = super::apply_deploy_base_burnpack_bytes_to_model(
+            &mut xy_apply_model,
+            xy_scaffold_bytes,
+        )
+        .expect("apply xy scaffold");
+
+        let forbidden = ["encoder", "encoder_v", "decoder"];
+        for key in dy_apply.applied.iter().chain(xy_apply.applied.iter()) {
+            for name in forbidden {
+                let matches_name = key == name
+                    || key.starts_with(&format!("{name}."))
+                    || key.contains(&format!(".{name}."))
+                    || key.ends_with(&format!(".{name}"));
+                assert!(
+                    !matches_name,
+                    "BitNet deploy scaffold should not apply targeted low-bit matrix `{name}`; applied key: {key}"
+                );
+            }
+        }
+
+        assert!(
+            dy_apply.applied.iter().any(|key| key.contains("embed")),
+            "expected deploy scaffold to carry fp remainder tensors like embed"
+        );
+        assert!(
+            dy_apply.applied.iter().any(|key| key.contains("lm_head")),
+            "expected deploy scaffold to carry fp remainder tensors like lm_head"
+        );
     }
 
     #[test]

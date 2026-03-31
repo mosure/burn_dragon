@@ -109,41 +109,56 @@ impl<B: Backend> BDH<B> {
         connector: &ResidualConnectorRef<'_, B>,
         residual_history: &[Tensor<B, 4>],
         mhc_coefficients: Option<&ManifoldHyperConnectionCoefficients<B>>,
-    ) -> LanguageMhcLayerBindings<B> {
-        let current_residuals = self.prepare_language_residuals(current.clone(), connector);
+    ) -> LanguageMhcSplitBindings<B> {
         match connector {
+            ResidualConnectorRef::Vanilla => LanguageMhcSplitBindings {
+                branch_input: current.clone(),
+                merge: LanguageMhcMergeBindings {
+                    residuals_base: current,
+                    legacy_beta: None,
+                    stream_coefficients: None,
+                },
+            },
             ResidualConnectorRef::Mhc(mhc)
                 if mhc.coefficient_policy().uses_dynamic_stream_controller() =>
             {
+                let current_residuals = self.prepare_language_residuals(current, connector);
                 let output = mhc.stream_width_connection(current_residuals);
-                LanguageMhcLayerBindings {
+                LanguageMhcSplitBindings {
                     branch_input: output.branch_input,
-                    residuals_base: output.residuals_out,
-                    legacy_beta: None,
-                    stream_coefficients: Some(output.coefficients),
+                    merge: LanguageMhcMergeBindings {
+                        residuals_base: output.residuals_out,
+                        legacy_beta: None,
+                        stream_coefficients: Some(output.coefficients),
+                    },
                 }
             }
             ResidualConnectorRef::AttentionResidual(attention_residual) => {
                 let branch_input =
-                    attention_residual.branch_input(current_residuals.clone(), residual_history);
-                LanguageMhcLayerBindings {
+                    attention_residual.branch_input(current.clone(), residual_history);
+                LanguageMhcSplitBindings {
                     branch_input,
-                    residuals_base: current_residuals,
-                    legacy_beta: None,
-                    stream_coefficients: None,
+                    merge: LanguageMhcMergeBindings {
+                        residuals_base: current,
+                        legacy_beta: None,
+                        stream_coefficients: None,
+                    },
                 }
             }
             ResidualConnectorRef::BlockAttentionResidual(block_attention_residual) => {
-                let branch_input = block_attention_residual
-                    .branch_input(current_residuals.clone(), residual_history);
-                LanguageMhcLayerBindings {
+                let branch_input =
+                    block_attention_residual.branch_input(current.clone(), residual_history);
+                LanguageMhcSplitBindings {
                     branch_input,
-                    residuals_base: current_residuals,
-                    legacy_beta: None,
-                    stream_coefficients: None,
+                    merge: LanguageMhcMergeBindings {
+                        residuals_base: current,
+                        legacy_beta: None,
+                        stream_coefficients: None,
+                    },
                 }
             }
             _ => {
+                let current_residuals = self.prepare_language_residuals(current, connector);
                 let mhc = match connector {
                     ResidualConnectorRef::Mhc(mhc) => Some(*mhc),
                     ResidualConnectorRef::Vanilla
@@ -152,11 +167,13 @@ impl<B: Backend> BDH<B> {
                 };
                 let (branch_input, residuals_base, legacy_beta) =
                     mhc_split_with_coefficients(mhc, current_residuals, mhc_coefficients);
-                LanguageMhcLayerBindings {
+                LanguageMhcSplitBindings {
                     branch_input,
-                    residuals_base,
-                    legacy_beta,
-                    stream_coefficients: None,
+                    merge: LanguageMhcMergeBindings {
+                        residuals_base,
+                        legacy_beta,
+                        stream_coefficients: None,
+                    },
                 }
             }
         }
@@ -165,7 +182,7 @@ impl<B: Backend> BDH<B> {
     pub(super) fn merge_language_residuals_for_layer(
         &self,
         branch_out: Tensor<B, 4>,
-        bindings: LanguageMhcLayerBindings<B>,
+        bindings: LanguageMhcMergeBindings<B>,
         connector: &ResidualConnectorRef<'_, B>,
         mhc_coefficients: Option<&ManifoldHyperConnectionCoefficients<B>>,
     ) -> Tensor<B, 4> {

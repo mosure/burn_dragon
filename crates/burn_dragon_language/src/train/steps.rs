@@ -63,7 +63,7 @@ impl<B: BackendTrait> LanguageTrainModel<B> {
 
     fn load_step_state(&self, reset_stream_state: bool) -> ModelState<B> {
         if !self.tbptt_persist_across_steps {
-            return self.model.init_state();
+            return self.model.init_state_ephemeral();
         }
         let key = (self.streaming_runtime_key, TypeId::of::<B>());
         let mut runtime = streaming_state_store()
@@ -165,7 +165,7 @@ impl<B: BackendTrait> LanguageTrainModel<B> {
             .collect::<Vec<_>>();
 
         let mut chunk_states = (0..plan.microbatches)
-            .map(|_| self.model.init_state())
+            .map(|_| self.model.init_state_ephemeral())
             .collect::<Vec<_>>();
         let mut pipeline_states = vec![None; plan.microbatches];
 

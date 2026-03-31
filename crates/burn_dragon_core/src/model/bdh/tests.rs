@@ -1,19 +1,12 @@
 use super::*;
 use crate::LatentFanoutScheduleConfig;
 use crate::experimental::bitnet_reference::{PackedWeightEncoding, unpack_weight_artifact_to_f32};
+use crate::model::bdh_support::LanguageMhcSplitBindings;
 use crate::model::low_bit::LowBitSavedActivationConfig;
 use crate::model::low_bit_runtime::{unpack_rho_block_state, unpack_rho_int8_block_state_device};
 use crate::model::sequence::mamba::MambaSequenceConfig;
 use burn::tensor::backend::Backend as BackendTrait;
 use burn::tensor::{Int, TensorData};
-#[cfg(feature = "cuda")]
-use burn_autodiff::Autodiff;
-#[cfg(feature = "cuda")]
-use burn_cuda::Cuda;
-#[cfg(feature = "cuda")]
-use burn_dragon_kernel::kernels::sequence::mamba2::forward::{
-    CudaShellCoreMode, CudaSsdCoreMode, tensorized_mamba2_forward_custom_backward_with_cuda_modes,
-};
 use burn_ndarray::NdArray;
 use std::sync::{Mutex, OnceLock};
 
@@ -184,6 +177,18 @@ fn allmat_quality_recipe_test_config(
     config
 }
 
+fn triad_hybrid_quality_recipe_test_config(sequence_kernel: SequenceKernelConfig) -> BDHConfig {
+    let mut config = decoder_y_quality_recipe_test_config(sequence_kernel);
+    config.quant.target_modules = vec![
+        crate::LowBitTargetModule::Encoder,
+        crate::LowBitTargetModule::DecoderX,
+        crate::LowBitTargetModule::DecoderY,
+    ];
+    config.quant.decoder_x_mode = crate::LowBitWeightFormat::Sign1;
+    config.quant.encoder_mode = Some(crate::LowBitWeightFormat::Int8);
+    config
+}
+
 fn recurrence_test_tokens_with_shape(
     device: &<RecurrenceBackend as BackendTrait>::Device,
     values: Vec<i64>,
@@ -312,19 +317,19 @@ fn collect_decoder_y_layer_scale_stats(
             residual_history.as_slice(),
             None,
         );
+        let LanguageMhcSplitBindings {
+            branch_input,
+            merge: merge_bindings,
+        } = bindings;
 
         layer_state.clocked_slow_hidden = None;
         layer_state.summary_memory_hidden = None;
         layer_state.y_neuron_state = None;
 
         let [branch_batch, branch_views, branch_time, branch_dim] =
-            bindings.branch_input.shape().dims::<4>();
+            branch_input.shape().dims::<4>();
         let flat_batch = branch_batch * branch_views;
-        let branch_flat =
-            bindings
-                .branch_input
-                .clone()
-                .reshape([flat_batch, 1, branch_time, branch_dim]);
+        let branch_flat = branch_input.reshape([flat_batch, 1, branch_time, branch_dim]);
         let (encoder, encoder_v, decoder, latent) = model.layer_lowrank_weights(layer_idx);
         let latent_pattern = &model.kernel.block_sparse.latent;
         let sparse_mask = if fused && latent_pattern.is_sparse() {
@@ -409,7 +414,8 @@ fn collect_decoder_y_layer_scale_stats(
         let branch_out = output
             .next
             .reshape([branch_batch, branch_views, branch_time, branch_dim]);
-        let next = model.merge_language_residuals_for_layer(branch_out, bindings, &connector, None);
+        let next =
+            model.merge_language_residuals_for_layer(branch_out, merge_bindings, &connector, None);
         current = if model.residual_connector_needs_post_merge_norm(&connector) {
             model.norm.forward(next)
         } else {
@@ -448,19 +454,19 @@ fn collect_allmat_layer_signal_stats(
             residual_history.as_slice(),
             None,
         );
+        let LanguageMhcSplitBindings {
+            branch_input,
+            merge: merge_bindings,
+        } = bindings;
 
         layer_state.clocked_slow_hidden = None;
         layer_state.summary_memory_hidden = None;
         layer_state.y_neuron_state = None;
 
         let [branch_batch, branch_views, branch_time, branch_dim] =
-            bindings.branch_input.shape().dims::<4>();
+            branch_input.shape().dims::<4>();
         let flat_batch = branch_batch * branch_views;
-        let branch_flat =
-            bindings
-                .branch_input
-                .clone()
-                .reshape([flat_batch, 1, branch_time, branch_dim]);
+        let branch_flat = branch_input.reshape([flat_batch, 1, branch_time, branch_dim]);
         let (encoder, encoder_v, decoder, latent) = model.layer_lowrank_weights(layer_idx);
         let latent_pattern = &model.kernel.block_sparse.latent;
         let sparse_mask = if fused && latent_pattern.is_sparse() {
@@ -578,7 +584,8 @@ fn collect_allmat_layer_signal_stats(
         let branch_out = output
             .next
             .reshape([branch_batch, branch_views, branch_time, branch_dim]);
-        let next = model.merge_language_residuals_for_layer(branch_out, bindings, &connector, None);
+        let next =
+            model.merge_language_residuals_for_layer(branch_out, merge_bindings, &connector, None);
         current = if model.residual_connector_needs_post_merge_norm(&connector) {
             model.norm.forward(next)
         } else {
@@ -1047,14 +1054,25 @@ fn train_kernel_exp_forward_selects_native_runtime_and_emits_finite_logits() {
 fn train_kernel_exp_decoder_y_quality_recipe_remains_close_to_qat_reference() {
     let device = <RecurrenceBackend as BackendTrait>::Device::default();
     let base = decoder_y_quality_recipe_test_config(kernel_linear_dense_score());
-    let qat_model = recurrence_test_model(base.clone());
+    let qat_model = recurrence_test_model(BDHConfig {
+        quant: crate::LowBitQuantizationConfig {
+            inference_mode: crate::LowBitInferenceMode::RuntimeFakeQuant,
+            ..base.quant.clone()
+        },
+        ..base.clone()
+    });
     let native_model = recurrence_test_model(BDHConfig {
         quant: crate::LowBitQuantizationConfig {
             training_mode: crate::LowBitTrainingMode::TrainKernelExp,
+            inference_mode: crate::LowBitInferenceMode::RuntimeFakeQuant,
             ..base.quant.clone()
         },
         ..base
     });
+    let plan = resolve_low_bit_kernel_plan::<RecurrenceBackend>(
+        &native_model.low_bit_quant.0,
+        native_model.available_packed_low_bit_projection_artifacts(),
+    );
     let tokens = recurrence_test_tokens_with_shape(&device, vec![1, 2, 3, 4, 5, 6, 7, 8], [2, 4]);
     let qat_logits = qat_model.forward(tokens.clone());
     let native_logits = native_model.forward(tokens);
@@ -1062,6 +1080,10 @@ fn train_kernel_exp_decoder_y_quality_recipe_remains_close_to_qat_reference() {
     let mean_diff = tensor_mean_abs_diff(qat_logits, native_logits);
     eprintln!(
         "decoder_y_quality_recipe_parity max_abs_diff={max_diff:.6} mean_abs_diff={mean_diff:.6}"
+    );
+    assert_eq!(
+        plan.runtime,
+        LowBitKernelRuntimeKind::PackedNativeTrainingForward
     );
     assert!(
         mean_diff <= 0.10,
@@ -1077,14 +1099,25 @@ fn train_kernel_exp_decoder_y_quality_recipe_remains_close_to_qat_reference() {
 fn train_kernel_exp_decoder_y_mamba_quality_recipe_reports_qat_parity() {
     let device = <RecurrenceBackend as BackendTrait>::Device::default();
     let base = decoder_y_quality_recipe_test_config(kernel_mamba1());
-    let qat_model = recurrence_test_model(base.clone());
+    let qat_model = recurrence_test_model(BDHConfig {
+        quant: crate::LowBitQuantizationConfig {
+            inference_mode: crate::LowBitInferenceMode::RuntimeFakeQuant,
+            ..base.quant.clone()
+        },
+        ..base.clone()
+    });
     let native_model = recurrence_test_model(BDHConfig {
         quant: crate::LowBitQuantizationConfig {
             training_mode: crate::LowBitTrainingMode::TrainKernelExp,
+            inference_mode: crate::LowBitInferenceMode::RuntimeFakeQuant,
             ..base.quant.clone()
         },
         ..base
     });
+    let plan = resolve_low_bit_kernel_plan::<RecurrenceBackend>(
+        &native_model.low_bit_quant.0,
+        native_model.available_packed_low_bit_projection_artifacts(),
+    );
     let tokens =
         recurrence_test_tokens_with_shape(&device, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10], [2, 5]);
     let qat_logits = qat_model.forward(tokens.clone());
@@ -1094,6 +1127,10 @@ fn train_kernel_exp_decoder_y_mamba_quality_recipe_reports_qat_parity() {
     eprintln!(
         "decoder_y_mamba_quality_recipe_parity max_abs_diff={max_diff:.6} mean_abs_diff={mean_diff:.6}"
     );
+    assert_eq!(
+        plan.runtime,
+        LowBitKernelRuntimeKind::PackedNativeTrainingForward
+    );
     assert!(max_diff.is_finite() && mean_diff.is_finite());
     assert!(
         mean_diff <= 0.10,
@@ -1102,6 +1139,103 @@ fn train_kernel_exp_decoder_y_mamba_quality_recipe_reports_qat_parity() {
     assert!(
         max_diff <= 0.45,
         "expected Mamba decoder_y native path to avoid large outliers, max diff {max_diff}"
+    );
+}
+
+#[test]
+fn train_kernel_exp_triad_hybrid_linear_quality_recipe_reports_qat_parity() {
+    let device = <RecurrenceBackend as BackendTrait>::Device::default();
+    let base = triad_hybrid_quality_recipe_test_config(kernel_linear_dense_score());
+    let qat_model = recurrence_test_model(BDHConfig {
+        quant: crate::LowBitQuantizationConfig {
+            inference_mode: crate::LowBitInferenceMode::RuntimeFakeQuant,
+            ..base.quant.clone()
+        },
+        ..base.clone()
+    });
+    let native_model = recurrence_test_model(BDHConfig {
+        quant: crate::LowBitQuantizationConfig {
+            training_mode: crate::LowBitTrainingMode::TrainKernelExp,
+            inference_mode: crate::LowBitInferenceMode::RuntimeFakeQuant,
+            ..base.quant.clone()
+        },
+        ..base
+    });
+    let plan = resolve_low_bit_kernel_plan::<RecurrenceBackend>(
+        &native_model.low_bit_quant.0,
+        native_model.available_packed_low_bit_projection_artifacts(),
+    );
+    let tokens =
+        recurrence_test_tokens_with_shape(&device, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10], [2, 5]);
+    let qat_logits = qat_model.forward(tokens.clone());
+    let native_logits = native_model.forward(tokens);
+    let max_diff = tensor_max_abs_diff(qat_logits.clone(), native_logits.clone());
+    let mean_diff = tensor_mean_abs_diff(qat_logits, native_logits);
+    eprintln!(
+        "triad_hybrid_linear_quality_recipe_parity max_abs_diff={max_diff:.6} mean_abs_diff={mean_diff:.6}"
+    );
+    assert_eq!(
+        plan.runtime,
+        LowBitKernelRuntimeKind::PackedNativeTrainingForward
+    );
+    assert!(max_diff.is_finite() && mean_diff.is_finite());
+    assert!(
+        mean_diff <= 0.20,
+        "expected triad hybrid native forward mean diff to stay bounded vs qat reference, mean diff {mean_diff}"
+    );
+    assert!(
+        max_diff <= 0.70,
+        "expected triad hybrid native forward max diff to stay bounded vs qat reference, max diff {max_diff}"
+    );
+}
+
+#[test]
+fn train_kernel_exp_triad_hybrid_mamba_quality_recipe_reports_qat_parity() {
+    let device = <RecurrenceBackend as BackendTrait>::Device::default();
+    let base = triad_hybrid_quality_recipe_test_config(kernel_mamba1());
+    let qat_model = recurrence_test_model(BDHConfig {
+        quant: crate::LowBitQuantizationConfig {
+            inference_mode: crate::LowBitInferenceMode::RuntimeFakeQuant,
+            ..base.quant.clone()
+        },
+        ..base.clone()
+    });
+    let native_model = recurrence_test_model(BDHConfig {
+        quant: crate::LowBitQuantizationConfig {
+            training_mode: crate::LowBitTrainingMode::TrainKernelExp,
+            inference_mode: crate::LowBitInferenceMode::RuntimeFakeQuant,
+            ..base.quant.clone()
+        },
+        ..base
+    });
+    let plan = resolve_low_bit_kernel_plan::<RecurrenceBackend>(
+        &native_model.low_bit_quant.0,
+        native_model.available_packed_low_bit_projection_artifacts(),
+    );
+    let tokens = recurrence_test_tokens_with_shape(
+        &device,
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+        [2, 6],
+    );
+    let qat_logits = qat_model.forward(tokens.clone());
+    let native_logits = native_model.forward(tokens);
+    let max_diff = tensor_max_abs_diff(qat_logits.clone(), native_logits.clone());
+    let mean_diff = tensor_mean_abs_diff(qat_logits, native_logits);
+    eprintln!(
+        "triad_hybrid_mamba_quality_recipe_parity max_abs_diff={max_diff:.6} mean_abs_diff={mean_diff:.6}"
+    );
+    assert_eq!(
+        plan.runtime,
+        LowBitKernelRuntimeKind::PackedNativeTrainingForward
+    );
+    assert!(max_diff.is_finite() && mean_diff.is_finite());
+    assert!(
+        mean_diff <= 0.22,
+        "expected triad hybrid mamba native forward mean diff to stay bounded vs qat reference, mean diff {mean_diff}"
+    );
+    assert!(
+        max_diff <= 0.80,
+        "expected triad hybrid mamba native forward max diff to stay bounded vs qat reference, max diff {max_diff}"
     );
 }
 
@@ -1665,6 +1799,32 @@ fn rwkv8_forward_with_state_populates_rho_norm() {
 
     assert!(state.layers.iter().all(|layer| layer.rho.is_some()));
     assert!(state.layers.iter().all(|layer| layer.rho_norm.is_some()));
+}
+
+#[test]
+fn rwkv8_forward_with_ephemeral_state_skips_sequence_state_writeback() {
+    type Backend = NdArray<f32>;
+    let device = <Backend as BackendTrait>::Device::default();
+    let model = BDH::<Backend>::new(
+        BDHConfig {
+            n_layer: 2,
+            n_embd: 8,
+            n_head: 2,
+            mlp_internal_dim_multiplier: 2,
+            vocab_size: 32,
+            dropout: 0.0,
+            sequence_kernel: kernel_rwkv8(),
+            ..Default::default()
+        },
+        &device,
+    );
+    let tokens =
+        Tensor::<Backend, 2, Int>::from_data(TensorData::new(vec![1, 2, 3], [1, 3]), &device);
+    let mut state = model.init_state_ephemeral();
+    let _ = model.forward_with_state(tokens, &mut state);
+
+    assert!(state.layers.iter().all(|layer| layer.rho.is_none()));
+    assert!(state.layers.iter().all(|layer| layer.rho_norm.is_none()));
 }
 
 #[test]
@@ -2626,6 +2786,7 @@ fn bdh_mhc_two_view_wrapper_matches_manual_layer_contract() {
             .reshape([1, 1, dim, model.mlp_internal_dim_multiplier * dim]);
     let decoder = model.decoder.val();
     let mut layer_state = LayerState {
+        persist_sequence_state: true,
         rho: None,
         packed_rho: None,
         packed_rho_int8_device: None,
@@ -2749,6 +2910,7 @@ fn bdh_mhc_dynamic_stream_wrapper_matches_manual_layer_contract() {
             .reshape([1, 1, dim, model.mlp_internal_dim_multiplier * dim]);
     let decoder = model.decoder.val();
     let mut layer_state = LayerState {
+        persist_sequence_state: true,
         rho: None,
         packed_rho: None,
         packed_rho_int8_device: None,
@@ -3378,6 +3540,7 @@ fn summary_memory_reads_previous_chunk_instead_of_self_summary() {
     );
 
     let mut layer_state = LayerState {
+        persist_sequence_state: true,
         rho: None,
         packed_rho: None,
         packed_rho_int8_device: None,
@@ -3443,6 +3606,7 @@ fn summary_memory_surprise_gate_preserves_prior_carry_when_chunk_is_unsurprising
     );
 
     let mut layer_state = LayerState {
+        persist_sequence_state: true,
         rho: None,
         packed_rho: None,
         packed_rho_int8_device: None,
@@ -3511,6 +3675,7 @@ fn summary_memory_write_trigger_updates_only_on_event_chunks() {
     );
 
     let mut layer_state = LayerState {
+        persist_sequence_state: true,
         rho: None,
         packed_rho: None,
         packed_rho_int8_device: None,

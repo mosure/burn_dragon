@@ -70,8 +70,12 @@ pub(crate) fn logits_projection_profile_record(elapsed_ns: u128) {
     }
 }
 
-pub(crate) struct LanguageMhcLayerBindings<B: Backend> {
+pub(crate) struct LanguageMhcSplitBindings<B: Backend> {
     pub branch_input: Tensor<B, 4>,
+    pub merge: LanguageMhcMergeBindings<B>,
+}
+
+pub(crate) struct LanguageMhcMergeBindings<B: Backend> {
     pub residuals_base: Tensor<B, 4>,
     pub legacy_beta: Option<Tensor<B, 2>>,
     pub stream_coefficients: Option<ManifoldHyperConnectionStreamCoefficients<B>>,

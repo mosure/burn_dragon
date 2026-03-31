@@ -1,15 +1,20 @@
 use burn::tensor::backend::{AutodiffBackend, Backend as BackendTrait};
 use burn::tensor::{Int, Tensor, TensorData};
 use burn_autodiff::Autodiff;
+#[cfg(feature = "cuda")]
+use burn_autodiff::checkpoint::strategy::BalancedCheckpointing;
 use burn_cubecl::CubeBackend;
+#[cfg(feature = "cuda")]
+use burn_cuda::Cuda;
 use burn_dragon_kernel::api::low_bit::{
     pack_decoder_input_codes_i8x4, pack_decoder_weight_codes_i8x4, pack_lowrank_input_codes_i8x4,
     pack_lowrank_weight_codes_i8x4, packed_decoder_tail_device_reference,
     packed_lowrank_projection_device_reference, try_cube_fused_packed_decoder_tail_wgpu,
     try_cube_fused_packed_lowrank_projection_wgpu, try_fused_packed_decoder_tail,
     try_fused_packed_decoder_tail_training_autodiff, try_fused_packed_lowrank_projection,
-    try_fused_packed_lowrank_training_autodiff, try_wgpu_packed_dot_decoder_tail,
-    try_wgpu_packed_dot_decoder_tail_device_scale,
+    try_fused_packed_lowrank_training_autodiff,
+    try_fused_packed_lowrank_training_autodiff_cuda_device_projection_scale,
+    try_wgpu_packed_dot_decoder_tail, try_wgpu_packed_dot_decoder_tail_device_scale,
     try_wgpu_packed_dot_decoder_tail_prepacked_input_device_scale,
     try_wgpu_packed_dot_lowrank_projection, try_wgpu_packed_dot_lowrank_projection_device_scale,
     try_wgpu_packed_dot_lowrank_projection_from_f32_device_scale,
@@ -20,6 +25,12 @@ use burn_wgpu::{RuntimeOptions, WgpuRuntime, graphics};
 
 type WgpuBackend = CubeBackend<WgpuRuntime, f32, i32, u32>;
 type AutodiffBackendImpl = Autodiff<WgpuBackend>;
+#[cfg(feature = "cuda")]
+type CudaBackend = Cuda<f32, i32>;
+#[cfg(feature = "cuda")]
+type CudaAutodiffBackendImpl = Autodiff<CudaBackend>;
+#[cfg(feature = "cuda")]
+type CudaBalancedAutodiffBackendImpl = Autodiff<CudaBackend, BalancedCheckpointing>;
 
 fn init_runtime(device: &<WgpuBackend as BackendTrait>::Device) {
     static INIT: std::sync::Once = std::sync::Once::new();
@@ -685,6 +696,388 @@ fn packed_lowrank_training_autodiff_matches_reference_gradients_on_wgpu() {
     let reference = quantized_input_ref.matmul(quantized_weight_ref);
     let output_weights =
         tensor_from_values::<AutodiffBackendImpl, 4>(output_weights_values, [2, 4, 5, 8], &device);
+
+    let fused_grads = (fused * output_weights.clone()).sum().backward();
+    let reference_grads = (reference * output_weights).sum().backward();
+
+    let fused_input_grad = input_fused.grad(&fused_grads).expect("fused input grad");
+    let reference_input_grad = input_ref
+        .grad(&reference_grads)
+        .expect("reference input grad");
+    let fused_weight_grad = weight_fused.grad(&fused_grads).expect("fused weight grad");
+    let reference_weight_grad = weight_ref
+        .grad(&reference_grads)
+        .expect("reference weight grad");
+
+    assert_close(fused_input_grad, reference_input_grad, 5.0e-4, 5.0e-4);
+    assert_close(fused_weight_grad, reference_weight_grad, 5.0e-4, 5.0e-4);
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn packed_lowrank_training_autodiff_matches_reference_gradients_on_cuda_bdh_shape() {
+    let device = <CudaAutodiffBackendImpl as BackendTrait>::Device::default();
+
+    let input_shape = [2, 4, 5, 16];
+    let weight_shape = [1, 4, 16, 8];
+    let input_values = deterministic_values(input_shape.iter().product(), 0.2);
+    let weight_values = deterministic_values(weight_shape.iter().product(), 0.7);
+    let output_weights_values = deterministic_values(2 * 4 * 5 * 8, 1.3);
+
+    let input_fused = tensor_from_values::<CudaAutodiffBackendImpl, 4>(
+        input_values.clone(),
+        input_shape,
+        &device,
+    )
+    .require_grad();
+    let weight_fused = tensor_from_values::<CudaAutodiffBackendImpl, 4>(
+        weight_values.clone(),
+        weight_shape,
+        &device,
+    )
+    .require_grad();
+    let input_ref = tensor_from_values::<CudaAutodiffBackendImpl, 4>(
+        input_values.clone(),
+        input_shape,
+        &device,
+    )
+    .require_grad();
+    let weight_ref = tensor_from_values::<CudaAutodiffBackendImpl, 4>(
+        weight_values.clone(),
+        weight_shape,
+        &device,
+    )
+    .require_grad();
+
+    let (input_codes_values, input_scale) = quantize_signed_values(&input_values);
+    let input_codes = int_tensor_from_values::<CudaAutodiffBackendImpl, 4>(
+        input_codes_values,
+        input_shape,
+        &device,
+    );
+    let (weight_codes_values, weight_scale) = quantize_signed_values(&weight_values);
+    let weight_codes = int_tensor_from_values::<CudaAutodiffBackendImpl, 3>(
+        weight_codes_values,
+        [4, 16, 8],
+        &device,
+    );
+
+    let quantized_input_fused =
+        ste_quantized_from_int_codes(input_fused.clone(), &input_codes, input_scale);
+    let quantized_weight_fused =
+        ste_quantized_lowrank_weight(weight_fused.clone(), &weight_codes, weight_scale);
+    let quantized_input_ref =
+        ste_quantized_from_int_codes(input_ref.clone(), &input_codes, input_scale);
+    let quantized_weight_ref =
+        ste_quantized_lowrank_weight(weight_ref.clone(), &weight_codes, weight_scale);
+
+    let fused = try_fused_packed_lowrank_training_autodiff(
+        &quantized_input_fused,
+        &quantized_weight_fused,
+        &input_codes,
+        &weight_codes,
+        input_scale,
+        weight_scale,
+        8,
+        false,
+        None,
+    )
+    .expect("fused autodiff lowrank cuda");
+    let reference = quantized_input_ref.matmul(quantized_weight_ref);
+    let output_weights = tensor_from_values::<CudaAutodiffBackendImpl, 4>(
+        output_weights_values,
+        [2, 4, 5, 8],
+        &device,
+    );
+
+    let fused_grads = (fused * output_weights.clone()).sum().backward();
+    let reference_grads = (reference * output_weights).sum().backward();
+
+    let fused_input_grad = input_fused.grad(&fused_grads).expect("fused input grad");
+    let reference_input_grad = input_ref
+        .grad(&reference_grads)
+        .expect("reference input grad");
+    let fused_weight_grad = weight_fused.grad(&fused_grads).expect("fused weight grad");
+    let reference_weight_grad = weight_ref
+        .grad(&reference_grads)
+        .expect("reference weight grad");
+
+    assert_close(fused_input_grad, reference_input_grad, 5.0e-4, 5.0e-4);
+    assert_close(fused_weight_grad, reference_weight_grad, 5.0e-4, 5.0e-4);
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn packed_lowrank_training_autodiff_cuda_device_scale_matches_reference_gradients_on_cuda_bdh_shape()
+ {
+    let device = <CudaAutodiffBackendImpl as BackendTrait>::Device::default();
+
+    let input_shape = [2, 4, 5, 16];
+    let weight_shape = [1, 4, 16, 8];
+    let input_values = deterministic_values(input_shape.iter().product(), 0.24);
+    let weight_values = deterministic_values(weight_shape.iter().product(), 0.73);
+    let output_weights_values = deterministic_values(2 * 4 * 5 * 8, 1.31);
+
+    let input_fused = tensor_from_values::<CudaAutodiffBackendImpl, 4>(
+        input_values.clone(),
+        input_shape,
+        &device,
+    )
+    .require_grad();
+    let weight_fused = tensor_from_values::<CudaAutodiffBackendImpl, 4>(
+        weight_values.clone(),
+        weight_shape,
+        &device,
+    )
+    .require_grad();
+    let input_ref = tensor_from_values::<CudaAutodiffBackendImpl, 4>(
+        input_values.clone(),
+        input_shape,
+        &device,
+    )
+    .require_grad();
+    let weight_ref = tensor_from_values::<CudaAutodiffBackendImpl, 4>(
+        weight_values.clone(),
+        weight_shape,
+        &device,
+    )
+    .require_grad();
+
+    let (input_codes_values, input_scale) = quantize_signed_values(&input_values);
+    let input_codes = int_tensor_from_values::<CudaAutodiffBackendImpl, 4>(
+        input_codes_values,
+        input_shape,
+        &device,
+    );
+    let (weight_codes_values, weight_scale) = quantize_signed_values(&weight_values);
+    let weight_codes = int_tensor_from_values::<CudaAutodiffBackendImpl, 3>(
+        weight_codes_values,
+        [4, 16, 8],
+        &device,
+    );
+    let projection_scale =
+        Tensor::<CudaAutodiffBackendImpl, 1>::from_data([input_scale * weight_scale], &device);
+
+    let quantized_input_fused =
+        ste_quantized_from_int_codes(input_fused.clone(), &input_codes, input_scale);
+    let quantized_weight_fused =
+        ste_quantized_lowrank_weight(weight_fused.clone(), &weight_codes, weight_scale);
+    let quantized_input_ref =
+        ste_quantized_from_int_codes(input_ref.clone(), &input_codes, input_scale);
+    let quantized_weight_ref =
+        ste_quantized_lowrank_weight(weight_ref.clone(), &weight_codes, weight_scale);
+
+    let fused = try_fused_packed_lowrank_training_autodiff_cuda_device_projection_scale(
+        &quantized_input_fused,
+        &quantized_weight_fused,
+        &input_codes,
+        &weight_codes,
+        input_scale,
+        &projection_scale,
+        8,
+        false,
+        None,
+    )
+    .expect("fused autodiff lowrank cuda device-scale");
+    let reference = quantized_input_ref.matmul(quantized_weight_ref);
+    let output_weights = tensor_from_values::<CudaAutodiffBackendImpl, 4>(
+        output_weights_values,
+        [2, 4, 5, 8],
+        &device,
+    );
+
+    let fused_grads = (fused * output_weights.clone()).sum().backward();
+    let reference_grads = (reference * output_weights).sum().backward();
+
+    let fused_input_grad = input_fused.grad(&fused_grads).expect("fused input grad");
+    let reference_input_grad = input_ref
+        .grad(&reference_grads)
+        .expect("reference input grad");
+    let fused_weight_grad = weight_fused.grad(&fused_grads).expect("fused weight grad");
+    let reference_weight_grad = weight_ref
+        .grad(&reference_grads)
+        .expect("reference weight grad");
+
+    assert_close(fused_input_grad, reference_input_grad, 5.0e-4, 5.0e-4);
+    assert_close(fused_weight_grad, reference_weight_grad, 5.0e-4, 5.0e-4);
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn packed_lowrank_training_autodiff_cuda_device_scale_matches_reference_gradients_on_cuda_bdh_shape_balanced_checkpointing()
+ {
+    let device = <CudaBalancedAutodiffBackendImpl as BackendTrait>::Device::default();
+
+    let input_shape = [2, 4, 5, 16];
+    let weight_shape = [1, 4, 16, 8];
+    let input_values = deterministic_values(input_shape.iter().product(), 0.26);
+    let weight_values = deterministic_values(weight_shape.iter().product(), 0.75);
+    let output_weights_values = deterministic_values(2 * 4 * 5 * 8, 1.33);
+
+    let input_fused = tensor_from_values::<CudaBalancedAutodiffBackendImpl, 4>(
+        input_values.clone(),
+        input_shape,
+        &device,
+    )
+    .require_grad();
+    let weight_fused = tensor_from_values::<CudaBalancedAutodiffBackendImpl, 4>(
+        weight_values.clone(),
+        weight_shape,
+        &device,
+    )
+    .require_grad();
+    let input_ref = tensor_from_values::<CudaBalancedAutodiffBackendImpl, 4>(
+        input_values.clone(),
+        input_shape,
+        &device,
+    )
+    .require_grad();
+    let weight_ref = tensor_from_values::<CudaBalancedAutodiffBackendImpl, 4>(
+        weight_values.clone(),
+        weight_shape,
+        &device,
+    )
+    .require_grad();
+
+    let (input_codes_values, input_scale) = quantize_signed_values(&input_values);
+    let input_codes = int_tensor_from_values::<CudaBalancedAutodiffBackendImpl, 4>(
+        input_codes_values,
+        input_shape,
+        &device,
+    );
+    let (weight_codes_values, weight_scale) = quantize_signed_values(&weight_values);
+    let weight_codes = int_tensor_from_values::<CudaBalancedAutodiffBackendImpl, 3>(
+        weight_codes_values,
+        [4, 16, 8],
+        &device,
+    );
+    let projection_scale = Tensor::<CudaBalancedAutodiffBackendImpl, 1>::from_data(
+        [input_scale * weight_scale],
+        &device,
+    );
+
+    let quantized_input_fused =
+        ste_quantized_from_int_codes(input_fused.clone(), &input_codes, input_scale);
+    let quantized_weight_fused =
+        ste_quantized_lowrank_weight(weight_fused.clone(), &weight_codes, weight_scale);
+    let quantized_input_ref =
+        ste_quantized_from_int_codes(input_ref.clone(), &input_codes, input_scale);
+    let quantized_weight_ref =
+        ste_quantized_lowrank_weight(weight_ref.clone(), &weight_codes, weight_scale);
+
+    let fused = try_fused_packed_lowrank_training_autodiff_cuda_device_projection_scale(
+        &quantized_input_fused,
+        &quantized_weight_fused,
+        &input_codes,
+        &weight_codes,
+        input_scale,
+        &projection_scale,
+        8,
+        false,
+        None,
+    )
+    .expect("fused autodiff lowrank cuda device-scale balanced");
+    let reference = quantized_input_ref.matmul(quantized_weight_ref);
+    let output_weights = tensor_from_values::<CudaBalancedAutodiffBackendImpl, 4>(
+        output_weights_values,
+        [2, 4, 5, 8],
+        &device,
+    );
+
+    let fused_grads = (fused * output_weights.clone()).sum().backward();
+    let reference_grads = (reference * output_weights).sum().backward();
+
+    let fused_input_grad = input_fused.grad(&fused_grads).expect("fused input grad");
+    let reference_input_grad = input_ref
+        .grad(&reference_grads)
+        .expect("reference input grad");
+    let fused_weight_grad = weight_fused.grad(&fused_grads).expect("fused weight grad");
+    let reference_weight_grad = weight_ref
+        .grad(&reference_grads)
+        .expect("reference weight grad");
+
+    assert_close(fused_input_grad, reference_input_grad, 5.0e-4, 5.0e-4);
+    assert_close(fused_weight_grad, reference_weight_grad, 5.0e-4, 5.0e-4);
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn packed_lowrank_training_autodiff_cuda_device_scale_accepts_computed_projection_scale_tensor() {
+    let device = <CudaAutodiffBackendImpl as BackendTrait>::Device::default();
+
+    let input_shape = [2, 4, 5, 16];
+    let weight_shape = [1, 4, 16, 8];
+    let input_values = deterministic_values(input_shape.iter().product(), 0.261);
+    let weight_values = deterministic_values(weight_shape.iter().product(), 0.751);
+    let output_weights_values = deterministic_values(2 * 4 * 5 * 8, 1.37);
+
+    let input_fused = tensor_from_values::<CudaAutodiffBackendImpl, 4>(
+        input_values.clone(),
+        input_shape,
+        &device,
+    )
+    .require_grad();
+    let weight_fused = tensor_from_values::<CudaAutodiffBackendImpl, 4>(
+        weight_values.clone(),
+        weight_shape,
+        &device,
+    )
+    .require_grad();
+    let input_ref = tensor_from_values::<CudaAutodiffBackendImpl, 4>(
+        input_values.clone(),
+        input_shape,
+        &device,
+    )
+    .require_grad();
+    let weight_ref = tensor_from_values::<CudaAutodiffBackendImpl, 4>(
+        weight_values.clone(),
+        weight_shape,
+        &device,
+    )
+    .require_grad();
+
+    let (input_codes_values, input_scale) = quantize_signed_values(&input_values);
+    let input_codes = int_tensor_from_values::<CudaAutodiffBackendImpl, 4>(
+        input_codes_values,
+        input_shape,
+        &device,
+    );
+    let (weight_codes_values, weight_scale) = quantize_signed_values(&weight_values);
+    let weight_codes = int_tensor_from_values::<CudaAutodiffBackendImpl, 3>(
+        weight_codes_values,
+        [4, 16, 8],
+        &device,
+    );
+    let projection_scale = Tensor::<CudaAutodiffBackendImpl, 1>::from_data([weight_scale], &device)
+        .mul_scalar(input_scale);
+
+    let quantized_input_fused =
+        ste_quantized_from_int_codes(input_fused.clone(), &input_codes, input_scale);
+    let quantized_weight_fused =
+        ste_quantized_lowrank_weight(weight_fused.clone(), &weight_codes, weight_scale);
+    let quantized_input_ref =
+        ste_quantized_from_int_codes(input_ref.clone(), &input_codes, input_scale);
+    let quantized_weight_ref =
+        ste_quantized_lowrank_weight(weight_ref.clone(), &weight_codes, weight_scale);
+
+    let fused = try_fused_packed_lowrank_training_autodiff_cuda_device_projection_scale(
+        &quantized_input_fused,
+        &quantized_weight_fused,
+        &input_codes,
+        &weight_codes,
+        input_scale,
+        &projection_scale,
+        8,
+        false,
+        None,
+    )
+    .expect("fused autodiff lowrank cuda device-scale computed tensor");
+    let reference = quantized_input_ref.matmul(quantized_weight_ref);
+    let output_weights = tensor_from_values::<CudaAutodiffBackendImpl, 4>(
+        output_weights_values,
+        [2, 4, 5, 8],
+        &device,
+    );
 
     let fused_grads = (fused * output_weights.clone()).sum().backward();
     let reference_grads = (reference * output_weights).sum().backward();

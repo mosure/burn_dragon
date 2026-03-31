@@ -27,7 +27,8 @@ use burn_dragon_kernel::kernels::sequence::mamba3::forward::{
     Mamba3TensorizedState, tensorized_mamba3_forward, use_tensorized_mamba3_forward_experimental,
 };
 use burn_dragon_kernel::kernels::sequence::rwkv8::forward::{
-    tensorized_rwkv8_forward, use_tensorized_rwkv8_forward_experimental,
+    tensorized_rwkv8_forward, tensorized_rwkv8_forward_context_only,
+    use_tensorized_rwkv8_forward_experimental,
 };
 use rand::distributions::{Distribution, WeightedIndex};
 use rand::prelude::*;
@@ -45,8 +46,8 @@ use super::bdh_support::{
     rms_from_values, tensor_values_f32, values_are_finite,
 };
 use super::bdh_support::{
-    LanguageMhcLayerBindings, LanguageMhcLayerDiagnostics, LanguagePipelineState,
-    RecurrentPositionMode, ResidualConnectorRef, RolloutExecutorMode,
+    LanguageMhcLayerDiagnostics, LanguageMhcMergeBindings, LanguageMhcSplitBindings,
+    LanguagePipelineState, RecurrentPositionMode, ResidualConnectorRef, RolloutExecutorMode,
     average_language_mhc_diagnostics, logits_projection_profile_enabled,
     logits_projection_profile_record, shannon_entropy,
 };
@@ -72,12 +73,13 @@ use super::norm::DragonNorm;
 use super::residual_stream::LowRankResidualOutput;
 #[cfg(test)]
 use super::residual_stream::lowrank_residual_step;
+#[cfg(any(feature = "viz", feature = "probe"))]
+use super::residual_stream::lowrank_residual_step_branch_thresholds_relu_native;
+use super::residual_stream::lowrank_residual_step_next_branch_thresholds;
+#[cfg(not(any(feature = "viz", feature = "probe")))]
+use super::residual_stream::lowrank_residual_step_next_branch_thresholds_relu_native;
 #[cfg(any(feature = "probe", test))]
 use super::residual_stream::lowrank_residual_step_with_metrics_branch_thresholds;
-use super::residual_stream::{
-    lowrank_residual_step_branch_thresholds_relu_native,
-    lowrank_residual_step_next_branch_thresholds,
-};
 use super::sequence::linear::{
     recurrent_attention_dense_score_final_rho_reference,
     recurrent_attention_dense_score_initial_context_reference,
@@ -595,6 +597,10 @@ impl<B: Backend> BDH<B> {
         ModelState::new(self.n_layer)
     }
 
+    pub fn init_state_ephemeral(&self) -> ModelState<B> {
+        ModelState::new_ephemeral(self.n_layer)
+    }
+
     fn layer_latent_total(&self, layer_idx: usize) -> usize {
         self.layer_latent_totals
             .0
@@ -727,14 +733,14 @@ impl<B: Backend> BDH<B> {
         latent: usize,
         device: &B::Device,
     ) -> super::sequence::state::Rwkv8State<B> {
-        let rho_norm = match layer_state.rho_norm.as_ref() {
-            Some(state) if state.shape().dims::<3>() == [batch, heads, latent] => state.clone(),
-            _ => Tensor::<B, 3>::zeros([batch, heads, latent], device),
-        };
-
         super::sequence::state::Rwkv8State {
             rho: self.resolve_linear_attention_rho_state(layer_state, device),
-            rho_norm,
+            rho_norm: match layer_state.rho_norm.as_ref() {
+                Some(state) if state.shape().dims::<3>() == [batch, heads, latent] => {
+                    Some(state.clone())
+                }
+                _ => None,
+            },
         }
     }
 
@@ -1096,17 +1102,17 @@ impl<B: Backend> BDH<B> {
                 residual_history.as_slice(),
                 mhc_coefficients,
             );
+            let LanguageMhcSplitBindings {
+                branch_input,
+                merge: merge_bindings,
+            } = bindings;
             layer_state.clocked_slow_hidden = None;
             layer_state.summary_memory_hidden = None;
 
             let [branch_batch, branch_views, branch_time, branch_dim] =
-                bindings.branch_input.shape().dims::<4>();
+                branch_input.shape().dims::<4>();
             let flat_batch = branch_batch * branch_views;
-            let branch_flat =
-                bindings
-                    .branch_input
-                    .clone()
-                    .reshape([flat_batch, 1, branch_time, branch_dim]);
+            let branch_flat = branch_input.reshape([flat_batch, 1, branch_time, branch_dim]);
             let (encoder, encoder_v, decoder, latent) = self.layer_lowrank_weights(layer_idx);
             let heads = self.n_head;
             let latent_pattern = &self.kernel.block_sparse.latent;
@@ -1117,7 +1123,16 @@ impl<B: Backend> BDH<B> {
             };
             if !self.y_neuron_recurrence_applies_to_layer(layer_idx) {
                 layer_state.y_neuron_state = None;
-                let fused_recurrent_plan = if self.kernel.enabled
+                let fused_recurrent_plan = if matches!(
+                    (
+                        self.sequence_kernel.memory_system,
+                        self.sequence_kernel.executor,
+                    ),
+                    (
+                        SequenceMemorySystem::LinearAttention,
+                        SequenceTrainingExecutor::Reference,
+                    )
+                ) && self.kernel.enabled
                     && self.kernel.wgpu_recurrent_kernel
                     && supports_recurrent_backend::<B>()
                 {
@@ -1133,6 +1148,12 @@ impl<B: Backend> BDH<B> {
                 } else {
                     None
                 };
+                let rwkv_decay = matches!(
+                    self.sequence_kernel.memory_system,
+                    SequenceMemorySystem::Rwkv8StateSpace
+                )
+                .then(|| self.rwkv_decay(latent));
+                #[cfg(any(feature = "viz", feature = "probe"))]
                 let output = lowrank_residual_step_branch_thresholds_relu_native(
                     branch_flat,
                     encoder.clone(),
@@ -1151,14 +1172,63 @@ impl<B: Backend> BDH<B> {
                     self.kernel.lowrank_grad_input_executor,
                     sparse_mask.clone(),
                     |query, value| {
-                        self.recurrent_attention_with_plan(
-                            query,
-                            value,
-                            layer_state,
-                            start_pos,
-                            position_mode,
-                            fused_recurrent_plan.as_ref(),
-                        )
+                        if let Some(decay) = rwkv_decay.as_ref() {
+                            self.recurrent_rwkv8_with_decay(
+                                query,
+                                value,
+                                layer_state,
+                                decay.clone(),
+                            )
+                        } else {
+                            self.recurrent_attention_with_plan(
+                                query,
+                                value,
+                                layer_state,
+                                start_pos,
+                                position_mode,
+                                fused_recurrent_plan.as_ref(),
+                            )
+                        }
+                    },
+                    |values| activation::relu(values),
+                    |values| self.norm.forward(values),
+                );
+                #[cfg(not(any(feature = "viz", feature = "probe")))]
+                let branch_out = lowrank_residual_step_next_branch_thresholds_relu_native(
+                    branch_flat,
+                    encoder.clone(),
+                    encoder_v.clone(),
+                    decoder.clone(),
+                    &self.dropout,
+                    fused && self.kernel.projection_executor.use_x(),
+                    fused && self.kernel.projection_executor.use_y(),
+                    self.x_relu_threshold,
+                    self.y_relu_threshold,
+                    true,
+                    self.low_bit_projection_plan(),
+                    self.low_bit_quant.0.saved_activations.clone(),
+                    self.packed_low_bit_projection_artifacts(),
+                    latent_pattern,
+                    self.kernel.lowrank_grad_input_executor,
+                    sparse_mask.clone(),
+                    |query, value| {
+                        if let Some(decay) = rwkv_decay.as_ref() {
+                            self.recurrent_rwkv8_with_decay(
+                                query,
+                                value,
+                                layer_state,
+                                decay.clone(),
+                            )
+                        } else {
+                            self.recurrent_attention_with_plan(
+                                query,
+                                value,
+                                layer_state,
+                                start_pos,
+                                position_mode,
+                                fused_recurrent_plan.as_ref(),
+                            )
+                        }
                     },
                     |values| activation::relu(values),
                     |values| self.norm.forward(values),
@@ -1222,13 +1292,17 @@ impl<B: Backend> BDH<B> {
                     });
                 }
 
+                #[cfg(any(feature = "viz", feature = "probe"))]
                 let branch_out =
                     output
                         .next
                         .reshape([branch_batch, branch_views, branch_time, branch_dim]);
+                #[cfg(not(any(feature = "viz", feature = "probe")))]
+                let branch_out =
+                    branch_out.reshape([branch_batch, branch_views, branch_time, branch_dim]);
                 let next = self.merge_language_residuals_for_layer(
                     branch_out,
-                    bindings,
+                    merge_bindings,
                     &connector,
                     mhc_coefficients,
                 );
@@ -1271,7 +1345,16 @@ impl<B: Backend> BDH<B> {
                 .chunk_tokens
                 .max(1)
                 .min(branch_time.max(1));
-            let fused_recurrent_plan = if self.kernel.enabled
+            let fused_recurrent_plan = if matches!(
+                (
+                    self.sequence_kernel.memory_system,
+                    self.sequence_kernel.executor,
+                ),
+                (
+                    SequenceMemorySystem::LinearAttention,
+                    SequenceTrainingExecutor::Reference,
+                )
+            ) && self.kernel.enabled
                 && self.kernel.wgpu_recurrent_kernel
                 && supports_recurrent_backend::<B>()
             {
@@ -1287,7 +1370,16 @@ impl<B: Backend> BDH<B> {
             } else {
                 None
             };
-            let tail_plan = if self.kernel.enabled
+            let tail_plan = if matches!(
+                (
+                    self.sequence_kernel.memory_system,
+                    self.sequence_kernel.executor,
+                ),
+                (
+                    SequenceMemorySystem::LinearAttention,
+                    SequenceTrainingExecutor::Reference,
+                )
+            ) && self.kernel.enabled
                 && self.kernel.wgpu_recurrent_kernel
                 && supports_recurrent_backend::<B>()
                 && branch_time % chunk_tokens != 0
@@ -1305,6 +1397,11 @@ impl<B: Backend> BDH<B> {
             } else {
                 None
             };
+            let rwkv_decay = matches!(
+                self.sequence_kernel.memory_system,
+                SequenceMemorySystem::Rwkv8StateSpace
+            )
+            .then(|| self.rwkv_decay(latent));
 
             #[cfg(any(feature = "viz", feature = "probe"))]
             let mut viz_last: Option<(Tensor<B, 4>, Tensor<B, 4>, Tensor<B, 4>)> = None;
@@ -1319,18 +1416,27 @@ impl<B: Backend> BDH<B> {
                     RecurrentPositionMode::Sequential => start_pos + chunk_start,
                     RecurrentPositionMode::Fixed => start_pos,
                 };
-                let a_dense = self.recurrent_attention_with_plan(
-                    x_neuron.clone(),
-                    current_token.clone(),
-                    layer_state,
-                    token_position,
-                    position_mode,
-                    if chunk_len == chunk_tokens {
-                        fused_recurrent_plan.as_ref()
-                    } else {
-                        tail_plan.as_ref()
-                    },
-                );
+                let a_dense = if let Some(decay) = rwkv_decay.as_ref() {
+                    self.recurrent_rwkv8_with_decay(
+                        x_neuron.clone(),
+                        current_token.clone(),
+                        layer_state,
+                        decay.clone(),
+                    )
+                } else {
+                    self.recurrent_attention_with_plan(
+                        x_neuron.clone(),
+                        current_token.clone(),
+                        layer_state,
+                        token_position,
+                        position_mode,
+                        if chunk_len == chunk_tokens {
+                            fused_recurrent_plan.as_ref()
+                        } else {
+                            tail_plan.as_ref()
+                        },
+                    )
+                };
                 let a_dense = self.norm.forward(a_dense);
                 let y_gate = self.project_lowrank_positive(LowrankProjectionRequest {
                     dense: a_dense,
@@ -1456,7 +1562,7 @@ impl<B: Backend> BDH<B> {
             ]);
             let next = self.merge_language_residuals_for_layer(
                 branch_out,
-                bindings,
+                merge_bindings,
                 &connector,
                 mhc_coefficients,
             );

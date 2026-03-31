@@ -1,5 +1,6 @@
 use super::forward::{
-    rwkv8_tensorized_chunk_size, tensorized_rwkv8_forward, tensorized_rwkv8_forward_direct_graph,
+    rwkv8_tensorized_chunk_size, tensorized_rwkv8_forward, tensorized_rwkv8_forward_context_only,
+    tensorized_rwkv8_forward_direct_graph,
 };
 use burn::tensor::backend::Backend as BackendTrait;
 use burn::tensor::{Tensor, TensorData};
@@ -385,12 +386,70 @@ fn tensorized_rwkv8_custom_backward_matches_direct_graph_on_cuda_autodiff() {
 
 #[cfg(feature = "cuda")]
 #[test]
-fn rwkv8_cuda_default_chunk_size_prefers_128_token_windows() {
+fn tensorized_rwkv8_context_only_matches_full_wrapper_on_cuda_autodiff() {
+    let _guard = EnvVarGuard::set("BURN_DRAGON_RWKV8_TENSORIZED_TRAIN_WRAPPER", "1");
+    let device = <CudaAutodiffBackend as BackendTrait>::Device::default();
+    let (query, value, rho_state, rho_norm_state, decay, weights) =
+        parity_inputs::<CudaAutodiffBackend>(&device);
+
+    let query = query.require_grad();
+    let value = value.require_grad();
+    let decay = decay.require_grad();
+
+    let full = tensorized_rwkv8_forward(
+        query.clone(),
+        value.clone(),
+        Some(rho_state.clone()),
+        Some(rho_norm_state.clone()),
+        decay.clone(),
+    );
+    let context_only = tensorized_rwkv8_forward_context_only(
+        query.clone(),
+        value.clone(),
+        Some(rho_state),
+        Some(rho_norm_state),
+        decay.clone(),
+    );
+
+    assert_close_backend(context_only.clone(), full.context.clone(), 2.0e-4, 2.0e-4);
+
+    let context_only_grads = (context_only * weights.clone()).sum().backward();
+    let full_grads = (full.context * weights).sum().backward();
+
+    assert_close_backend(
+        query
+            .grad(&context_only_grads)
+            .expect("context-only query grad"),
+        query.grad(&full_grads).expect("full query grad"),
+        4.0e-3,
+        4.0e-3,
+    );
+    assert_close_backend(
+        value
+            .grad(&context_only_grads)
+            .expect("context-only value grad"),
+        value.grad(&full_grads).expect("full value grad"),
+        4.0e-3,
+        4.0e-3,
+    );
+    assert_close_backend(
+        decay
+            .grad(&context_only_grads)
+            .expect("context-only decay grad"),
+        decay.grad(&full_grads).expect("full decay grad"),
+        4.0e-3,
+        4.0e-3,
+    );
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn rwkv8_cuda_default_chunk_size_prefers_64_token_windows() {
     let _chunk_guard = EnvVarGuard::set("BURN_DRAGON_RWKV8_TENSORIZED_FORWARD_CHUNK", "0");
     let _threshold_guard = EnvVarGuard::set(
         "BURN_DRAGON_RWKV8_TENSORIZED_FORWARD_SCAN_THRESHOLD_BYTES",
         "4294967296",
     );
     let chunk = rwkv8_tensorized_chunk_size::<CudaBackend>(24, 4, 512, 128, 128);
-    assert_eq!(chunk, 128);
+    assert_eq!(chunk, 64);
 }

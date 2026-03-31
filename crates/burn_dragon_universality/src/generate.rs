@@ -235,8 +235,7 @@ fn generate_sample_record(
     let token_offset = writer.total_token_count();
     let tokens = match tokenizer {
         CorpusTokenizer::PatchTokenIds { .. } => {
-            let patch_tokens = patch_token_ids(&sample, &config.serialization);
-            tokenizer.encode_patch_tokens(&patch_tokens)?
+            tokenizer.encode_patch_sample(&sample, &config.serialization)?
         }
         CorpusTokenizer::Gpt2ByteCompatible { .. } | CorpusTokenizer::RustBpe { .. } => {
             tokenizer.encode(&serialized)

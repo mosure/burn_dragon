@@ -1,6 +1,49 @@
 use super::*;
 
 impl<B: Backend> BDH<B> {
+    pub(super) fn recurrent_rwkv8_with_decay(
+        &self,
+        query: Tensor<B, 4>,
+        value: Tensor<B, 4>,
+        layer_state: &mut LayerState<B>,
+        decay: Tensor<B, 3>,
+    ) -> Tensor<B, 4> {
+        let [batch, heads, _time, latent] = query.shape().dims::<4>();
+        let device = query.device();
+        let initial_state = self.resolve_rwkv8_state(layer_state, batch, heads, latent, &device);
+        if self.kernel.enabled && use_tensorized_rwkv8_forward_experimental() {
+            if layer_state.persist_sequence_state {
+                let output = tensorized_rwkv8_forward(
+                    query,
+                    value,
+                    initial_state.rho,
+                    initial_state.rho_norm,
+                    decay,
+                );
+                self.write_rwkv8_sequence_state(layer_state, output.rho, output.rho_norm);
+                return output.context;
+            }
+            return tensorized_rwkv8_forward_context_only(
+                query,
+                value,
+                initial_state.rho,
+                initial_state.rho_norm,
+                decay,
+            );
+        }
+        let (context, rho, rho_norm) = self.recurrent_rwkv8_state_space_reference(
+            query,
+            value,
+            initial_state.rho,
+            initial_state.rho_norm,
+            decay,
+        );
+        if layer_state.persist_sequence_state {
+            self.write_rwkv8_sequence_state(layer_state, rho, rho_norm);
+        }
+        context
+    }
+
     pub(super) fn rollout_executor_mode(&self) -> RolloutExecutorMode {
         if self.sequence_kernel.memory_system == SequenceMemorySystem::LinearAttention
             && self.sequence_kernel.executor == SequenceTrainingExecutor::Reference
@@ -171,31 +214,9 @@ impl<B: Backend> BDH<B> {
                 context
             }
             (SequenceMemorySystem::Rwkv8StateSpace, SequenceTrainingExecutor::Reference) => {
-                let [batch, heads, _time, latent] = query.shape().dims::<4>();
-                let device = query.device();
-                let initial_state =
-                    self.resolve_rwkv8_state(layer_state, batch, heads, latent, &device);
+                let latent = query.shape().dims::<4>()[3];
                 let decay = self.rwkv_decay(latent);
-                if self.kernel.enabled && use_tensorized_rwkv8_forward_experimental() {
-                    let output = tensorized_rwkv8_forward(
-                        query,
-                        value,
-                        initial_state.rho,
-                        Some(initial_state.rho_norm),
-                        decay,
-                    );
-                    self.write_rwkv8_sequence_state(layer_state, output.rho, output.rho_norm);
-                    return output.context;
-                }
-                let (context, rho, rho_norm) = self.recurrent_rwkv8_state_space_reference(
-                    query,
-                    value,
-                    initial_state.rho,
-                    Some(initial_state.rho_norm),
-                    decay,
-                );
-                self.write_rwkv8_sequence_state(layer_state, rho, rho_norm);
-                context
+                self.recurrent_rwkv8_with_decay(query, value, layer_state, decay)
             }
             (
                 SequenceMemorySystem::Mamba1SelectiveScan

@@ -1,4 +1,4 @@
-use std::any::Any;
+use std::any::{Any, TypeId};
 use std::marker::PhantomData;
 
 use burn::tensor::Tensor as BurnTensor;
@@ -14,7 +14,11 @@ use burn_wgpu::{CubeBackend, WgpuRuntime};
 use crate::kernels::sequence::rwkv8::backward::{
     TensorizedRwkv8Backward, TensorizedRwkv8BackwardState,
 };
-use crate::kernels::sequence::rwkv8::runtime::try_rwkv8_runtime_forward;
+use crate::kernels::sequence::rwkv8::runtime::{
+    try_rwkv8_runtime_chunk_boundaries, try_rwkv8_runtime_chunk_boundaries_from_zero,
+    try_rwkv8_runtime_chunk_boundaries_from_zero_without_final_state,
+    try_rwkv8_runtime_chunk_boundaries_without_final_state, try_rwkv8_runtime_forward,
+};
 
 type WgpuCubeBackend = CubeBackend<WgpuRuntime, f32, i32, u32>;
 type WgpuCubeAutodiffBackend = Autodiff<WgpuCubeBackend>;
@@ -34,6 +38,24 @@ pub struct Rwkv8ForwardOutput<B: BackendTrait> {
     pub context: Tensor<B, 4>,
     pub rho: Tensor<B, 4>,
     pub rho_norm: Tensor<B, 3>,
+}
+
+#[derive(Debug)]
+struct Rwkv8ChunkBoundaryTrace<B: BackendTrait> {
+    rho_start: Tensor<B, 5>,
+    rho_norm_start: Tensor<B, 4>,
+    full_rho_before: Option<Tensor<B, 6>>,
+    full_rho_norm_before: Option<Tensor<B, 5>>,
+    tail_rho_start: Option<Tensor<B, 4>>,
+    tail_rho_norm_start: Option<Tensor<B, 3>>,
+    tail_rho_before: Option<Tensor<B, 5>>,
+    tail_rho_norm_before: Option<Tensor<B, 4>>,
+}
+
+#[derive(Debug)]
+struct Rwkv8RuntimeChunkedForwardOutput<B: BackendTrait> {
+    forward: Rwkv8ForwardOutput<B>,
+    trace: Option<Rwkv8ChunkBoundaryTrace<B>>,
 }
 
 pub fn use_tensorized_rwkv8_forward_experimental() -> bool {
@@ -58,6 +80,21 @@ fn use_tensorized_rwkv8_train_wrapper() -> bool {
     }
 }
 
+fn capture_rwkv8_chunk_history_in_forward() -> bool {
+    match std::env::var("BURN_DRAGON_RWKV8_CAPTURE_CHUNK_HISTORY_IN_FORWARD")
+        .ok()
+        .as_deref()
+    {
+        Some("0") | Some("false") | Some("FALSE") | Some("off") | Some("OFF") => false,
+        Some(_) => true,
+        None => true,
+    }
+}
+
+fn matches_type<A: 'static, B: 'static>() -> bool {
+    TypeId::of::<A>() == TypeId::of::<B>()
+}
+
 fn tensorized_rwkv8_runtime_chunked_forward<B: BackendTrait>(
     query: Tensor<B, 4>,
     value: Tensor<B, 4>,
@@ -65,42 +102,205 @@ fn tensorized_rwkv8_runtime_chunked_forward<B: BackendTrait>(
     rho_norm_state: Option<Tensor<B, 3>>,
     decay: Tensor<B, 3>,
     chunk: usize,
-) -> Option<Rwkv8ForwardOutput<B>>
+    include_final_state: bool,
+) -> Option<Rwkv8RuntimeChunkedForwardOutput<B>>
 where
     B::FloatTensorPrimitive: 'static,
 {
     let [batch, heads, time, latent] = query.shape().dims::<4>();
+    let value_heads = value.shape().dims::<4>()[1];
     let embd = value.shape().dims::<4>()[3];
     let device = query.device();
-    let mut rho_state = match rho_state {
-        Some(existing) if existing.shape().dims::<4>() == [batch, heads, latent, embd] => existing,
-        _ => Tensor::<B, 4>::zeros([batch, heads, latent, embd], &device),
-    };
-    let mut rho_norm_state = match rho_norm_state {
-        Some(existing) if existing.shape().dims::<3>() == [batch, heads, latent] => existing,
-        _ => Tensor::<B, 3>::zeros([batch, heads, latent], &device),
-    };
+    let chunk = chunk.max(1).min(time.max(1));
+    let capture_chunk_history = capture_rwkv8_chunk_history_in_forward();
+    let resolved_rho_state =
+        rho_state.filter(|existing| existing.shape().dims::<4>() == [batch, heads, latent, embd]);
+    let resolved_rho_norm_state =
+        rho_norm_state.filter(|existing| existing.shape().dims::<3>() == [batch, heads, latent]);
+    let starts_from_zero = resolved_rho_state.is_none() && resolved_rho_norm_state.is_none();
 
-    let mut outputs = Vec::with_capacity(time.div_ceil(chunk.max(1)));
-    for start in (0..time).step_by(chunk.max(1)) {
-        let end = (start + chunk.max(1)).min(time);
-        let chunk_output = try_rwkv8_runtime_forward(
-            query.clone().slice_dim(2, start..end),
-            value.clone().slice_dim(2, start..end),
-            rho_state,
-            rho_norm_state,
-            decay.clone(),
+    if chunk >= time {
+        return try_rwkv8_runtime_forward(
+            query,
+            value,
+            resolved_rho_state
+                .unwrap_or_else(|| Tensor::<B, 4>::zeros([batch, heads, latent, embd], &device)),
+            resolved_rho_norm_state
+                .unwrap_or_else(|| Tensor::<B, 3>::zeros([batch, heads, latent], &device)),
+            decay,
             false,
-        )?;
-        outputs.push(chunk_output.context);
-        rho_state = chunk_output.rho;
-        rho_norm_state = chunk_output.rho_norm;
+        )
+        .map(|output| Rwkv8RuntimeChunkedForwardOutput {
+            forward: Rwkv8ForwardOutput {
+                context: output.context,
+                rho: output.rho,
+                rho_norm: output.rho_norm,
+            },
+            trace: None,
+        });
     }
 
-    Some(Rwkv8ForwardOutput {
-        context: Tensor::cat(outputs, 2),
-        rho: rho_state,
-        rho_norm: rho_norm_state,
+    let tail_exists = time % chunk != 0;
+    let chunk_boundaries = if starts_from_zero {
+        if include_final_state || tail_exists {
+            try_rwkv8_runtime_chunk_boundaries_from_zero(
+                query.clone(),
+                value.clone(),
+                decay.clone(),
+                chunk,
+            )?
+        } else {
+            try_rwkv8_runtime_chunk_boundaries_from_zero_without_final_state(
+                query.clone(),
+                value.clone(),
+                decay.clone(),
+                chunk,
+            )?
+        }
+    } else {
+        if include_final_state || tail_exists {
+            try_rwkv8_runtime_chunk_boundaries(
+                query.clone(),
+                value.clone(),
+                resolved_rho_state
+                    .clone()
+                    .expect("rwkv8 chunked forward requires rho state"),
+                resolved_rho_norm_state
+                    .clone()
+                    .expect("rwkv8 chunked forward requires rho_norm state"),
+                decay.clone(),
+                chunk,
+            )?
+        } else {
+            try_rwkv8_runtime_chunk_boundaries_without_final_state(
+                query.clone(),
+                value.clone(),
+                resolved_rho_state
+                    .clone()
+                    .expect("rwkv8 chunked forward requires rho state"),
+                resolved_rho_norm_state
+                    .clone()
+                    .expect("rwkv8 chunked forward requires rho_norm state"),
+                decay.clone(),
+                chunk,
+            )?
+        }
+    };
+    let mut outputs = Vec::with_capacity(2);
+    let mut full_rho_before = None;
+    let mut full_rho_norm_before = None;
+    let mut tail_rho_start = None;
+    let mut tail_rho_norm_start = None;
+    let mut tail_rho_before = None;
+    let mut tail_rho_norm_before = None;
+    if chunk_boundaries.chunk_count > 0 {
+        let full_query = query
+            .clone()
+            .slice_dim(2, 0..chunk_boundaries.full_time)
+            .reshape([batch, heads, chunk_boundaries.chunk_count, chunk, latent])
+            .swap_dims(1, 2);
+        let full_value = value
+            .clone()
+            .slice_dim(2, 0..chunk_boundaries.full_time)
+            .reshape([
+                batch,
+                value_heads,
+                chunk_boundaries.chunk_count,
+                chunk,
+                embd,
+            ])
+            .swap_dims(1, 2);
+        let full_output = try_rwkv8_runtime_forward(
+            full_query.clone().reshape([
+                batch * chunk_boundaries.chunk_count,
+                heads,
+                chunk,
+                latent,
+            ]),
+            full_value.clone().reshape([
+                batch * chunk_boundaries.chunk_count,
+                value_heads,
+                chunk,
+                embd,
+            ]),
+            chunk_boundaries.rho_start.clone().reshape([
+                batch * chunk_boundaries.chunk_count,
+                heads,
+                latent,
+                embd,
+            ]),
+            chunk_boundaries.rho_norm_start.clone().reshape([
+                batch * chunk_boundaries.chunk_count,
+                heads,
+                latent,
+            ]),
+            decay.clone(),
+            capture_chunk_history,
+        )?;
+        full_rho_before = full_output.rho_before.map(|tensor| {
+            tensor.reshape([
+                batch,
+                chunk_boundaries.chunk_count,
+                heads,
+                chunk,
+                latent,
+                embd,
+            ])
+        });
+        full_rho_norm_before = full_output.rho_norm_before.map(|tensor| {
+            tensor.reshape([batch, chunk_boundaries.chunk_count, heads, chunk, latent])
+        });
+        outputs.push(
+            full_output
+                .context
+                .reshape([batch, chunk_boundaries.chunk_count, heads, chunk, embd])
+                .swap_dims(1, 2)
+                .reshape([batch, heads, chunk_boundaries.full_time, embd]),
+        );
+    }
+
+    let mut final_rho = chunk_boundaries.final_rho;
+    let mut final_rho_norm = chunk_boundaries.final_rho_norm;
+    if chunk_boundaries.full_time < time {
+        tail_rho_start = Some(final_rho.clone());
+        tail_rho_norm_start = Some(final_rho_norm.clone());
+        let tail = try_rwkv8_runtime_forward(
+            query.slice_dim(2, chunk_boundaries.full_time..time),
+            value.slice_dim(2, chunk_boundaries.full_time..time),
+            final_rho,
+            final_rho_norm,
+            decay,
+            capture_chunk_history,
+        )?;
+        tail_rho_before = tail.rho_before.clone();
+        tail_rho_norm_before = tail.rho_norm_before.clone();
+        outputs.push(tail.context);
+        final_rho = tail.rho;
+        final_rho_norm = tail.rho_norm;
+    }
+
+    let context = if outputs.len() == 1 {
+        outputs.remove(0)
+    } else {
+        Tensor::cat(outputs, 2)
+    };
+
+    Some(Rwkv8RuntimeChunkedForwardOutput {
+        forward: Rwkv8ForwardOutput {
+            context,
+            rho: final_rho,
+            rho_norm: final_rho_norm,
+        },
+        trace: (chunk_boundaries.chunk_count > 0).then_some(Rwkv8ChunkBoundaryTrace {
+            rho_start: chunk_boundaries.rho_start,
+            rho_norm_start: chunk_boundaries.rho_norm_start,
+            full_rho_before,
+            full_rho_norm_before,
+            tail_rho_start,
+            tail_rho_norm_start,
+            tail_rho_before,
+            tail_rho_norm_before,
+        }),
     })
 }
 
@@ -112,6 +312,27 @@ pub fn tensorized_rwkv8_forward<B: BackendTrait>(
     decay: Tensor<B, 3>,
 ) -> Rwkv8ForwardOutput<B> {
     if use_tensorized_rwkv8_train_wrapper() {
+        if matches_type::<B::FloatTensorPrimitive, WgpuCubeAutodiffTensor>() {
+            return try_tensorized_rwkv8_autodiff_wgpu(
+                query,
+                value,
+                rho_state,
+                rho_norm_state,
+                decay,
+            )
+            .expect("matching WGPU autodiff backend must support RWKV8 wrapper");
+        }
+        #[cfg(feature = "cuda")]
+        if matches_type::<B::FloatTensorPrimitive, CudaCubeAutodiffTensor>() {
+            return try_tensorized_rwkv8_autodiff_cuda(
+                query,
+                value,
+                rho_state,
+                rho_norm_state,
+                decay,
+            )
+            .expect("matching CUDA autodiff backend must support RWKV8 wrapper");
+        }
         if let Some(output) = try_tensorized_rwkv8_autodiff_cube::<B>(
             query.clone(),
             value.clone(),
@@ -123,6 +344,39 @@ pub fn tensorized_rwkv8_forward<B: BackendTrait>(
         }
     }
     tensorized_rwkv8_forward_impl(query, value, rho_state, rho_norm_state, decay)
+}
+
+pub fn tensorized_rwkv8_forward_context_only<B: BackendTrait>(
+    query: Tensor<B, 4>,
+    value: Tensor<B, 4>,
+    rho_state: Option<Tensor<B, 4>>,
+    rho_norm_state: Option<Tensor<B, 3>>,
+    decay: Tensor<B, 3>,
+) -> Tensor<B, 4> {
+    if use_tensorized_rwkv8_train_wrapper() {
+        if matches_type::<B::FloatTensorPrimitive, WgpuCubeAutodiffTensor>() {
+            return try_tensorized_rwkv8_autodiff_wgpu_context_only(
+                query,
+                value,
+                rho_state,
+                rho_norm_state,
+                decay,
+            )
+            .expect("matching WGPU autodiff backend must support RWKV8 context-only wrapper");
+        }
+        #[cfg(feature = "cuda")]
+        if matches_type::<B::FloatTensorPrimitive, CudaCubeAutodiffTensor>() {
+            return try_tensorized_rwkv8_autodiff_cuda_context_only(
+                query,
+                value,
+                rho_state,
+                rho_norm_state,
+                decay,
+            )
+            .expect("matching CUDA autodiff backend must support RWKV8 context-only wrapper");
+        }
+    }
+    tensorized_rwkv8_forward(query, value, rho_state, rho_norm_state, decay).context
 }
 
 pub fn tensorized_rwkv8_forward_direct_graph<B: BackendTrait>(
@@ -227,6 +481,25 @@ fn try_tensorized_rwkv8_autodiff_cube<B: BackendTrait>(
 where
     B::FloatTensorPrimitive: 'static,
 {
+    if matches_type::<B::FloatTensorPrimitive, WgpuCubeAutodiffTensor>() {
+        return try_tensorized_rwkv8_autodiff_wgpu::<B>(
+            query,
+            value,
+            rho_state,
+            rho_norm_state,
+            decay,
+        );
+    }
+    #[cfg(feature = "cuda")]
+    if matches_type::<B::FloatTensorPrimitive, CudaCubeAutodiffTensor>() {
+        return try_tensorized_rwkv8_autodiff_cuda::<B>(
+            query,
+            value,
+            rho_state,
+            rho_norm_state,
+            decay,
+        );
+    }
     try_tensorized_rwkv8_autodiff_wgpu::<B>(
         query.clone(),
         value.clone(),
@@ -313,9 +586,10 @@ where
             decay_inner.clone(),
         )),
         chunk_size,
+        true,
     )
-    .unwrap_or_else(|| {
-        tensorized_rwkv8_forward_impl(
+    .unwrap_or_else(|| Rwkv8RuntimeChunkedForwardOutput {
+        forward: tensorized_rwkv8_forward_impl(
             BurnTensor::<WgpuCubeBackend, 4>::from_primitive(TensorPrimitive::Float(
                 query_inner.clone(),
             )),
@@ -331,11 +605,60 @@ where
             BurnTensor::<WgpuCubeBackend, 3>::from_primitive(TensorPrimitive::Float(
                 decay_inner.clone(),
             )),
-        )
+        ),
+        trace: None,
     });
+    let trace = output.trace;
+    let output = output.forward;
     let context_inner = output.context.into_primitive().tensor();
     let rho_inner = output.rho.into_primitive().tensor();
     let rho_norm_inner = output.rho_norm.into_primitive().tensor();
+    let chunk_rho_before = trace
+        .as_ref()
+        .and_then(|trace| trace.full_rho_before.clone())
+        .map(|tensor| tensor.into_primitive().tensor());
+    let chunk_rho_norm_before = trace
+        .as_ref()
+        .and_then(|trace| trace.full_rho_norm_before.clone())
+        .map(|tensor| tensor.into_primitive().tensor());
+    let tail_rho_before = trace
+        .as_ref()
+        .and_then(|trace| trace.tail_rho_before.clone())
+        .map(|tensor| tensor.into_primitive().tensor());
+    let tail_rho_norm_before = trace
+        .as_ref()
+        .and_then(|trace| trace.tail_rho_norm_before.clone())
+        .map(|tensor| tensor.into_primitive().tensor());
+    let chunk_rho_start = if chunk_rho_before.is_none() || chunk_rho_norm_before.is_none() {
+        trace
+            .as_ref()
+            .map(|trace| trace.rho_start.clone().into_primitive().tensor())
+    } else {
+        None
+    };
+    let chunk_rho_norm_start = if chunk_rho_before.is_none() || chunk_rho_norm_before.is_none() {
+        trace
+            .as_ref()
+            .map(|trace| trace.rho_norm_start.clone().into_primitive().tensor())
+    } else {
+        None
+    };
+    let tail_rho_start = if tail_rho_before.is_none() || tail_rho_norm_before.is_none() {
+        trace
+            .as_ref()
+            .and_then(|trace| trace.tail_rho_start.clone())
+            .map(|tensor| tensor.into_primitive().tensor())
+    } else {
+        None
+    };
+    let tail_rho_norm_start = if tail_rho_before.is_none() || tail_rho_norm_before.is_none() {
+        trace
+            .as_ref()
+            .and_then(|trace| trace.tail_rho_norm_start.clone())
+            .map(|tensor| tensor.into_primitive().tensor())
+    } else {
+        None
+    };
 
     let context_ad = match TensorizedRwkv8Backward::<WgpuCubeBackend>(PhantomData)
         .prepare::<NoCheckpointing>([
@@ -354,6 +677,14 @@ where
                 rho_norm_state: rho_norm_state_inner,
                 decay: decay_inner,
                 chunk_size,
+                chunk_rho_start,
+                chunk_rho_norm_start,
+                chunk_rho_before,
+                chunk_rho_norm_before,
+                tail_rho_start,
+                tail_rho_norm_start,
+                tail_rho_before,
+                tail_rho_norm_before,
             },
             context_inner,
         ),
@@ -370,6 +701,180 @@ where
         rho: BurnTensor::<B, 4>::from_primitive(TensorPrimitive::Float(rho_primitive)),
         rho_norm: BurnTensor::<B, 3>::from_primitive(TensorPrimitive::Float(rho_norm_primitive)),
     })
+}
+
+fn try_tensorized_rwkv8_autodiff_wgpu_context_only<B>(
+    query: Tensor<B, 4>,
+    value: Tensor<B, 4>,
+    rho_state: Option<Tensor<B, 4>>,
+    rho_norm_state: Option<Tensor<B, 3>>,
+    decay: Tensor<B, 3>,
+) -> Option<Tensor<B, 4>>
+where
+    B: BackendTrait,
+    B::FloatTensorPrimitive: 'static,
+{
+    let query_shape = query.shape().dims::<4>();
+    let value_shape = value.shape().dims::<4>();
+    let query_ad: WgpuCubeAutodiffTensor =
+        try_cast_primitive::<B, _>(query.into_primitive().tensor())?;
+    let value_ad: WgpuCubeAutodiffTensor =
+        try_cast_primitive::<B, _>(value.into_primitive().tensor())?;
+    let decay_ad: WgpuCubeAutodiffTensor =
+        try_cast_primitive::<B, _>(decay.into_primitive().tensor())?;
+    let rho_state_inner = match rho_state {
+        Some(state) => {
+            let state_ad: WgpuCubeAutodiffTensor =
+                try_cast_primitive::<B, _>(state.into_primitive().tensor())?;
+            Some(<WgpuCubeAutodiffBackend as AutodiffBackend>::inner(
+                state_ad,
+            ))
+        }
+        None => None,
+    };
+    let rho_norm_state_inner = match rho_norm_state {
+        Some(state) => {
+            let state_ad: WgpuCubeAutodiffTensor =
+                try_cast_primitive::<B, _>(state.into_primitive().tensor())?;
+            Some(<WgpuCubeAutodiffBackend as AutodiffBackend>::inner(
+                state_ad,
+            ))
+        }
+        None => None,
+    };
+    let query_inner = <WgpuCubeAutodiffBackend as AutodiffBackend>::inner(query_ad.clone());
+    let value_inner = <WgpuCubeAutodiffBackend as AutodiffBackend>::inner(value_ad.clone());
+    let decay_inner = <WgpuCubeAutodiffBackend as AutodiffBackend>::inner(decay_ad.clone());
+
+    let chunk_size = rwkv8_tensorized_chunk_size::<WgpuCubeBackend>(
+        query_shape[0],
+        query_shape[1],
+        query_shape[2],
+        query_shape[3],
+        value_shape[3],
+    );
+    let output = tensorized_rwkv8_runtime_chunked_forward(
+        BurnTensor::<WgpuCubeBackend, 4>::from_primitive(TensorPrimitive::Float(
+            query_inner.clone(),
+        )),
+        BurnTensor::<WgpuCubeBackend, 4>::from_primitive(TensorPrimitive::Float(
+            value_inner.clone(),
+        )),
+        rho_state_inner.clone().map(|inner| {
+            BurnTensor::<WgpuCubeBackend, 4>::from_primitive(TensorPrimitive::Float(inner))
+        }),
+        rho_norm_state_inner.clone().map(|inner| {
+            BurnTensor::<WgpuCubeBackend, 3>::from_primitive(TensorPrimitive::Float(inner))
+        }),
+        BurnTensor::<WgpuCubeBackend, 3>::from_primitive(TensorPrimitive::Float(
+            decay_inner.clone(),
+        )),
+        chunk_size,
+        false,
+    )
+    .unwrap_or_else(|| Rwkv8RuntimeChunkedForwardOutput {
+        forward: tensorized_rwkv8_forward_impl(
+            BurnTensor::<WgpuCubeBackend, 4>::from_primitive(TensorPrimitive::Float(
+                query_inner.clone(),
+            )),
+            BurnTensor::<WgpuCubeBackend, 4>::from_primitive(TensorPrimitive::Float(
+                value_inner.clone(),
+            )),
+            rho_state_inner.clone().map(|inner| {
+                BurnTensor::<WgpuCubeBackend, 4>::from_primitive(TensorPrimitive::Float(inner))
+            }),
+            rho_norm_state_inner.clone().map(|inner| {
+                BurnTensor::<WgpuCubeBackend, 3>::from_primitive(TensorPrimitive::Float(inner))
+            }),
+            BurnTensor::<WgpuCubeBackend, 3>::from_primitive(TensorPrimitive::Float(
+                decay_inner.clone(),
+            )),
+        ),
+        trace: None,
+    });
+    let trace = output.trace;
+    let context_inner = output.forward.context.into_primitive().tensor();
+    let chunk_rho_before = trace
+        .as_ref()
+        .and_then(|trace| trace.full_rho_before.clone())
+        .map(|tensor| tensor.into_primitive().tensor());
+    let chunk_rho_norm_before = trace
+        .as_ref()
+        .and_then(|trace| trace.full_rho_norm_before.clone())
+        .map(|tensor| tensor.into_primitive().tensor());
+    let tail_rho_before = trace
+        .as_ref()
+        .and_then(|trace| trace.tail_rho_before.clone())
+        .map(|tensor| tensor.into_primitive().tensor());
+    let tail_rho_norm_before = trace
+        .as_ref()
+        .and_then(|trace| trace.tail_rho_norm_before.clone())
+        .map(|tensor| tensor.into_primitive().tensor());
+    let chunk_rho_start = if chunk_rho_before.is_none() || chunk_rho_norm_before.is_none() {
+        trace
+            .as_ref()
+            .map(|trace| trace.rho_start.clone().into_primitive().tensor())
+    } else {
+        None
+    };
+    let chunk_rho_norm_start = if chunk_rho_before.is_none() || chunk_rho_norm_before.is_none() {
+        trace
+            .as_ref()
+            .map(|trace| trace.rho_norm_start.clone().into_primitive().tensor())
+    } else {
+        None
+    };
+    let tail_rho_start = if tail_rho_before.is_none() || tail_rho_norm_before.is_none() {
+        trace
+            .as_ref()
+            .and_then(|trace| trace.tail_rho_start.clone())
+            .map(|tensor| tensor.into_primitive().tensor())
+    } else {
+        None
+    };
+    let tail_rho_norm_start = if tail_rho_before.is_none() || tail_rho_norm_before.is_none() {
+        trace
+            .as_ref()
+            .and_then(|trace| trace.tail_rho_norm_start.clone())
+            .map(|tensor| tensor.into_primitive().tensor())
+    } else {
+        None
+    };
+
+    let context_ad = match TensorizedRwkv8Backward::<WgpuCubeBackend>(PhantomData)
+        .prepare::<NoCheckpointing>([
+            query_ad.node.clone(),
+            value_ad.node.clone(),
+            decay_ad.node.clone(),
+        ])
+        .compute_bound()
+        .stateful()
+    {
+        OpsKind::Tracked(prep) => prep.finish(
+            TensorizedRwkv8BackwardState {
+                query: query_inner,
+                value: value_inner,
+                rho_state: rho_state_inner,
+                rho_norm_state: rho_norm_state_inner,
+                decay: decay_inner,
+                chunk_size,
+                chunk_rho_start,
+                chunk_rho_norm_start,
+                chunk_rho_before,
+                chunk_rho_norm_before,
+                tail_rho_start,
+                tail_rho_norm_start,
+                tail_rho_before,
+                tail_rho_norm_before,
+            },
+            context_inner,
+        ),
+        OpsKind::UnTracked(prep) => prep.finish(context_inner),
+    };
+    let context_primitive = try_cast_backend::<B, _>(context_ad)?;
+    Some(BurnTensor::<B, 4>::from_primitive(TensorPrimitive::Float(
+        context_primitive,
+    )))
 }
 
 #[cfg(feature = "cuda")]
@@ -440,9 +945,10 @@ where
             decay_inner.clone(),
         )),
         chunk_size,
+        true,
     )
-    .unwrap_or_else(|| {
-        tensorized_rwkv8_forward_impl(
+    .unwrap_or_else(|| Rwkv8RuntimeChunkedForwardOutput {
+        forward: tensorized_rwkv8_forward_impl(
             BurnTensor::<CudaCubeBackend, 4>::from_primitive(TensorPrimitive::Float(
                 query_inner.clone(),
             )),
@@ -458,11 +964,60 @@ where
             BurnTensor::<CudaCubeBackend, 3>::from_primitive(TensorPrimitive::Float(
                 decay_inner.clone(),
             )),
-        )
+        ),
+        trace: None,
     });
+    let trace = output.trace;
+    let output = output.forward;
     let context_inner = output.context.into_primitive().tensor();
     let rho_inner = output.rho.into_primitive().tensor();
     let rho_norm_inner = output.rho_norm.into_primitive().tensor();
+    let chunk_rho_before = trace
+        .as_ref()
+        .and_then(|trace| trace.full_rho_before.clone())
+        .map(|tensor| tensor.into_primitive().tensor());
+    let chunk_rho_norm_before = trace
+        .as_ref()
+        .and_then(|trace| trace.full_rho_norm_before.clone())
+        .map(|tensor| tensor.into_primitive().tensor());
+    let tail_rho_before = trace
+        .as_ref()
+        .and_then(|trace| trace.tail_rho_before.clone())
+        .map(|tensor| tensor.into_primitive().tensor());
+    let tail_rho_norm_before = trace
+        .as_ref()
+        .and_then(|trace| trace.tail_rho_norm_before.clone())
+        .map(|tensor| tensor.into_primitive().tensor());
+    let chunk_rho_start = if chunk_rho_before.is_none() || chunk_rho_norm_before.is_none() {
+        trace
+            .as_ref()
+            .map(|trace| trace.rho_start.clone().into_primitive().tensor())
+    } else {
+        None
+    };
+    let chunk_rho_norm_start = if chunk_rho_before.is_none() || chunk_rho_norm_before.is_none() {
+        trace
+            .as_ref()
+            .map(|trace| trace.rho_norm_start.clone().into_primitive().tensor())
+    } else {
+        None
+    };
+    let tail_rho_start = if tail_rho_before.is_none() || tail_rho_norm_before.is_none() {
+        trace
+            .as_ref()
+            .and_then(|trace| trace.tail_rho_start.clone())
+            .map(|tensor| tensor.into_primitive().tensor())
+    } else {
+        None
+    };
+    let tail_rho_norm_start = if tail_rho_before.is_none() || tail_rho_norm_before.is_none() {
+        trace
+            .as_ref()
+            .and_then(|trace| trace.tail_rho_norm_start.clone())
+            .map(|tensor| tensor.into_primitive().tensor())
+    } else {
+        None
+    };
 
     let context_ad = match TensorizedRwkv8Backward::<CudaCubeBackend>(PhantomData)
         .prepare::<NoCheckpointing>([
@@ -481,6 +1036,14 @@ where
                 rho_norm_state: rho_norm_state_inner,
                 decay: decay_inner,
                 chunk_size,
+                chunk_rho_start,
+                chunk_rho_norm_start,
+                chunk_rho_before,
+                chunk_rho_norm_before,
+                tail_rho_start,
+                tail_rho_norm_start,
+                tail_rho_before,
+                tail_rho_norm_before,
             },
             context_inner,
         ),
@@ -497,6 +1060,181 @@ where
         rho: BurnTensor::<B, 4>::from_primitive(TensorPrimitive::Float(rho_primitive)),
         rho_norm: BurnTensor::<B, 3>::from_primitive(TensorPrimitive::Float(rho_norm_primitive)),
     })
+}
+
+#[cfg(feature = "cuda")]
+fn try_tensorized_rwkv8_autodiff_cuda_context_only<B>(
+    query: Tensor<B, 4>,
+    value: Tensor<B, 4>,
+    rho_state: Option<Tensor<B, 4>>,
+    rho_norm_state: Option<Tensor<B, 3>>,
+    decay: Tensor<B, 3>,
+) -> Option<Tensor<B, 4>>
+where
+    B: BackendTrait,
+    B::FloatTensorPrimitive: 'static,
+{
+    let query_shape = query.shape().dims::<4>();
+    let value_shape = value.shape().dims::<4>();
+    let query_ad: CudaCubeAutodiffTensor =
+        try_cast_primitive::<B, _>(query.into_primitive().tensor())?;
+    let value_ad: CudaCubeAutodiffTensor =
+        try_cast_primitive::<B, _>(value.into_primitive().tensor())?;
+    let decay_ad: CudaCubeAutodiffTensor =
+        try_cast_primitive::<B, _>(decay.into_primitive().tensor())?;
+    let rho_state_inner = match rho_state {
+        Some(state) => {
+            let state_ad: CudaCubeAutodiffTensor =
+                try_cast_primitive::<B, _>(state.into_primitive().tensor())?;
+            Some(<CudaCubeAutodiffBackend as AutodiffBackend>::inner(
+                state_ad,
+            ))
+        }
+        None => None,
+    };
+    let rho_norm_state_inner = match rho_norm_state {
+        Some(state) => {
+            let state_ad: CudaCubeAutodiffTensor =
+                try_cast_primitive::<B, _>(state.into_primitive().tensor())?;
+            Some(<CudaCubeAutodiffBackend as AutodiffBackend>::inner(
+                state_ad,
+            ))
+        }
+        None => None,
+    };
+    let query_inner = <CudaCubeAutodiffBackend as AutodiffBackend>::inner(query_ad.clone());
+    let value_inner = <CudaCubeAutodiffBackend as AutodiffBackend>::inner(value_ad.clone());
+    let decay_inner = <CudaCubeAutodiffBackend as AutodiffBackend>::inner(decay_ad.clone());
+
+    let chunk_size = rwkv8_tensorized_chunk_size::<CudaCubeBackend>(
+        query_shape[0],
+        query_shape[1],
+        query_shape[2],
+        query_shape[3],
+        value_shape[3],
+    );
+    let output = tensorized_rwkv8_runtime_chunked_forward(
+        BurnTensor::<CudaCubeBackend, 4>::from_primitive(TensorPrimitive::Float(
+            query_inner.clone(),
+        )),
+        BurnTensor::<CudaCubeBackend, 4>::from_primitive(TensorPrimitive::Float(
+            value_inner.clone(),
+        )),
+        rho_state_inner.clone().map(|inner| {
+            BurnTensor::<CudaCubeBackend, 4>::from_primitive(TensorPrimitive::Float(inner))
+        }),
+        rho_norm_state_inner.clone().map(|inner| {
+            BurnTensor::<CudaCubeBackend, 3>::from_primitive(TensorPrimitive::Float(inner))
+        }),
+        BurnTensor::<CudaCubeBackend, 3>::from_primitive(TensorPrimitive::Float(
+            decay_inner.clone(),
+        )),
+        chunk_size,
+        false,
+    )
+    .unwrap_or_else(|| Rwkv8RuntimeChunkedForwardOutput {
+        forward: tensorized_rwkv8_forward_impl(
+            BurnTensor::<CudaCubeBackend, 4>::from_primitive(TensorPrimitive::Float(
+                query_inner.clone(),
+            )),
+            BurnTensor::<CudaCubeBackend, 4>::from_primitive(TensorPrimitive::Float(
+                value_inner.clone(),
+            )),
+            rho_state_inner.clone().map(|inner| {
+                BurnTensor::<CudaCubeBackend, 4>::from_primitive(TensorPrimitive::Float(inner))
+            }),
+            rho_norm_state_inner.clone().map(|inner| {
+                BurnTensor::<CudaCubeBackend, 3>::from_primitive(TensorPrimitive::Float(inner))
+            }),
+            BurnTensor::<CudaCubeBackend, 3>::from_primitive(TensorPrimitive::Float(
+                decay_inner.clone(),
+            )),
+        ),
+        trace: None,
+    });
+    let trace = output.trace;
+    let context_inner = output.forward.context.into_primitive().tensor();
+    let chunk_rho_before = trace
+        .as_ref()
+        .and_then(|trace| trace.full_rho_before.clone())
+        .map(|tensor| tensor.into_primitive().tensor());
+    let chunk_rho_norm_before = trace
+        .as_ref()
+        .and_then(|trace| trace.full_rho_norm_before.clone())
+        .map(|tensor| tensor.into_primitive().tensor());
+    let tail_rho_before = trace
+        .as_ref()
+        .and_then(|trace| trace.tail_rho_before.clone())
+        .map(|tensor| tensor.into_primitive().tensor());
+    let tail_rho_norm_before = trace
+        .as_ref()
+        .and_then(|trace| trace.tail_rho_norm_before.clone())
+        .map(|tensor| tensor.into_primitive().tensor());
+    let chunk_rho_start = if chunk_rho_before.is_none() || chunk_rho_norm_before.is_none() {
+        trace
+            .as_ref()
+            .map(|trace| trace.rho_start.clone().into_primitive().tensor())
+    } else {
+        None
+    };
+    let chunk_rho_norm_start = if chunk_rho_before.is_none() || chunk_rho_norm_before.is_none() {
+        trace
+            .as_ref()
+            .map(|trace| trace.rho_norm_start.clone().into_primitive().tensor())
+    } else {
+        None
+    };
+    let tail_rho_start = if tail_rho_before.is_none() || tail_rho_norm_before.is_none() {
+        trace
+            .as_ref()
+            .and_then(|trace| trace.tail_rho_start.clone())
+            .map(|tensor| tensor.into_primitive().tensor())
+    } else {
+        None
+    };
+    let tail_rho_norm_start = if tail_rho_before.is_none() || tail_rho_norm_before.is_none() {
+        trace
+            .as_ref()
+            .and_then(|trace| trace.tail_rho_norm_start.clone())
+            .map(|tensor| tensor.into_primitive().tensor())
+    } else {
+        None
+    };
+
+    let context_ad = match TensorizedRwkv8Backward::<CudaCubeBackend>(PhantomData)
+        .prepare::<NoCheckpointing>([
+            query_ad.node.clone(),
+            value_ad.node.clone(),
+            decay_ad.node.clone(),
+        ])
+        .compute_bound()
+        .stateful()
+    {
+        OpsKind::Tracked(prep) => prep.finish(
+            TensorizedRwkv8BackwardState {
+                query: query_inner,
+                value: value_inner,
+                rho_state: rho_state_inner,
+                rho_norm_state: rho_norm_state_inner,
+                decay: decay_inner,
+                chunk_size,
+                chunk_rho_start,
+                chunk_rho_norm_start,
+                chunk_rho_before,
+                chunk_rho_norm_before,
+                tail_rho_start,
+                tail_rho_norm_start,
+                tail_rho_before,
+                tail_rho_norm_before,
+            },
+            context_inner,
+        ),
+        OpsKind::UnTracked(prep) => prep.finish(context_inner),
+    };
+    let context_primitive = try_cast_backend::<B, _>(context_ad)?;
+    Some(BurnTensor::<B, 4>::from_primitive(TensorPrimitive::Float(
+        context_primitive,
+    )))
 }
 
 pub(crate) fn rwkv8_forward_recurrence_before_5d<B: BackendTrait>(
@@ -654,7 +1392,10 @@ fn tensorized_rwkv8_forward_scan_chunk<B: BackendTrait>(
             .clone()
             .slice_dim(2, step..step + 1)
             .squeeze_dim::<3>(2);
-        let value_t = value.clone().slice_dim(2, step..step + 1).squeeze_dim::<3>(2);
+        let value_t = value
+            .clone()
+            .slice_dim(2, step..step + 1)
+            .squeeze_dim::<3>(2);
 
         let q_weights = rwkv8_query_weights_step(query_t.clone());
         let context_t = rho
@@ -772,9 +1513,7 @@ fn tensorized_rwkv8_forward_matmul_chunk<B: BackendTrait>(
     let last_delta = delta
         .slice_dim(2, time - 1..time)
         .reshape([batch, heads, latent, embd]);
-    let last_query = query
-        .slice_dim(2, time - 1..time)
-        .squeeze_dim::<3>(2);
+    let last_query = query.slice_dim(2, time - 1..time).squeeze_dim::<3>(2);
 
     let rho = last_rho_before
         .mul(decay.clone().reshape([1, heads, latent, 1]))
@@ -808,10 +1547,12 @@ pub(crate) fn rwkv8_tensorized_chunk_size<B: BackendTrait>(
     let threshold_bytes = rwkv8_tensorized_scan_threshold_bytes::<B>();
     let backend_name = std::any::type_name::<B>();
     let mut chunk = if backend_name.contains("CudaRuntime") {
-        // Real CUDA training at the Shakespeare base shape prefers a much wider
-        // chunk window than the older conservative default once the runtime
-        // forward/backward shell is fully fused and state outputs are pure.
-        time.min(128).max(1)
+        // Real CUDA training at the Shakespeare base shape now consistently
+        // prefers a smaller runtime chunk than the earlier 128-token default
+        // after the batched analytical backward landed. 64 keeps the wrapper
+        // fast without pushing boundary/setup overhead back above the saved
+        // recurrence work.
+        time.min(64).max(1)
     } else {
         time.max(1)
     };
@@ -966,17 +1707,6 @@ fn exclusive_prefix_sum_time_5d<B: BackendTrait>(tensor: Tensor<B, 5>) -> Tensor
     let [batch, heads, time, latent, embd] = tensor.shape().dims::<5>();
     let prefix = tensor.cumsum(2);
     let zero = Tensor::<B, 5>::zeros([batch, heads, 1, latent, embd], &prefix.device());
-    if time == 1 {
-        zero
-    } else {
-        Tensor::cat(vec![zero, prefix.slice_dim(2, 0..time - 1)], 2)
-    }
-}
-
-fn exclusive_prefix_sum_time_4d<B: BackendTrait>(tensor: Tensor<B, 4>) -> Tensor<B, 4> {
-    let [batch, heads, time, latent] = tensor.shape().dims::<4>();
-    let prefix = tensor.cumsum(2);
-    let zero = Tensor::<B, 4>::zeros([batch, heads, 1, latent], &prefix.device());
     if time == 1 {
         zero
     } else {

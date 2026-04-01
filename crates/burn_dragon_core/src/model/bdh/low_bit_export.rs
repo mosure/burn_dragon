@@ -1,3 +1,4 @@
+use super::language_head::LanguageHeadDeployScaffold;
 use anyhow::{Result, anyhow};
 use burn::module::{Module, Param};
 use burn::nn::Embedding;
@@ -44,6 +45,11 @@ impl<B: Backend> BDH<B> {
     }
 
     pub fn export_bitnet_deploy_scaffold(&self) -> BdhBitNetDeployScaffold<B> {
+        let LanguageHeadDeployScaffold {
+            lm_head,
+            nca_factorized_lm_head,
+            nca_special_lm_head,
+        } = self.clone_language_head_deploy_scaffold();
         BdhBitNetDeployScaffold {
             embed: self.embed.clone(),
             norm: self.norm.clone(),
@@ -54,9 +60,9 @@ impl<B: Backend> BDH<B> {
                 == SequenceMemorySystem::Rwkv8StateSpace)
                 .then(|| self.rwkv_time_decay.clone()),
             mamba: self.mamba.clone(),
-            lm_head: self.lm_head.clone(),
-            nca_factorized_lm_head: self.nca_factorized_lm_head.clone(),
-            nca_special_lm_head: self.nca_special_lm_head.clone(),
+            lm_head,
+            nca_factorized_lm_head,
+            nca_special_lm_head,
         }
     }
 

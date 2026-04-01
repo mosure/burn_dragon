@@ -1,14 +1,81 @@
 use super::*;
 
+pub(crate) enum LanguageHeadRuntimeRef<'a, B: Backend> {
+    StandardTokenClassification {
+        lm_head: &'a Param<Tensor<B, 2>>,
+    },
+    NcaFactorizedPatch {
+        factorized_lm_head: &'a Param<Tensor<B, 2>>,
+        special_lm_head: Option<&'a Param<Tensor<B, 2>>>,
+        tables: &'a NcaFactorizedHeadTables,
+    },
+}
+
+pub(crate) struct LanguageHeadDeployScaffold<B: Backend> {
+    pub(crate) lm_head: Option<Param<Tensor<B, 2>>>,
+    pub(crate) nca_factorized_lm_head: Option<Param<Tensor<B, 2>>>,
+    pub(crate) nca_special_lm_head: Option<Param<Tensor<B, 2>>>,
+}
+
 impl<B: Backend> BDH<B> {
+    pub(crate) fn language_head_runtime(&self) -> LanguageHeadRuntimeRef<'_, B> {
+        match &self.language_head.0 {
+            LanguageHeadRuntimeKind::StandardTokenClassification => {
+                LanguageHeadRuntimeRef::StandardTokenClassification {
+                    lm_head: self
+                        .lm_head
+                        .as_ref()
+                        .expect("flat language-model head weights missing"),
+                }
+            }
+            LanguageHeadRuntimeKind::NcaFactorizedPatch => {
+                LanguageHeadRuntimeRef::NcaFactorizedPatch {
+                    factorized_lm_head: self
+                        .nca_factorized_lm_head
+                        .as_ref()
+                        .expect("factorized NCA head weights missing"),
+                    special_lm_head: self.nca_special_lm_head.as_ref(),
+                    tables: self
+                        .nca_factorized_head_tables
+                        .0
+                        .as_ref()
+                        .expect("factorized NCA head tables missing"),
+                }
+            }
+        }
+    }
+
+    pub(crate) fn clone_language_head_deploy_scaffold(&self) -> LanguageHeadDeployScaffold<B> {
+        match self.language_head_runtime() {
+            LanguageHeadRuntimeRef::StandardTokenClassification { lm_head } => {
+                LanguageHeadDeployScaffold {
+                    lm_head: Some(lm_head.clone()),
+                    nca_factorized_lm_head: None,
+                    nca_special_lm_head: None,
+                }
+            }
+            LanguageHeadRuntimeRef::NcaFactorizedPatch {
+                factorized_lm_head,
+                special_lm_head,
+                ..
+            } => LanguageHeadDeployScaffold {
+                lm_head: None,
+                nca_factorized_lm_head: Some(factorized_lm_head.clone()),
+                nca_special_lm_head: special_lm_head.cloned(),
+            },
+        }
+    }
+
     pub fn language_token_losses_from_hidden(
         &self,
         hidden: Tensor<B, 3>,
         targets: Tensor<B, 2, Int>,
     ) -> Tensor<B, 2> {
-        match self.nca_factorized_head_tables.0.as_ref() {
-            None => self.language_token_losses_from_logits(self.project_hidden_to_logits(hidden), targets),
-            Some(tables) => {
+        match self.language_head_runtime() {
+            LanguageHeadRuntimeRef::StandardTokenClassification { .. } => {
+                self.language_token_losses_from_logits(self.project_hidden_to_logits(hidden), targets)
+            }
+            LanguageHeadRuntimeRef::NcaFactorizedPatch { tables, .. } => {
                 self.nca_factorized_language_token_losses_from_hidden(hidden, targets, tables)
             }
         }
@@ -19,9 +86,13 @@ impl<B: Backend> BDH<B> {
         hidden: Tensor<B, 3>,
         targets: Tensor<B, 2, Int>,
     ) -> Tensor<B, 1> {
-        match self.nca_factorized_head_tables.0.as_ref() {
-            None => self.language_loss_from_logits(self.project_hidden_to_logits(hidden), targets),
-            Some(tables) => self.nca_factorized_language_loss_from_hidden(hidden, targets, tables),
+        match self.language_head_runtime() {
+            LanguageHeadRuntimeRef::StandardTokenClassification { .. } => {
+                self.language_loss_from_logits(self.project_hidden_to_logits(hidden), targets)
+            }
+            LanguageHeadRuntimeRef::NcaFactorizedPatch { tables, .. } => {
+                self.nca_factorized_language_loss_from_hidden(hidden, targets, tables)
+            }
         }
     }
 
@@ -60,13 +131,19 @@ impl<B: Backend> BDH<B> {
         let device = hidden.device();
         let hidden_flat = hidden.reshape([token_count, dim]);
 
+        let LanguageHeadRuntimeRef::NcaFactorizedPatch {
+            factorized_lm_head,
+            special_lm_head,
+            ..
+        } = self.language_head_runtime()
+        else {
+            panic!("factorized NCA loss requires NCA factorized language head runtime");
+        };
+
         let patch_logits = hidden_flat
             .clone()
             .matmul(
-                self.nca_factorized_lm_head
-                    .as_ref()
-                    .expect("factorized NCA head weights missing")
-                    .val(),
+                factorized_lm_head.val(),
             )
             .reshape([token_count, tables.patch_cells, tables.state_count]);
 
@@ -112,8 +189,7 @@ impl<B: Backend> BDH<B> {
             );
             let special_logits = hidden_flat
                 .matmul(
-                    self.nca_special_lm_head
-                        .as_ref()
+                    special_lm_head
                         .expect("factorized NCA special-token head weights missing")
                         .val(),
                 )

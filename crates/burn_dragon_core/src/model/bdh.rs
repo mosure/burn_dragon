@@ -105,7 +105,7 @@ pub struct BDH<B: Backend> {
     n_head: usize,
     mlp_internal_dim_multiplier: usize,
     vocab_size: usize,
-    language_head: Ignored<LanguageHeadConfig>,
+    language_head: Ignored<LanguageHeadRuntimeKind>,
     sequence_kernel: SequenceKernelConfig,
     rollout_fast_steps_per_slow_step: usize,
     kernel: FusedKernelConfig,
@@ -150,7 +150,7 @@ pub struct BDH<B: Backend> {
 }
 
 #[derive(Clone)]
-struct NcaFactorizedHeadTables {
+pub(crate) struct NcaFactorizedHeadTables {
     patch_cells: usize,
     state_count: usize,
     special_token_ids: Vec<u32>,
@@ -158,6 +158,25 @@ struct NcaFactorizedHeadTables {
     patch_mask_table: Vec<f32>,
     special_index_table: Vec<i64>,
     special_mask_table: Vec<f32>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum LanguageHeadRuntimeKind {
+    StandardTokenClassification,
+    NcaFactorizedPatch,
+}
+
+impl LanguageHeadRuntimeKind {
+    fn from_config(config: &LanguageHeadConfig) -> Self {
+        match config {
+            LanguageHeadConfig::StandardTokenClassification => Self::StandardTokenClassification,
+            LanguageHeadConfig::NcaFactorizedPatch { .. } => Self::NcaFactorizedPatch,
+        }
+    }
+
+    fn uses_flat_token_logits(&self) -> bool {
+        matches!(self, Self::StandardTokenClassification)
+    }
 }
 
 impl core::fmt::Debug for NcaFactorizedHeadTables {
@@ -379,6 +398,7 @@ impl<B: Backend> BDH<B> {
                 | SequenceMemorySystem::Mamba3StateSpaceDuality
         )
         .then(|| MambaSequenceParameters::new(mamba_config, sequence_kernel.memory_system, device));
+        let language_head = LanguageHeadRuntimeKind::from_config(&config.language_head);
         let nca_factorized_head_tables =
             NcaFactorizedHeadTables::from_language_head_config(&config.language_head, config.vocab_size)
                 .unwrap_or_else(|message| panic!("invalid language head config: {message}"));
@@ -427,7 +447,7 @@ impl<B: Backend> BDH<B> {
             n_head: config.n_head,
             mlp_internal_dim_multiplier: config.mlp_internal_dim_multiplier,
             vocab_size: config.vocab_size,
-            language_head: Ignored(config.language_head.clone()),
+            language_head: Ignored(language_head),
             sequence_kernel,
             rollout_fast_steps_per_slow_step: config.rollout_fast_steps_per_slow_step,
             kernel: config.fused_kernels,

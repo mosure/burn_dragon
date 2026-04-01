@@ -32,7 +32,7 @@ pub use bdh_support::{
 pub use burn_dragon_kernel::api::projection::LowrankGradInputExecutor;
 pub use config::{
     BDHConfig, ClockedSlowMemoryConfig, FusedAttentionExecutor, FusedKernelConfig,
-    FusedProjectionExecutor, LatentFanoutScheduleConfig, SummaryMemoryConfig,
+    FusedProjectionExecutor, LanguageHeadConfig, LatentFanoutScheduleConfig, SummaryMemoryConfig,
     YNeuronRecurrenceConfig,
 };
 pub use halt::HaltHead;

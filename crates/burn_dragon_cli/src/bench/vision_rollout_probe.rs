@@ -346,6 +346,7 @@ fn build_validation_probe_batch(
         cache_decoded: config.dataset.cache_decoded,
         cache_capacity: config.dataset.cache_capacity,
         cache_preprocessed: config.dataset.cache_preprocessed,
+        rac_teacher_latent: None,
     })?;
     let record_count = dataset.len();
     let teacher_store = Arc::new(DinoFeatureStore::new(

@@ -1,6 +1,7 @@
 mod auxiliary_memory;
 mod connector;
 mod diagnostics;
+mod language_head;
 mod language_pipeline;
 mod low_bit_export;
 mod sequence_dispatch;
@@ -52,8 +53,8 @@ use super::bdh_support::{
     logits_projection_profile_record, shannon_entropy,
 };
 use super::config::{
-    BDHConfig, ClockedSlowMemoryConfig, FusedKernelConfig, SummaryMemoryConfig,
-    YNeuronRecurrenceConfig,
+    BDHConfig, ClockedSlowMemoryConfig, FusedKernelConfig, LanguageHeadConfig,
+    SummaryMemoryConfig, YNeuronRecurrenceConfig,
 };
 use super::init::{BdhFiringTargetKind, BdhInitializer, BdhProjectionRole};
 use super::low_bit::{
@@ -104,6 +105,7 @@ pub struct BDH<B: Backend> {
     n_head: usize,
     mlp_internal_dim_multiplier: usize,
     vocab_size: usize,
+    language_head: Ignored<LanguageHeadConfig>,
     sequence_kernel: SequenceKernelConfig,
     rollout_fast_steps_per_slow_step: usize,
     kernel: FusedKernelConfig,
@@ -140,7 +142,113 @@ pub struct BDH<B: Backend> {
     decoder: Param<Tensor<B, 2>>,
     mamba_config: Ignored<ResolvedMambaSequenceConfig>,
     mamba: Option<MambaSequenceParameters<B>>,
-    lm_head: Param<Tensor<B, 2>>,
+    lm_head: Option<Param<Tensor<B, 2>>>,
+    nca_factorized_lm_head: Option<Param<Tensor<B, 2>>>,
+    nca_special_lm_head: Option<Param<Tensor<B, 2>>>,
+    #[module(ignore)]
+    nca_factorized_head_tables: Ignored<Option<NcaFactorizedHeadTables>>,
+}
+
+#[derive(Clone)]
+struct NcaFactorizedHeadTables {
+    patch_cells: usize,
+    state_count: usize,
+    special_token_ids: Vec<u32>,
+    patch_digit_tables: Vec<Vec<i64>>,
+    patch_mask_table: Vec<f32>,
+    special_index_table: Vec<i64>,
+    special_mask_table: Vec<f32>,
+}
+
+impl core::fmt::Debug for NcaFactorizedHeadTables {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("NcaFactorizedHeadTables")
+            .field("patch_cells", &self.patch_cells)
+            .field("state_count", &self.state_count)
+            .field("special_token_ids", &self.special_token_ids)
+            .field("patch_digit_tables", &format_args!("{} tables", self.patch_digit_tables.len()))
+            .field(
+                "patch_mask_table",
+                &format_args!("len={}", self.patch_mask_table.len()),
+            )
+            .field(
+                "special_index_table",
+                &format_args!("len={}", self.special_index_table.len()),
+            )
+            .field(
+                "special_mask_table",
+                &format_args!("len={}", self.special_mask_table.len()),
+            )
+            .finish()
+    }
+}
+
+impl NcaFactorizedHeadTables {
+    fn from_language_head_config(
+        config: &LanguageHeadConfig,
+        vocab_size: usize,
+    ) -> Result<Option<Self>, String> {
+        let LanguageHeadConfig::NcaFactorizedPatch {
+            state_count,
+            patch_size,
+            frame_special_tokens,
+            eos_id,
+        } = config
+        else {
+            return Ok(None);
+        };
+        config.validate_for_vocab_size(vocab_size)?;
+        let patch_cells = patch_size.saturating_mul(*patch_size);
+        let patch_vocab_size = state_count
+            .checked_pow(patch_cells as u32)
+            .ok_or_else(|| "NCA factorized head patch vocabulary overflow".to_string())?;
+        let mut special_token_ids = Vec::new();
+        if *frame_special_tokens {
+            special_token_ids.push(patch_vocab_size as u32);
+            special_token_ids.push((patch_vocab_size + 1) as u32);
+        }
+        if let Some(eos_id) = eos_id {
+            if !special_token_ids.contains(eos_id) {
+                special_token_ids.push(*eos_id);
+            }
+        }
+
+        let mut patch_digit_tables = vec![vec![0i64; vocab_size]; patch_cells];
+        let mut patch_mask_table = vec![0.0f32; vocab_size];
+        for token_id in 0..patch_vocab_size.min(vocab_size) {
+            patch_mask_table[token_id] = 1.0;
+            let mut remainder = token_id;
+            for cell_idx in (0..patch_cells).rev() {
+                let digit = remainder % state_count;
+                patch_digit_tables[cell_idx][token_id] = digit as i64;
+                remainder /= state_count;
+            }
+        }
+
+        let mut special_index_table = vec![0i64; vocab_size];
+        let mut special_mask_table = vec![0.0f32; vocab_size];
+        for (special_idx, token_id) in special_token_ids.iter().enumerate() {
+            let token_id = *token_id as usize;
+            if token_id < vocab_size {
+                special_index_table[token_id] = special_idx as i64;
+                special_mask_table[token_id] = 1.0;
+            }
+        }
+
+        Ok(Some(Self {
+            patch_cells,
+            state_count: *state_count,
+            special_token_ids,
+            patch_digit_tables,
+            patch_mask_table,
+            special_index_table,
+            special_mask_table,
+        }))
+    }
+
+    fn special_count(&self) -> usize {
+        self.special_token_ids.len()
+    }
 }
 
 /// Named inputs for a single low-rank positive projection.
@@ -271,13 +379,42 @@ impl<B: Backend> BDH<B> {
                 | SequenceMemorySystem::Mamba3StateSpaceDuality
         )
         .then(|| MambaSequenceParameters::new(mamba_config, sequence_kernel.memory_system, device));
-        let lm_head = Param::from_tensor(initializer.projection_tensor::<B>(
-            BdhProjectionRole::LmHead,
-            config.n_embd,
-            config.vocab_size,
-            residual_depth,
-            device,
-        ));
+        let nca_factorized_head_tables =
+            NcaFactorizedHeadTables::from_language_head_config(&config.language_head, config.vocab_size)
+                .unwrap_or_else(|message| panic!("invalid language head config: {message}"));
+        let lm_head = if nca_factorized_head_tables.is_none() {
+            Some(Param::from_tensor(initializer.projection_tensor::<B>(
+                BdhProjectionRole::LmHead,
+                config.n_embd,
+                config.vocab_size,
+                residual_depth,
+                device,
+            )))
+        } else {
+            None
+        };
+        let nca_factorized_lm_head = nca_factorized_head_tables.as_ref().map(|tables| {
+            Param::from_tensor(initializer.projection_tensor::<B>(
+                BdhProjectionRole::LmHead,
+                config.n_embd,
+                tables.patch_cells * tables.state_count,
+                residual_depth,
+                device,
+            ))
+        });
+        let nca_special_lm_head = nca_factorized_head_tables
+            .as_ref()
+            .and_then(|tables| {
+                (tables.special_count() > 0).then(|| {
+                    Param::from_tensor(initializer.projection_tensor::<B>(
+                        BdhProjectionRole::LmHead,
+                        config.n_embd,
+                        tables.special_count(),
+                        residual_depth,
+                        device,
+                    ))
+                })
+            });
         let layer_latent_totals = Ignored(
             (0..config.n_layer)
                 .map(|layer_idx| config.latent_total_for_layer(layer_idx))
@@ -290,6 +427,7 @@ impl<B: Backend> BDH<B> {
             n_head: config.n_head,
             mlp_internal_dim_multiplier: config.mlp_internal_dim_multiplier,
             vocab_size: config.vocab_size,
+            language_head: Ignored(config.language_head.clone()),
             sequence_kernel,
             rollout_fast_steps_per_slow_step: config.rollout_fast_steps_per_slow_step,
             kernel: config.fused_kernels,
@@ -330,6 +468,9 @@ impl<B: Backend> BDH<B> {
             mamba_config: Ignored(mamba_config),
             mamba,
             lm_head,
+            nca_factorized_lm_head,
+            nca_special_lm_head,
+            nca_factorized_head_tables: Ignored(nca_factorized_head_tables),
         }
     }
 
@@ -933,6 +1074,16 @@ impl<B: Backend> BDH<B> {
         self.forward_with_state_from_embedded(embedded, state, summary_event_mask)
     }
 
+    fn forward_hidden_with_state_impl(
+        &self,
+        tokens: Tensor<B, 2, Int>,
+        state: &mut ModelState<B>,
+        summary_event_mask: Option<Tensor<B, 2, Int>>,
+    ) -> Tensor<B, 3> {
+        let embedded = self.embed.forward(tokens);
+        self.forward_hidden_with_state_from_embedded(embedded, state, summary_event_mask)
+    }
+
     fn forward_with_state_from_embedded(
         &self,
         embedded: Tensor<B, 3>,
@@ -963,6 +1114,40 @@ impl<B: Backend> BDH<B> {
                 state,
                 summary_event_mask,
             ),
+        }
+    }
+
+    fn forward_hidden_with_state_from_embedded(
+        &self,
+        embedded: Tensor<B, 3>,
+        state: &mut ModelState<B>,
+        summary_event_mask: Option<Tensor<B, 2, Int>>,
+    ) -> Tensor<B, 3> {
+        if self.rollout_fast_steps_per_slow_step <= 1 {
+            let start_pos = state.position;
+            return self.forward_hidden_with_state_from_embedded_single_pass(
+                embedded,
+                state,
+                start_pos,
+                true,
+                RecurrentPositionMode::Sequential,
+                summary_event_mask,
+            );
+        }
+
+        match self.rollout_executor_mode() {
+            RolloutExecutorMode::HostLoop => self
+                .forward_hidden_with_state_from_embedded_rollout_host_loop(
+                    embedded,
+                    state,
+                    summary_event_mask,
+                ),
+            RolloutExecutorMode::WgpuFused => self
+                .forward_hidden_with_state_from_embedded_rollout_fused(
+                    embedded,
+                    state,
+                    summary_event_mask,
+                ),
         }
     }
 
@@ -1016,6 +1201,50 @@ impl<B: Backend> BDH<B> {
         (Tensor::cat(hidden_slow, 1), Tensor::cat(logits_slow, 1))
     }
 
+    fn forward_hidden_with_state_from_embedded_rollout_host_loop(
+        &self,
+        embedded: Tensor<B, 3>,
+        state: &mut ModelState<B>,
+        summary_event_mask: Option<Tensor<B, 2, Int>>,
+    ) -> Tensor<B, 3> {
+        assert_eq!(
+            state.layers.len(),
+            self.n_layer,
+            "model state layers mismatch"
+        );
+        let [batch, slow_steps, _embd] = embedded.shape().dims::<3>();
+
+        if slow_steps == 0 {
+            let device = embedded.device();
+            return Tensor::<B, 3>::zeros([batch, 0, self.n_embd], &device);
+        }
+
+        let mut hidden_slow = Vec::with_capacity(slow_steps);
+        for slow_idx in 0..slow_steps {
+            let token_embedded = embedded.clone().slice_dim(1, slow_idx..slow_idx + 1);
+            let token_summary_event_mask = summary_event_mask
+                .as_ref()
+                .map(|mask| mask.clone().slice_dim(1, slow_idx..slow_idx + 1));
+            let start_pos = state.position;
+            let mut hidden_last = None;
+            for _ in 0..self.rollout_fast_steps_per_slow_step {
+                let hidden = self.forward_hidden_with_state_from_embedded_single_pass(
+                    token_embedded.clone(),
+                    state,
+                    start_pos,
+                    false,
+                    RecurrentPositionMode::Sequential,
+                    token_summary_event_mask.clone(),
+                );
+                hidden_last = Some(hidden);
+            }
+            hidden_slow.push(hidden_last.expect("rollout hidden output"));
+            state.position = state.position.saturating_add(1);
+        }
+
+        Tensor::cat(hidden_slow, 1)
+    }
+
     fn forward_with_state_from_embedded_rollout_fused(
         &self,
         embedded: Tensor<B, 3>,
@@ -1064,6 +1293,51 @@ impl<B: Backend> BDH<B> {
         }
 
         (Tensor::cat(hidden_slow, 1), Tensor::cat(logits_slow, 1))
+    }
+
+    fn forward_hidden_with_state_from_embedded_rollout_fused(
+        &self,
+        embedded: Tensor<B, 3>,
+        state: &mut ModelState<B>,
+        summary_event_mask: Option<Tensor<B, 2, Int>>,
+    ) -> Tensor<B, 3> {
+        assert_eq!(
+            state.layers.len(),
+            self.n_layer,
+            "model state layers mismatch"
+        );
+        let [batch, slow_steps, _embd] = embedded.shape().dims::<3>();
+
+        if slow_steps == 0 {
+            let device = embedded.device();
+            return Tensor::<B, 3>::zeros([batch, 0, self.n_embd], &device);
+        }
+
+        let fast_steps = self.rollout_fast_steps_per_slow_step;
+        let mut hidden_slow = Vec::with_capacity(slow_steps);
+
+        for slow_idx in 0..slow_steps {
+            let token_embedded = embedded.clone().slice_dim(1, slow_idx..slow_idx + 1);
+            let rollout_embedded = token_embedded.repeat_dim(1, fast_steps);
+            let token_summary_event_mask = summary_event_mask
+                .as_ref()
+                .map(|mask| mask.clone().slice_dim(1, slow_idx..slow_idx + 1));
+            let start_pos = state.position;
+            let hidden_rollout = self.forward_hidden_with_state_from_embedded_single_pass(
+                rollout_embedded,
+                state,
+                start_pos,
+                false,
+                RecurrentPositionMode::Fixed,
+                token_summary_event_mask,
+            );
+            let last = fast_steps - 1;
+            let hidden_last = hidden_rollout.slice_dim(1, last..fast_steps);
+            hidden_slow.push(hidden_last);
+            state.position = state.position.saturating_add(1);
+        }
+
+        Tensor::cat(hidden_slow, 1)
     }
 
     fn forward_hidden_with_state_from_embedded_single_pass_y_neuron_recurrence(
@@ -1584,12 +1858,21 @@ impl<B: Backend> BDH<B> {
     }
 
     fn project_hidden_to_logits(&self, hidden: Tensor<B, 3>) -> Tensor<B, 3> {
+        assert!(
+            self.language_head.0.uses_flat_token_logits(),
+            "flat token logits are not available for the configured NCA factorized language head; use hidden-state loss helpers instead"
+        );
         let prof_enabled = logits_projection_profile_enabled();
         let start = prof_enabled.then(Instant::now);
         let [batch, time, dim] = hidden.shape().dims();
         let logits = hidden
             .reshape([batch * time, dim])
-            .matmul(self.lm_head.val())
+            .matmul(
+                self.lm_head
+                    .as_ref()
+                    .expect("flat language-model head weights missing")
+                    .val(),
+            )
             .reshape([batch, time, self.vocab_size]);
         if let Some(start) = start {
             logits_projection_profile_record(start.elapsed().as_nanos());
@@ -1601,6 +1884,10 @@ impl<B: Backend> BDH<B> {
         self.project_hidden_to_logits(hidden)
     }
 
+    pub fn uses_factorized_language_head(&self) -> bool {
+        !self.language_head.0.uses_flat_token_logits()
+    }
+
     pub fn forward_with_state(
         &self,
         tokens: Tensor<B, 2, Int>,
@@ -1608,6 +1895,11 @@ impl<B: Backend> BDH<B> {
     ) -> Tensor<B, 3> {
         let (_hidden, logits) = self.forward_with_state_impl(tokens, state, None);
         logits
+    }
+
+    pub fn forward_hidden(&self, tokens: Tensor<B, 2, Int>) -> Tensor<B, 3> {
+        let mut state = self.init_state();
+        self.forward_hidden_with_state(tokens, &mut state)
     }
 
     pub fn forward_with_state_and_summary_event_mask(
@@ -1619,6 +1911,23 @@ impl<B: Backend> BDH<B> {
         let (_hidden, logits) =
             self.forward_with_state_impl(tokens, state, Some(summary_event_mask));
         logits
+    }
+
+    pub fn forward_hidden_with_state(
+        &self,
+        tokens: Tensor<B, 2, Int>,
+        state: &mut ModelState<B>,
+    ) -> Tensor<B, 3> {
+        self.forward_hidden_with_state_impl(tokens, state, None)
+    }
+
+    pub fn forward_hidden_with_state_and_summary_event_mask(
+        &self,
+        tokens: Tensor<B, 2, Int>,
+        summary_event_mask: Tensor<B, 2, Int>,
+        state: &mut ModelState<B>,
+    ) -> Tensor<B, 3> {
+        self.forward_hidden_with_state_impl(tokens, state, Some(summary_event_mask))
     }
 
     pub fn forward_with_hidden_and_state(
@@ -1645,6 +1954,14 @@ impl<B: Backend> BDH<B> {
     ) -> Tensor<B, 3> {
         let (_hidden, logits) = self.forward_with_state_from_embedded(embedded, state, None);
         logits
+    }
+
+    pub fn forward_hidden_with_state_embedded(
+        &self,
+        embedded: Tensor<B, 3>,
+        state: &mut ModelState<B>,
+    ) -> Tensor<B, 3> {
+        self.forward_hidden_with_state_from_embedded(embedded, state, None)
     }
 
     pub fn forward_with_hidden_and_state_embedded(

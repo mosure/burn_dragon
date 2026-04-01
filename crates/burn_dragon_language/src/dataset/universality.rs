@@ -1054,6 +1054,49 @@ mod tests {
     }
 
     #[test]
+    fn on_the_fly_universality_dataset_epoch_stream_is_deterministic_across_instances() {
+        let dir = tempdir().expect("tempdir");
+        let config_path = dir.path().join("nca.toml");
+        let config = fixed_runtime_config();
+        fs::write(&config_path, toml::to_string_pretty(&config).expect("toml"))
+            .expect("write config");
+
+        let dataset_a = UniversalityDataset::new_on_the_fly(
+            &config_path,
+            32,
+            2,
+            None,
+            &pretokenized_tokenizer(),
+        )
+        .expect("load on-the-fly dataset a");
+        let dataset_b = UniversalityDataset::new_on_the_fly(
+            &config_path,
+            32,
+            2,
+            None,
+            &pretokenized_tokenizer(),
+        )
+        .expect("load on-the-fly dataset b");
+
+        dataset_a.prefetch_epoch(DatasetSplit::Train, 4);
+        dataset_a.prepare_epoch(DatasetSplit::Train, 4);
+        dataset_b.prepare_epoch(DatasetSplit::Train, 4);
+
+        let mut epoch4_a = vec![0u32; 64];
+        let mut epoch4_b = vec![0u32; 64];
+        dataset_a.copy_token_range_with_epoch(DatasetSplit::Train, 4, 0, &mut epoch4_a);
+        dataset_b.copy_token_range_with_epoch(DatasetSplit::Train, 4, 0, &mut epoch4_b);
+        assert_eq!(epoch4_a, epoch4_b);
+
+        let mut epoch5_a = vec![0u32; 64];
+        let mut epoch5_b = vec![0u32; 64];
+        dataset_a.copy_token_range_with_epoch(DatasetSplit::Train, 5, 0, &mut epoch5_a);
+        dataset_b.copy_token_range_with_epoch(DatasetSplit::Train, 5, 0, &mut epoch5_b);
+        assert_eq!(epoch5_a, epoch5_b);
+        assert_ne!(epoch4_a, epoch5_a);
+    }
+
+    #[test]
     fn on_the_fly_universality_dataset_spans_documents_without_materializing_corpus() {
         let dir = tempdir().expect("tempdir");
         let config_path = dir.path().join("nca.toml");

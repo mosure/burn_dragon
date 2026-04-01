@@ -13,6 +13,13 @@ type = "pretokenized"
 vocab_size = 10003
 eos_id = 10002
 
+[model.language_head]
+type = "nca_factorized_patch"
+state_count = 10
+patch_size = 2
+frame_special_tokens = true
+eos_id = 10002
+
 [generation]
 prompt = "0 0 0"
 temperature = 1.0

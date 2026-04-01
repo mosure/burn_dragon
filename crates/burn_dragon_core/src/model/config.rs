@@ -551,6 +551,73 @@ impl ModuleDisplayDefault for YNeuronRecurrenceConfig {
 impl ModuleDisplay for YNeuronRecurrenceConfig {}
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum LanguageHeadConfig {
+    StandardTokenClassification,
+    NcaFactorizedPatch {
+        state_count: usize,
+        patch_size: usize,
+        #[serde(default)]
+        frame_special_tokens: bool,
+        #[serde(default)]
+        eos_id: Option<u32>,
+    },
+}
+
+impl Default for LanguageHeadConfig {
+    fn default() -> Self {
+        Self::StandardTokenClassification
+    }
+}
+
+impl LanguageHeadConfig {
+    pub fn uses_flat_token_logits(&self) -> bool {
+        matches!(self, Self::StandardTokenClassification)
+    }
+
+    pub fn validate_for_vocab_size(&self, vocab_size: usize) -> Result<(), String> {
+        match self {
+            Self::StandardTokenClassification => Ok(()),
+            Self::NcaFactorizedPatch {
+                state_count,
+                patch_size,
+                frame_special_tokens,
+                eos_id,
+            } => {
+                if *state_count < 2 {
+                    return Err("language_head.state_count must be >= 2".to_string());
+                }
+                if *patch_size == 0 {
+                    return Err("language_head.patch_size must be > 0".to_string());
+                }
+                let patch_cells = patch_size.saturating_mul(*patch_size);
+                let patch_vocab_size = state_count
+                    .checked_pow(patch_cells as u32)
+                    .ok_or_else(|| "language_head patch vocabulary overflow".to_string())?;
+                let frame_special_budget = usize::from(*frame_special_tokens) * 2;
+                let special_budget = frame_special_budget + usize::from(eos_id.is_some());
+                if patch_vocab_size.saturating_add(special_budget) > vocab_size {
+                    return Err(format!(
+                        "language_head requires vocab_size >= {} (got {})",
+                        patch_vocab_size + special_budget,
+                        vocab_size
+                    ));
+                }
+                if let Some(eos_id) = eos_id {
+                    if *eos_id as usize >= vocab_size {
+                        return Err(format!(
+                            "language_head.eos_id must be < vocab_size (got eos_id={} vocab_size={})",
+                            eos_id, vocab_size
+                        ));
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct BDHConfig {
     pub n_layer: usize,
     pub n_embd: usize,
@@ -567,6 +634,8 @@ pub struct BDHConfig {
     pub mamba: MambaSequenceConfig,
     pub n_expert: usize,
     pub vocab_size: usize,
+    #[serde(default)]
+    pub language_head: LanguageHeadConfig,
     /// Number of fast internal recurrent updates to run before each slow token emission.
     /// Valid values: 1, 2, 4, 8, 16.
     pub rollout_fast_steps_per_slow_step: usize,
@@ -602,6 +671,7 @@ impl Default for BDHConfig {
             mamba: MambaSequenceConfig::default(),
             n_expert: 1,
             vocab_size: 256,
+            language_head: LanguageHeadConfig::default(),
             rollout_fast_steps_per_slow_step: 1,
             fused_kernels: FusedKernelConfig::default(),
             normalization: DragonNormConfig::default(),

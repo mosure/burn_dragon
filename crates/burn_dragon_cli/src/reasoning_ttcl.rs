@@ -497,6 +497,7 @@ fn map_reasoning_model_overrides(model: &ReasoningModelOverrides) -> LanguageMod
         n_embd: model.n_embd,
         n_head: model.n_head,
         mlp_internal_dim_multiplier: model.mlp_internal_dim_multiplier,
+        language_head: None,
         latent_total: model.latent_total,
         initialization: model.initialization.clone(),
         sequence_kernel: model.sequence_kernel,

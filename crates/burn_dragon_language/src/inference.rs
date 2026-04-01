@@ -32,6 +32,9 @@ pub fn build_model_config(overrides: &ModelOverrides, training_block_size: usize
     if let Some(multiplier) = overrides.mlp_internal_dim_multiplier {
         model_config.mlp_internal_dim_multiplier = multiplier;
     }
+    if let Some(language_head) = &overrides.language_head {
+        model_config.language_head = language_head.clone();
+    }
     if let Some(latent_total) = overrides.latent_total {
         assert!(
             latent_total % model_config.n_embd == 0,
@@ -167,6 +170,10 @@ pub fn build_model_config_with_tokenizer(
     let mut model_config = build_model_config(overrides, training_block_size);
     resolve_summary_memory_write_triggers(&mut model_config, tokenizer)?;
     model_config.vocab_size = tokenizer.len();
+    model_config
+        .language_head
+        .validate_for_vocab_size(model_config.vocab_size)
+        .unwrap_or_else(|message| panic!("invalid language_head config: {message}"));
     Ok(model_config)
 }
 

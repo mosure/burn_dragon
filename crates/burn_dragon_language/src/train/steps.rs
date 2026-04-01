@@ -125,6 +125,22 @@ impl<B: BackendTrait> LanguageTrainModel<B> {
         self.pipeline_plan.is_some()
     }
 
+    fn language_loss_from_hidden(
+        &self,
+        hidden: Tensor<B, 3>,
+        targets: Tensor<B, 2, Int>,
+    ) -> Tensor<B, 1> {
+        self.model.language_loss_from_hidden(hidden, targets)
+    }
+
+    fn language_loss_from_logits(
+        &self,
+        logits: Tensor<B, 3>,
+        targets: Tensor<B, 2, Int>,
+    ) -> Tensor<B, 1> {
+        self.model.language_loss_from_logits(logits, targets)
+    }
+
     fn forward_loss_with_pipeline(
         &self,
         inputs: Tensor<B, 2, Int>,
@@ -163,6 +179,7 @@ impl<B: BackendTrait> LanguageTrainModel<B> {
                     .map(|mask| Self::slice_batch(mask, range.start, range.end))
             })
             .collect::<Vec<_>>();
+        let factorized_head = self.model.uses_factorized_language_head();
 
         let mut chunk_states = (0..plan.microbatches)
             .map(|_| self.model.init_state_ephemeral())
@@ -200,28 +217,35 @@ impl<B: BackendTrait> LanguageTrainModel<B> {
         let mut hidden_chunks = Vec::with_capacity(plan.microbatches);
         let mut logits_chunks = Vec::with_capacity(plan.microbatches);
         for microbatch_id in 0..plan.microbatches {
-            let (hidden, logits) = self.model.finish_language_pipeline_with_state(
+            let hidden = self.model.finish_language_pipeline_hidden_with_state(
                 pipeline_states[microbatch_id]
                     .take()
                     .expect("pipeline state after scheduled forward"),
                 &mut chunk_states[microbatch_id],
             );
             let weight = ranges[microbatch_id].len() as f32 / batch_size as f32;
-            let chunk_loss =
-                language_model_loss::<B>(logits.clone(), chunk_targets[microbatch_id].clone())
-                    .mul_scalar(weight);
+            let chunk_loss = self
+                .language_loss_from_hidden(hidden.clone(), chunk_targets[microbatch_id].clone())
+                .mul_scalar(weight);
             total_loss = Some(match total_loss {
                 Some(accumulated) => accumulated + chunk_loss,
                 None => chunk_loss,
             });
+            if !factorized_head {
+                logits_chunks.push(self.model.logits_from_hidden(hidden.clone()));
+            }
             hidden_chunks.push(hidden);
-            logits_chunks.push(logits);
         }
 
         (
             total_loss.expect("pipeline forward should produce at least one microbatch loss"),
             Tensor::cat(hidden_chunks, 0),
-            Tensor::cat(logits_chunks, 0),
+            if logits_chunks.is_empty() {
+                let device = inputs.device();
+                Tensor::<B, 3>::zeros([batch_size, 0, 1], &device)
+            } else {
+                Tensor::cat(logits_chunks, 0)
+            },
         )
     }
 
@@ -295,6 +319,7 @@ impl<B: AutodiffBackend> TrainStep for LanguageTrainModel<B> {
             .and_then(|device| device_memory_usage_safe::<B>(device));
         let [_batch_size, block_size] = inputs.shape().dims();
         let tbptt_chunk_size = self.effective_tbptt_chunk_size(block_size);
+        let factorized_head = self.model.uses_factorized_language_head();
         let probe_inputs = detail_prof_enabled.then(|| inputs.clone());
         let probe_summary_event_mask = detail_prof_enabled
             .then(|| summary_event_mask.clone())
@@ -308,7 +333,7 @@ impl<B: AutodiffBackend> TrainStep for LanguageTrainModel<B> {
             (
                 loss,
                 Some(hidden),
-                Some(logits),
+                (!factorized_head).then_some(logits),
                 forward_start.elapsed().as_nanos(),
             )
         } else if let Some(chunk_size) = tbptt_chunk_size {
@@ -324,28 +349,31 @@ impl<B: AutodiffBackend> TrainStep for LanguageTrainModel<B> {
                         .clone()
                         .map(|mask| Self::slice_tokens(mask, batch_size, start, end));
                     let chunk_forward_start = Instant::now();
-                    let (hidden, logits) = if let Some(mask) = chunk_summary_event_mask {
-                        self.model
-                            .forward_with_hidden_and_state_and_summary_event_mask(
-                                chunk_inputs,
-                                mask,
-                                &mut step_state,
-                            )
+                    let hidden = if let Some(mask) = chunk_summary_event_mask {
+                        self.model.forward_hidden_with_state_and_summary_event_mask(
+                            chunk_inputs,
+                            mask,
+                            &mut step_state,
+                        )
                     } else {
-                        self.model
-                            .forward_with_hidden_and_state(chunk_inputs, &mut step_state)
+                        self.model.forward_hidden_with_state(chunk_inputs, &mut step_state)
                     };
                     total_forward_ns += chunk_forward_start.elapsed().as_nanos();
                     hidden_chunks.push(hidden);
-                    logits_chunks.push(logits);
+                    if !factorized_head {
+                        logits_chunks.push(
+                            self.model
+                                .logits_from_hidden(hidden_chunks.last().expect("hidden").clone()),
+                        );
+                    }
                     if end < block_size {
                         step_state.detach_in_place();
                     }
                 }
                 let hidden = Tensor::cat(hidden_chunks, 1);
-                let logits = Tensor::cat(logits_chunks, 1);
-                let loss = language_model_loss::<B>(logits.clone(), targets.clone());
-                (loss, Some(hidden), Some(logits), total_forward_ns)
+                let loss = self.language_loss_from_hidden(hidden.clone(), targets.clone());
+                let logits = (!factorized_head).then(|| Tensor::cat(logits_chunks, 1));
+                (loss, Some(hidden), logits, total_forward_ns)
             } else {
                 let [batch_size, block_size] = inputs.shape().dims();
                 let mut total_forward_ns = 0u128;
@@ -362,20 +390,21 @@ impl<B: AutodiffBackend> TrainStep for LanguageTrainModel<B> {
                         .map(|mask| Self::slice_tokens(mask, batch_size, start, end));
 
                     let chunk_forward_start = Instant::now();
-                    let logits = if let Some(mask) = chunk_summary_event_mask {
-                        self.model.forward_with_state_and_summary_event_mask(
+                    let chunk_loss = if let Some(mask) = chunk_summary_event_mask {
+                        let hidden = self.model.forward_hidden_with_state_and_summary_event_mask(
                             chunk_inputs,
                             mask,
                             &mut step_state,
-                        )
+                        );
+                        self.language_loss_from_hidden(hidden, chunk_targets.clone())
                     } else {
-                        self.model.forward_with_state(chunk_inputs, &mut step_state)
+                        let hidden = self.model.forward_hidden_with_state(chunk_inputs, &mut step_state);
+                        self.language_loss_from_hidden(hidden, chunk_targets.clone())
                     };
                     total_forward_ns += chunk_forward_start.elapsed().as_nanos();
 
                     let chunk_weight = (end - start) as f32 / block_size as f32;
-                    let chunk_loss =
-                        language_model_loss::<B>(logits, chunk_targets).mul_scalar(chunk_weight);
+                    let chunk_loss = chunk_loss.mul_scalar(chunk_weight);
                     total_loss = Some(match total_loss {
                         Some(accumulated) => accumulated + chunk_loss.clone().detach(),
                         None => chunk_loss.clone().detach(),
@@ -426,43 +455,41 @@ impl<B: AutodiffBackend> TrainStep for LanguageTrainModel<B> {
             }
         } else if detail_prof_enabled {
             if let Some(summary_event_mask) = summary_event_mask {
-                let (hidden, logits) = self
-                    .model
-                    .forward_with_hidden_and_state_and_summary_event_mask(
-                        inputs,
-                        summary_event_mask,
-                        &mut step_state,
-                    );
+                let hidden = self.model.forward_hidden_with_state_and_summary_event_mask(
+                    inputs,
+                    summary_event_mask,
+                    &mut step_state,
+                );
                 let forward_ns = forward_start
                     .map(|start| start.elapsed().as_nanos())
                     .unwrap_or_default();
-                let loss = language_model_loss::<B>(logits.clone(), targets.clone());
-                (loss, Some(hidden), Some(logits), forward_ns)
+                let loss = self.language_loss_from_hidden(hidden.clone(), targets.clone());
+                let logits = (!factorized_head).then(|| self.model.logits_from_hidden(hidden.clone()));
+                (loss, Some(hidden), logits, forward_ns)
             } else {
-                let (hidden, logits) = self
-                    .model
-                    .forward_with_hidden_and_state(inputs, &mut step_state);
+                let hidden = self.model.forward_hidden_with_state(inputs, &mut step_state);
                 let forward_ns = forward_start
                     .map(|start| start.elapsed().as_nanos())
                     .unwrap_or_default();
-                let loss = language_model_loss::<B>(logits.clone(), targets.clone());
-                (loss, Some(hidden), Some(logits), forward_ns)
+                let loss = self.language_loss_from_hidden(hidden.clone(), targets.clone());
+                let logits = (!factorized_head).then(|| self.model.logits_from_hidden(hidden.clone()));
+                (loss, Some(hidden), logits, forward_ns)
             }
         } else {
-            let logits = if let Some(summary_event_mask) = summary_event_mask {
-                self.model.forward_with_state_and_summary_event_mask(
+            let hidden = if let Some(summary_event_mask) = summary_event_mask {
+                self.model.forward_hidden_with_state_and_summary_event_mask(
                     inputs,
                     summary_event_mask,
                     &mut step_state,
                 )
             } else {
-                self.model.forward_with_state(inputs, &mut step_state)
+                self.model.forward_hidden_with_state(inputs, &mut step_state)
             };
             let forward_ns = forward_start
                 .map(|start| start.elapsed().as_nanos())
                 .unwrap_or_default();
-            let loss = language_model_loss::<B>(logits.clone(), targets.clone());
-            (loss, None, Some(logits), forward_ns)
+            let loss = self.language_loss_from_hidden(hidden, targets.clone());
+            (loss, None, None, forward_ns)
         };
         self.store_step_state(step_state);
         let step_memory_after_forward = step_device
@@ -470,8 +497,11 @@ impl<B: AutodiffBackend> TrainStep for LanguageTrainModel<B> {
             .and_then(|device| device_memory_usage_safe::<B>(device));
 
         let probe_targets = (prof_enabled && detail_prof_enabled).then(|| targets.clone());
-        let probe_logits = (prof_enabled && detail_prof_enabled)
-            .then(|| probe_logits.clone().expect("probe logits").detach());
+        let probe_logits = if prof_enabled && detail_prof_enabled {
+            probe_logits.clone().map(|logits| logits.detach())
+        } else {
+            None
+        };
         let probe_hidden = probe_hidden.map(|hidden| hidden.detach());
 
         let loss_backward_start = prof_enabled.then(Instant::now);
@@ -646,7 +676,7 @@ impl<B: BackendTrait> ValidStep for LanguageTrainModel<B> {
             );
             return LanguageModelOutput::new(loss);
         }
-        let logits = if let Some(summary_event_mask) = batch.summary_event_mask {
+        if let Some(summary_event_mask) = batch.summary_event_mask {
             if let Some(chunk_size) =
                 self.effective_tbptt_chunk_size(batch.inputs.shape().dims::<2>()[1])
             {
@@ -661,14 +691,15 @@ impl<B: BackendTrait> ValidStep for LanguageTrainModel<B> {
                         Self::slice_tokens(batch.targets.clone(), batch_size, start, end);
                     let chunk_mask =
                         Self::slice_tokens(summary_event_mask.clone(), batch_size, start, end);
-                    let logits = self.model.forward_with_state_and_summary_event_mask(
+                    let hidden = self.model.forward_hidden_with_state_and_summary_event_mask(
                         chunk_inputs,
                         chunk_mask,
                         &mut state,
                     );
                     let chunk_weight = (end - start) as f32 / block_size as f32;
-                    let chunk_loss =
-                        language_model_loss::<B>(logits, chunk_targets).mul_scalar(chunk_weight);
+                    let chunk_loss = self
+                        .language_loss_from_hidden(hidden, chunk_targets)
+                        .mul_scalar(chunk_weight);
                     loss = Some(match loss {
                         Some(accumulated) => accumulated + chunk_loss,
                         None => chunk_loss,
@@ -678,8 +709,16 @@ impl<B: BackendTrait> ValidStep for LanguageTrainModel<B> {
                     loss.expect("tbptt valid step should produce at least one loss chunk"),
                 );
             } else {
-                self.model
-                    .forward_with_summary_event_mask(batch.inputs, summary_event_mask)
+                let mut state = self.model.init_state();
+                let hidden = self
+                    .model
+                    .forward_hidden_with_state_and_summary_event_mask(
+                        batch.inputs,
+                        summary_event_mask,
+                        &mut state,
+                    );
+                let loss = self.language_loss_from_hidden(hidden, batch.targets);
+                return LanguageModelOutput::new(loss);
             }
         } else if let Some(chunk_size) =
             self.effective_tbptt_chunk_size(batch.inputs.shape().dims::<2>()[1])
@@ -692,10 +731,11 @@ impl<B: BackendTrait> ValidStep for LanguageTrainModel<B> {
                 let chunk_inputs = Self::slice_tokens(batch.inputs.clone(), batch_size, start, end);
                 let chunk_targets =
                     Self::slice_tokens(batch.targets.clone(), batch_size, start, end);
-                let logits = self.model.forward_with_state(chunk_inputs, &mut state);
+                let hidden = self.model.forward_hidden_with_state(chunk_inputs, &mut state);
                 let chunk_weight = (end - start) as f32 / block_size as f32;
-                let chunk_loss =
-                    language_model_loss::<B>(logits, chunk_targets).mul_scalar(chunk_weight);
+                let chunk_loss = self
+                    .language_loss_from_hidden(hidden, chunk_targets)
+                    .mul_scalar(chunk_weight);
                 loss = Some(match loss {
                     Some(accumulated) => accumulated + chunk_loss,
                     None => chunk_loss,
@@ -705,10 +745,10 @@ impl<B: BackendTrait> ValidStep for LanguageTrainModel<B> {
                 loss.expect("tbptt valid step should produce at least one loss chunk"),
             );
         } else {
-            self.model.forward(batch.inputs)
-        };
-        let loss = language_model_loss::<B>(logits, batch.targets);
-        LanguageModelOutput::new(loss)
+            let hidden = self.model.forward_hidden(batch.inputs);
+            let loss = self.language_loss_from_hidden(hidden, batch.targets);
+            return LanguageModelOutput::new(loss);
+        }
     }
 }
 
@@ -718,9 +758,9 @@ mod tests {
     use burn::tensor::TensorData;
     use burn_autodiff::Autodiff;
     use burn_dragon_core::{
-        BitNetLowBitProtocol, LowBitActivationFormat, LowBitQuantizationConfig,
-        LowBitSavedActivationConfig, LowBitSavedActivationMode, LowBitTargetModule,
-        LowBitTrainingMode, LowBitWeightFormat,
+        BitNetLowBitProtocol, LanguageHeadConfig, LowBitActivationFormat,
+        LowBitQuantizationConfig, LowBitSavedActivationConfig, LowBitSavedActivationMode,
+        LowBitTargetModule, LowBitTrainingMode, LowBitWeightFormat,
     };
     use burn_ndarray::NdArray;
 
@@ -780,6 +820,24 @@ mod tests {
             format: LowBitActivationFormat::Int8,
         };
         config
+    }
+
+    fn tiny_nca_factorized_model_config() -> BDHConfig {
+        BDHConfig {
+            n_layer: 2,
+            n_embd: 8,
+            n_head: 1,
+            mlp_internal_dim_multiplier: 1,
+            dropout: 0.0,
+            vocab_size: 19,
+            language_head: LanguageHeadConfig::NcaFactorizedPatch {
+                state_count: 2,
+                patch_size: 2,
+                frame_special_tokens: true,
+                eos_id: Some(18),
+            },
+            ..Default::default()
+        }
     }
 
     fn pipeline_plan_for_tiny_model() -> PipelinePlan {
@@ -881,6 +939,44 @@ mod tests {
         let synced = output.item.sync();
         let loss = loss_scalar(synced);
         assert!(loss.is_finite(), "pipeline train loss must be finite");
+    }
+
+    #[test]
+    fn nca_factorized_tbptt_valid_step_matches_full_loss_value() {
+        let device = <TestValidBackend as BackendTrait>::Device::default();
+        let model = BDH::<TestValidBackend>::new(tiny_nca_factorized_model_config(), &device);
+        let baseline = LanguageTrainModel::new(model.clone());
+        let tbptt = LanguageTrainModel::new(model).with_tbptt_chunk_size(Some(2));
+        let batch = make_batch::<TestValidBackend>(
+            &device,
+            &[16, 0, 1, 17, 16, 2, 3, 18],
+            &[0, 1, 17, 18, 2, 3, 16, 18],
+            [2, 4],
+        );
+        let baseline_loss = loss_scalar(ValidStep::step(&baseline, batch.clone()));
+        let tbptt_loss = loss_scalar(ValidStep::step(&tbptt, batch));
+        assert!(
+            (baseline_loss - tbptt_loss).abs() < 1.0e-5,
+            "expected factorized tbptt loss to match full loss value, got baseline={baseline_loss} tbptt={tbptt_loss}"
+        );
+    }
+
+    #[test]
+    fn nca_factorized_train_step_runs_and_emits_finite_loss() {
+        let device = <TestBackend as BackendTrait>::Device::default();
+        let model =
+            LanguageTrainModel::new(BDH::<TestBackend>::new(tiny_nca_factorized_model_config(), &device))
+                .with_tbptt_chunk_size(Some(2));
+        let batch = make_batch::<TestBackend>(
+            &device,
+            &[16, 0, 1, 17, 16, 2, 3, 18],
+            &[0, 1, 17, 18, 2, 3, 16, 18],
+            [2, 4],
+        );
+        let output = TrainStep::step(&model, batch);
+        let synced = output.item.sync();
+        let loss = loss_scalar(synced);
+        assert!(loss.is_finite(), "factorized NCA train loss must be finite");
     }
 
     #[test]

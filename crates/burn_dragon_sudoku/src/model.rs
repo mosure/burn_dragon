@@ -142,6 +142,7 @@ impl SudokuModelConfig {
             y_neuron_recurrence: Default::default(),
             clocked_slow_memory: Default::default(),
             summary_memory: Default::default(),
+            language_head: Default::default(),
             sequence_kernel: SequenceKernelConfig::reference(SequenceMemorySystem::LinearAttention),
             mamba: Default::default(),
         }

@@ -1094,12 +1094,14 @@ where
             );
 
             if event.virtual_stage_id == last_virtual_stage_id {
-                let (_hidden, logits) = model.model.finish_language_pipeline_with_state(
+                let hidden = model.model.finish_language_pipeline_hidden_with_state(
                     output_state,
                     &mut chunk_states[microbatch_id],
                 );
                 let weight = ranges[microbatch_id].len() as f32 / batch_size as f32;
-                let loss = language_model_loss::<B>(logits, chunk_targets[microbatch_id].clone())
+                let loss = model
+                    .model
+                    .language_loss_from_hidden(hidden, chunk_targets[microbatch_id].clone())
                     .mul_scalar(weight);
                 local_loss = Some(match local_loss {
                     Some(accumulated) => accumulated + loss.clone().detach().inner(),
@@ -2138,14 +2140,15 @@ mod tests {
                     plan.assignment(last_virtual_stage_id).layer_range.clone(),
                     chunk_masks[microbatch_id].clone(),
                 );
-            let (_hidden, logits) = split_model.model.finish_language_pipeline_with_state(
+            let hidden = split_model.model.finish_language_pipeline_hidden_with_state(
                 stage1_output,
                 &mut chunk_states[microbatch_id],
             );
             let weight = ranges[microbatch_id].len() as f32 / batch_size as f32;
-            let loss =
-                language_model_loss::<TestBackend>(logits, chunk_targets[microbatch_id].clone())
-                    .mul_scalar(weight);
+            let loss = split_model
+                .model
+                .language_loss_from_hidden(hidden, chunk_targets[microbatch_id].clone())
+                .mul_scalar(weight);
             let mut stage1_grads = loss.backward();
             let grad_to_stage0 =
                 pipeline_input_grad_state(&stage1_input_for_grad, &mut stage1_grads);

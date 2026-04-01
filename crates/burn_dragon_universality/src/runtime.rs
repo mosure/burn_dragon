@@ -576,6 +576,30 @@ mod tests {
     }
 
     #[test]
+    fn online_corpus_epoch_stream_is_deterministic_across_instances() {
+        let config = fixed_patch_config();
+        let corpus_a = OnlineNcaCorpus::new(config.clone()).expect("runtime corpus a");
+        let corpus_b = OnlineNcaCorpus::new(config).expect("runtime corpus b");
+
+        let train_a = corpus_a
+            .generate_document_for_epoch(SampleSplit::Train, 7, 3)
+            .expect("train sample a");
+        let train_b = corpus_b
+            .generate_document_for_epoch(SampleSplit::Train, 7, 3)
+            .expect("train sample b");
+        let val_a = corpus_a
+            .generate_document_for_epoch(SampleSplit::Validation, 7, 1)
+            .expect("val sample a");
+        let val_b = corpus_b
+            .generate_document_for_epoch(SampleSplit::Validation, 7, 1)
+            .expect("val sample b");
+
+        assert_eq!(train_a.tokens, train_b.tokens);
+        assert_eq!(val_a.tokens, val_b.tokens);
+        assert_ne!(train_a.tokens, val_a.tokens);
+    }
+
+    #[test]
     fn online_corpus_can_adapt_document_length_for_large_logical_blocks() {
         let config = fixed_patch_config();
         let corpus = OnlineNcaCorpus::new_with_min_logical_document_tokens(config, Some(4096))

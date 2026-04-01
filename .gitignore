@@ -65,9 +65,9 @@ config/**/README.md
 # Local planning / status / experiment-result surfaces should not be committed.
 # Keep repo-facing assets under docs/assets/ visible.
 docs/*
-!docs/language_throughput_matrix.md
 !docs/assets/
 !docs/assets/**
+docs/assets/matrix
 docs/paper/
 docs/paper/**
 docs/README.md

@@ -28,7 +28,9 @@ pub struct BdhBitNetDeployScaffold<B: Backend> {
     block_attention_residual_shared: Option<BlockAttentionResidual<B>>,
     rwkv_time_decay: Option<Param<Tensor<B, 2>>>,
     mamba: Option<MambaSequenceParameters<B>>,
-    lm_head: Param<Tensor<B, 2>>,
+    lm_head: Option<Param<Tensor<B, 2>>>,
+    nca_factorized_lm_head: Option<Param<Tensor<B, 2>>>,
+    nca_special_lm_head: Option<Param<Tensor<B, 2>>>,
 }
 
 impl<B: Backend> BDH<B> {
@@ -53,6 +55,8 @@ impl<B: Backend> BDH<B> {
                 .then(|| self.rwkv_time_decay.clone()),
             mamba: self.mamba.clone(),
             lm_head: self.lm_head.clone(),
+            nca_factorized_lm_head: self.nca_factorized_lm_head.clone(),
+            nca_special_lm_head: self.nca_special_lm_head.clone(),
         }
     }
 

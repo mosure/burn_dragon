@@ -8,7 +8,7 @@ authors = ["mosure <mitchell@mosure.me>"]
 license = "MIT OR Apache-2.0"
 keywords = [
   "burn",
-  "bdh",
+  "dragon",
   "language-model",
   "machine-learning",
 ]
@@ -17,8 +17,8 @@ categories = [
   "science",
   "science::neuroscience",
 ]
-homepage = "https://github.com/mosure/burn_bdh"
-repository = "https://github.com/mosure/burn_bdh"
+homepage = "https://github.com/mosure/burn_dragon"
+repository = "https://github.com/mosure/burn_dragon"
 readme = "README.md"
 exclude = [
   ".devcontainer",

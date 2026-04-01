@@ -119,7 +119,7 @@ Current status:
 - streamed web initialization is supported
 - native cache/bootstrap resolution for remote burnpack bundles is supported in the shared checkpoint crate
 - monolithic-or-parts burnpack loading is supported in CLI inference
-- language/BDH checkpoint export is supported in CLI through `export_burnpack`
+- dragon checkpoint export is supported in CLI through `export_burnpack`
 - vision encoder checkpoint export is supported in CLI through `export_burnpack` for `distill`, `lejepa`, and `video_lejepa`
 - sudoku checkpoint export is supported in CLI through `export_burnpack`
 - graph checkpoint export is supported in CLI through `export_burnpack`

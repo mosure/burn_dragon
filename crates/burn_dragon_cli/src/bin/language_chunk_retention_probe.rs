@@ -99,7 +99,7 @@ mod real {
             .unwrap_or_else(|err| panic!("failed to prepare dataset: {err}"));
         let tokenizer =
             load_tokenizer_for_checkpoint(&args.config, Some(&args.checkpoint), backend_name)
-            .unwrap_or_else(|err| panic!("failed to load tokenizer for checkpoint: {err}"));
+                .unwrap_or_else(|err| panic!("failed to load tokenizer for checkpoint: {err}"));
         let model = load_model(&config, &args.checkpoint, tokenizer.as_ref(), &device)
             .unwrap_or_else(|err| panic!("failed to load model: {err}"));
 
@@ -258,8 +258,10 @@ mod real {
         windows: &mut Vec<RetentionWindow>,
     ) {
         for &prefix_len in prefix_lens {
-            let prefix =
-                copy_tokens(dataset, start, prefix_len).into_iter().map(i64::from).collect();
+            let prefix = copy_tokens(dataset, start, prefix_len)
+                .into_iter()
+                .map(i64::from)
+                .collect();
             let suffix_inputs = copy_tokens(dataset, start + prefix_len - 1, suffix_len)
                 .into_iter()
                 .map(i64::from)
@@ -420,8 +422,8 @@ mod real {
             device,
         ) {
             Some(mask) => {
-                let _ =
-                    model.forward_hidden_with_state_and_summary_event_mask(prefix, mask, &mut state);
+                let _ = model
+                    .forward_hidden_with_state_and_summary_event_mask(prefix, mask, &mut state);
             }
             None => {
                 let _ = model.forward_hidden_with_state(prefix, &mut state);
@@ -434,13 +436,11 @@ mod real {
             model.summary_memory_write_trigger_token_ids(),
             device,
         ) {
-            Some(mask) => {
-                model.forward_hidden_with_state_and_summary_event_mask(
-                    suffix_inputs,
-                    mask,
-                    &mut state,
-                )
-            }
+            Some(mask) => model.forward_hidden_with_state_and_summary_event_mask(
+                suffix_inputs,
+                mask,
+                &mut state,
+            ),
             None => model.forward_hidden_with_state(suffix_inputs, &mut state),
         };
         let losses = model.language_token_losses_from_hidden(hidden, suffix_targets);
@@ -465,13 +465,11 @@ mod real {
             model.summary_memory_write_trigger_token_ids(),
             device,
         ) {
-            Some(mask) => {
-                model.forward_hidden_with_state_and_summary_event_mask(
-                    suffix_inputs,
-                    mask,
-                    &mut state,
-                )
-            }
+            Some(mask) => model.forward_hidden_with_state_and_summary_event_mask(
+                suffix_inputs,
+                mask,
+                &mut state,
+            ),
             None => model.forward_hidden_with_state(suffix_inputs, &mut state),
         };
         let losses = model.language_token_losses_from_hidden(hidden, suffix_targets);

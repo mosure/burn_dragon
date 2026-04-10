@@ -141,6 +141,8 @@ pub enum LearningRateScheduleConfig {
         #[serde(default)]
         min_lr: Option<f64>,
         #[serde(default)]
+        warmup_steps: Option<usize>,
+        #[serde(default)]
         num_iters: Option<usize>,
     },
     Linear {

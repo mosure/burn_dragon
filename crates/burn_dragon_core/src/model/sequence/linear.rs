@@ -130,8 +130,10 @@ pub fn recurrent_attention_dense_score_reference<B: Backend>(
             Tensor::<B, 4>::zeros([batch, heads, rows, n_embd], &device)
         };
 
-        let chunk_context =
-            initial_context_chunk + score_chunk.matmul(value.clone()).reshape([batch, heads, rows, n_embd]);
+        let chunk_context = initial_context_chunk
+            + score_chunk
+                .matmul(value.clone())
+                .reshape([batch, heads, rows, n_embd]);
         outputs.push(chunk_context);
     }
 

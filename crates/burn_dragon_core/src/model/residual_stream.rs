@@ -103,7 +103,6 @@ impl LowRankResidualStepMode {
         }
     }
 
-    #[cfg(any(feature = "viz", feature = "probe"))]
     const fn full_output_relu_native() -> Self {
         Self {
             native_projection_relu_fused: true,
@@ -931,7 +930,6 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-#[cfg(any(feature = "viz", feature = "probe"))]
 pub fn lowrank_residual_step_branch_thresholds_relu_native<B, FAttn, FNorm, FAct>(
     current: Tensor<B, 4>,
     encoder: Tensor<B, 4>,

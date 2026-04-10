@@ -1,9 +1,10 @@
 use crate::OptimizerScheduleMode;
 use crate::train::prelude::*;
+use std::f64::consts::PI;
 
 pub enum ResolvedLrScheduler {
     Constant(LearningRate),
-    Cosine(CosineAnnealingLrScheduler),
+    Cosine(WarmupCosineLrScheduler),
     Linear(LinearLrScheduler),
     Exponential(ExponentialLrScheduler),
     Step(StepLrScheduler),
@@ -47,6 +48,24 @@ struct BitNetTwoStageProfile {
 }
 
 #[derive(Clone, Debug)]
+pub struct WarmupCosineLrScheduler {
+    peak_lr: LearningRate,
+    min_lr: LearningRate,
+    warmup_steps: usize,
+    total_steps: usize,
+    current_step: usize,
+}
+
+#[derive(Record, Clone, Debug)]
+pub struct WarmupCosineLrSchedulerRecord {
+    peak_lr: LearningRate,
+    min_lr: LearningRate,
+    warmup_steps: usize,
+    total_steps: usize,
+    current_step: usize,
+}
+
+#[derive(Clone, Debug)]
 pub struct BitNetTwoStageLrScheduler {
     peak_lr: LearningRate,
     final_lr: LearningRate,
@@ -64,6 +83,83 @@ pub struct BitNetTwoStageLrSchedulerRecord {
     second_stage_start_step: usize,
     total_steps: usize,
     current_step: usize,
+}
+
+impl WarmupCosineLrScheduler {
+    fn new(
+        peak_lr: LearningRate,
+        min_lr: LearningRate,
+        warmup_steps: usize,
+        total_steps: usize,
+    ) -> Result<Self, String> {
+        if peak_lr <= 0.0 || peak_lr > 1.0 {
+            return Err("Initial learning rate must be greater than 0 and at most 1".into());
+        }
+        if min_lr < 0.0 || min_lr > peak_lr {
+            return Err(
+                "Minimum learning rate must be at least 0 and at most equal to the initial \
+                 learning rate"
+                    .into(),
+            );
+        }
+        if total_steps == 0 {
+            return Err("Number of iterations must be at least 1".into());
+        }
+
+        Ok(Self {
+            peak_lr,
+            min_lr,
+            warmup_steps: warmup_steps.min(total_steps),
+            total_steps,
+            current_step: 0,
+        })
+    }
+
+    fn cosine_lr(&self, cosine_step: usize) -> LearningRate {
+        let cosine_total_steps = self.total_steps.saturating_sub(self.warmup_steps).max(1);
+        let cosine_num_iters = cosine_total_steps.max(1);
+        let current_iter = cosine_step % (cosine_num_iters + 1);
+
+        self.min_lr
+            + 0.5
+                * (self.peak_lr - self.min_lr)
+                * (1.0 + (current_iter as f64 / cosine_num_iters as f64 * PI).cos())
+    }
+}
+
+impl LrScheduler for WarmupCosineLrScheduler {
+    type Record<B: BackendTrait> = WarmupCosineLrSchedulerRecord;
+
+    fn step(&mut self) -> LearningRate {
+        self.current_step = self.current_step.saturating_add(1);
+
+        if self.warmup_steps > 0 && self.current_step <= self.warmup_steps {
+            return self.peak_lr * (self.current_step as f64 / self.warmup_steps as f64);
+        }
+
+        let cosine_step = self.current_step.saturating_sub(self.warmup_steps + 1);
+        self.cosine_lr(cosine_step)
+    }
+
+    fn to_record<B: BackendTrait>(&self) -> Self::Record<B> {
+        WarmupCosineLrSchedulerRecord {
+            peak_lr: self.peak_lr,
+            min_lr: self.min_lr,
+            warmup_steps: self.warmup_steps,
+            total_steps: self.total_steps,
+            current_step: self.current_step,
+        }
+    }
+
+    fn load_record<B: BackendTrait>(self, record: Self::Record<B>) -> Self {
+        Self {
+            peak_lr: record.peak_lr,
+            min_lr: record.min_lr,
+            warmup_steps: record.warmup_steps,
+            total_steps: record.total_steps,
+            current_step: record.current_step,
+        }
+    }
 }
 
 impl BitNetTwoStageLrScheduler {
@@ -172,17 +268,18 @@ pub fn resolve_lr_scheduler(
         Some(LearningRateScheduleConfig::Cosine {
             initial_lr,
             min_lr,
+            warmup_steps,
             num_iters,
         }) => {
             let init_lr = initial_lr.unwrap_or(base_lr);
-            let scheduler = CosineAnnealingLrSchedulerConfig::new(
+            let scheduler = WarmupCosineLrScheduler::new(
                 init_lr,
+                min_lr.unwrap_or(0.0),
+                warmup_steps.unwrap_or(0),
                 override_num_iters
                     .unwrap_or_else(|| num_iters.unwrap_or(fallback_iters))
                     .max(1),
             )
-            .with_min_lr(min_lr.unwrap_or(0.0))
-            .init()
             .map_err(|err| anyhow!("failed to initialize cosine lr scheduler: {err}"))?;
             ResolvedLrScheduler::Cosine(scheduler)
         }
@@ -387,6 +484,23 @@ mod tests {
         )
         .expect("noam schedule");
         assert!(matches!(noam, ResolvedLrScheduler::Noam(_)));
+
+        let cosine = resolve_lr_scheduler(
+            &optimizer(
+                2e-3,
+                Some(LearningRateScheduleConfig::Cosine {
+                    initial_lr: Some(2e-3),
+                    min_lr: Some(2e-4),
+                    warmup_steps: Some(8),
+                    num_iters: Some(64),
+                }),
+            ),
+            200,
+            None,
+            256,
+        )
+        .expect("cosine schedule");
+        assert!(matches!(cosine, ResolvedLrScheduler::Cosine(_)));
     }
 
     #[test]
@@ -424,6 +538,40 @@ mod tests {
         assert!((step4 - 1.2e-3).abs() < 1.0e-12);
         assert!(step5 < step4);
         assert!((step6 - 8.0e-4).abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn warmup_cosine_scheduler_soft_starts_then_enters_cosine_decay() {
+        let mut scheduler =
+            WarmupCosineLrScheduler::new(1.0e-3, 2.0e-4, 2, 6).expect("warmup cosine");
+
+        let step1 = scheduler.step();
+        let step2 = scheduler.step();
+        let step3 = scheduler.step();
+        let step4 = scheduler.step();
+
+        assert!((step1 - 5.0e-4).abs() < 1.0e-12);
+        assert!((step2 - 1.0e-3).abs() < 1.0e-12);
+        assert!((step3 - 1.0e-3).abs() < 1.0e-12);
+        assert!(step4 < step3);
+    }
+
+    #[test]
+    fn warmup_cosine_scheduler_round_trips_record_state() {
+        let scheduler = WarmupCosineLrScheduler::new(1.0e-3, 2.0e-4, 3, 12).expect("warmup cosine");
+        let mut truth = scheduler.clone();
+        let mut persisted = scheduler.clone();
+        for _ in 0..4 {
+            truth.step();
+            persisted.step();
+        }
+        let record = persisted.to_record::<burn_ndarray::NdArray<f32>>();
+        let mut restored = persisted.load_record::<burn_ndarray::NdArray<f32>>(record);
+        for _ in 0..8 {
+            let expected = truth.step();
+            let actual = restored.step();
+            assert!((expected - actual).abs() < 1.0e-12);
+        }
     }
 
     #[test]

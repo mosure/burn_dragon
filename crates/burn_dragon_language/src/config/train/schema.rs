@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use burn_dragon_core::SequenceKernelConfig;
+use burn_dragon_core::{LanguageModuleLrScaleTarget, SequenceKernelConfig};
 
 use super::*;
 
@@ -127,6 +127,161 @@ pub enum HuggingFaceRecordFormat {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(default)]
+pub struct InitTransferConfig {
+    #[serde(default)]
+    pub interface_checkpoint_path: Option<PathBuf>,
+    #[serde(default)]
+    pub interface_checkpoint_epoch: Option<usize>,
+    #[serde(default)]
+    pub preserve_interface_input_embedding: bool,
+    #[serde(default)]
+    pub preserve_interface_output_head: bool,
+    #[serde(default)]
+    pub interface_output_head_blend_alpha: Option<f32>,
+    #[serde(default)]
+    pub backbone_blend_alpha: Option<f32>,
+    #[serde(default)]
+    pub decoder_blend_alpha: Option<f32>,
+    #[serde(default)]
+    pub norm_blend_alpha: Option<f32>,
+    #[serde(default)]
+    pub backbone_grad_scale: Option<f32>,
+    #[serde(default)]
+    pub backbone_grad_scale_steps: Option<usize>,
+    #[serde(default)]
+    pub fresh_top_layers: Option<usize>,
+    #[serde(default)]
+    pub preserve_fresh_decoder: bool,
+    #[serde(default)]
+    pub preserve_fresh_norm: bool,
+    #[serde(default)]
+    pub match_fresh_rms: bool,
+}
+
+impl Default for InitTransferConfig {
+    fn default() -> Self {
+        Self {
+            interface_checkpoint_path: None,
+            interface_checkpoint_epoch: None,
+            preserve_interface_input_embedding: false,
+            preserve_interface_output_head: false,
+            interface_output_head_blend_alpha: None,
+            backbone_blend_alpha: None,
+            decoder_blend_alpha: None,
+            norm_blend_alpha: None,
+            backbone_grad_scale: None,
+            backbone_grad_scale_steps: None,
+            fresh_top_layers: None,
+            preserve_fresh_decoder: false,
+            preserve_fresh_norm: false,
+            match_fresh_rms: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct ModuleLrScaleScheduleConfig {
+    pub final_scale: f32,
+    #[serde(default)]
+    pub start_fraction: f32,
+    #[serde(default = "default_module_lr_scale_schedule_end_fraction")]
+    pub end_fraction: f32,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct ModuleLrScaleEntry {
+    pub target: LanguageModuleLrScaleTarget,
+    pub scale: f32,
+    #[serde(default)]
+    pub schedule: Option<ModuleLrScaleScheduleConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ContinualBackpropTarget {
+    #[default]
+    SharedLowrankLatents,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ContinualBackpropLrCoupling {
+    #[default]
+    None,
+    GlobalRatio,
+    TargetGroupRatio,
+}
+
+fn default_continual_backprop_utility_decay() -> f32 {
+    0.99
+}
+
+fn default_continual_backprop_replacement_rate() -> f32 {
+    1.0e-4
+}
+
+fn default_continual_backprop_maturity_steps() -> usize {
+    100
+}
+
+fn default_continual_backprop_sample_interval_steps() -> usize {
+    8
+}
+
+fn default_continual_backprop_replace_interval_steps() -> usize {
+    64
+}
+
+fn default_continual_backprop_utility_epsilon() -> f32 {
+    1.0e-6
+}
+
+fn default_continual_backprop_lr_coupling_power() -> f32 {
+    1.0
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(default)]
+pub struct ContinualBackpropConfig {
+    pub enabled: bool,
+    pub target: ContinualBackpropTarget,
+    #[serde(default = "default_continual_backprop_utility_decay")]
+    pub utility_decay: f32,
+    #[serde(default = "default_continual_backprop_replacement_rate")]
+    pub replacement_rate: f32,
+    #[serde(default = "default_continual_backprop_maturity_steps")]
+    pub maturity_steps: usize,
+    #[serde(default = "default_continual_backprop_sample_interval_steps")]
+    pub sample_interval_steps: usize,
+    #[serde(default = "default_continual_backprop_replace_interval_steps")]
+    pub replace_interval_steps: usize,
+    #[serde(default = "default_continual_backprop_utility_epsilon")]
+    pub utility_epsilon: f32,
+    #[serde(default)]
+    pub lr_coupling: ContinualBackpropLrCoupling,
+    #[serde(default = "default_continual_backprop_lr_coupling_power")]
+    pub lr_coupling_power: f32,
+}
+
+impl Default for ContinualBackpropConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            target: ContinualBackpropTarget::default(),
+            utility_decay: default_continual_backprop_utility_decay(),
+            replacement_rate: default_continual_backprop_replacement_rate(),
+            maturity_steps: default_continual_backprop_maturity_steps(),
+            sample_interval_steps: default_continual_backprop_sample_interval_steps(),
+            replace_interval_steps: default_continual_backprop_replace_interval_steps(),
+            utility_epsilon: default_continual_backprop_utility_epsilon(),
+            lr_coupling: ContinualBackpropLrCoupling::default(),
+            lr_coupling_power: default_continual_backprop_lr_coupling_power(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct TrainingHyperparameters {
     pub block_size: usize,
     #[serde(default)]
@@ -158,6 +313,12 @@ pub struct TrainingHyperparameters {
     pub init_checkpoint_path: Option<PathBuf>,
     #[serde(default)]
     pub init_checkpoint_epoch: Option<usize>,
+    #[serde(default)]
+    pub init_transfer: InitTransferConfig,
+    #[serde(default)]
+    pub continual_backprop: ContinualBackpropConfig,
+    #[serde(default)]
+    pub module_lr_scales: Vec<ModuleLrScaleEntry>,
     #[serde(default = "default_context_strategy")]
     pub context_strategy: ContextStrategyConfig,
     #[serde(default)]
@@ -200,6 +361,10 @@ fn default_hf_field_separator() -> String {
 
 fn default_context_strategy() -> ContextStrategyConfig {
     ContextStrategyConfig::Infinite
+}
+
+fn default_module_lr_scale_schedule_end_fraction() -> f32 {
+    1.0
 }
 
 fn default_training_seed() -> u64 {

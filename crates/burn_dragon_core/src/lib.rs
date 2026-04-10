@@ -16,6 +16,8 @@ pub mod kernel;
 pub mod model;
 pub mod positional;
 
+pub use model::LanguageModuleLrScaleTarget;
+
 pub mod api {
     //! Curated public surface for the Dragon core.
     //!
@@ -23,6 +25,7 @@ pub mod api {
     //! implementation layout.
 
     pub mod config {
+        pub use crate::model::LanguageModuleLrScaleTarget;
         pub use crate::{
             AttentionResidualConfig, BDHConfig, BdhFiringTargetConfig, BdhFiringTargetKind,
             BdhInitializationConfig, BdhInitializationKind, BdhNeuronGainConfig, BdhNeuronGainKind,
@@ -53,8 +56,6 @@ pub mod api {
     }
 
     pub mod recurrent {
-        #[cfg(any(feature = "probe", test))]
-        pub use crate::LanguageBdhInitLayerDiagnostics;
         pub use crate::{
             BDH, DragonNorm, HaltHead, LanguageMhcLayerDiagnostics, LanguagePipelineState,
             LogitsProjectionProfileSnapshot, LowBitTrainingProjectionMemoryProfileSnapshot,
@@ -67,6 +68,15 @@ pub mod api {
             lowrank_residual_memory_profile_snapshot, lowrank_residual_profile_reset,
             lowrank_residual_profile_snapshot, lowrank_residual_step, lowrank_residual_step_next,
             structured_dense_update_tokens,
+        };
+        #[cfg(any(feature = "probe", test))]
+        pub use crate::{
+            HeadTensorComparisonDiagnostics, HeadTensorGeometryDiagnostics,
+            LanguageBdhInitLayerDiagnostics, LanguageLayerStateDeltaDiagnostics,
+            LanguageLayerStateSummaryDiagnostics, LanguageLowRankLayerComparisonDiagnostics,
+            LanguageLowRankLayerGeometryDiagnostics, TensorComparisonDiagnostics,
+            TensorDistributionDiagnostics, TensorStateDeltaDiagnostics,
+            TensorStateSummaryDiagnostics, compare_model_states, summarize_model_state,
         };
     }
 
@@ -162,9 +172,11 @@ pub use model::{
     PackedRhoInt8DeviceState, PackedSavedActivationBuffer, PackedSavedActivationState,
     ResidualConnectorKind, RhoCompressionConfig, RhoCompressionInterval, RhoCompressionQualityGate,
     RhoCompressionStatsSnapshot, RhoPrecisionConfig, SequenceKernelConfig, SequenceMemorySystem,
-    SequenceTrainingExecutor, StructuredBankRole, StructuredDenseUpdateOutput, StructuredGridState,
-    StructuredRouteOperation, StructuredRoutePattern, StructuredRouteSpec, StructuredRoutingSpec,
-    StructuredStepMode, StructuredTopologyState, SummaryMemoryConfig, YNeuronRecurrenceConfig,
+    SequenceTrainingExecutor, SharedLowrankActivationBatchStats,
+    SharedLowrankContinualBackpropRuntime, SharedLowrankFeatureMetrics, SharedLowrankParamIds,
+    StructuredBankRole, StructuredDenseUpdateOutput, StructuredGridState, StructuredRouteOperation,
+    StructuredRoutePattern, StructuredRouteSpec, StructuredRoutingSpec, StructuredStepMode,
+    StructuredTopologyState, SummaryMemoryConfig, YNeuronRecurrenceConfig,
     build_low_bit_saved_activation_inventory, estimate_low_bit_memory_buckets,
     logits_projection_profile_reset, logits_projection_profile_snapshot,
     low_bit_kernel_capabilities, low_bit_kernel_capabilities_for_backend_name,
@@ -182,5 +194,13 @@ pub use model::{
     structured_dense_update_tokens, structured_predict_decay, target_major_apply_decay,
     target_major_decay_add, target_major_identity_read, target_major_identity_write,
     target_major_outer_product, unpack_saved_activation_state,
+};
+#[cfg(any(feature = "probe", test))]
+pub use model::{
+    HeadTensorComparisonDiagnostics, HeadTensorGeometryDiagnostics,
+    LanguageLayerStateDeltaDiagnostics, LanguageLayerStateSummaryDiagnostics,
+    LanguageLowRankLayerComparisonDiagnostics, LanguageLowRankLayerGeometryDiagnostics,
+    TensorComparisonDiagnostics, TensorDistributionDiagnostics, TensorStateDeltaDiagnostics,
+    TensorStateSummaryDiagnostics, compare_model_states, summarize_model_state,
 };
 pub use positional::RotaryEmbedding;

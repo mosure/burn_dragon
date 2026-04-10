@@ -1,4 +1,5 @@
 use anyhow::{Result, anyhow};
+use std::collections::HashSet;
 
 use burn_dragon_core::{BDHConfig, ResidualConnectorKind};
 use burn_dragon_train::{
@@ -304,15 +305,292 @@ impl TrainingConfig {
                 "training.init_checkpoint_epoch requires training.init_checkpoint_path"
             ));
         }
+        if self.training.init_transfer.backbone_blend_alpha.is_some()
+            && self.training.init_checkpoint_path.is_none()
+        {
+            return Err(anyhow!(
+                "training.init_transfer.backbone_blend_alpha requires training.init_checkpoint_path"
+            ));
+        }
+        if self
+            .training
+            .init_transfer
+            .interface_checkpoint_path
+            .is_some()
+            && self.training.init_checkpoint_path.is_none()
+        {
+            return Err(anyhow!(
+                "training.init_transfer.interface_checkpoint_path requires training.init_checkpoint_path"
+            ));
+        }
+        if self
+            .training
+            .init_transfer
+            .interface_checkpoint_epoch
+            .is_some()
+            && self
+                .training
+                .init_transfer
+                .interface_checkpoint_path
+                .is_none()
+        {
+            return Err(anyhow!(
+                "training.init_transfer.interface_checkpoint_epoch requires training.init_transfer.interface_checkpoint_path"
+            ));
+        }
+        if (self
+            .training
+            .init_transfer
+            .preserve_interface_input_embedding
+            || self.training.init_transfer.preserve_interface_output_head
+            || self
+                .training
+                .init_transfer
+                .interface_output_head_blend_alpha
+                .is_some())
+            && self
+                .training
+                .init_transfer
+                .interface_checkpoint_path
+                .is_none()
+        {
+            return Err(anyhow!(
+                "training.init_transfer.preserve_interface_input_embedding, training.init_transfer.preserve_interface_output_head, and training.init_transfer.interface_output_head_blend_alpha require training.init_transfer.interface_checkpoint_path"
+            ));
+        }
+        if self
+            .training
+            .init_transfer
+            .interface_output_head_blend_alpha
+            .is_some()
+            && self.training.init_transfer.preserve_interface_output_head
+        {
+            return Err(anyhow!(
+                "training.init_transfer.interface_output_head_blend_alpha cannot be combined with training.init_transfer.preserve_interface_output_head"
+            ));
+        }
+        if self.training.init_transfer.decoder_blend_alpha.is_some()
+            && self.training.init_checkpoint_path.is_none()
+        {
+            return Err(anyhow!(
+                "training.init_transfer.decoder_blend_alpha requires training.init_checkpoint_path"
+            ));
+        }
+        if self.training.init_transfer.norm_blend_alpha.is_some()
+            && self.training.init_checkpoint_path.is_none()
+        {
+            return Err(anyhow!(
+                "training.init_transfer.norm_blend_alpha requires training.init_checkpoint_path"
+            ));
+        }
+        if (self.training.init_transfer.backbone_grad_scale.is_some()
+            || self
+                .training
+                .init_transfer
+                .backbone_grad_scale_steps
+                .is_some())
+            && self.training.init_checkpoint_path.is_none()
+        {
+            return Err(anyhow!(
+                "training.init_transfer.backbone_grad_scale and training.init_transfer.backbone_grad_scale_steps require training.init_checkpoint_path"
+            ));
+        }
+        if self.training.init_transfer.fresh_top_layers.is_some()
+            && self.training.init_checkpoint_path.is_none()
+        {
+            return Err(anyhow!(
+                "training.init_transfer.fresh_top_layers requires training.init_checkpoint_path"
+            ));
+        }
+        if self.training.init_transfer.preserve_fresh_decoder
+            && self.training.init_checkpoint_path.is_none()
+        {
+            return Err(anyhow!(
+                "training.init_transfer.preserve_fresh_decoder requires training.init_checkpoint_path"
+            ));
+        }
+        if self.training.init_transfer.preserve_fresh_norm
+            && self.training.init_checkpoint_path.is_none()
+        {
+            return Err(anyhow!(
+                "training.init_transfer.preserve_fresh_norm requires training.init_checkpoint_path"
+            ));
+        }
+        if self.training.init_transfer.match_fresh_rms
+            && self.training.init_checkpoint_path.is_none()
+        {
+            return Err(anyhow!(
+                "training.init_transfer.match_fresh_rms requires training.init_checkpoint_path"
+            ));
+        }
+        if let Some(alpha) = self.training.init_transfer.backbone_blend_alpha
+            && !(0.0..=1.0).contains(&alpha)
+        {
+            return Err(anyhow!(
+                "training.init_transfer.backbone_blend_alpha must be in [0, 1]"
+            ));
+        }
+        if let Some(alpha) = self.training.init_transfer.decoder_blend_alpha
+            && !(0.0..=1.0).contains(&alpha)
+        {
+            return Err(anyhow!(
+                "training.init_transfer.decoder_blend_alpha must be in [0, 1]"
+            ));
+        }
+        if let Some(alpha) = self.training.init_transfer.norm_blend_alpha
+            && !(0.0..=1.0).contains(&alpha)
+        {
+            return Err(anyhow!(
+                "training.init_transfer.norm_blend_alpha must be in [0, 1]"
+            ));
+        }
+        if let Some(alpha) = self
+            .training
+            .init_transfer
+            .interface_output_head_blend_alpha
+            && !(0.0..=1.0).contains(&alpha)
+        {
+            return Err(anyhow!(
+                "training.init_transfer.interface_output_head_blend_alpha must be in [0, 1]"
+            ));
+        }
+        if self.training.continual_backprop.enabled {
+            if !(0.0..1.0).contains(&self.training.continual_backprop.utility_decay) {
+                return Err(anyhow!(
+                    "training.continual_backprop.utility_decay must be in [0, 1)"
+                ));
+            }
+            if self.training.continual_backprop.replacement_rate <= 0.0
+                || !self
+                    .training
+                    .continual_backprop
+                    .replacement_rate
+                    .is_finite()
+            {
+                return Err(anyhow!(
+                    "training.continual_backprop.replacement_rate must be finite and > 0"
+                ));
+            }
+            if self.training.continual_backprop.maturity_steps == 0 {
+                return Err(anyhow!(
+                    "training.continual_backprop.maturity_steps must be > 0"
+                ));
+            }
+            if self.training.continual_backprop.sample_interval_steps == 0 {
+                return Err(anyhow!(
+                    "training.continual_backprop.sample_interval_steps must be > 0"
+                ));
+            }
+            if self.training.continual_backprop.replace_interval_steps == 0 {
+                return Err(anyhow!(
+                    "training.continual_backprop.replace_interval_steps must be > 0"
+                ));
+            }
+            if self.training.continual_backprop.utility_epsilon <= 0.0
+                || !self.training.continual_backprop.utility_epsilon.is_finite()
+            {
+                return Err(anyhow!(
+                    "training.continual_backprop.utility_epsilon must be finite and > 0"
+                ));
+            }
+            if self.training.continual_backprop.lr_coupling_power < 0.0
+                || !self
+                    .training
+                    .continual_backprop
+                    .lr_coupling_power
+                    .is_finite()
+            {
+                return Err(anyhow!(
+                    "training.continual_backprop.lr_coupling_power must be finite and >= 0"
+                ));
+            }
+        }
+        let mut seen_module_lr_targets = HashSet::new();
+        for entry in &self.training.module_lr_scales {
+            if entry.scale <= 0.0 || !entry.scale.is_finite() {
+                return Err(anyhow!(
+                    "training.module_lr_scales[{:#?}] scale must be finite and > 0",
+                    entry.target
+                ));
+            }
+            if let Some(schedule) = &entry.schedule {
+                if schedule.final_scale <= 0.0 || !schedule.final_scale.is_finite() {
+                    return Err(anyhow!(
+                        "training.module_lr_scales[{:#?}].schedule.final_scale must be finite and > 0",
+                        entry.target
+                    ));
+                }
+                if !schedule.start_fraction.is_finite()
+                    || !(0.0..=1.0).contains(&schedule.start_fraction)
+                {
+                    return Err(anyhow!(
+                        "training.module_lr_scales[{:#?}].schedule.start_fraction must be finite and in [0, 1]",
+                        entry.target
+                    ));
+                }
+                if !schedule.end_fraction.is_finite()
+                    || !(0.0..=1.0).contains(&schedule.end_fraction)
+                {
+                    return Err(anyhow!(
+                        "training.module_lr_scales[{:#?}].schedule.end_fraction must be finite and in [0, 1]",
+                        entry.target
+                    ));
+                }
+                if schedule.end_fraction < schedule.start_fraction {
+                    return Err(anyhow!(
+                        "training.module_lr_scales[{:#?}].schedule.end_fraction must be >= start_fraction",
+                        entry.target
+                    ));
+                }
+            }
+            if !seen_module_lr_targets.insert(entry.target) {
+                return Err(anyhow!(
+                    "training.module_lr_scales contains duplicate target {:?}",
+                    entry.target
+                ));
+            }
+        }
+        if self.training.init_transfer.backbone_grad_scale.is_some()
+            ^ self
+                .training
+                .init_transfer
+                .backbone_grad_scale_steps
+                .is_some()
+        {
+            return Err(anyhow!(
+                "training.init_transfer.backbone_grad_scale and training.init_transfer.backbone_grad_scale_steps must be set together"
+            ));
+        }
+        if let Some(scale) = self.training.init_transfer.backbone_grad_scale
+            && !(0.0..=1.0).contains(&scale)
+        {
+            return Err(anyhow!(
+                "training.init_transfer.backbone_grad_scale must be in [0, 1]"
+            ));
+        }
+        if matches!(
+            self.training.init_transfer.backbone_grad_scale_steps,
+            Some(0)
+        ) {
+            return Err(anyhow!(
+                "training.init_transfer.backbone_grad_scale_steps must be > 0 when set"
+            ));
+        }
+        if matches!(self.training.init_transfer.fresh_top_layers, Some(0)) {
+            return Err(anyhow!(
+                "training.init_transfer.fresh_top_layers must be > 0 when set"
+            ));
+        }
         match self.training.launch_mode {
             TrainingLaunchMode::Fresh => {
                 if self.training.resume_run_dir.is_some()
                     || self.training.resume_checkpoint_epoch.is_some()
                     || self.training.init_checkpoint_path.is_some()
                     || self.training.init_checkpoint_epoch.is_some()
+                    || self.training.init_transfer != Default::default()
                 {
                     return Err(anyhow!(
-                        "training.launch_mode = \"fresh\" requires training.resume_run_dir, training.resume_checkpoint_epoch, training.init_checkpoint_path, and training.init_checkpoint_epoch to all be unset"
+                        "training.launch_mode = \"fresh\" requires resume and init checkpoint settings to all be unset"
                     ));
                 }
             }
@@ -324,9 +602,10 @@ impl TrainingConfig {
                 }
                 if self.training.init_checkpoint_path.is_some()
                     || self.training.init_checkpoint_epoch.is_some()
+                    || self.training.init_transfer != Default::default()
                 {
                     return Err(anyhow!(
-                        "training.launch_mode = \"resume_exact_run\" cannot be combined with training.init_checkpoint_path or training.init_checkpoint_epoch"
+                        "training.launch_mode = \"resume_exact_run\" cannot be combined with init checkpoint or init transfer settings"
                     ));
                 }
             }
@@ -890,10 +1169,16 @@ impl TrainingConfig {
 
             match schedule {
                 LearningRateScheduleConfig::Cosine {
-                    min_lr, num_iters, ..
+                    min_lr,
+                    warmup_steps,
+                    num_iters,
+                    ..
                 } => {
                     if matches!(min_lr.as_ref(), Some(value) if *value < 0.0) {
                         return Err(anyhow!("optimizer.lr_schedule.min_lr must be >= 0"));
+                    }
+                    if matches!(warmup_steps, Some(0)) {
+                        return Err(anyhow!("optimizer.lr_schedule.warmup_steps must be > 0"));
                     }
                     if matches!(num_iters, Some(0)) {
                         return Err(anyhow!("optimizer.lr_schedule.num_iters must be > 0"));
@@ -1060,6 +1345,9 @@ mod tests {
                 resume_checkpoint_epoch: None,
                 init_checkpoint_path: None,
                 init_checkpoint_epoch: None,
+                init_transfer: Default::default(),
+                continual_backprop: Default::default(),
+                module_lr_scales: Vec::new(),
                 context_strategy: ContextStrategyConfig::Infinite,
                 sequence_kernel_override: None,
                 gdpo: None,
@@ -1133,6 +1421,9 @@ mod tests {
                 resume_checkpoint_epoch: None,
                 init_checkpoint_path: None,
                 init_checkpoint_epoch: None,
+                init_transfer: Default::default(),
+                continual_backprop: Default::default(),
+                module_lr_scales: Vec::new(),
                 context_strategy: ContextStrategyConfig::Infinite,
                 sequence_kernel_override: None,
                 gdpo: None,
@@ -1206,6 +1497,9 @@ mod tests {
                 resume_checkpoint_epoch: Some(1),
                 init_checkpoint_path: None,
                 init_checkpoint_epoch: None,
+                init_transfer: Default::default(),
+                continual_backprop: Default::default(),
+                module_lr_scales: Vec::new(),
                 context_strategy: ContextStrategyConfig::Infinite,
                 sequence_kernel_override: None,
                 gdpo: None,
@@ -1273,6 +1567,9 @@ mod tests {
                 resume_checkpoint_epoch: None,
                 init_checkpoint_path: None,
                 init_checkpoint_epoch: None,
+                init_transfer: Default::default(),
+                continual_backprop: Default::default(),
+                module_lr_scales: Vec::new(),
                 context_strategy: ContextStrategyConfig::Infinite,
                 sequence_kernel_override: None,
                 gdpo: None,
@@ -1342,6 +1639,9 @@ mod tests {
                 resume_checkpoint_epoch: None,
                 init_checkpoint_path: None,
                 init_checkpoint_epoch: Some(1),
+                init_transfer: Default::default(),
+                continual_backprop: Default::default(),
+                module_lr_scales: Vec::new(),
                 context_strategy: ContextStrategyConfig::Infinite,
                 sequence_kernel_override: None,
                 gdpo: None,

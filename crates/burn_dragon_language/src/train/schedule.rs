@@ -2007,6 +2007,9 @@ mod tests {
             resume_checkpoint_epoch: None,
             init_checkpoint_path: None,
             init_checkpoint_epoch: None,
+            init_transfer: Default::default(),
+            continual_backprop: Default::default(),
+            module_lr_scales: Vec::new(),
             context_strategy: ContextStrategyConfig::Infinite,
             sequence_kernel_override: None,
             gdpo: None,
@@ -2140,10 +2143,12 @@ mod tests {
                     plan.assignment(last_virtual_stage_id).layer_range.clone(),
                     chunk_masks[microbatch_id].clone(),
                 );
-            let hidden = split_model.model.finish_language_pipeline_hidden_with_state(
-                stage1_output,
-                &mut chunk_states[microbatch_id],
-            );
+            let hidden = split_model
+                .model
+                .finish_language_pipeline_hidden_with_state(
+                    stage1_output,
+                    &mut chunk_states[microbatch_id],
+                );
             let weight = ranges[microbatch_id].len() as f32 / batch_size as f32;
             let loss = split_model
                 .model

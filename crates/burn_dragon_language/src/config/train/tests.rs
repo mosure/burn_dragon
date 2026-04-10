@@ -113,6 +113,9 @@ fn load_merges_in_order() {
             resume_checkpoint_epoch: None,
             init_checkpoint_path: None,
             init_checkpoint_epoch: None,
+            init_transfer: Default::default(),
+            continual_backprop: Default::default(),
+            module_lr_scales: Vec::new(),
             context_strategy: ContextStrategyConfig::Infinite,
             sequence_kernel_override: None,
             gdpo: None,
@@ -219,6 +222,50 @@ fn validate_accepts_sequence_kernel_override() {
             burn_dragon_core::SequenceMemorySystem::Rwkv8StateSpace,
         ))
     );
+}
+
+#[test]
+fn load_parses_module_lr_scale_schedule_block() {
+    let text = r#"
+        [dataset]
+        cache_dir = "data"
+        type = "shakespeare"
+
+        [training]
+        block_size = 32
+        batch_size = 2
+        max_iters = 4
+        log_frequency = 1
+
+        [[training.module_lr_scales]]
+        target = "mamba"
+        scale = 0.5
+
+        [training.module_lr_scales.schedule]
+        final_scale = 1.0
+        start_fraction = 0.25
+        end_fraction = 0.75
+
+        [optimizer]
+        learning_rate = 0.001
+        weight_decay = 0.0
+
+        [generation]
+        prompt = "abc"
+    "#;
+    let config: TrainingConfig = toml::from_str(text).expect("parse training config");
+    config.validate().expect("valid config");
+    assert_eq!(config.training.module_lr_scales.len(), 1);
+    let entry = &config.training.module_lr_scales[0];
+    assert_eq!(
+        entry.target,
+        burn_dragon_core::LanguageModuleLrScaleTarget::Mamba
+    );
+    assert!((entry.scale - 0.5).abs() < f32::EPSILON);
+    let schedule = entry.schedule.as_ref().expect("scheduled module lr scale");
+    assert!((schedule.final_scale - 1.0).abs() < f32::EPSILON);
+    assert!((schedule.start_fraction - 0.25).abs() < f32::EPSILON);
+    assert!((schedule.end_fraction - 0.75).abs() < f32::EPSILON);
 }
 
 #[test]

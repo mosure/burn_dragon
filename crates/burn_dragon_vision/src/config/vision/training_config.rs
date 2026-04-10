@@ -207,6 +207,7 @@ impl VisionTrainingConfig {
             lr_schedule: Some(LearningRateScheduleConfig::Cosine {
                 initial_lr: None,
                 min_lr: Some(3e-5),
+                warmup_steps: None,
                 num_iters: Some(max_iters),
             }),
             schedule_mode: burn_dragon_train::OptimizerScheduleMode::default(),

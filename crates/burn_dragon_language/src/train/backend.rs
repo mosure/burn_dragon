@@ -1,4 +1,5 @@
 use crate::checkpoint::{RUN_DIR_ENV, RUN_NAME_ENV};
+use crate::train::continual_backprop::ContinualBackpropAdamWOptimizer;
 use crate::train::prelude::*;
 use crate::train::schedule::{
     TrainEnvironment, resolve_lr_scheduler, resolve_train_schedule, train_with_scheduler,
@@ -9,7 +10,8 @@ use crate::train::startup_autotune::{
 use crate::train::utils::{build_training_execution_form, write_run_config};
 use crate::write_training_snapshot;
 use burn_dragon_core::SequenceMemorySystem;
-use std::time::Instant;
+use serde::Serialize;
+use std::{fs, time::Instant};
 use tracing::warn;
 
 const PROCESS_GROUP_RUN_DIR_ENV: &str = "BURN_DRAGON_PROCESS_GROUP_RUN_DIR";
@@ -273,34 +275,23 @@ fn resolve_resume_checkpoint_epoch(
 }
 
 fn initialize_model_from_checkpoint<B: BackendTrait>(
+    resolved_config: &TrainingConfig,
     training: &TrainingHyperparameters,
     model: &mut BDH<B>,
     device: &B::Device,
+    backend_name: &str,
 ) -> Result<()> {
     let Some(checkpoint_path) = &training.init_checkpoint_path else {
         return Ok(());
     };
-    let (checkpoint_base, epoch) =
-        crate::checkpoint::resolve_checkpoint_base(checkpoint_path, training.init_checkpoint_epoch)
-            .with_context(|| {
-                format!(
-                    "failed to resolve init checkpoint from {}",
-                    checkpoint_path.display()
-                )
-            })?;
-    let record = BinFileRecorder::<FullPrecisionSettings>::new()
-        .load::<<BDH<B> as Module<B>>::Record>(checkpoint_base.clone(), device)
-        .with_context(|| {
-            format!(
-                "failed to load init checkpoint epoch {epoch} from {}",
-                checkpoint_base.display()
-            )
-        })?;
-    *model = model.clone().load_record(record);
-    info!(
-        "initialized model weights from checkpoint epoch {epoch} at {}",
-        checkpoint_base.display()
-    );
+    *model = crate::checkpoint::apply_init_checkpoint_to_language_core(
+        model,
+        resolved_config,
+        checkpoint_path,
+        training.init_checkpoint_epoch,
+        backend_name,
+        device,
+    )?;
     Ok(())
 }
 
@@ -336,6 +327,109 @@ where
             train_with_scheduler(context, model, optimizer, scheduler)
         }
     }
+}
+
+#[derive(Debug, Serialize)]
+struct PreStepValidationReport {
+    split: &'static str,
+    mean_loss: f64,
+    num_batches: usize,
+    init_checkpoint_path: String,
+    init_checkpoint_epoch: Option<usize>,
+    init_transfer_interface_checkpoint_path: Option<String>,
+    init_transfer_interface_checkpoint_epoch: Option<usize>,
+    init_transfer_preserve_interface_input_embedding: bool,
+    init_transfer_preserve_interface_output_head: bool,
+    init_transfer_backbone_blend_alpha: Option<f32>,
+    init_transfer_backbone_grad_scale: Option<f32>,
+    init_transfer_backbone_grad_scale_steps: Option<usize>,
+    init_transfer_fresh_top_layers: Option<usize>,
+    init_transfer_preserve_fresh_decoder: bool,
+    init_transfer_preserve_fresh_norm: bool,
+    init_transfer_match_fresh_rms: bool,
+}
+
+fn mean_scalar_from_valid_loss<B: BackendTrait>(tensor: Tensor<B, 1>) -> f64 {
+    let values = tensor
+        .to_data()
+        .convert::<f32>()
+        .into_vec::<f32>()
+        .expect("loss tensor to vec");
+    if values.is_empty() {
+        0.0
+    } else {
+        values.iter().map(|value| *value as f64).sum::<f64>() / values.len() as f64
+    }
+}
+
+fn maybe_write_pre_step_validation_report<B>(
+    training: &TrainingHyperparameters,
+    parallel_runtime: &ParallelRuntime,
+    run_dir: &Path,
+    model: &LanguageTrainModel<B>,
+    valid_loader: &Arc<dyn DataLoader<ValidBackend<B>, SequenceBatch<ValidBackend<B>>>>,
+) -> Result<()>
+where
+    B: AutodiffBackend + Clone + 'static,
+    B::Device: Clone,
+{
+    let Some(init_checkpoint_path) = training.init_checkpoint_path.as_ref() else {
+        return Ok(());
+    };
+    if !parallel_runtime.is_primary() {
+        return Ok(());
+    }
+
+    let valid_model = model.valid();
+    let mut iterator = valid_loader.iter();
+    let mut total = 0.0;
+    let mut count = 0usize;
+
+    while let Some(item) = iterator.next() {
+        let output = valid_model.step(item);
+        let loss_value: LossValue<ValidBackend<B>> = output.adapt();
+        total += mean_scalar_from_valid_loss(loss_value.value());
+        count += 1;
+    }
+
+    let mean_loss = if count == 0 {
+        0.0
+    } else {
+        total / count as f64
+    };
+    let report = PreStepValidationReport {
+        split: "val",
+        mean_loss,
+        num_batches: count,
+        init_checkpoint_path: init_checkpoint_path.display().to_string(),
+        init_checkpoint_epoch: training.init_checkpoint_epoch,
+        init_transfer_interface_checkpoint_path: training
+            .init_transfer
+            .interface_checkpoint_path
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        init_transfer_interface_checkpoint_epoch: training.init_transfer.interface_checkpoint_epoch,
+        init_transfer_preserve_interface_input_embedding: training
+            .init_transfer
+            .preserve_interface_input_embedding,
+        init_transfer_preserve_interface_output_head: training
+            .init_transfer
+            .preserve_interface_output_head,
+        init_transfer_backbone_blend_alpha: training.init_transfer.backbone_blend_alpha,
+        init_transfer_backbone_grad_scale: training.init_transfer.backbone_grad_scale,
+        init_transfer_backbone_grad_scale_steps: training.init_transfer.backbone_grad_scale_steps,
+        init_transfer_fresh_top_layers: training.init_transfer.fresh_top_layers,
+        init_transfer_preserve_fresh_decoder: training.init_transfer.preserve_fresh_decoder,
+        init_transfer_preserve_fresh_norm: training.init_transfer.preserve_fresh_norm,
+        init_transfer_match_fresh_rms: training.init_transfer.match_fresh_rms,
+    };
+    let payload =
+        serde_json::to_string_pretty(&report).context("serialize pre-step validation report")?;
+    let path = run_dir.join("pre_step_validation.json");
+    fs::write(&path, payload)
+        .with_context(|| format!("write pre-step validation report to {}", path.display()))?;
+    info!("pre-step validation before optimizer step 1: mean_loss={mean_loss:.6} batches={count}");
+    Ok(())
 }
 
 fn resolve_effective_training_sequence_kernel(
@@ -680,17 +774,47 @@ where
         );
 
     let mut base_model = BDH::<B>::new(model_config.clone(), &device);
-    initialize_model_from_checkpoint(training, &mut base_model, &device)?;
-    let mut model = Some(
-        LanguageTrainModel::new(base_model)
-            .with_pipeline_plan(pipeline_plan.clone())
-            .with_tbptt_chunk_size(training.tbptt_chunk_size)
-            .with_tbptt_persist_across_steps(training.tbptt_persist_across_steps),
+    let fresh_model = base_model.clone();
+    initialize_model_from_checkpoint(
+        &resolved_config,
+        training,
+        &mut base_model,
+        &device,
+        backend_name,
+    )?;
+    anyhow::ensure!(
+        !training.continual_backprop.enabled || parallel_runtime.world_size == 1,
+        "training.continual_backprop currently requires single-process training"
     );
-    let mut optim = Some(resolve_optimizer::<B, LanguageTrainModel<B>>(
-        optimizer_cfg,
-        total_steps,
-    )?);
+    anyhow::ensure!(
+        !training.continual_backprop.enabled
+            || base_model.supports_shared_lowrank_continual_backprop(),
+        "training.continual_backprop currently requires rollout_fast_steps_per_slow_step = 1 and y_neuron_recurrence disabled"
+    );
+    let prepared_model = LanguageTrainModel::new(base_model)
+        .with_pipeline_plan(pipeline_plan.clone())
+        .with_tbptt_chunk_size(training.tbptt_chunk_size)
+        .with_tbptt_persist_across_steps(training.tbptt_persist_across_steps)
+        .with_continual_backprop(&training.continual_backprop)
+        .with_gradient_scale_schedule(training, total_steps);
+    let mut model = Some(prepared_model);
+    let mut cbp_optim = if training.continual_backprop.enabled {
+        Some(ContinualBackpropAdamWOptimizer::new(
+            optimizer_cfg,
+            training.continual_backprop.clone(),
+            fresh_model,
+        )?)
+    } else {
+        None
+    };
+    let mut optim = if cbp_optim.is_none() {
+        Some(resolve_optimizer::<B, LanguageTrainModel<B>>(
+            optimizer_cfg,
+            total_steps,
+        )?)
+    } else {
+        None
+    };
     let scheduler_iters = match schedule.source {
         ScheduleSource::Epochs => Some(total_steps),
         ScheduleSource::MaxIters => None,
@@ -709,6 +833,15 @@ where
             startup_autotune.as_ref(),
         )?;
         write_training_snapshot(&resolved_config, &run_dir, dataset.tokenizer().as_ref())?;
+    }
+    if let Some(model_ref) = model.as_ref() {
+        maybe_write_pre_step_validation_report(
+            training,
+            &parallel_runtime,
+            &run_dir,
+            model_ref,
+            &valid_loader,
+        )?;
     }
     info!("run name: {run_name}");
     if let Some(report) = &startup_autotune {
@@ -754,12 +887,15 @@ where
             .unwrap_or_else(|| "disabled".to_string())
     );
     info!(
-        "optimizer fingerprint: name={:?} schedule_mode={:?} learning_rate={} weight_decay={} weight_decay_final={:?}",
+        "optimizer fingerprint: name={:?} schedule_mode={:?} learning_rate={} weight_decay={} weight_decay_final={:?} module_lr_scales={:?} continual_backprop_lr_coupling={:?} continual_backprop_lr_coupling_power={}",
         optimizer_cfg.name,
         optimizer_cfg.schedule_mode,
         optimizer_cfg.learning_rate,
         optimizer_cfg.weight_decay,
         optimizer_cfg.weight_decay_final,
+        training.module_lr_scales,
+        training.continual_backprop.lr_coupling,
+        training.continual_backprop.lr_coupling_power,
     );
     let context = TrainEnvironment {
         parallel_runtime: &parallel_runtime,
@@ -776,25 +912,34 @@ where
         valid_loader,
         epochs: total_epochs,
     };
-    let _model = match optim.take().expect("optimizer initialized") {
-        ResolvedOptimizer::AdamW(optimizer) => train_with_resolved_scheduler(
+    let _model = if let Some(optimizer) = cbp_optim.take() {
+        train_with_resolved_scheduler(
             &context,
             model.take().expect("model initialized"),
             optimizer,
             scheduler,
-        )?,
-        ResolvedOptimizer::BitNetAdamW(optimizer) => train_with_resolved_scheduler(
-            &context,
-            model.take().expect("model initialized"),
-            optimizer,
-            scheduler,
-        )?,
-        ResolvedOptimizer::MuonHybrid(optimizer) => train_with_resolved_scheduler(
-            &context,
-            model.take().expect("model initialized"),
-            optimizer,
-            scheduler,
-        )?,
+        )?
+    } else {
+        match optim.take().expect("optimizer initialized") {
+            ResolvedOptimizer::AdamW(optimizer) => train_with_resolved_scheduler(
+                &context,
+                model.take().expect("model initialized"),
+                optimizer,
+                scheduler,
+            )?,
+            ResolvedOptimizer::BitNetAdamW(optimizer) => train_with_resolved_scheduler(
+                &context,
+                model.take().expect("model initialized"),
+                optimizer,
+                scheduler,
+            )?,
+            ResolvedOptimizer::MuonHybrid(optimizer) => train_with_resolved_scheduler(
+                &context,
+                model.take().expect("model initialized"),
+                optimizer,
+                scheduler,
+            )?,
+        }
     };
 
     info!("Training complete on {backend_name}");
@@ -925,6 +1070,9 @@ mod tests {
                 resume_checkpoint_epoch: None,
                 init_checkpoint_path: None,
                 init_checkpoint_epoch: None,
+                init_transfer: Default::default(),
+                continual_backprop: Default::default(),
+                module_lr_scales: Vec::new(),
                 context_strategy: ContextStrategyConfig::Infinite,
                 sequence_kernel_override: None,
                 gdpo: None,
@@ -1073,6 +1221,9 @@ mod tests {
             resume_checkpoint_epoch: None,
             init_checkpoint_path: None,
             init_checkpoint_epoch: None,
+            init_transfer: Default::default(),
+            continual_backprop: Default::default(),
+            module_lr_scales: Vec::new(),
             context_strategy: ContextStrategyConfig::Infinite,
             sequence_kernel_override: None,
             gdpo: None,
@@ -1104,6 +1255,9 @@ mod tests {
             resume_checkpoint_epoch: None,
             init_checkpoint_path: None,
             init_checkpoint_epoch: None,
+            init_transfer: Default::default(),
+            continual_backprop: Default::default(),
+            module_lr_scales: Vec::new(),
             context_strategy: ContextStrategyConfig::Infinite,
             sequence_kernel_override: None,
             gdpo: None,
@@ -1440,6 +1594,8 @@ mod tests {
         warmstart.parallel = burn_dragon_train::ParallelConfig::default();
         warmstart.training.init_checkpoint_path = Some(checkpoint_dir.clone());
         warmstart.training.init_checkpoint_epoch = Some(1);
+        warmstart.training.init_transfer.interface_checkpoint_path = Some(checkpoint_dir.clone());
+        warmstart.training.init_transfer.interface_checkpoint_epoch = Some(1);
         train_backend::<TestBackend, _>(&warmstart, dataset, "cpu", |_| {})
             .expect("warmstart train backend");
 
@@ -1452,6 +1608,23 @@ mod tests {
                 .join("checkpoint")
                 .join("model-1.bin")
                 .is_file()
+        );
+        let pre_step_report = second_run_dir.join("pre_step_validation.json");
+        assert!(
+            pre_step_report.is_file(),
+            "expected pre-step validation report"
+        );
+        let report: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(&pre_step_report).expect("read pre-step validation report"),
+        )
+        .expect("parse pre-step validation report");
+        let mean_loss = report["mean_loss"]
+            .as_f64()
+            .expect("pre-step validation mean_loss");
+        assert!(mean_loss.is_finite() && mean_loss >= 0.0);
+        assert_eq!(
+            report["init_transfer_interface_checkpoint_epoch"].as_u64(),
+            Some(1)
         );
     }
 

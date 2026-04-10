@@ -3426,6 +3426,7 @@ dependencies = [
  "csv",
  "fancy-regex",
  "flate2",
+ "hashbrown 0.16.1",
  "hf-hub",
  "indexmap 2.13.0",
  "memmap2",

@@ -1,8 +1,8 @@
-use std::mem::size_of;
 use std::collections::BTreeMap;
+use std::mem::size_of;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, sync_channel};
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
@@ -375,7 +375,11 @@ impl RandomPrefetch {
             return;
         }
         while self.contiguous_ready() < target_ready {
-            let Some((index, batch)) = self.receiver.as_ref().and_then(|receiver| receiver.recv().ok()) else {
+            let Some((index, batch)) = self
+                .receiver
+                .as_ref()
+                .and_then(|receiver| receiver.recv().ok())
+            else {
                 break;
             };
             self.pending.insert(index, batch);
@@ -481,12 +485,7 @@ fn finalize_host_batch_on_device<B: Backend>(
     if prof_enabled {
         let values = batch_size.saturating_mul(block_size);
         let copy_bytes = (values.saturating_mul(2).saturating_mul(size_of::<i64>())) as u128;
-        crate::train::profile::record_dataloader(
-            dataloader_cpu_ns,
-            tensor_copy_ns,
-            copy_bytes,
-            0,
-        );
+        crate::train::profile::record_dataloader(dataloader_cpu_ns, tensor_copy_ns, copy_bytes, 0);
     }
 
     SequenceBatch::new(inputs_tensor, targets_tensor, summary_event_mask)
@@ -588,7 +587,8 @@ impl<B: Backend> RandomDataLoader<B> {
     }
 
     pub fn with_initial_consumed_steps(self, initial_steps: usize) -> Self {
-        if let (Some(limit), Some(consumed_steps)) = (self.total_steps, self.consumed_steps.as_ref())
+        if let (Some(limit), Some(consumed_steps)) =
+            (self.total_steps, self.consumed_steps.as_ref())
         {
             consumed_steps.store(initial_steps.min(limit), Ordering::Relaxed);
         }
@@ -688,7 +688,8 @@ impl<B: Backend> StreamingDataLoader<B> {
     }
 
     pub fn with_initial_consumed_steps(self, initial_steps: usize) -> Self {
-        if let (Some(limit), Some(consumed_steps)) = (self.total_steps, self.consumed_steps.as_ref())
+        if let (Some(limit), Some(consumed_steps)) =
+            (self.total_steps, self.consumed_steps.as_ref())
         {
             consumed_steps.store(initial_steps.min(limit), Ordering::Relaxed);
         }

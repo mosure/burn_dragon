@@ -1,10 +1,25 @@
 mod auxiliary_memory;
 mod connector;
+mod continual_backprop;
 mod diagnostics;
+#[cfg(any(feature = "probe", test))]
+mod interpretability;
 mod language_head;
 mod language_pipeline;
 mod low_bit_export;
 mod sequence_dispatch;
+pub use continual_backprop::{
+    SharedLowrankActivationBatchStats, SharedLowrankContinualBackpropRuntime,
+    SharedLowrankFeatureMetrics, SharedLowrankParamIds,
+};
+#[cfg(any(feature = "probe", test))]
+pub use interpretability::{
+    HeadTensorComparisonDiagnostics, HeadTensorGeometryDiagnostics,
+    LanguageLayerStateDeltaDiagnostics, LanguageLayerStateSummaryDiagnostics,
+    LanguageLowRankLayerComparisonDiagnostics, LanguageLowRankLayerGeometryDiagnostics,
+    TensorComparisonDiagnostics, TensorDistributionDiagnostics, TensorStateDeltaDiagnostics,
+    TensorStateSummaryDiagnostics, compare_model_states, summarize_model_state,
+};
 pub use low_bit_export::BdhBitNetDeployScaffold;
 
 use burn::module::{Ignored, Module, Param};
@@ -33,6 +48,7 @@ use burn_dragon_kernel::kernels::sequence::rwkv8::forward::{
 };
 use rand::distributions::{Distribution, WeightedIndex};
 use rand::prelude::*;
+use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::ops::Range;
 use std::time::Instant;
@@ -53,8 +69,8 @@ use super::bdh_support::{
     logits_projection_profile_record, shannon_entropy,
 };
 use super::config::{
-    BDHConfig, ClockedSlowMemoryConfig, FusedKernelConfig, LanguageHeadConfig,
-    SummaryMemoryConfig, YNeuronRecurrenceConfig,
+    BDHConfig, ClockedSlowMemoryConfig, FusedKernelConfig, LanguageHeadConfig, SummaryMemoryConfig,
+    YNeuronRecurrenceConfig,
 };
 use super::init::{BdhFiringTargetKind, BdhInitializer, BdhProjectionRole};
 use super::low_bit::{
@@ -125,6 +141,8 @@ pub struct BDH<B: Backend> {
     #[module(ignore)]
     packed_encoder: Ignored<Option<PackedWeightArtifact>>,
     layer_latent_totals: Ignored<Vec<usize>>,
+    #[module(ignore)]
+    shared_lowrank_continual_backprop: Ignored<Option<SharedLowrankContinualBackpropRuntime>>,
     embed: Embedding<B>,
     dropout: Dropout,
     norm: DragonNorm<B>,
@@ -179,13 +197,31 @@ impl LanguageHeadRuntimeKind {
     }
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum LanguageModuleLrScaleTarget {
+    Embedding,
+    Normalization,
+    OutputHead,
+    SharedLowrankEncoder,
+    SharedLowrankDecoder,
+    SharedLowrankDecay,
+    Attention,
+    Mamba,
+    ResidualModules,
+    OtherBackbone,
+}
+
 impl core::fmt::Debug for NcaFactorizedHeadTables {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("NcaFactorizedHeadTables")
             .field("patch_cells", &self.patch_cells)
             .field("state_count", &self.state_count)
             .field("special_token_ids", &self.special_token_ids)
-            .field("patch_digit_tables", &format_args!("{} tables", self.patch_digit_tables.len()))
+            .field(
+                "patch_digit_tables",
+                &format_args!("{} tables", self.patch_digit_tables.len()),
+            )
             .field(
                 "patch_mask_table",
                 &format_args!("len={}", self.patch_mask_table.len()),
@@ -399,9 +435,11 @@ impl<B: Backend> BDH<B> {
         )
         .then(|| MambaSequenceParameters::new(mamba_config, sequence_kernel.memory_system, device));
         let language_head = LanguageHeadRuntimeKind::from_config(&config.language_head);
-        let nca_factorized_head_tables =
-            NcaFactorizedHeadTables::from_language_head_config(&config.language_head, config.vocab_size)
-                .unwrap_or_else(|message| panic!("invalid language head config: {message}"));
+        let nca_factorized_head_tables = NcaFactorizedHeadTables::from_language_head_config(
+            &config.language_head,
+            config.vocab_size,
+        )
+        .unwrap_or_else(|message| panic!("invalid language head config: {message}"));
         let lm_head = if nca_factorized_head_tables.is_none() {
             Some(Param::from_tensor(initializer.projection_tensor::<B>(
                 BdhProjectionRole::LmHead,
@@ -422,19 +460,17 @@ impl<B: Backend> BDH<B> {
                 device,
             ))
         });
-        let nca_special_lm_head = nca_factorized_head_tables
-            .as_ref()
-            .and_then(|tables| {
-                (tables.special_count() > 0).then(|| {
-                    Param::from_tensor(initializer.projection_tensor::<B>(
-                        BdhProjectionRole::LmHead,
-                        config.n_embd,
-                        tables.special_count(),
-                        residual_depth,
-                        device,
-                    ))
-                })
-            });
+        let nca_special_lm_head = nca_factorized_head_tables.as_ref().and_then(|tables| {
+            (tables.special_count() > 0).then(|| {
+                Param::from_tensor(initializer.projection_tensor::<B>(
+                    BdhProjectionRole::LmHead,
+                    config.n_embd,
+                    tables.special_count(),
+                    residual_depth,
+                    device,
+                ))
+            })
+        });
         let layer_latent_totals = Ignored(
             (0..config.n_layer)
                 .map(|layer_idx| config.latent_total_for_layer(layer_idx))
@@ -470,6 +506,7 @@ impl<B: Backend> BDH<B> {
             packed_decoder_y: Ignored(None),
             packed_encoder: Ignored(None),
             layer_latent_totals,
+            shared_lowrank_continual_backprop: Ignored(None),
             embed,
             dropout,
             norm,

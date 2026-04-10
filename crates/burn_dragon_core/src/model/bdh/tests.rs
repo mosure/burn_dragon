@@ -5,6 +5,7 @@ use crate::model::bdh_support::LanguageMhcSplitBindings;
 use crate::model::low_bit::LowBitSavedActivationConfig;
 use crate::model::low_bit_runtime::{unpack_rho_block_state, unpack_rho_int8_block_state_device};
 use crate::model::sequence::mamba::MambaSequenceConfig;
+use burn::module::{Module, list_param_ids};
 use burn::tensor::backend::Backend as BackendTrait;
 use burn::tensor::{Int, TensorData};
 use burn_ndarray::NdArray;
@@ -163,6 +164,71 @@ fn decoder_y_quality_recipe_test_config(sequence_kernel: SequenceKernelConfig) -
     config
 }
 
+#[test]
+fn transferred_backbone_param_ids_exclude_surface_params() {
+    let device = <RecurrenceBackend as BackendTrait>::Device::default();
+    let model = BDH::<RecurrenceBackend>::new(BDHConfig::default(), &device);
+
+    let all_ids = list_param_ids(&model);
+    let surface_ids = model.transfer_interface_surface_param_ids(true, true);
+    let backbone_ids = model.transferred_backbone_param_ids(true, true);
+    let surface_set = surface_ids
+        .iter()
+        .copied()
+        .collect::<std::collections::HashSet<_>>();
+    let backbone_set = backbone_ids
+        .iter()
+        .copied()
+        .collect::<std::collections::HashSet<_>>();
+
+    assert!(
+        !surface_set.is_empty(),
+        "expected interface surfaces to have parameters"
+    );
+    assert!(
+        !backbone_set.is_empty(),
+        "expected transferred backbone to have parameters"
+    );
+    assert!(surface_set.is_disjoint(&backbone_set));
+    assert_eq!(surface_set.len() + backbone_set.len(), all_ids.len());
+}
+
+#[test]
+fn language_module_lr_scale_targets_partition_model_params() {
+    let device = <RecurrenceBackend as BackendTrait>::Device::default();
+    let model = BDH::<RecurrenceBackend>::new(BDHConfig::default(), &device);
+    let all_ids = list_param_ids(&model);
+    let targets = [
+        LanguageModuleLrScaleTarget::Embedding,
+        LanguageModuleLrScaleTarget::Normalization,
+        LanguageModuleLrScaleTarget::OutputHead,
+        LanguageModuleLrScaleTarget::SharedLowrankEncoder,
+        LanguageModuleLrScaleTarget::SharedLowrankDecoder,
+        LanguageModuleLrScaleTarget::SharedLowrankDecay,
+        LanguageModuleLrScaleTarget::Attention,
+        LanguageModuleLrScaleTarget::Mamba,
+        LanguageModuleLrScaleTarget::ResidualModules,
+        LanguageModuleLrScaleTarget::OtherBackbone,
+    ];
+
+    let mut union = std::collections::HashSet::new();
+    for target in targets {
+        for param_id in model.language_module_lr_scale_param_ids(target) {
+            assert!(
+                union.insert(param_id),
+                "expected lr-scale target {:?} to be disjoint from earlier groups",
+                target
+            );
+        }
+    }
+
+    assert_eq!(
+        union.len(),
+        all_ids.len(),
+        "expected lr targets to cover all params"
+    );
+}
+
 fn allmat_quality_recipe_test_config(
     sequence_kernel: SequenceKernelConfig,
     decoder_x_mode: crate::LowBitWeightFormat,
@@ -238,6 +304,331 @@ fn tensor_mean_abs_diff<const D: usize>(
         .map(|(lhs, rhs)| (lhs - rhs).abs())
         .sum::<f32>()
         / lhs_vec.len().max(1) as f32
+}
+
+#[test]
+fn load_record_preserving_tokenizer_surfaces_restores_standard_head_after_nca_warmstart() {
+    let source = recurrence_test_model(BDHConfig {
+        n_layer: 2,
+        n_embd: 16,
+        n_head: 4,
+        mlp_internal_dim_multiplier: 4,
+        vocab_size: 10_003,
+        dropout: 0.0,
+        fused_kernels: FusedKernelConfig {
+            enabled: false,
+            ..Default::default()
+        },
+        language_head: LanguageHeadConfig::NcaFactorizedPatch {
+            state_count: 10,
+            patch_size: 2,
+            frame_special_tokens: true,
+            eos_id: Some(10_002),
+        },
+        ..Default::default()
+    });
+    let target = recurrence_test_model(BDHConfig {
+        n_layer: 2,
+        n_embd: 16,
+        n_head: 4,
+        mlp_internal_dim_multiplier: 4,
+        vocab_size: 69,
+        dropout: 0.0,
+        fused_kernels: FusedKernelConfig {
+            enabled: false,
+            ..Default::default()
+        },
+        ..Default::default()
+    });
+    let warmed = target.load_record_preserving_tokenizer_surfaces(source.into_record(), true, true);
+    let device = <RecurrenceBackend as BackendTrait>::Device::default();
+    let logits = warmed.forward(recurrence_test_tokens_with_shape(
+        &device,
+        vec![0, 1, 2, 3],
+        [1, 4],
+    ));
+    let [_batch, _time, vocab] = logits.shape().dims();
+    assert_eq!(vocab, 69);
+    let values = logits
+        .to_data()
+        .convert::<f32>()
+        .into_vec::<f32>()
+        .expect("logits vec");
+    assert!(values.iter().all(|value| value.is_finite()));
+}
+
+#[test]
+fn adapted_transferred_backbone_can_reset_top_layers_to_fresh_init() {
+    let config = BDHConfig {
+        n_layer: 2,
+        n_embd: 8,
+        n_head: 2,
+        mlp_internal_dim_multiplier: 2,
+        vocab_size: 32,
+        dropout: 0.0,
+        fused_kernels: FusedKernelConfig {
+            enabled: false,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let fresh = recurrence_test_model(config.clone());
+    let mut source = recurrence_test_model(config);
+    let device = <RecurrenceBackend as BackendTrait>::Device::default();
+    source.encoder = Param::from_tensor(Tensor::<RecurrenceBackend, 3>::from_data(
+        TensorData::new(vec![2.0; 2 * 8 * 8], [2, 8, 8]),
+        &device,
+    ));
+    source.encoder_v = Param::from_tensor(Tensor::<RecurrenceBackend, 3>::from_data(
+        TensorData::new(vec![3.0; 2 * 8 * 8], [2, 8, 8]),
+        &device,
+    ));
+    source.rwkv_time_decay = Param::from_tensor(Tensor::<RecurrenceBackend, 2>::from_data(
+        TensorData::new(vec![4.0; 2 * 8], [2, 8]),
+        &device,
+    ));
+
+    let adapted =
+        source.adapted_transferred_backbone(&fresh, None, None, None, Some(1), false, false, false);
+
+    let source_encoder = source.encoder.val();
+    let fresh_encoder = fresh.encoder.val();
+    let adapted_encoder = adapted.encoder.val();
+    let source_decay = source.rwkv_time_decay.val();
+    let fresh_decay = fresh.rwkv_time_decay.val();
+    let adapted_decay = adapted.rwkv_time_decay.val();
+
+    assert!(
+        tensor_mean_abs_diff(
+            adapted_encoder.clone().slice([0..1, 0..8, 0..8]),
+            source_encoder.slice([0..1, 0..8, 0..8]),
+        ) <= 1.0e-6
+    );
+    assert!(
+        tensor_mean_abs_diff(
+            adapted_encoder.slice([1..2, 0..8, 0..8]),
+            fresh_encoder.slice([1..2, 0..8, 0..8]),
+        ) <= 1.0e-6
+    );
+    assert!(
+        tensor_mean_abs_diff(
+            adapted_decay.clone().slice([0..1, 0..8]),
+            source_decay.slice([0..1, 0..8]),
+        ) <= 1.0e-6
+    );
+    assert!(
+        tensor_mean_abs_diff(
+            adapted_decay.slice([1..2, 0..8]),
+            fresh_decay.slice([1..2, 0..8]),
+        ) <= 1.0e-6
+    );
+}
+
+#[test]
+fn adapted_transferred_backbone_can_preserve_fresh_decoder_and_norm() {
+    let config = BDHConfig {
+        n_layer: 2,
+        n_embd: 8,
+        n_head: 2,
+        mlp_internal_dim_multiplier: 2,
+        vocab_size: 32,
+        dropout: 0.0,
+        fused_kernels: FusedKernelConfig {
+            enabled: false,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let fresh = recurrence_test_model(config.clone());
+    let device = <RecurrenceBackend as BackendTrait>::Device::default();
+    <RecurrenceBackend as BackendTrait>::seed(&device, 777);
+    let mut source = BDH::<RecurrenceBackend>::new(config.clone(), &device);
+    let norm_mismatch = recurrence_test_model(BDHConfig {
+        normalization: crate::DragonNormConfig {
+            kind: crate::DragonNormKind::DynamicTanh,
+            alpha_init: Some(0.25),
+            ..Default::default()
+        },
+        ..config
+    });
+    source.norm = norm_mismatch.norm.clone();
+
+    let adapted =
+        source.adapted_transferred_backbone(&fresh, None, None, None, None, true, true, false);
+
+    assert!(
+        tensor_mean_abs_diff(adapted.decoder.val(), fresh.decoder.val()) <= 1.0e-6,
+        "expected fresh decoder to be preserved"
+    );
+    assert!(
+        tensor_mean_abs_diff(source.decoder.val(), fresh.decoder.val()) > 1.0e-3,
+        "expected source decoder to differ from fresh decoder"
+    );
+
+    let probe =
+        Tensor::<RecurrenceBackend, 2>::from_data(TensorData::new(vec![0.5; 8], [1, 8]), &device);
+    let fresh_norm_out = fresh.norm.forward(probe.clone());
+    let adapted_norm_out = adapted.norm.forward(probe.clone());
+    let source_norm_out = source.norm.forward(probe);
+
+    assert!(
+        tensor_mean_abs_diff(adapted_norm_out, fresh_norm_out.clone()) <= 1.0e-6,
+        "expected fresh norm to be preserved"
+    );
+    assert!(
+        tensor_mean_abs_diff(source_norm_out, fresh_norm_out) > 1.0e-4,
+        "expected source norm to differ from fresh norm"
+    );
+}
+
+#[test]
+fn adapted_transferred_backbone_can_blend_decoder_and_norm_independently() {
+    let config = BDHConfig {
+        n_layer: 2,
+        n_embd: 8,
+        n_head: 2,
+        mlp_internal_dim_multiplier: 2,
+        vocab_size: 32,
+        dropout: 0.0,
+        fused_kernels: FusedKernelConfig {
+            enabled: false,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let fresh = recurrence_test_model(config.clone());
+    let mut source = recurrence_test_model(config.clone());
+    let device = <RecurrenceBackend as BackendTrait>::Device::default();
+    let [decoder_rows, decoder_cols] = source.decoder.val().shape().dims();
+    source.decoder = Param::from_tensor(Tensor::<RecurrenceBackend, 2>::from_data(
+        TensorData::new(
+            vec![2.0; decoder_rows * decoder_cols],
+            [decoder_rows, decoder_cols],
+        ),
+        &device,
+    ));
+    let norm_mismatch = recurrence_test_model(BDHConfig {
+        normalization: crate::DragonNormConfig {
+            kind: crate::DragonNormKind::DynamicTanh,
+            alpha_init: Some(0.25),
+            ..Default::default()
+        },
+        ..config
+    });
+    source.norm = norm_mismatch.norm.clone();
+
+    let adapted = source.adapted_transferred_backbone(
+        &fresh,
+        None,
+        Some(0.25),
+        Some(0.25),
+        None,
+        false,
+        false,
+        false,
+    );
+
+    let expected_decoder = source
+        .decoder
+        .val()
+        .mul_scalar(0.25)
+        .add(fresh.decoder.val().mul_scalar(0.75));
+    assert!(tensor_mean_abs_diff(adapted.decoder.val(), expected_decoder) <= 1.0e-6);
+
+    let probe =
+        Tensor::<RecurrenceBackend, 2>::from_data(TensorData::new(vec![0.5; 8], [1, 8]), &device);
+    let expected_norm = source.norm.blended_with(&fresh.norm, 0.25);
+    let expected_norm_out = expected_norm.forward(probe.clone());
+    let adapted_norm_out = adapted.norm.forward(probe);
+    assert!(
+        tensor_mean_abs_diff(adapted_norm_out, expected_norm_out) <= 1.0e-6,
+        "expected norm blend to match DragonNorm::blended_with"
+    );
+}
+
+#[test]
+fn with_tokenizer_surfaces_from_can_replace_embed_and_output_head() {
+    let config = BDHConfig {
+        n_layer: 2,
+        n_embd: 8,
+        n_head: 2,
+        mlp_internal_dim_multiplier: 2,
+        vocab_size: 32,
+        dropout: 0.0,
+        fused_kernels: FusedKernelConfig {
+            enabled: false,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let device = <RecurrenceBackend as BackendTrait>::Device::default();
+    let recipient = recurrence_test_model(config.clone());
+    let mut donor = recurrence_test_model(config);
+
+    let [embed_rows, embed_cols] = donor.embed.weight.val().shape().dims();
+    donor.embed = burn::nn::Embedding {
+        weight: Param::from_tensor(Tensor::<RecurrenceBackend, 2>::from_data(
+            TensorData::new(vec![7.0; embed_rows * embed_cols], [embed_rows, embed_cols]),
+            &device,
+        )),
+    };
+    if let Some(lm_head) = donor.lm_head.as_mut() {
+        let [rows, cols] = lm_head.val().shape().dims();
+        *lm_head = Param::from_tensor(Tensor::<RecurrenceBackend, 2>::from_data(
+            TensorData::new(vec![5.0; rows * cols], [rows, cols]),
+            &device,
+        ));
+    }
+
+    let updated = recipient.with_tokenizer_surfaces_from(&donor, true, true);
+
+    assert!(tensor_mean_abs_diff(updated.embed.weight.val(), donor.embed.weight.val()) <= 1.0e-6);
+    assert!(
+        tensor_mean_abs_diff(updated.embed.weight.val(), recipient.embed.weight.val()) > 1.0e-3
+    );
+    let updated_head = updated.lm_head.as_ref().expect("updated lm_head");
+    let donor_head = donor.lm_head.as_ref().expect("donor lm_head");
+    let recipient_head = recipient.lm_head.as_ref().expect("recipient lm_head");
+    assert!(tensor_mean_abs_diff(updated_head.val(), donor_head.val()) <= 1.0e-6);
+    assert!(tensor_mean_abs_diff(updated_head.val(), recipient_head.val()) > 1.0e-3);
+}
+
+#[test]
+fn with_output_head_blended_from_interpolates_standard_lm_head() {
+    let config = BDHConfig {
+        n_layer: 2,
+        n_embd: 8,
+        n_head: 2,
+        mlp_internal_dim_multiplier: 2,
+        vocab_size: 32,
+        dropout: 0.0,
+        fused_kernels: FusedKernelConfig {
+            enabled: false,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let device = <RecurrenceBackend as BackendTrait>::Device::default();
+    let recipient = recurrence_test_model(config.clone());
+    let mut donor = recurrence_test_model(config);
+
+    if let Some(lm_head) = donor.lm_head.as_mut() {
+        let [rows, cols] = lm_head.val().shape().dims();
+        *lm_head = Param::from_tensor(Tensor::<RecurrenceBackend, 2>::from_data(
+            TensorData::new(vec![6.0; rows * cols], [rows, cols]),
+            &device,
+        ));
+    }
+
+    let blended = recipient.with_output_head_blended_from(&donor, 0.25);
+    let blended_head = blended.lm_head.as_ref().expect("blended lm_head");
+    let recipient_head = recipient.lm_head.as_ref().expect("recipient lm_head");
+    let donor_head = donor.lm_head.as_ref().expect("donor lm_head");
+
+    let expected = recipient_head.val().mul_scalar(0.75) + donor_head.val().mul_scalar(0.25);
+    assert!(tensor_mean_abs_diff(blended_head.val(), expected) <= 1.0e-6);
+    assert!(tensor_mean_abs_diff(blended_head.val(), recipient_head.val()) > 1.0e-3);
+    assert!(tensor_mean_abs_diff(blended_head.val(), donor_head.val()) > 1.0e-3);
 }
 
 fn tensor_values_f32<const D: usize>(tensor: Tensor<RecurrenceBackend, D>) -> Vec<f32> {
@@ -3729,4 +4120,67 @@ fn summary_memory_write_trigger_updates_only_on_event_chunks() {
         "expected trigger-gated summary carry to affect the next chunk, got {:?}",
         probe_vec
     );
+}
+
+#[test]
+fn lowrank_geometry_reports_identical_heads_as_redundant() {
+    type Backend = NdArray<f32>;
+    let device = <Backend as BackendTrait>::Device::default();
+    let mut model = recurrence_test_model(BDHConfig {
+        n_layer: 1,
+        n_embd: 4,
+        n_head: 2,
+        mlp_internal_dim_multiplier: 1,
+        vocab_size: 16,
+        dropout: 0.0,
+        fused_kernels: FusedKernelConfig {
+            enabled: false,
+            ..Default::default()
+        },
+        ..Default::default()
+    });
+    model.encoder = Param::from_tensor(Tensor::<Backend, 3>::from_data(
+        TensorData::new(
+            vec![
+                1.0, 0.5, 0.25, 0.0, 0.75, -0.5, -0.25, 0.125, 1.0, 0.5, 0.25, 0.0, 0.75, -0.5,
+                -0.25, 0.125,
+            ],
+            [2, 4, 2],
+        ),
+        &device,
+    ));
+
+    let diagnostics = model.collect_lowrank_geometry_diagnostics();
+    let layer = diagnostics.first().expect("geometry diagnostics");
+    let redundancy = layer
+        .encoder
+        .pairwise_cosine_mean
+        .expect("pairwise encoder cosine");
+    assert!(redundancy > 0.999);
+    assert!(layer.encoder.head_norm_cv < 1.0e-6);
+}
+
+#[test]
+fn compare_model_states_reports_zero_delta_for_identical_state() {
+    let model = recurrence_test_model(BDHConfig {
+        n_layer: 2,
+        n_embd: 8,
+        n_head: 2,
+        mlp_internal_dim_multiplier: 2,
+        vocab_size: 16,
+        dropout: 0.0,
+        fused_kernels: FusedKernelConfig {
+            enabled: false,
+            ..Default::default()
+        },
+        ..Default::default()
+    });
+    let state = model.init_state();
+    let deltas = compare_model_states(&state, &state);
+    assert_eq!(deltas.len(), 2);
+    for layer in deltas {
+        assert!(!layer.rho.present_before);
+        assert!(!layer.rho.present_after);
+        assert!(layer.rho.delta_rms.is_none());
+    }
 }

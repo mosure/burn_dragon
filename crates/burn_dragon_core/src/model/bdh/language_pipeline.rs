@@ -1,7 +1,9 @@
 use super::*;
 use crate::model::bdh_support::LanguageMhcSplitBindings;
-#[cfg(not(any(feature = "viz", feature = "probe")))]
-use crate::model::residual_stream::lowrank_residual_step_next_branch_thresholds_relu_native;
+use crate::model::residual_stream::{
+    lowrank_residual_step_branch_thresholds_relu_native,
+    lowrank_residual_step_next_branch_thresholds_relu_native,
+};
 
 impl<B: Backend> BDH<B> {
     pub(super) fn forward_with_state_from_embedded_single_pass(
@@ -186,80 +188,115 @@ impl<B: Backend> BDH<B> {
                 SequenceMemorySystem::Rwkv8StateSpace
             )
             .then(|| self.rwkv_decay(latent));
-            #[cfg(any(feature = "viz", feature = "probe"))]
-            let output = lowrank_residual_step_branch_thresholds_relu_native(
-                branch_flat.clone(),
-                encoder.clone(),
-                encoder_v.clone(),
-                decoder.clone(),
-                &self.dropout,
-                fused && self.kernel.projection_executor.use_x(),
-                fused && self.kernel.projection_executor.use_y(),
-                self.x_relu_threshold,
-                self.y_relu_threshold,
-                true,
-                self.low_bit_projection_plan(),
-                self.low_bit_quant.0.saved_activations.clone(),
-                self.packed_low_bit_projection_artifacts(),
-                latent_pattern,
-                self.kernel.lowrank_grad_input_executor,
-                sparse_mask.clone(),
-                |query, value| {
-                    if let Some(decay) = rwkv_decay.as_ref() {
-                        self.recurrent_rwkv8_with_decay(query, value, layer_state, decay.clone())
-                    } else {
-                        self.recurrent_attention_with_plan(
-                            query,
-                            value,
-                            layer_state,
-                            start_pos,
-                            position_mode,
-                            fused_recurrent_plan.as_ref(),
-                        )
-                    }
-                },
-                |values| activation::relu(values),
-                |values| self.norm.forward(values),
-            );
-            #[cfg(not(any(feature = "viz", feature = "probe")))]
-            let branch_out = lowrank_residual_step_next_branch_thresholds_relu_native(
-                branch_flat,
-                encoder.clone(),
-                encoder_v.clone(),
-                decoder.clone(),
-                &self.dropout,
-                fused && self.kernel.projection_executor.use_x(),
-                fused && self.kernel.projection_executor.use_y(),
-                self.x_relu_threshold,
-                self.y_relu_threshold,
-                true,
-                self.low_bit_projection_plan(),
-                self.low_bit_quant.0.saved_activations.clone(),
-                self.packed_low_bit_projection_artifacts(),
-                latent_pattern,
-                self.kernel.lowrank_grad_input_executor,
-                sparse_mask.clone(),
-                |query, value| {
-                    if let Some(decay) = rwkv_decay.as_ref() {
-                        self.recurrent_rwkv8_with_decay(query, value, layer_state, decay.clone())
-                    } else {
-                        self.recurrent_attention_with_plan(
-                            query,
-                            value,
-                            layer_state,
-                            start_pos,
-                            position_mode,
-                            fused_recurrent_plan.as_ref(),
-                        )
-                    }
-                },
-                |values| activation::relu(values),
-                |values| self.norm.forward(values),
-            )
-            .reshape([branch_batch, branch_views, branch_time, branch_dim]);
+            let shared_lowrank_cbp_runtime = self.shared_lowrank_continual_backprop_runtime();
+            let should_capture_shared_lowrank_cbp = shared_lowrank_cbp_runtime
+                .map(|runtime| runtime.should_sample_step())
+                .unwrap_or(false);
+            let output = (cfg!(any(feature = "viz", feature = "probe"))
+                || should_capture_shared_lowrank_cbp)
+                .then(|| {
+                    lowrank_residual_step_branch_thresholds_relu_native(
+                        branch_flat.clone(),
+                        encoder.clone(),
+                        encoder_v.clone(),
+                        decoder.clone(),
+                        &self.dropout,
+                        fused && self.kernel.projection_executor.use_x(),
+                        fused && self.kernel.projection_executor.use_y(),
+                        self.x_relu_threshold,
+                        self.y_relu_threshold,
+                        true,
+                        self.low_bit_projection_plan(),
+                        self.low_bit_quant.0.saved_activations.clone(),
+                        self.packed_low_bit_projection_artifacts(),
+                        latent_pattern,
+                        self.kernel.lowrank_grad_input_executor,
+                        sparse_mask.clone(),
+                        |query, value| {
+                            if let Some(decay) = rwkv_decay.as_ref() {
+                                self.recurrent_rwkv8_with_decay(
+                                    query,
+                                    value,
+                                    layer_state,
+                                    decay.clone(),
+                                )
+                            } else {
+                                self.recurrent_attention_with_plan(
+                                    query,
+                                    value,
+                                    layer_state,
+                                    start_pos,
+                                    position_mode,
+                                    fused_recurrent_plan.as_ref(),
+                                )
+                            }
+                        },
+                        |values| activation::relu(values),
+                        |values| self.norm.forward(values),
+                    )
+                });
+            if should_capture_shared_lowrank_cbp {
+                if let (Some(runtime), Some(output)) =
+                    (shared_lowrank_cbp_runtime.as_ref(), output.as_ref())
+                {
+                    runtime.record_y_neuron_stats(output.y_neuron.clone());
+                }
+            }
+            let branch_out = if let Some(output) = output.as_ref() {
+                output
+                    .next
+                    .clone()
+                    .reshape([branch_batch, branch_views, branch_time, branch_dim])
+            } else {
+                lowrank_residual_step_next_branch_thresholds_relu_native(
+                    branch_flat,
+                    encoder.clone(),
+                    encoder_v.clone(),
+                    decoder.clone(),
+                    &self.dropout,
+                    fused && self.kernel.projection_executor.use_x(),
+                    fused && self.kernel.projection_executor.use_y(),
+                    self.x_relu_threshold,
+                    self.y_relu_threshold,
+                    true,
+                    self.low_bit_projection_plan(),
+                    self.low_bit_quant.0.saved_activations.clone(),
+                    self.packed_low_bit_projection_artifacts(),
+                    latent_pattern,
+                    self.kernel.lowrank_grad_input_executor,
+                    sparse_mask.clone(),
+                    |query, value| {
+                        if let Some(decay) = rwkv_decay.as_ref() {
+                            self.recurrent_rwkv8_with_decay(
+                                query,
+                                value,
+                                layer_state,
+                                decay.clone(),
+                            )
+                        } else {
+                            self.recurrent_attention_with_plan(
+                                query,
+                                value,
+                                layer_state,
+                                start_pos,
+                                position_mode,
+                                fused_recurrent_plan.as_ref(),
+                            )
+                        }
+                    },
+                    |values| activation::relu(values),
+                    |values| self.norm.forward(values),
+                )
+                .reshape([branch_batch, branch_views, branch_time, branch_dim])
+            };
 
             #[cfg(any(feature = "viz", feature = "probe"))]
-            let mixed = output.y_neuron.clone().swap_dims(1, 2);
+            let mixed = output
+                .as_ref()
+                .expect("viz/probe path should retain full residual output")
+                .y_neuron
+                .clone()
+                .swap_dims(1, 2);
             #[cfg(any(feature = "viz", feature = "probe"))]
             let [flat_batch, time, heads, latent] = mixed.shape().dims();
 
@@ -269,6 +306,8 @@ impl<B: Backend> BDH<B> {
                 let viz_batch = branch_batch.max(1);
                 let viz_views = branch_views.max(1);
                 let x_neuron_last = output
+                    .as_ref()
+                    .expect("viz/probe path should retain full residual output")
                     .x_neuron
                     .clone()
                     .slice_dim(2, last..time)
@@ -277,6 +316,8 @@ impl<B: Backend> BDH<B> {
                     .slice_dim(0, 0..1)
                     .reshape([heads, latent]);
                 let y_gate_last = output
+                    .as_ref()
+                    .expect("viz/probe path should retain full residual output")
                     .y_gate
                     .clone()
                     .slice_dim(2, last..time)
@@ -285,6 +326,8 @@ impl<B: Backend> BDH<B> {
                     .slice_dim(0, 0..1)
                     .reshape([heads, latent]);
                 let y_neuron_last = output
+                    .as_ref()
+                    .expect("viz/probe path should retain full residual output")
                     .y_neuron
                     .clone()
                     .slice_dim(2, last..time)
@@ -323,7 +366,10 @@ impl<B: Backend> BDH<B> {
             #[cfg(any(feature = "viz", feature = "probe"))]
             let branch_out =
                 output
+                    .as_ref()
+                    .expect("viz/probe path should retain full residual output")
                     .next
+                    .clone()
                     .reshape([branch_batch, branch_views, branch_time, branch_dim]);
             let next = self.merge_language_residuals_for_layer(
                 branch_out,

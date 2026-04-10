@@ -236,3 +236,8 @@ required-features = ["benchmark"]
 name = "language_bdh_init_probe"
 path = "src/bin/language_bdh_init_probe.rs"
 required-features = ["language-probe"]
+
+[[bin]]
+name = "language_pp_interpretability"
+path = "src/bin/language_pp_interpretability.rs"
+required-features = ["language-probe", "language-universality"]

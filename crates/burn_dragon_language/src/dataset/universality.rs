@@ -3,9 +3,9 @@ use std::fs;
 use std::io;
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Condvar, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::sync_channel;
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 
 use burn::tensor::backend::Backend;
@@ -401,20 +401,16 @@ impl TokenSequenceDataset for UniversalityDataset {
     }
 
     fn prepare_epoch(&self, split: DatasetSplit, epoch_index: usize) {
-        if let (
-            DatasetSplit::Train,
-            UniversalityStorage::OnTheFly(storage),
-        ) = (split, &self.storage)
+        if let (DatasetSplit::Train, UniversalityStorage::OnTheFly(storage)) =
+            (split, &self.storage)
         {
             storage.prepare_epoch(burn_dragon_universality::SampleSplit::Train, epoch_index);
         }
     }
 
     fn prefetch_epoch(&self, split: DatasetSplit, epoch_index: usize) {
-        if let (
-            DatasetSplit::Train,
-            UniversalityStorage::OnTheFly(storage),
-        ) = (split, &self.storage)
+        if let (DatasetSplit::Train, UniversalityStorage::OnTheFly(storage)) =
+            (split, &self.storage)
         {
             storage.prefetch_epoch(burn_dragon_universality::SampleSplit::Train, epoch_index);
         }
@@ -476,7 +472,10 @@ impl OnTheFlyStorage {
                 .min(remaining);
             let effective_epoch_index = match split {
                 burn_dragon_universality::SampleSplit::Train
-                    if matches!(requested_split, DatasetSplit::Train) => epoch_index,
+                    if matches!(requested_split, DatasetSplit::Train) =>
+                {
+                    epoch_index
+                }
                 _ => 0,
             };
             let document_tokens = self.document_tokens(split, sample_index, effective_epoch_index);

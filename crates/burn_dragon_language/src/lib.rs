@@ -74,7 +74,8 @@ pub mod api {
         pub use crate::checkpoint::{
             LanguageBitNetArtifactExportReport, LanguageBurnpackExportReport,
             LanguageRunConfigSnapshot, apply_bitnet_artifact_bundle_to_model,
-            candidate_bitnet_artifact_paths, default_bitnet_artifact_path, default_checkpoint_dir,
+            apply_init_checkpoint_to_language_core, candidate_bitnet_artifact_paths,
+            default_bitnet_artifact_path, default_checkpoint_dir,
             export_language_checkpoint_to_bitnet_artifact, export_language_checkpoint_to_burnpack,
             load_bitnet_artifact_bundle, load_language_core_from_checkpoint,
             load_language_core_from_checkpoint_with_bitnet_artifact, load_tokenizer_for_checkpoint,
@@ -101,8 +102,8 @@ pub use burn_dragon_core::{
 #[cfg(feature = "train")]
 pub use checkpoint::{
     LanguageBitNetArtifactExportReport, LanguageBurnpackExportReport, LanguageRunConfigSnapshot,
-    apply_bitnet_artifact_bundle_to_model, candidate_bitnet_artifact_paths,
-    default_bitnet_artifact_path, default_checkpoint_dir,
+    apply_bitnet_artifact_bundle_to_model, apply_init_checkpoint_to_language_core,
+    candidate_bitnet_artifact_paths, default_bitnet_artifact_path, default_checkpoint_dir,
     export_language_checkpoint_to_bitnet_artifact, export_language_checkpoint_to_burnpack,
     load_bitnet_artifact_bundle, load_language_core_from_checkpoint,
     load_language_core_from_checkpoint_with_bitnet_artifact, load_tokenizer_for_checkpoint,

@@ -195,6 +195,35 @@ pub struct DragonNorm<B: Backend> {
 }
 
 impl<B: Backend> DragonNorm<B> {
+    fn param_rms<const D: usize>(tensor: Tensor<B, D>) -> f32 {
+        let values = tensor
+            .powf_scalar(2.0)
+            .mean()
+            .to_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .expect("dragon norm rms scalar");
+        values.first().copied().unwrap_or(0.0).sqrt()
+    }
+
+    fn blend_param<const D: usize>(
+        source: Tensor<B, D>,
+        fresh: Tensor<B, D>,
+        alpha: f32,
+    ) -> Tensor<B, D> {
+        let alpha = alpha.clamp(0.0, 1.0);
+        (fresh.mul_scalar(1.0 - alpha) + source.mul_scalar(alpha)).detach()
+    }
+
+    fn match_fresh_rms<const D: usize>(source: Tensor<B, D>, fresh: Tensor<B, D>) -> Tensor<B, D> {
+        let source_rms = Self::param_rms(source.clone());
+        let fresh_rms = Self::param_rms(fresh);
+        if source_rms <= 1.0e-8 || !source_rms.is_finite() || !fresh_rms.is_finite() {
+            return source;
+        }
+        source.mul_scalar(fresh_rms / source_rms).detach()
+    }
+
     pub fn new(config: &DragonNormConfig, width: usize, device: &B::Device) -> Self {
         let width = width.max(1);
         let alpha_init = config.resolved_alpha_init();
@@ -206,6 +235,40 @@ impl<B: Backend> DragonNorm<B> {
             beta: Param::from_tensor(Tensor::<B, 1>::zeros([width], device)),
             alpha: Param::from_tensor(Tensor::<B, 1>::ones([1], device).mul_scalar(alpha_init)),
             shift: Param::from_tensor(Tensor::<B, 1>::ones([1], device).mul_scalar(shift_init)),
+        }
+    }
+
+    pub fn blended_with(&self, fresh: &Self, alpha: f32) -> Self {
+        Self {
+            kind: self.kind,
+            eps: self.eps,
+            gamma: Param::from_tensor(Self::blend_param(
+                self.gamma.val(),
+                fresh.gamma.val(),
+                alpha,
+            )),
+            beta: Param::from_tensor(Self::blend_param(self.beta.val(), fresh.beta.val(), alpha)),
+            alpha: Param::from_tensor(Self::blend_param(
+                self.alpha.val(),
+                fresh.alpha.val(),
+                alpha,
+            )),
+            shift: Param::from_tensor(Self::blend_param(
+                self.shift.val(),
+                fresh.shift.val(),
+                alpha,
+            )),
+        }
+    }
+
+    pub fn matched_fresh_rms(&self, fresh: &Self) -> Self {
+        Self {
+            kind: self.kind,
+            eps: self.eps,
+            gamma: Param::from_tensor(Self::match_fresh_rms(self.gamma.val(), fresh.gamma.val())),
+            beta: Param::from_tensor(Self::match_fresh_rms(self.beta.val(), fresh.beta.val())),
+            alpha: Param::from_tensor(Self::match_fresh_rms(self.alpha.val(), fresh.alpha.val())),
+            shift: Param::from_tensor(Self::match_fresh_rms(self.shift.val(), fresh.shift.val())),
         }
     }
 

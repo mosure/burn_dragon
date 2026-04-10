@@ -502,6 +502,115 @@ impl<B: Backend> Mamba1SequenceParameters<B> {
     pub fn out_proj_tensor(&self) -> Tensor<B, 2> {
         self.out_proj.val()
     }
+
+    pub fn blended_with(&self, fresh: &Self, alpha: f32) -> Self {
+        Self {
+            d_model: self.d_model,
+            d_inner: self.d_inner,
+            d_state: self.d_state,
+            d_conv: self.d_conv,
+            dt_rank: self.dt_rank,
+            in_proj: Param::from_tensor(MambaSequenceParameters::<B>::blend_param(
+                self.in_proj.val(),
+                fresh.in_proj.val(),
+                alpha,
+            )),
+            conv_weight: Param::from_tensor(MambaSequenceParameters::<B>::blend_param(
+                self.conv_weight.val(),
+                fresh.conv_weight.val(),
+                alpha,
+            )),
+            conv_bias: self.conv_bias.as_ref().zip(fresh.conv_bias.as_ref()).map(
+                |(source, fresh)| {
+                    Param::from_tensor(MambaSequenceParameters::<B>::blend_param(
+                        source.val(),
+                        fresh.val(),
+                        alpha,
+                    ))
+                },
+            ),
+            x_proj: Param::from_tensor(MambaSequenceParameters::<B>::blend_param(
+                self.x_proj.val(),
+                fresh.x_proj.val(),
+                alpha,
+            )),
+            dt_proj_weight: Param::from_tensor(MambaSequenceParameters::<B>::blend_param(
+                self.dt_proj_weight.val(),
+                fresh.dt_proj_weight.val(),
+                alpha,
+            )),
+            dt_proj_bias: Param::from_tensor(MambaSequenceParameters::<B>::blend_param(
+                self.dt_proj_bias.val(),
+                fresh.dt_proj_bias.val(),
+                alpha,
+            )),
+            a_log: Param::from_tensor(MambaSequenceParameters::<B>::blend_param(
+                self.a_log.val(),
+                fresh.a_log.val(),
+                alpha,
+            )),
+            d_skip: Param::from_tensor(MambaSequenceParameters::<B>::blend_param(
+                self.d_skip.val(),
+                fresh.d_skip.val(),
+                alpha,
+            )),
+            out_proj: Param::from_tensor(MambaSequenceParameters::<B>::blend_param(
+                self.out_proj.val(),
+                fresh.out_proj.val(),
+                alpha,
+            )),
+        }
+    }
+
+    pub fn matched_fresh_rms(&self, fresh: &Self) -> Self {
+        Self {
+            d_model: self.d_model,
+            d_inner: self.d_inner,
+            d_state: self.d_state,
+            d_conv: self.d_conv,
+            dt_rank: self.dt_rank,
+            in_proj: Param::from_tensor(MambaSequenceParameters::<B>::match_fresh_rms(
+                self.in_proj.val(),
+                fresh.in_proj.val(),
+            )),
+            conv_weight: Param::from_tensor(MambaSequenceParameters::<B>::match_fresh_rms(
+                self.conv_weight.val(),
+                fresh.conv_weight.val(),
+            )),
+            conv_bias: self.conv_bias.as_ref().zip(fresh.conv_bias.as_ref()).map(
+                |(source, fresh)| {
+                    Param::from_tensor(MambaSequenceParameters::<B>::match_fresh_rms(
+                        source.val(),
+                        fresh.val(),
+                    ))
+                },
+            ),
+            x_proj: Param::from_tensor(MambaSequenceParameters::<B>::match_fresh_rms(
+                self.x_proj.val(),
+                fresh.x_proj.val(),
+            )),
+            dt_proj_weight: Param::from_tensor(MambaSequenceParameters::<B>::match_fresh_rms(
+                self.dt_proj_weight.val(),
+                fresh.dt_proj_weight.val(),
+            )),
+            dt_proj_bias: Param::from_tensor(MambaSequenceParameters::<B>::match_fresh_rms(
+                self.dt_proj_bias.val(),
+                fresh.dt_proj_bias.val(),
+            )),
+            a_log: Param::from_tensor(MambaSequenceParameters::<B>::match_fresh_rms(
+                self.a_log.val(),
+                fresh.a_log.val(),
+            )),
+            d_skip: Param::from_tensor(MambaSequenceParameters::<B>::match_fresh_rms(
+                self.d_skip.val(),
+                fresh.d_skip.val(),
+            )),
+            out_proj: Param::from_tensor(MambaSequenceParameters::<B>::match_fresh_rms(
+                self.out_proj.val(),
+                fresh.out_proj.val(),
+            )),
+        }
+    }
 }
 
 #[derive(Module, Debug)]
@@ -655,6 +764,112 @@ impl<B: Backend> Mamba2SequenceParameters<B> {
     pub fn out_proj_tensor(&self) -> Tensor<B, 2> {
         self.out_proj.val()
     }
+
+    pub fn blended_with(&self, fresh: &Self, alpha: f32) -> Self {
+        Self {
+            d_model: self.d_model,
+            d_inner: self.d_inner,
+            d_state: self.d_state,
+            d_conv: self.d_conv,
+            headdim: self.headdim,
+            ngroups: self.ngroups,
+            nheads: self.nheads,
+            norm_eps: self.norm_eps,
+            in_proj: Param::from_tensor(MambaSequenceParameters::<B>::blend_param(
+                self.in_proj.val(),
+                fresh.in_proj.val(),
+                alpha,
+            )),
+            conv_weight: Param::from_tensor(MambaSequenceParameters::<B>::blend_param(
+                self.conv_weight.val(),
+                fresh.conv_weight.val(),
+                alpha,
+            )),
+            conv_bias: self.conv_bias.as_ref().zip(fresh.conv_bias.as_ref()).map(
+                |(source, fresh)| {
+                    Param::from_tensor(MambaSequenceParameters::<B>::blend_param(
+                        source.val(),
+                        fresh.val(),
+                        alpha,
+                    ))
+                },
+            ),
+            dt_bias: Param::from_tensor(MambaSequenceParameters::<B>::blend_param(
+                self.dt_bias.val(),
+                fresh.dt_bias.val(),
+                alpha,
+            )),
+            a_log: Param::from_tensor(MambaSequenceParameters::<B>::blend_param(
+                self.a_log.val(),
+                fresh.a_log.val(),
+                alpha,
+            )),
+            d_skip: Param::from_tensor(MambaSequenceParameters::<B>::blend_param(
+                self.d_skip.val(),
+                fresh.d_skip.val(),
+                alpha,
+            )),
+            norm_weight: Param::from_tensor(MambaSequenceParameters::<B>::blend_param(
+                self.norm_weight.val(),
+                fresh.norm_weight.val(),
+                alpha,
+            )),
+            out_proj: Param::from_tensor(MambaSequenceParameters::<B>::blend_param(
+                self.out_proj.val(),
+                fresh.out_proj.val(),
+                alpha,
+            )),
+        }
+    }
+
+    pub fn matched_fresh_rms(&self, fresh: &Self) -> Self {
+        Self {
+            d_model: self.d_model,
+            d_inner: self.d_inner,
+            d_state: self.d_state,
+            d_conv: self.d_conv,
+            headdim: self.headdim,
+            ngroups: self.ngroups,
+            nheads: self.nheads,
+            norm_eps: self.norm_eps,
+            in_proj: Param::from_tensor(MambaSequenceParameters::<B>::match_fresh_rms(
+                self.in_proj.val(),
+                fresh.in_proj.val(),
+            )),
+            conv_weight: Param::from_tensor(MambaSequenceParameters::<B>::match_fresh_rms(
+                self.conv_weight.val(),
+                fresh.conv_weight.val(),
+            )),
+            conv_bias: self.conv_bias.as_ref().zip(fresh.conv_bias.as_ref()).map(
+                |(source, fresh)| {
+                    Param::from_tensor(MambaSequenceParameters::<B>::match_fresh_rms(
+                        source.val(),
+                        fresh.val(),
+                    ))
+                },
+            ),
+            dt_bias: Param::from_tensor(MambaSequenceParameters::<B>::match_fresh_rms(
+                self.dt_bias.val(),
+                fresh.dt_bias.val(),
+            )),
+            a_log: Param::from_tensor(MambaSequenceParameters::<B>::match_fresh_rms(
+                self.a_log.val(),
+                fresh.a_log.val(),
+            )),
+            d_skip: Param::from_tensor(MambaSequenceParameters::<B>::match_fresh_rms(
+                self.d_skip.val(),
+                fresh.d_skip.val(),
+            )),
+            norm_weight: Param::from_tensor(MambaSequenceParameters::<B>::match_fresh_rms(
+                self.norm_weight.val(),
+                fresh.norm_weight.val(),
+            )),
+            out_proj: Param::from_tensor(MambaSequenceParameters::<B>::match_fresh_rms(
+                self.out_proj.val(),
+                fresh.out_proj.val(),
+            )),
+        }
+    }
 }
 
 #[derive(Module, Debug)]
@@ -807,6 +1022,108 @@ impl<B: Backend> Mamba3SequenceParameters<B> {
     pub fn out_proj_tensor(&self) -> Tensor<B, 2> {
         self.out_proj.val()
     }
+
+    pub fn blended_with(&self, fresh: &Self, alpha: f32) -> Self {
+        Self {
+            d_model: self.d_model,
+            d_inner: self.d_inner,
+            d_state: self.d_state,
+            headdim: self.headdim,
+            ngroups: self.ngroups,
+            nheads: self.nheads,
+            norm_eps: self.norm_eps,
+            num_rope_angles: self.num_rope_angles,
+            a_floor: self.a_floor,
+            chunk_size: self.chunk_size,
+            in_proj: Param::from_tensor(MambaSequenceParameters::<B>::blend_param(
+                self.in_proj.val(),
+                fresh.in_proj.val(),
+                alpha,
+            )),
+            dt_bias: Param::from_tensor(MambaSequenceParameters::<B>::blend_param(
+                self.dt_bias.val(),
+                fresh.dt_bias.val(),
+                alpha,
+            )),
+            b_bias: Param::from_tensor(MambaSequenceParameters::<B>::blend_param(
+                self.b_bias.val(),
+                fresh.b_bias.val(),
+                alpha,
+            )),
+            c_bias: Param::from_tensor(MambaSequenceParameters::<B>::blend_param(
+                self.c_bias.val(),
+                fresh.c_bias.val(),
+                alpha,
+            )),
+            b_norm_weight: Param::from_tensor(MambaSequenceParameters::<B>::blend_param(
+                self.b_norm_weight.val(),
+                fresh.b_norm_weight.val(),
+                alpha,
+            )),
+            c_norm_weight: Param::from_tensor(MambaSequenceParameters::<B>::blend_param(
+                self.c_norm_weight.val(),
+                fresh.c_norm_weight.val(),
+                alpha,
+            )),
+            d_skip: Param::from_tensor(MambaSequenceParameters::<B>::blend_param(
+                self.d_skip.val(),
+                fresh.d_skip.val(),
+                alpha,
+            )),
+            out_proj: Param::from_tensor(MambaSequenceParameters::<B>::blend_param(
+                self.out_proj.val(),
+                fresh.out_proj.val(),
+                alpha,
+            )),
+        }
+    }
+
+    pub fn matched_fresh_rms(&self, fresh: &Self) -> Self {
+        Self {
+            d_model: self.d_model,
+            d_inner: self.d_inner,
+            d_state: self.d_state,
+            headdim: self.headdim,
+            ngroups: self.ngroups,
+            nheads: self.nheads,
+            norm_eps: self.norm_eps,
+            num_rope_angles: self.num_rope_angles,
+            a_floor: self.a_floor,
+            chunk_size: self.chunk_size,
+            in_proj: Param::from_tensor(MambaSequenceParameters::<B>::match_fresh_rms(
+                self.in_proj.val(),
+                fresh.in_proj.val(),
+            )),
+            dt_bias: Param::from_tensor(MambaSequenceParameters::<B>::match_fresh_rms(
+                self.dt_bias.val(),
+                fresh.dt_bias.val(),
+            )),
+            b_bias: Param::from_tensor(MambaSequenceParameters::<B>::match_fresh_rms(
+                self.b_bias.val(),
+                fresh.b_bias.val(),
+            )),
+            c_bias: Param::from_tensor(MambaSequenceParameters::<B>::match_fresh_rms(
+                self.c_bias.val(),
+                fresh.c_bias.val(),
+            )),
+            b_norm_weight: Param::from_tensor(MambaSequenceParameters::<B>::match_fresh_rms(
+                self.b_norm_weight.val(),
+                fresh.b_norm_weight.val(),
+            )),
+            c_norm_weight: Param::from_tensor(MambaSequenceParameters::<B>::match_fresh_rms(
+                self.c_norm_weight.val(),
+                fresh.c_norm_weight.val(),
+            )),
+            d_skip: Param::from_tensor(MambaSequenceParameters::<B>::match_fresh_rms(
+                self.d_skip.val(),
+                fresh.d_skip.val(),
+            )),
+            out_proj: Param::from_tensor(MambaSequenceParameters::<B>::match_fresh_rms(
+                self.out_proj.val(),
+                fresh.out_proj.val(),
+            )),
+        }
+    }
 }
 
 #[derive(Module, Debug)]
@@ -817,6 +1134,35 @@ pub struct MambaSequenceParameters<B: Backend> {
 }
 
 impl<B: Backend> MambaSequenceParameters<B> {
+    fn param_rms<const D: usize>(tensor: Tensor<B, D>) -> f32 {
+        let values = tensor
+            .powf_scalar(2.0)
+            .mean()
+            .to_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .expect("mamba rms scalar");
+        values.first().copied().unwrap_or(0.0).sqrt()
+    }
+
+    fn blend_param<const D: usize>(
+        source: Tensor<B, D>,
+        fresh: Tensor<B, D>,
+        alpha: f32,
+    ) -> Tensor<B, D> {
+        let alpha = alpha.clamp(0.0, 1.0);
+        (fresh.mul_scalar(1.0 - alpha) + source.mul_scalar(alpha)).detach()
+    }
+
+    fn match_fresh_rms<const D: usize>(source: Tensor<B, D>, fresh: Tensor<B, D>) -> Tensor<B, D> {
+        let source_rms = Self::param_rms(source.clone());
+        let fresh_rms = Self::param_rms(fresh);
+        if source_rms <= 1.0e-8 || !source_rms.is_finite() || !fresh_rms.is_finite() {
+            return source;
+        }
+        source.mul_scalar(fresh_rms / source_rms).detach()
+    }
+
     pub fn new(
         config: ResolvedMambaSequenceConfig,
         memory_system: SequenceMemorySystem,
@@ -852,6 +1198,46 @@ impl<B: Backend> MambaSequenceParameters<B> {
 
     pub fn mamba3(&self) -> Option<&Mamba3SequenceParameters<B>> {
         self.mamba3.as_ref()
+    }
+
+    pub fn blended_with(&self, fresh: &Self, alpha: f32) -> Self {
+        Self {
+            mamba1: self
+                .mamba1
+                .as_ref()
+                .zip(fresh.mamba1.as_ref())
+                .map(|(source, fresh)| source.blended_with(fresh, alpha)),
+            mamba2: self
+                .mamba2
+                .as_ref()
+                .zip(fresh.mamba2.as_ref())
+                .map(|(source, fresh)| source.blended_with(fresh, alpha)),
+            mamba3: self
+                .mamba3
+                .as_ref()
+                .zip(fresh.mamba3.as_ref())
+                .map(|(source, fresh)| source.blended_with(fresh, alpha)),
+        }
+    }
+
+    pub fn matched_fresh_rms(&self, fresh: &Self) -> Self {
+        Self {
+            mamba1: self
+                .mamba1
+                .as_ref()
+                .zip(fresh.mamba1.as_ref())
+                .map(|(source, fresh)| source.matched_fresh_rms(fresh)),
+            mamba2: self
+                .mamba2
+                .as_ref()
+                .zip(fresh.mamba2.as_ref())
+                .map(|(source, fresh)| source.matched_fresh_rms(fresh)),
+            mamba3: self
+                .mamba3
+                .as_ref()
+                .zip(fresh.mamba3.as_ref())
+                .map(|(source, fresh)| source.matched_fresh_rms(fresh)),
+        }
     }
 }
 

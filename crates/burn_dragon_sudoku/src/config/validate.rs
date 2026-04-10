@@ -521,10 +521,16 @@ impl SudokuTrainingConfig {
 
             match schedule {
                 LearningRateScheduleConfig::Cosine {
-                    min_lr, num_iters, ..
+                    min_lr,
+                    warmup_steps,
+                    num_iters,
+                    ..
                 } => {
                     if matches!(min_lr.as_ref(), Some(value) if *value < 0.0) {
                         return Err(anyhow!("optimizer.lr_schedule.min_lr must be >= 0"));
+                    }
+                    if matches!(warmup_steps, Some(0)) {
+                        return Err(anyhow!("optimizer.lr_schedule.warmup_steps must be > 0"));
                     }
                     if matches!(num_iters, Some(0)) {
                         return Err(anyhow!("optimizer.lr_schedule.num_iters must be > 0"));

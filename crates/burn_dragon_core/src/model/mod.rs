@@ -22,7 +22,18 @@ pub use attention_residual::{
     AttentionResidual, AttentionResidualConfig, BlockAttentionResidual,
     BlockAttentionResidualConfig, BlockAttentionResidualSummaryMode, ResidualConnectorKind,
 };
-pub use bdh::{BDH, BdhBitNetDeployScaffold};
+pub use bdh::{
+    BDH, BdhBitNetDeployScaffold, LanguageModuleLrScaleTarget, SharedLowrankActivationBatchStats,
+    SharedLowrankContinualBackpropRuntime, SharedLowrankFeatureMetrics, SharedLowrankParamIds,
+};
+#[cfg(any(feature = "probe", test))]
+pub use bdh::{
+    HeadTensorComparisonDiagnostics, HeadTensorGeometryDiagnostics,
+    LanguageLayerStateDeltaDiagnostics, LanguageLayerStateSummaryDiagnostics,
+    LanguageLowRankLayerComparisonDiagnostics, LanguageLowRankLayerGeometryDiagnostics,
+    TensorComparisonDiagnostics, TensorDistributionDiagnostics, TensorStateDeltaDiagnostics,
+    TensorStateSummaryDiagnostics, compare_model_states, summarize_model_state,
+};
 #[cfg(any(feature = "probe", test))]
 pub use bdh_support::LanguageBdhInitLayerDiagnostics;
 pub use bdh_support::{

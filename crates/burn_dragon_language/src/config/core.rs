@@ -5,10 +5,10 @@ use serde::{Deserialize, Serialize};
 use crate::tokenizer::TokenizerConfig;
 use burn_dragon_core::{
     AttentionResidualConfig, BdhInitializationConfig, BlockAttentionResidualConfig,
-    ClockedSlowMemoryConfig, DragonNormConfig, LatentFanoutScheduleConfig,
-    LanguageHeadConfig, LowBitQuantizationConfig, LowBitRhoConfig, MambaSequenceConfig,
-    ManifoldHyperConnectionsConfig, ResidualConnectorKind, RotaryEmbedding,
-    SequenceKernelConfig, SummaryMemoryConfig, YNeuronRecurrenceConfig,
+    ClockedSlowMemoryConfig, DragonNormConfig, LanguageHeadConfig, LatentFanoutScheduleConfig,
+    LowBitQuantizationConfig, LowBitRhoConfig, MambaSequenceConfig, ManifoldHyperConnectionsConfig,
+    ResidualConnectorKind, RotaryEmbedding, SequenceKernelConfig, SummaryMemoryConfig,
+    YNeuronRecurrenceConfig,
 };
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]

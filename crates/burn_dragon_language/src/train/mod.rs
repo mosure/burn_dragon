@@ -3,6 +3,7 @@
 mod prelude;
 
 pub mod backend;
+pub(crate) mod continual_backprop;
 pub mod profile;
 #[cfg(feature = "rerun")]
 pub mod rerun;

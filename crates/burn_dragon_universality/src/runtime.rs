@@ -216,8 +216,11 @@ impl OnlineNcaCorpus {
                 .saturating_add(sample_index),
             SampleSplit::Validation => sample_index,
         };
-        let mut rng =
-            StdRng::seed_from_u64(derive_sample_seed(self.config.seed, split, effective_sample_index));
+        let mut rng = StdRng::seed_from_u64(derive_sample_seed(
+            self.config.seed,
+            split,
+            effective_sample_index,
+        ));
         let family = choose_family(&self.config, &mut rng);
         Ok(generate_sample(
             family,

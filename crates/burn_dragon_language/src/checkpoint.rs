@@ -560,6 +560,215 @@ pub fn load_language_core_from_checkpoint<B: BackendTrait>(
     Ok(model)
 }
 
+pub fn apply_init_checkpoint_to_language_core<B: BackendTrait>(
+    target_model: &BDH<B>,
+    target_config: &TrainingConfig,
+    init_checkpoint_path: &Path,
+    init_checkpoint_epoch: Option<usize>,
+    backend_name: &str,
+    device: &B::Device,
+) -> Result<BDH<B>> {
+    let checkpoint_path = init_checkpoint_path.to_path_buf();
+    let (checkpoint_base, epoch) = resolve_checkpoint_base(&checkpoint_path, init_checkpoint_epoch)
+        .with_context(|| {
+            format!(
+                "failed to resolve init checkpoint from {}",
+                checkpoint_path.display()
+            )
+        })?;
+    let record = BinFileRecorder::<FullPrecisionSettings>::new()
+        .load::<<BDH<B> as Module<B>>::Record>(checkpoint_base.clone(), device)
+        .map_err(|err| anyhow!(format_checkpoint_load_error(&checkpoint_base, err)))?;
+    let source_config =
+        load_training_config_for_checkpoint(&[], Some(&checkpoint_path), backend_name)
+            .with_context(|| {
+                format!(
+                    "failed to load source training config for init checkpoint {}",
+                    checkpoint_path.display()
+                )
+            })?;
+    let current_language_head = target_config
+        .model
+        .language_head
+        .clone()
+        .unwrap_or_default();
+    let source_language_head = source_config
+        .model
+        .language_head
+        .clone()
+        .unwrap_or_default();
+    let preserve_input_embedding =
+        source_config.dataset.tokenizer.kind != target_config.dataset.tokenizer.kind;
+    let preserve_output_head =
+        preserve_input_embedding || source_language_head != current_language_head;
+    let loaded = if preserve_input_embedding || preserve_output_head {
+        target_model.load_record_preserving_tokenizer_surfaces(
+            record,
+            preserve_input_embedding,
+            preserve_output_head,
+        )
+    } else {
+        target_model.clone().load_record(record)
+    };
+    let interface_reference = if let Some(interface_checkpoint_path) = target_config
+        .training
+        .init_transfer
+        .interface_checkpoint_path
+        .as_ref()
+    {
+        let (interface_base, interface_epoch) = resolve_checkpoint_base(
+            interface_checkpoint_path,
+            target_config
+                .training
+                .init_transfer
+                .interface_checkpoint_epoch,
+        )
+        .with_context(|| {
+            format!(
+                "failed to resolve init transfer interface checkpoint from {}",
+                interface_checkpoint_path.display()
+            )
+        })?;
+        let interface_record = BinFileRecorder::<FullPrecisionSettings>::new()
+            .load::<<BDH<B> as Module<B>>::Record>(interface_base.clone(), device)
+            .map_err(|err| anyhow!(format_checkpoint_load_error(&interface_base, err)))?;
+        let interface_config =
+            load_training_config_for_checkpoint(&[], Some(interface_checkpoint_path), backend_name)
+                .with_context(|| {
+                    format!(
+                        "failed to load interface training config for checkpoint {}",
+                        interface_checkpoint_path.display()
+                    )
+                })?;
+        let interface_language_head = interface_config
+            .model
+            .language_head
+            .clone()
+            .unwrap_or_default();
+        let preserve_interface_embedding =
+            interface_config.dataset.tokenizer.kind != target_config.dataset.tokenizer.kind;
+        let preserve_interface_head =
+            preserve_interface_embedding || interface_language_head != current_language_head;
+        let interface_model = if preserve_interface_embedding || preserve_interface_head {
+            target_model.load_record_preserving_tokenizer_surfaces(
+                interface_record,
+                preserve_interface_embedding,
+                preserve_interface_head,
+            )
+        } else {
+            target_model.clone().load_record(interface_record)
+        };
+        Some((interface_model, interface_base, interface_epoch))
+    } else {
+        None
+    };
+    let reference_model = interface_reference
+        .as_ref()
+        .map(|(model, _, _)| model)
+        .unwrap_or(target_model);
+    let loaded = if let Some((interface_model, _, _)) = interface_reference.as_ref() {
+        let interface_checkpoint_config = load_training_config_for_checkpoint(
+            &[],
+            target_config
+                .training
+                .init_transfer
+                .interface_checkpoint_path
+                .as_ref(),
+            backend_name,
+        )?;
+        if target_config
+            .training
+            .init_transfer
+            .preserve_interface_input_embedding
+            || target_config
+                .training
+                .init_transfer
+                .preserve_interface_output_head
+            || target_config
+                .training
+                .init_transfer
+                .interface_output_head_blend_alpha
+                .is_some()
+        {
+            anyhow::ensure!(
+                interface_checkpoint_config.dataset.tokenizer.kind
+                    == target_config.dataset.tokenizer.kind,
+                "training.init_transfer.preserve_interface_input_embedding/output_head requires interface tokenizer kind to match target tokenizer kind"
+            );
+            anyhow::ensure!(
+                interface_checkpoint_config
+                    .model
+                    .language_head
+                    .clone()
+                    .unwrap_or_default()
+                    == current_language_head,
+                "training.init_transfer.preserve_interface_output_head requires interface language head to match target language head"
+            );
+        }
+        loaded
+            .with_tokenizer_surfaces_from(
+                interface_model,
+                target_config
+                    .training
+                    .init_transfer
+                    .preserve_interface_input_embedding,
+                target_config
+                    .training
+                    .init_transfer
+                    .preserve_interface_output_head,
+            )
+            .with_output_head_blended_from(
+                interface_model,
+                target_config
+                    .training
+                    .init_transfer
+                    .interface_output_head_blend_alpha
+                    .unwrap_or(0.0),
+            )
+    } else {
+        loaded
+    };
+    let loaded = loaded.adapted_transferred_backbone(
+        reference_model,
+        target_config.training.init_transfer.backbone_blend_alpha,
+        target_config.training.init_transfer.decoder_blend_alpha,
+        target_config.training.init_transfer.norm_blend_alpha,
+        target_config.training.init_transfer.fresh_top_layers,
+        target_config.training.init_transfer.preserve_fresh_decoder,
+        target_config.training.init_transfer.preserve_fresh_norm,
+        target_config.training.init_transfer.match_fresh_rms,
+    );
+    tracing::info!(
+        "initialized model weights from checkpoint epoch {epoch} at {} (interface_checkpoint={}, interface_epoch={:?}, interface_embed={}, interface_head={}, interface_head_blend_alpha={:?}, blend_alpha={:?}, decoder_blend_alpha={:?}, norm_blend_alpha={:?}, fresh_top_layers={:?}, preserve_fresh_decoder={}, preserve_fresh_norm={}, match_fresh_rms={})",
+        checkpoint_base.display(),
+        interface_reference
+            .as_ref()
+            .map(|(_, base, _)| base.display().to_string())
+            .unwrap_or_else(|| "none".to_string()),
+        interface_reference.as_ref().map(|(_, _, epoch)| *epoch),
+        target_config
+            .training
+            .init_transfer
+            .preserve_interface_input_embedding,
+        target_config
+            .training
+            .init_transfer
+            .preserve_interface_output_head,
+        target_config
+            .training
+            .init_transfer
+            .interface_output_head_blend_alpha,
+        target_config.training.init_transfer.backbone_blend_alpha,
+        target_config.training.init_transfer.decoder_blend_alpha,
+        target_config.training.init_transfer.norm_blend_alpha,
+        target_config.training.init_transfer.fresh_top_layers,
+        target_config.training.init_transfer.preserve_fresh_decoder,
+        target_config.training.init_transfer.preserve_fresh_norm,
+        target_config.training.init_transfer.match_fresh_rms
+    );
+    Ok(loaded)
+}
+
 pub fn load_language_core_from_checkpoint_with_bitnet_artifact<B: BackendTrait>(
     checkpoint: &Path,
     epoch: Option<usize>,
@@ -1324,6 +1533,9 @@ mod tests {
                 resume_checkpoint_epoch: None,
                 init_checkpoint_path: None,
                 init_checkpoint_epoch: None,
+                init_transfer: Default::default(),
+                continual_backprop: Default::default(),
+                module_lr_scales: Vec::new(),
                 context_strategy: ContextStrategyConfig::Infinite,
                 sequence_kernel_override: None,
                 gdpo: None,

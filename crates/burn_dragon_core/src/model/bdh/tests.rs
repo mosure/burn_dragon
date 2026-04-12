@@ -740,7 +740,7 @@ fn collect_decoder_y_layer_scale_stats(
             model.y_relu_threshold,
             true,
             model.low_bit_projection_plan(),
-            model.low_bit_quant.0.saved_activations.clone(),
+            model.low_bit_quant.saved_activations.clone(),
             model.packed_low_bit_projection_artifacts(),
             latent_pattern,
             model.kernel.lowrank_grad_input_executor,
@@ -877,7 +877,7 @@ fn collect_allmat_layer_signal_stats(
             model.y_relu_threshold,
             true,
             model.low_bit_projection_plan(),
-            model.low_bit_quant.0.saved_activations.clone(),
+            model.low_bit_quant.saved_activations.clone(),
             model.packed_low_bit_projection_artifacts(),
             latent_pattern,
             model.kernel.lowrank_grad_input_executor,
@@ -1419,7 +1419,7 @@ fn train_kernel_exp_forward_selects_native_runtime_and_emits_finite_logits() {
     let qat_logits = qat_model.forward(tokens.clone());
     let native_logits = native_model.forward(tokens);
     let plan = resolve_low_bit_kernel_plan::<RecurrenceBackend>(
-        &native_model.low_bit_quant.0,
+        &native_model.low_bit_quant,
         native_model.available_packed_low_bit_projection_artifacts(),
     );
     let max_diff = tensor_max_abs_diff(qat_logits, native_logits.clone());
@@ -1461,7 +1461,7 @@ fn train_kernel_exp_decoder_y_quality_recipe_remains_close_to_qat_reference() {
         ..base
     });
     let plan = resolve_low_bit_kernel_plan::<RecurrenceBackend>(
-        &native_model.low_bit_quant.0,
+        &native_model.low_bit_quant,
         native_model.available_packed_low_bit_projection_artifacts(),
     );
     let tokens = recurrence_test_tokens_with_shape(&device, vec![1, 2, 3, 4, 5, 6, 7, 8], [2, 4]);
@@ -1506,7 +1506,7 @@ fn train_kernel_exp_decoder_y_mamba_quality_recipe_reports_qat_parity() {
         ..base
     });
     let plan = resolve_low_bit_kernel_plan::<RecurrenceBackend>(
-        &native_model.low_bit_quant.0,
+        &native_model.low_bit_quant,
         native_model.available_packed_low_bit_projection_artifacts(),
     );
     let tokens =
@@ -1553,7 +1553,7 @@ fn train_kernel_exp_triad_hybrid_linear_quality_recipe_reports_qat_parity() {
         ..base
     });
     let plan = resolve_low_bit_kernel_plan::<RecurrenceBackend>(
-        &native_model.low_bit_quant.0,
+        &native_model.low_bit_quant,
         native_model.available_packed_low_bit_projection_artifacts(),
     );
     let tokens =
@@ -1600,7 +1600,7 @@ fn train_kernel_exp_triad_hybrid_mamba_quality_recipe_reports_qat_parity() {
         ..base
     });
     let plan = resolve_low_bit_kernel_plan::<RecurrenceBackend>(
-        &native_model.low_bit_quant.0,
+        &native_model.low_bit_quant,
         native_model.available_packed_low_bit_projection_artifacts(),
     );
     let tokens = recurrence_test_tokens_with_shape(
@@ -2258,11 +2258,11 @@ fn assert_linear_forward_with_rho_chunk_compression_preserves_logits_and_compres
         ..Default::default()
     });
     let mut compressed_model = dense_model.clone();
-    compressed_model.low_bit_rho = Ignored(crate::LowBitRhoConfig {
+    compressed_model.low_bit_rho = crate::LowBitRhoConfig {
         compression,
         compression_interval: crate::RhoCompressionInterval::Chunk,
         ..Default::default()
-    });
+    };
     let tokens = Tensor::<RecurrenceBackend, 2, Int>::from_data(
         TensorData::new(vec![1, 2, 3], [1, 3]),
         &device,

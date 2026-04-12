@@ -35,8 +35,8 @@ pub(crate) use burn::tensor::backend::{AutodiffBackend, Backend as BackendTrait}
 pub(crate) use burn::tensor::{Int, Tensor, TensorData};
 pub(crate) use burn_train::metric::{LearningRateMetric, LossMetric};
 pub(crate) use burn_train::{
-    InferenceStep as ValidStep, LearningResult as TrainingResult, SupervisedTraining, TrainOutput,
-    TrainStep, TrainingStrategy as LearningStrategy,
+    ExecutionStrategy, InferenceStep as ValidStep, LearningResult as TrainingResult,
+    SupervisedTraining, TrainOutput, TrainStep, TrainingStrategy as LearningStrategy,
 };
 pub(crate) use tracing::info;
 

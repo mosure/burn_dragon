@@ -1464,13 +1464,13 @@ fn rwkv8_runtime_forward<R: CubeRuntime>(
             batch as u32,
         ),
         cube_dim,
-        query.as_tensor_arg(1),
-        value.as_tensor_arg(1),
-        rho_state.as_tensor_arg(1),
-        rho_before.as_tensor_arg(1),
-        rho.as_tensor_arg(1),
-        decay.as_tensor_arg(1),
-        params.as_tensor_arg(1),
+        query.clone().into_tensor_arg(),
+        value.clone().into_tensor_arg(),
+        rho_state.clone().into_tensor_arg(),
+        rho_before.clone().into_tensor_arg(),
+        rho.clone().into_tensor_arg(),
+        decay.clone().into_tensor_arg(),
+        params.clone().into_tensor_arg(),
     );
     let _ = rwkv8_norm_query_history_kernel::launch::<R>(
         &client,
@@ -1480,12 +1480,12 @@ fn rwkv8_runtime_forward<R: CubeRuntime>(
             batch as u32,
         ),
         cube_dim,
-        query.as_tensor_arg(1),
-        rho_norm_state.as_tensor_arg(1),
-        rho_norm_before.as_tensor_arg(1),
-        rho_norm.as_tensor_arg(1),
-        decay.as_tensor_arg(1),
-        params.as_tensor_arg(1),
+        query.clone().into_tensor_arg(),
+        rho_norm_state.clone().into_tensor_arg(),
+        rho_norm_before.clone().into_tensor_arg(),
+        rho_norm.clone().into_tensor_arg(),
+        decay.clone().into_tensor_arg(),
+        params.clone().into_tensor_arg(),
     );
     let _ = rwkv8_context_kernel::launch::<R>(
         &client,
@@ -1495,11 +1495,11 @@ fn rwkv8_runtime_forward<R: CubeRuntime>(
             batch as u32,
         ),
         cube_dim,
-        query.as_tensor_arg(1),
-        rho_before.as_tensor_arg(1),
-        rho_norm_before.as_tensor_arg(1),
-        context.as_tensor_arg(1),
-        params.as_tensor_arg(1),
+        query.clone().into_tensor_arg(),
+        rho_before.clone().into_tensor_arg(),
+        rho_norm_before.clone().into_tensor_arg(),
+        context.clone().into_tensor_arg(),
+        params.clone().into_tensor_arg(),
     );
 
     Rwkv8RuntimeForwardCubeOutput {
@@ -1549,12 +1549,12 @@ fn rwkv8_runtime_advance_state<R: CubeRuntime>(
             batch as u32,
         ),
         cube_dim,
-        query.as_tensor_arg(1),
-        value.as_tensor_arg(1),
-        rho_state.as_tensor_arg(1),
-        rho.as_tensor_arg(1),
-        decay.as_tensor_arg(1),
-        params.as_tensor_arg(1),
+        query.clone().into_tensor_arg(),
+        value.clone().into_tensor_arg(),
+        rho_state.clone().into_tensor_arg(),
+        rho.clone().into_tensor_arg(),
+        decay.clone().into_tensor_arg(),
+        params.clone().into_tensor_arg(),
     );
     let _ = rwkv8_norm_query_kernel::launch::<R>(
         &client,
@@ -1564,11 +1564,11 @@ fn rwkv8_runtime_advance_state<R: CubeRuntime>(
             batch as u32,
         ),
         cube_dim,
-        query.as_tensor_arg(1),
-        rho_norm_state.as_tensor_arg(1),
-        rho_norm.as_tensor_arg(1),
-        decay.as_tensor_arg(1),
-        params.as_tensor_arg(1),
+        query.clone().into_tensor_arg(),
+        rho_norm_state.clone().into_tensor_arg(),
+        rho_norm.clone().into_tensor_arg(),
+        decay.clone().into_tensor_arg(),
+        params.clone().into_tensor_arg(),
     );
 
     Rwkv8RuntimeStateCubeOutput { rho, rho_norm }
@@ -1608,11 +1608,11 @@ fn rwkv8_runtime_advance_state_from_zero<R: CubeRuntime>(
             batch as u32,
         ),
         cube_dim,
-        query.as_tensor_arg(1),
-        value.as_tensor_arg(1),
-        rho.as_tensor_arg(1),
-        decay.as_tensor_arg(1),
-        params.as_tensor_arg(1),
+        query.clone().into_tensor_arg(),
+        value.clone().into_tensor_arg(),
+        rho.clone().into_tensor_arg(),
+        decay.clone().into_tensor_arg(),
+        params.clone().into_tensor_arg(),
     );
     let _ = rwkv8_norm_query_zero_kernel::launch::<R>(
         &client,
@@ -1622,10 +1622,10 @@ fn rwkv8_runtime_advance_state_from_zero<R: CubeRuntime>(
             batch as u32,
         ),
         cube_dim,
-        query.as_tensor_arg(1),
-        rho_norm.as_tensor_arg(1),
-        decay.as_tensor_arg(1),
-        params.as_tensor_arg(1),
+        query.clone().into_tensor_arg(),
+        rho_norm.clone().into_tensor_arg(),
+        decay.clone().into_tensor_arg(),
+        params.clone().into_tensor_arg(),
     );
 
     Rwkv8RuntimeStateCubeOutput { rho, rho_norm }
@@ -1665,12 +1665,12 @@ fn rwkv8_runtime_state_recurrence<R: CubeRuntime>(
             batch as u32,
         ),
         cube_dim,
-        delta.as_tensor_arg(1),
-        state.as_tensor_arg(1),
-        history.as_tensor_arg(1),
-        final_state.as_tensor_arg(1),
-        decay.as_tensor_arg(1),
-        params.as_tensor_arg(1),
+        delta.clone().into_tensor_arg(),
+        state.clone().into_tensor_arg(),
+        history.clone().into_tensor_arg(),
+        final_state.clone().into_tensor_arg(),
+        decay.clone().into_tensor_arg(),
+        params.clone().into_tensor_arg(),
     );
     (history, final_state)
 }
@@ -1704,11 +1704,11 @@ fn rwkv8_runtime_state_history_recurrence<R: CubeRuntime>(
             batch as u32,
         ),
         cube_dim,
-        delta.as_tensor_arg(1),
-        state.as_tensor_arg(1),
-        history.as_tensor_arg(1),
-        decay.as_tensor_arg(1),
-        params.as_tensor_arg(1),
+        delta.clone().into_tensor_arg(),
+        state.clone().into_tensor_arg(),
+        history.clone().into_tensor_arg(),
+        decay.clone().into_tensor_arg(),
+        params.clone().into_tensor_arg(),
     );
     history
 }
@@ -1745,11 +1745,11 @@ fn rwkv8_runtime_state_recurrence_from_zero<R: CubeRuntime>(
             batch as u32,
         ),
         cube_dim,
-        delta.as_tensor_arg(1),
-        history.as_tensor_arg(1),
-        final_state.as_tensor_arg(1),
-        decay.as_tensor_arg(1),
-        params.as_tensor_arg(1),
+        delta.clone().into_tensor_arg(),
+        history.clone().into_tensor_arg(),
+        final_state.clone().into_tensor_arg(),
+        decay.clone().into_tensor_arg(),
+        params.clone().into_tensor_arg(),
     );
     (history, final_state)
 }
@@ -1781,10 +1781,10 @@ fn rwkv8_runtime_state_history_recurrence_from_zero<R: CubeRuntime>(
             batch as u32,
         ),
         cube_dim,
-        delta.as_tensor_arg(1),
-        history.as_tensor_arg(1),
-        decay.as_tensor_arg(1),
-        params.as_tensor_arg(1),
+        delta.clone().into_tensor_arg(),
+        history.clone().into_tensor_arg(),
+        decay.clone().into_tensor_arg(),
+        params.clone().into_tensor_arg(),
     );
     history
 }
@@ -1823,12 +1823,12 @@ fn rwkv8_runtime_norm_recurrence<R: CubeRuntime>(
             batch as u32,
         ),
         cube_dim,
-        delta.as_tensor_arg(1),
-        state.as_tensor_arg(1),
-        history.as_tensor_arg(1),
-        final_state.as_tensor_arg(1),
-        decay.as_tensor_arg(1),
-        params.as_tensor_arg(1),
+        delta.clone().into_tensor_arg(),
+        state.clone().into_tensor_arg(),
+        history.clone().into_tensor_arg(),
+        final_state.clone().into_tensor_arg(),
+        decay.clone().into_tensor_arg(),
+        params.clone().into_tensor_arg(),
     );
     (history, final_state)
 }
@@ -1862,11 +1862,11 @@ fn rwkv8_runtime_norm_history_recurrence<R: CubeRuntime>(
             batch as u32,
         ),
         cube_dim,
-        delta.as_tensor_arg(1),
-        state.as_tensor_arg(1),
-        history.as_tensor_arg(1),
-        decay.as_tensor_arg(1),
-        params.as_tensor_arg(1),
+        delta.clone().into_tensor_arg(),
+        state.clone().into_tensor_arg(),
+        history.clone().into_tensor_arg(),
+        decay.clone().into_tensor_arg(),
+        params.clone().into_tensor_arg(),
     );
     history
 }
@@ -1903,11 +1903,11 @@ fn rwkv8_runtime_norm_recurrence_from_zero<R: CubeRuntime>(
             batch as u32,
         ),
         cube_dim,
-        delta.as_tensor_arg(1),
-        history.as_tensor_arg(1),
-        final_state.as_tensor_arg(1),
-        decay.as_tensor_arg(1),
-        params.as_tensor_arg(1),
+        delta.clone().into_tensor_arg(),
+        history.clone().into_tensor_arg(),
+        final_state.clone().into_tensor_arg(),
+        decay.clone().into_tensor_arg(),
+        params.clone().into_tensor_arg(),
     );
     (history, final_state)
 }
@@ -1939,10 +1939,10 @@ fn rwkv8_runtime_norm_history_recurrence_from_zero<R: CubeRuntime>(
             batch as u32,
         ),
         cube_dim,
-        delta.as_tensor_arg(1),
-        history.as_tensor_arg(1),
-        decay.as_tensor_arg(1),
-        params.as_tensor_arg(1),
+        delta.clone().into_tensor_arg(),
+        history.clone().into_tensor_arg(),
+        decay.clone().into_tensor_arg(),
+        params.clone().into_tensor_arg(),
     );
     history
 }
@@ -1988,14 +1988,14 @@ fn rwkv8_runtime_grad_context_prepare<R: CubeRuntime>(
             (batch * time) as u32,
         ),
         cube_dim,
-        rho_before.as_tensor_arg(1),
-        query.as_tensor_arg(1),
-        rho_norm_before.as_tensor_arg(1),
-        grad_output.as_tensor_arg(1),
-        grad_query_weights.as_tensor_arg(1),
-        grad_rho.as_tensor_arg(1),
-        grad_rho_norm.as_tensor_arg(1),
-        params.as_tensor_arg(1),
+        rho_before.clone().into_tensor_arg(),
+        query.clone().into_tensor_arg(),
+        rho_norm_before.clone().into_tensor_arg(),
+        grad_output.clone().into_tensor_arg(),
+        grad_query_weights.clone().into_tensor_arg(),
+        grad_rho.clone().into_tensor_arg(),
+        grad_rho_norm.clone().into_tensor_arg(),
+        params.clone().into_tensor_arg(),
     );
     (grad_query_weights, grad_rho, grad_rho_norm)
 }
@@ -2032,13 +2032,13 @@ fn rwkv8_runtime_grad_query<R: CubeRuntime>(
             (batch * time) as u32,
         ),
         cube_dim,
-        query.as_tensor_arg(1),
-        value.as_tensor_arg(1),
-        grad_query_weights.as_tensor_arg(1),
-        grad_rho_carry.as_tensor_arg(1),
-        grad_rho_norm_carry.as_tensor_arg(1),
-        grad_query.as_tensor_arg(1),
-        params.as_tensor_arg(1),
+        query.clone().into_tensor_arg(),
+        value.clone().into_tensor_arg(),
+        grad_query_weights.clone().into_tensor_arg(),
+        grad_rho_carry.clone().into_tensor_arg(),
+        grad_rho_norm_carry.clone().into_tensor_arg(),
+        grad_query.clone().into_tensor_arg(),
+        params.clone().into_tensor_arg(),
     );
     grad_query
 }
@@ -2071,10 +2071,10 @@ fn rwkv8_runtime_grad_value<R: CubeRuntime>(
             (batch * time) as u32,
         ),
         cube_dim,
-        query.as_tensor_arg(1),
-        grad_rho_carry.as_tensor_arg(1),
-        grad_value.as_tensor_arg(1),
-        params.as_tensor_arg(1),
+        query.clone().into_tensor_arg(),
+        grad_rho_carry.clone().into_tensor_arg(),
+        grad_value.clone().into_tensor_arg(),
+        params.clone().into_tensor_arg(),
     );
     grad_value
 }
@@ -2104,10 +2104,10 @@ fn rwkv8_runtime_grad_value_reduced<R: CubeRuntime>(
             (batch * time) as u32,
         ),
         cube_dim,
-        query.as_tensor_arg(1),
-        grad_rho_carry.as_tensor_arg(1),
-        grad_value.as_tensor_arg(1),
-        params.as_tensor_arg(1),
+        query.clone().into_tensor_arg(),
+        grad_rho_carry.clone().into_tensor_arg(),
+        grad_value.clone().into_tensor_arg(),
+        params.clone().into_tensor_arg(),
     );
     grad_value
 }
@@ -2143,24 +2143,24 @@ fn rwkv8_runtime_grad_decay_partial<R: CubeRuntime>(
             (batch * time) as u32,
         ),
         cube_dim,
-        rho_before.as_tensor_arg(1),
-        rho_norm_before.as_tensor_arg(1),
-        grad_rho_carry.as_tensor_arg(1),
-        grad_rho_norm_carry.as_tensor_arg(1),
-        grad_decay_partial.as_tensor_arg(1),
-        params.as_tensor_arg(1),
+        rho_before.clone().into_tensor_arg(),
+        rho_norm_before.clone().into_tensor_arg(),
+        grad_rho_carry.clone().into_tensor_arg(),
+        grad_rho_norm_carry.clone().into_tensor_arg(),
+        grad_decay_partial.clone().into_tensor_arg(),
+        params.clone().into_tensor_arg(),
     );
     grad_decay_partial
 }
 
 #[cube(launch)]
 fn rwkv8_state_qv_kernel(
-    query: &Tensor<Line<f32>>,
-    value: &Tensor<Line<f32>>,
-    rho_state_in: &Tensor<Line<f32>>,
-    rho_state_out: &mut Tensor<Line<f32>>,
-    decay: &Tensor<Line<f32>>,
-    params: &Tensor<Line<f32>>,
+    query: &Tensor<f32>,
+    value: &Tensor<f32>,
+    rho_state_in: &Tensor<f32>,
+    rho_state_out: &mut Tensor<f32>,
+    decay: &Tensor<f32>,
+    params: &Tensor<f32>,
 ) {
     let batch = u32::cast_from(params[0]) as usize;
     let heads = u32::cast_from(params[1]) as usize;
@@ -2212,13 +2212,13 @@ fn rwkv8_state_qv_kernel(
 
 #[cube(launch)]
 fn rwkv8_state_qv_history_kernel(
-    query: &Tensor<Line<f32>>,
-    value: &Tensor<Line<f32>>,
-    rho_state_in: &Tensor<Line<f32>>,
-    rho_before: &mut Tensor<Line<f32>>,
-    rho_state_out: &mut Tensor<Line<f32>>,
-    decay: &Tensor<Line<f32>>,
-    params: &Tensor<Line<f32>>,
+    query: &Tensor<f32>,
+    value: &Tensor<f32>,
+    rho_state_in: &Tensor<f32>,
+    rho_before: &mut Tensor<f32>,
+    rho_state_out: &mut Tensor<f32>,
+    decay: &Tensor<f32>,
+    params: &Tensor<f32>,
 ) {
     let batch = u32::cast_from(params[0]) as usize;
     let heads = u32::cast_from(params[1]) as usize;
@@ -2276,11 +2276,11 @@ fn rwkv8_state_qv_history_kernel(
 
 #[cube(launch)]
 fn rwkv8_state_qv_zero_kernel(
-    query: &Tensor<Line<f32>>,
-    value: &Tensor<Line<f32>>,
-    rho_state_out: &mut Tensor<Line<f32>>,
-    decay: &Tensor<Line<f32>>,
-    params: &Tensor<Line<f32>>,
+    query: &Tensor<f32>,
+    value: &Tensor<f32>,
+    rho_state_out: &mut Tensor<f32>,
+    decay: &Tensor<f32>,
+    params: &Tensor<f32>,
 ) {
     let batch = u32::cast_from(params[0]) as usize;
     let heads = u32::cast_from(params[1]) as usize;
@@ -2303,7 +2303,7 @@ fn rwkv8_state_qv_zero_kernel(
     let mut l = 0usize;
     while l < latent {
         let decay_index = h * decay.stride(1) + l * decay.stride(2);
-        let mut rho_prev = Line::cast_from(0u32);
+        let mut rho_prev = f32::cast_from(0u32);
         let mut t = 0usize;
         while t < time {
             let value_index = b * value.stride(0)
@@ -2328,11 +2328,11 @@ fn rwkv8_state_qv_zero_kernel(
 
 #[cube(launch)]
 fn rwkv8_norm_query_kernel(
-    query: &Tensor<Line<f32>>,
-    rho_norm_state_in: &Tensor<Line<f32>>,
-    rho_norm_state_out: &mut Tensor<Line<f32>>,
-    decay: &Tensor<Line<f32>>,
-    params: &Tensor<Line<f32>>,
+    query: &Tensor<f32>,
+    rho_norm_state_in: &Tensor<f32>,
+    rho_norm_state_out: &mut Tensor<f32>,
+    decay: &Tensor<f32>,
+    params: &Tensor<f32>,
 ) {
     let batch = u32::cast_from(params[0]) as usize;
     let heads = u32::cast_from(params[1]) as usize;
@@ -2366,12 +2366,12 @@ fn rwkv8_norm_query_kernel(
 
 #[cube(launch)]
 fn rwkv8_norm_query_history_kernel(
-    query: &Tensor<Line<f32>>,
-    rho_norm_state_in: &Tensor<Line<f32>>,
-    rho_norm_before: &mut Tensor<Line<f32>>,
-    rho_norm_state_out: &mut Tensor<Line<f32>>,
-    decay: &Tensor<Line<f32>>,
-    params: &Tensor<Line<f32>>,
+    query: &Tensor<f32>,
+    rho_norm_state_in: &Tensor<f32>,
+    rho_norm_before: &mut Tensor<f32>,
+    rho_norm_state_out: &mut Tensor<f32>,
+    decay: &Tensor<f32>,
+    params: &Tensor<f32>,
 ) {
     let batch = u32::cast_from(params[0]) as usize;
     let heads = u32::cast_from(params[1]) as usize;
@@ -2410,10 +2410,10 @@ fn rwkv8_norm_query_history_kernel(
 
 #[cube(launch)]
 fn rwkv8_norm_query_zero_kernel(
-    query: &Tensor<Line<f32>>,
-    rho_norm_state_out: &mut Tensor<Line<f32>>,
-    decay: &Tensor<Line<f32>>,
-    params: &Tensor<Line<f32>>,
+    query: &Tensor<f32>,
+    rho_norm_state_out: &mut Tensor<f32>,
+    decay: &Tensor<f32>,
+    params: &Tensor<f32>,
 ) {
     let batch = u32::cast_from(params[0]) as usize;
     let heads = u32::cast_from(params[1]) as usize;
@@ -2428,7 +2428,7 @@ fn rwkv8_norm_query_zero_kernel(
     }
 
     let decay_index = h * decay.stride(1) + l * decay.stride(2);
-    let mut rho_prev = Line::cast_from(0u32);
+    let mut rho_prev = f32::cast_from(0u32);
     let mut t = 0usize;
     while t < time {
         let query_index =
@@ -2444,11 +2444,11 @@ fn rwkv8_norm_query_zero_kernel(
 
 #[cube(launch)]
 fn rwkv8_context_kernel(
-    query: &Tensor<Line<f32>>,
-    rho_before: &Tensor<Line<f32>>,
-    rho_norm_before: &Tensor<Line<f32>>,
-    context: &mut Tensor<Line<f32>>,
-    params: &Tensor<Line<f32>>,
+    query: &Tensor<f32>,
+    rho_before: &Tensor<f32>,
+    rho_norm_before: &Tensor<f32>,
+    context: &mut Tensor<f32>,
+    params: &Tensor<f32>,
 ) {
     let batch = u32::cast_from(params[0]) as usize;
     let heads = u32::cast_from(params[1]) as usize;
@@ -2463,10 +2463,10 @@ fn rwkv8_context_kernel(
         terminate!();
     }
 
-    let eps = Line::cast_from(RWKV8_EPS);
+    let eps = f32::cast_from(RWKV8_EPS);
     let mut t = 0usize;
     while t < time {
-        let mut q_sum = Line::cast_from(0u32);
+        let mut q_sum = f32::cast_from(0u32);
         let mut l2 = 0usize;
         while l2 < latent {
             let query_index = b * query.stride(0)
@@ -2476,8 +2476,8 @@ fn rwkv8_context_kernel(
             q_sum += query[query_index];
             l2 += 1usize;
         }
-        let q_inv = Line::cast_from(1.0f32) / (q_sum + eps);
-        let mut acc = Line::cast_from(0u32);
+        let q_inv = f32::cast_from(1.0f32) / (q_sum + eps);
+        let mut acc = f32::cast_from(0u32);
         let mut l2 = 0usize;
         while l2 < latent {
             let query_index = b * query.stride(0)
@@ -2509,12 +2509,12 @@ fn rwkv8_context_kernel(
 
 #[cube(launch)]
 fn rwkv8_state_recurrence_history_kernel(
-    delta: &Tensor<Line<f32>>,
-    state_in: &Tensor<Line<f32>>,
-    state_before: &mut Tensor<Line<f32>>,
-    state_out: &mut Tensor<Line<f32>>,
-    decay: &Tensor<Line<f32>>,
-    params: &Tensor<Line<f32>>,
+    delta: &Tensor<f32>,
+    state_in: &Tensor<f32>,
+    state_before: &mut Tensor<f32>,
+    state_out: &mut Tensor<f32>,
+    decay: &Tensor<f32>,
+    params: &Tensor<f32>,
 ) {
     let batch = u32::cast_from(params[0]) as usize;
     let heads = u32::cast_from(params[1]) as usize;
@@ -2564,11 +2564,11 @@ fn rwkv8_state_recurrence_history_kernel(
 
 #[cube(launch)]
 fn rwkv8_state_recurrence_zero_history_kernel(
-    delta: &Tensor<Line<f32>>,
-    state_before: &mut Tensor<Line<f32>>,
-    state_out: &mut Tensor<Line<f32>>,
-    decay: &Tensor<Line<f32>>,
-    params: &Tensor<Line<f32>>,
+    delta: &Tensor<f32>,
+    state_before: &mut Tensor<f32>,
+    state_out: &mut Tensor<f32>,
+    decay: &Tensor<f32>,
+    params: &Tensor<f32>,
 ) {
     let batch = u32::cast_from(params[0]) as usize;
     let heads = u32::cast_from(params[1]) as usize;
@@ -2586,7 +2586,7 @@ fn rwkv8_state_recurrence_zero_history_kernel(
     let mut l = 0usize;
     while l < latent {
         let decay_index = h * decay.stride(1) + l * decay.stride(2);
-        let mut prev = Line::cast_from(0u32);
+        let mut prev = f32::cast_from(0u32);
         let mut t = 0usize;
         while t < time {
             let history_index = b * state_before.stride(0)
@@ -2614,11 +2614,11 @@ fn rwkv8_state_recurrence_zero_history_kernel(
 
 #[cube(launch)]
 fn rwkv8_state_recurrence_history_only_kernel(
-    delta: &Tensor<Line<f32>>,
-    state_in: &Tensor<Line<f32>>,
-    state_before: &mut Tensor<Line<f32>>,
-    decay: &Tensor<Line<f32>>,
-    params: &Tensor<Line<f32>>,
+    delta: &Tensor<f32>,
+    state_in: &Tensor<f32>,
+    state_before: &mut Tensor<f32>,
+    decay: &Tensor<f32>,
+    params: &Tensor<f32>,
 ) {
     let batch = u32::cast_from(params[0]) as usize;
     let heads = u32::cast_from(params[1]) as usize;
@@ -2663,10 +2663,10 @@ fn rwkv8_state_recurrence_history_only_kernel(
 
 #[cube(launch)]
 fn rwkv8_state_recurrence_zero_history_only_kernel(
-    delta: &Tensor<Line<f32>>,
-    state_before: &mut Tensor<Line<f32>>,
-    decay: &Tensor<Line<f32>>,
-    params: &Tensor<Line<f32>>,
+    delta: &Tensor<f32>,
+    state_before: &mut Tensor<f32>,
+    decay: &Tensor<f32>,
+    params: &Tensor<f32>,
 ) {
     let batch = u32::cast_from(params[0]) as usize;
     let heads = u32::cast_from(params[1]) as usize;
@@ -2684,7 +2684,7 @@ fn rwkv8_state_recurrence_zero_history_only_kernel(
     let mut l = 0usize;
     while l < latent {
         let decay_index = h * decay.stride(1) + l * decay.stride(2);
-        let mut prev = Line::cast_from(0u32);
+        let mut prev = f32::cast_from(0u32);
         let mut t = 0usize;
         while t < time {
             let history_index = b * state_before.stride(0)
@@ -2707,12 +2707,12 @@ fn rwkv8_state_recurrence_zero_history_only_kernel(
 
 #[cube(launch)]
 fn rwkv8_norm_recurrence_history_kernel(
-    delta: &Tensor<Line<f32>>,
-    state_in: &Tensor<Line<f32>>,
-    state_before: &mut Tensor<Line<f32>>,
-    state_out: &mut Tensor<Line<f32>>,
-    decay: &Tensor<Line<f32>>,
-    params: &Tensor<Line<f32>>,
+    delta: &Tensor<f32>,
+    state_in: &Tensor<f32>,
+    state_before: &mut Tensor<f32>,
+    state_out: &mut Tensor<f32>,
+    decay: &Tensor<f32>,
+    params: &Tensor<f32>,
 ) {
     let batch = u32::cast_from(params[0]) as usize;
     let heads = u32::cast_from(params[1]) as usize;
@@ -2747,11 +2747,11 @@ fn rwkv8_norm_recurrence_history_kernel(
 
 #[cube(launch)]
 fn rwkv8_norm_recurrence_zero_history_kernel(
-    delta: &Tensor<Line<f32>>,
-    state_before: &mut Tensor<Line<f32>>,
-    state_out: &mut Tensor<Line<f32>>,
-    decay: &Tensor<Line<f32>>,
-    params: &Tensor<Line<f32>>,
+    delta: &Tensor<f32>,
+    state_before: &mut Tensor<f32>,
+    state_out: &mut Tensor<f32>,
+    decay: &Tensor<f32>,
+    params: &Tensor<f32>,
 ) {
     let batch = u32::cast_from(params[0]) as usize;
     let heads = u32::cast_from(params[1]) as usize;
@@ -2766,7 +2766,7 @@ fn rwkv8_norm_recurrence_zero_history_kernel(
     }
 
     let decay_index = h * decay.stride(1) + l * decay.stride(2);
-    let mut prev = Line::cast_from(0u32);
+    let mut prev = f32::cast_from(0u32);
     let mut t = 0usize;
     while t < time {
         let history_index = b * state_before.stride(0)
@@ -2785,11 +2785,11 @@ fn rwkv8_norm_recurrence_zero_history_kernel(
 
 #[cube(launch)]
 fn rwkv8_norm_recurrence_history_only_kernel(
-    delta: &Tensor<Line<f32>>,
-    state_in: &Tensor<Line<f32>>,
-    state_before: &mut Tensor<Line<f32>>,
-    decay: &Tensor<Line<f32>>,
-    params: &Tensor<Line<f32>>,
+    delta: &Tensor<f32>,
+    state_in: &Tensor<f32>,
+    state_before: &mut Tensor<f32>,
+    decay: &Tensor<f32>,
+    params: &Tensor<f32>,
 ) {
     let batch = u32::cast_from(params[0]) as usize;
     let heads = u32::cast_from(params[1]) as usize;
@@ -2822,10 +2822,10 @@ fn rwkv8_norm_recurrence_history_only_kernel(
 
 #[cube(launch)]
 fn rwkv8_norm_recurrence_zero_history_only_kernel(
-    delta: &Tensor<Line<f32>>,
-    state_before: &mut Tensor<Line<f32>>,
-    decay: &Tensor<Line<f32>>,
-    params: &Tensor<Line<f32>>,
+    delta: &Tensor<f32>,
+    state_before: &mut Tensor<f32>,
+    decay: &Tensor<f32>,
+    params: &Tensor<f32>,
 ) {
     let batch = u32::cast_from(params[0]) as usize;
     let heads = u32::cast_from(params[1]) as usize;
@@ -2840,7 +2840,7 @@ fn rwkv8_norm_recurrence_zero_history_only_kernel(
     }
 
     let decay_index = h * decay.stride(1) + l * decay.stride(2);
-    let mut prev = Line::cast_from(0u32);
+    let mut prev = f32::cast_from(0u32);
     let mut t = 0usize;
     while t < time {
         let history_index = b * state_before.stride(0)
@@ -2857,14 +2857,14 @@ fn rwkv8_norm_recurrence_zero_history_only_kernel(
 
 #[cube(launch)]
 fn rwkv8_grad_context_prepare_kernel(
-    rho_before: &Tensor<Line<f32>>,
-    query: &Tensor<Line<f32>>,
-    rho_norm_before: &Tensor<Line<f32>>,
-    grad_output: &Tensor<Line<f32>>,
-    grad_query_weights: &mut Tensor<Line<f32>>,
-    grad_rho: &mut Tensor<Line<f32>>,
-    grad_rho_norm: &mut Tensor<Line<f32>>,
-    params: &Tensor<Line<f32>>,
+    rho_before: &Tensor<f32>,
+    query: &Tensor<f32>,
+    rho_norm_before: &Tensor<f32>,
+    grad_output: &Tensor<f32>,
+    grad_query_weights: &mut Tensor<f32>,
+    grad_rho: &mut Tensor<f32>,
+    grad_rho_norm: &mut Tensor<f32>,
+    params: &Tensor<f32>,
 ) {
     let batch = u32::cast_from(params[0]) as usize;
     let heads = u32::cast_from(params[1]) as usize;
@@ -2880,8 +2880,8 @@ fn rwkv8_grad_context_prepare_kernel(
         terminate!();
     }
 
-    let eps = Line::cast_from(RWKV8_EPS);
-    let mut q_sum = Line::cast_from(0u32);
+    let eps = f32::cast_from(RWKV8_EPS);
+    let mut q_sum = f32::cast_from(0u32);
     let mut l2 = 0usize;
     while l2 < latent {
         let query_index =
@@ -2889,7 +2889,7 @@ fn rwkv8_grad_context_prepare_kernel(
         q_sum += query[query_index];
         l2 += 1usize;
     }
-    let q_inv = Line::cast_from(1.0f32) / (q_sum + eps);
+    let q_inv = f32::cast_from(1.0f32) / (q_sum + eps);
 
     let query_index =
         b * query.stride(0) + h * query.stride(1) + t * query.stride(2) + l * query.stride(3);
@@ -2898,7 +2898,7 @@ fn rwkv8_grad_context_prepare_kernel(
         + t * rho_norm_before.stride(2)
         + l * rho_norm_before.stride(3);
     let denom = rho_norm_before[rho_norm_index] + eps;
-    let mut acc = Line::cast_from(0u32);
+    let mut acc = f32::cast_from(0u32);
     let mut e = 0usize;
     while e < embd {
         let rho_index = b * rho_before.stride(0)
@@ -2934,13 +2934,13 @@ fn rwkv8_grad_context_prepare_kernel(
 
 #[cube(launch)]
 fn rwkv8_grad_query_kernel(
-    query: &Tensor<Line<f32>>,
-    value: &Tensor<Line<f32>>,
-    grad_query_weights: &Tensor<Line<f32>>,
-    grad_rho_carry: &Tensor<Line<f32>>,
-    grad_rho_norm_carry: &Tensor<Line<f32>>,
-    grad_query: &mut Tensor<Line<f32>>,
-    params: &Tensor<Line<f32>>,
+    query: &Tensor<f32>,
+    value: &Tensor<f32>,
+    grad_query_weights: &Tensor<f32>,
+    grad_rho_carry: &Tensor<f32>,
+    grad_rho_norm_carry: &Tensor<f32>,
+    grad_query: &mut Tensor<f32>,
+    params: &Tensor<f32>,
 ) {
     let batch = u32::cast_from(params[0]) as usize;
     let heads = u32::cast_from(params[1]) as usize;
@@ -2961,9 +2961,9 @@ fn rwkv8_grad_query_kernel(
     if value_heads == 1usize {
         value_head = 0usize;
     }
-    let eps = Line::cast_from(RWKV8_EPS);
-    let mut q_sum = Line::cast_from(0u32);
-    let mut weighted_dot = Line::cast_from(0u32);
+    let eps = f32::cast_from(RWKV8_EPS);
+    let mut q_sum = f32::cast_from(0u32);
+    let mut weighted_dot = f32::cast_from(0u32);
     let mut l2 = 0usize;
     while l2 < latent {
         let query_index =
@@ -2977,10 +2977,10 @@ fn rwkv8_grad_query_kernel(
         weighted_dot += grad_query_weights[grad_qw_index] * q;
         l2 += 1usize;
     }
-    let q_inv = Line::cast_from(1.0f32) / (q_sum + eps);
+    let q_inv = f32::cast_from(1.0f32) / (q_sum + eps);
     weighted_dot = weighted_dot * q_inv;
 
-    let mut state_term = Line::cast_from(0u32);
+    let mut state_term = f32::cast_from(0u32);
     let mut e = 0usize;
     while e < embd {
         let value_index = b * value.stride(0)
@@ -3015,10 +3015,10 @@ fn rwkv8_grad_query_kernel(
 
 #[cube(launch)]
 fn rwkv8_grad_value_kernel(
-    query: &Tensor<Line<f32>>,
-    grad_rho_carry: &Tensor<Line<f32>>,
-    grad_value: &mut Tensor<Line<f32>>,
-    params: &Tensor<Line<f32>>,
+    query: &Tensor<f32>,
+    grad_rho_carry: &Tensor<f32>,
+    grad_value: &mut Tensor<f32>,
+    params: &Tensor<f32>,
 ) {
     let batch = u32::cast_from(params[0]) as usize;
     let heads = u32::cast_from(params[1]) as usize;
@@ -3034,7 +3034,7 @@ fn rwkv8_grad_value_kernel(
         terminate!();
     }
 
-    let mut grad = Line::cast_from(0u32);
+    let mut grad = f32::cast_from(0u32);
     let mut l = 0usize;
     while l < latent {
         let query_index =
@@ -3057,10 +3057,10 @@ fn rwkv8_grad_value_kernel(
 
 #[cube(launch)]
 fn rwkv8_grad_value_reduced_kernel(
-    query: &Tensor<Line<f32>>,
-    grad_rho_carry: &Tensor<Line<f32>>,
-    grad_value: &mut Tensor<Line<f32>>,
-    params: &Tensor<Line<f32>>,
+    query: &Tensor<f32>,
+    grad_rho_carry: &Tensor<f32>,
+    grad_value: &mut Tensor<f32>,
+    params: &Tensor<f32>,
 ) {
     let batch = u32::cast_from(params[0]) as usize;
     let heads = u32::cast_from(params[1]) as usize;
@@ -3075,7 +3075,7 @@ fn rwkv8_grad_value_reduced_kernel(
         terminate!();
     }
 
-    let mut grad = Line::cast_from(0u32);
+    let mut grad = f32::cast_from(0u32);
     let mut h = 0usize;
     while h < heads {
         let mut l = 0usize;
@@ -3101,12 +3101,12 @@ fn rwkv8_grad_value_reduced_kernel(
 
 #[cube(launch)]
 fn rwkv8_grad_decay_partial_kernel(
-    rho_before: &Tensor<Line<f32>>,
-    rho_norm_before: &Tensor<Line<f32>>,
-    grad_rho_carry: &Tensor<Line<f32>>,
-    grad_rho_norm_carry: &Tensor<Line<f32>>,
-    grad_decay_partial: &mut Tensor<Line<f32>>,
-    params: &Tensor<Line<f32>>,
+    rho_before: &Tensor<f32>,
+    rho_norm_before: &Tensor<f32>,
+    grad_rho_carry: &Tensor<f32>,
+    grad_rho_norm_carry: &Tensor<f32>,
+    grad_decay_partial: &mut Tensor<f32>,
+    params: &Tensor<f32>,
 ) {
     let batch = u32::cast_from(params[0]) as usize;
     let heads = u32::cast_from(params[1]) as usize;
@@ -3122,7 +3122,7 @@ fn rwkv8_grad_decay_partial_kernel(
         terminate!();
     }
 
-    let mut grad = Line::cast_from(0u32);
+    let mut grad = f32::cast_from(0u32);
     let mut e = 0usize;
     while e < embd {
         let rho_index = b * rho_before.stride(0)

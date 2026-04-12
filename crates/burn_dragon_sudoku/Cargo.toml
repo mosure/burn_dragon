@@ -3,7 +3,7 @@ name = "burn_dragon_sudoku"
 description = "Sudoku datasets and training for burn_dragon"
 version = "0.5.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.92"
 autobins = false
 authors = ["mosure <mitchell@mosure.me>"]
 license = "MIT OR Apache-2.0"
@@ -50,13 +50,13 @@ clap = { version = "4.5", features = ["derive"], optional = true }
 pollster = { version = "0.3", optional = true }
 wgpu = { version = "26", optional = true }
 
-burn = { version = "0.21.0-pre.2", default-features = false, features = ["fusion", "ndarray", "std", "wgpu"] }
-burn-autodiff = { version = "0.21.0-pre.2", optional = true }
-burn-ndarray = { version = "0.21.0-pre.2", optional = true }
-burn-train = { version = "0.21.0-pre.2", optional = true, default-features = false }
-burn-cuda = { version = "0.21.0-pre.2", optional = true, default-features = false, features = ["std"] }
-burn-wgpu = { version = "0.21.0-pre.2", optional = true, default-features = false, features = ["fusion", "std"] }
-cubecl = { version = "0.10.0-pre.2", default-features = false, optional = true, features = ["std", "cuda"] }
+burn = { version = "0.21.0-pre.3", default-features = false, features = ["fusion", "ndarray", "std", "wgpu"] }
+burn-autodiff = { version = "0.21.0-pre.3", optional = true }
+burn-ndarray = { version = "0.21.0-pre.3", optional = true }
+burn-train = { version = "0.21.0-pre.3", optional = true, default-features = false }
+burn-cuda = { version = "0.21.0-pre.3", optional = true, default-features = false, features = ["std"] }
+burn-wgpu = { version = "0.21.0-pre.3", optional = true, default-features = false, features = ["fusion", "std"] }
+cubecl = { version = "0.10.0-pre.3", default-features = false, optional = true, features = ["std", "cuda"] }
 
 [dev-dependencies]
 tempfile = "3"

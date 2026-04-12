@@ -316,13 +316,17 @@ where
 
     #[cfg(feature = "cuda")]
     if let Some(cuda_device) = (device as &dyn Any).downcast_ref::<CudaDevice>() {
-        let usage = <CudaRuntime as Runtime>::client(cuda_device).memory_usage();
+        let usage = <CudaRuntime as Runtime>::client(cuda_device)
+            .memory_usage()
+            .expect("cuda memory usage");
         return Some((usage.bytes_reserved, usage.bytes_in_use));
     }
 
     #[cfg(any(feature = "benchmark", feature = "train"))]
     if let Some(wgpu_device) = (device as &dyn Any).downcast_ref::<WgpuDevice>() {
-        let usage = <WgpuRuntime as Runtime>::client(wgpu_device).memory_usage();
+        let usage = <WgpuRuntime as Runtime>::client(wgpu_device)
+            .memory_usage()
+            .expect("wgpu memory usage");
         return Some((usage.bytes_reserved, usage.bytes_in_use));
     }
 

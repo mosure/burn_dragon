@@ -343,6 +343,7 @@ fn run_correctness_case(
         chunk_tokens.max(1),
         device_buffer_tokens.max(chunk_tokens.max(1)),
         None,
+        None,
     )
     .expect("chunked generation should succeed");
 
@@ -475,6 +476,7 @@ fn run_generation(
             settings,
             chunk_tokens.max(1),
             device_buffer_tokens.max(chunk_tokens.max(1)),
+            None,
             None,
         ),
     }

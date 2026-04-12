@@ -3,7 +3,7 @@ name = "burn_dragon_core"
 description = "burn dragon core model and utilities"
 version = "0.5.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.92"
 authors = ["mosure <mitchell@mosure.me>"]
 license = "MIT OR Apache-2.0"
 keywords = [
@@ -54,14 +54,14 @@ burn_dragon_kernel = { path = "../burn_dragon_kernel", version = "0.5.0" }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"], optional = true }
 clap = { version = "4.5", features = ["derive"], optional = true }
 serde_json = { version = "1.0", optional = true }
-burn-ndarray = { version = "0.21.0-pre.2", optional = true }
-burn-autodiff = { version = "0.21.0-pre.2", optional = true }
-burn-wgpu = { version = "0.21.0-pre.2", default-features = false, features = ["fusion", "std"], optional = true }
-burn-cubecl = { version = "0.21.0-pre.2", default-features = false, features = ["std", "fusion"], optional = true }
+burn-ndarray = { version = "0.21.0-pre.3", optional = true }
+burn-autodiff = { version = "0.21.0-pre.3", optional = true }
+burn-wgpu = { version = "0.21.0-pre.3", default-features = false, features = ["fusion", "std"], optional = true }
+burn-cubecl = { version = "0.21.0-pre.3", default-features = false, features = ["std", "fusion"], optional = true }
 
 
 [dependencies.burn]
-version = "0.21.0-pre.2"
+version = "0.21.0-pre.3"
 default-features = false
 features = [
   # "autotune",
@@ -74,7 +74,7 @@ features = [
 ]
 
 [dependencies.burn-cuda]
-version = "0.21.0-pre.2"
+version = "0.21.0-pre.3"
 optional = true
 default-features = false
 features = [
@@ -83,10 +83,10 @@ features = [
 
 
 [dev-dependencies]
-burn-autodiff = "0.21.0-pre.2"
-burn-ndarray = "0.21.0-pre.2"
-burn-wgpu = { version = "0.21.0-pre.2", default-features = false, features = ["fusion", "std"] }
-burn-cubecl = { version = "0.21.0-pre.2", default-features = false, features = ["std"] }
+burn-autodiff = "0.21.0-pre.3"
+burn-ndarray = "0.21.0-pre.3"
+burn-wgpu = { version = "0.21.0-pre.3", default-features = false, features = ["fusion", "std"] }
+burn-cubecl = { version = "0.21.0-pre.3", default-features = false, features = ["std"] }
 serde_json = "1.0"
 tempfile = "3"
 

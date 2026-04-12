@@ -106,7 +106,9 @@ where
     .with_application_logger(None)
     .num_epochs(env.epochs)
     .grads_accumulation(env.training.gradient_accumulation_steps.max(1))
-    .with_training_strategy(LearningStrategy::SingleDevice(env.device.clone()));
+    .with_training_strategy(LearningStrategy::Default(ExecutionStrategy::single(
+        env.device.clone(),
+    )));
     if enable_checkpoints {
         builder = builder.with_file_checkpointer(BinFileRecorder::<FullPrecisionSettings>::new());
     }

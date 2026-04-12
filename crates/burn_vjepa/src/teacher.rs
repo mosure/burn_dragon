@@ -20,13 +20,13 @@ pub trait ClipFeatureTeacher<B: Backend> {
 #[derive(Module, Debug)]
 pub struct NativeVjepa2Teacher<B: Backend> {
     pub model: Vjepa2Model<B>,
-    #[module(ignore)]
+    #[module(skip)]
     feature_dim: usize,
-    #[module(ignore)]
+    #[module(skip)]
     image_size: usize,
-    #[module(ignore)]
+    #[module(skip)]
     in_channels: usize,
-    #[module(ignore)]
+    #[module(skip)]
     tubelet_size: usize,
 }
 
@@ -66,9 +66,9 @@ impl<B: Backend> NativeVjepa2Teacher<B> {
 #[derive(Module, Debug)]
 pub(crate) struct FixedProjectionTeacher<B: Backend> {
     projection: Tensor<B, 2>,
-    #[module(ignore)]
+    #[module(skip)]
     input_dim: usize,
-    #[module(ignore)]
+    #[module(skip)]
     feature_dim: usize,
 }
 
@@ -106,15 +106,15 @@ impl<B: Backend> ClipFeatureTeacher<B> for FixedProjectionTeacher<B> {
 #[derive(Module, Debug)]
 pub struct VisionDragonTeacher<B: Backend> {
     model: VisionDragon<B>,
-    #[module(ignore)]
+    #[module(skip)]
     projection_dim: usize,
-    #[module(ignore)]
+    #[module(skip)]
     image_size: usize,
-    #[module(ignore)]
+    #[module(skip)]
     in_channels: usize,
-    #[module(ignore)]
+    #[module(skip)]
     rollout_steps: usize,
-    #[module(ignore)]
+    #[module(skip)]
     backprop_steps: usize,
 }
 
@@ -239,7 +239,7 @@ impl<B: Backend> ClipFeatureTeacher<B> for NativeVjepa2Teacher<B> {
         let adapted = adapt_clip_frames(clip_frames, self.in_channels, self.image_size);
         let encoded = self.model.get_vision_features(adapted);
         let [batch, tokens, dim] = encoded.shape().dims::<3>();
-        let spatial = (self.image_size / self.model.config.0.patch_size.max(1))
+        let spatial = (self.image_size / self.model.config.patch_size.max(1))
             .pow(2)
             .max(1);
         let tubelets = (tokens / spatial).max(1);

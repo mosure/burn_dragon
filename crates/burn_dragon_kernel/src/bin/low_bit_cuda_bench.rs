@@ -437,7 +437,9 @@ extern "C" __global__ void packed_decoder_tail_dp4a(
     }
 
     fn memory_snapshot(device: &<BenchBackend as BackendTrait>::Device) -> MemorySnapshot {
-        let usage = <CudaRuntime as Runtime>::client(device).memory_usage();
+        let usage = <CudaRuntime as Runtime>::client(device)
+            .memory_usage()
+            .expect("cuda memory usage");
         MemorySnapshot {
             reserved: usage.bytes_reserved,
             in_use: usage.bytes_in_use,

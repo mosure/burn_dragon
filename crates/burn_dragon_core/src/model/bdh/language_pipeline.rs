@@ -207,7 +207,7 @@ impl<B: Backend> BDH<B> {
                         self.y_relu_threshold,
                         true,
                         self.low_bit_projection_plan(),
-                        self.low_bit_quant.0.saved_activations.clone(),
+                        self.low_bit_quant.saved_activations.clone(),
                         self.packed_low_bit_projection_artifacts(),
                         latent_pattern,
                         self.kernel.lowrank_grad_input_executor,
@@ -260,7 +260,7 @@ impl<B: Backend> BDH<B> {
                     self.y_relu_threshold,
                     true,
                     self.low_bit_projection_plan(),
-                    self.low_bit_quant.0.saved_activations.clone(),
+                    self.low_bit_quant.saved_activations.clone(),
                     self.packed_low_bit_projection_artifacts(),
                     latent_pattern,
                     self.kernel.lowrank_grad_input_executor,
@@ -364,13 +364,12 @@ impl<B: Backend> BDH<B> {
             }
 
             #[cfg(any(feature = "viz", feature = "probe"))]
-            let branch_out =
-                output
-                    .as_ref()
-                    .expect("viz/probe path should retain full residual output")
-                    .next
-                    .clone()
-                    .reshape([branch_batch, branch_views, branch_time, branch_dim]);
+            let branch_out = output
+                .as_ref()
+                .expect("viz/probe path should retain full residual output")
+                .next
+                .clone()
+                .reshape([branch_batch, branch_views, branch_time, branch_dim]);
             let next = self.merge_language_residuals_for_layer(
                 branch_out,
                 merge_bindings,

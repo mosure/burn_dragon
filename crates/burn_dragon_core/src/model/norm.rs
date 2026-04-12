@@ -186,7 +186,7 @@ impl ModuleDisplay for DragonNormConfig {}
 #[derive(Module, Debug)]
 pub struct DragonNorm<B: Backend> {
     kind: DragonNormKind,
-    #[module(ignore)]
+    #[module(skip)]
     eps: f32,
     gamma: Param<Tensor<B, 1>>,
     beta: Param<Tensor<B, 1>>,

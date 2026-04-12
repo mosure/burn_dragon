@@ -97,7 +97,7 @@ impl<B: Backend> PatchEmbedStage<B> {
 
 #[derive(Module, Debug)]
 pub struct PatchEmbed<B: Backend> {
-    #[module(ignore)]
+    #[module(skip)]
     mode: VisionPatchEmbedMode,
     stages: Vec<PatchEmbedStage<B>>,
     proj: Option<Conv2d<B>>,

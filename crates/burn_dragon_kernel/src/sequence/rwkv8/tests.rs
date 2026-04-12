@@ -1,7 +1,6 @@
-use super::forward::{
-    rwkv8_tensorized_chunk_size, tensorized_rwkv8_forward, tensorized_rwkv8_forward_context_only,
-    tensorized_rwkv8_forward_direct_graph,
-};
+#[cfg(feature = "cuda")]
+use super::forward::{rwkv8_tensorized_chunk_size, tensorized_rwkv8_forward_context_only};
+use super::forward::{tensorized_rwkv8_forward, tensorized_rwkv8_forward_direct_graph};
 use burn::tensor::backend::Backend as BackendTrait;
 use burn::tensor::{Tensor, TensorData};
 use burn_autodiff::Autodiff;

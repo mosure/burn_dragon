@@ -56,13 +56,12 @@ where
     BT: BoolElement + 'static,
     R: CubeRuntime + 'static,
 {
-    if !matches_type::<B::FloatTensorPrimitive, FusionTensor<FusionCubeRuntime<R, BT>>>() {
+    if !matches_type::<B::FloatTensorPrimitive, FusionTensor<FusionCubeRuntime<R>>>() {
         return None;
     }
 
     let prim_input = input.clone().into_primitive().tensor();
-    let fusion_input: FusionTensor<FusionCubeRuntime<R, BT>> =
-        try_cast_primitive::<B, _>(prim_input)?;
+    let fusion_input: FusionTensor<FusionCubeRuntime<R>> = try_cast_primitive::<B, _>(prim_input)?;
     let fusion_client = fusion_input.client.clone();
     let input = fusion_client.resolve_tensor_float::<CubeBackend<R, f32, i32, BT>>(fusion_input);
     if input.dtype != DType::F32 {
@@ -204,7 +203,7 @@ where
     if TypeId::of::<R>() == TypeId::of::<WgpuRuntime>() {
         let prim_input = input.clone().into_primitive().tensor();
         let input_ad: WgpuFusionAutodiffTensor<BT> = try_cast_primitive::<B, _>(prim_input)?;
-        let fusion_input: FusionTensor<FusionCubeRuntime<WgpuRuntime, BT>> =
+        let fusion_input: FusionTensor<FusionCubeRuntime<WgpuRuntime>> =
             <WgpuFusionAutodiffBackend<BT> as AutodiffBackend>::inner(input_ad.clone());
         let fusion_client = fusion_input.client.clone();
         let input = fusion_client
@@ -215,7 +214,7 @@ where
 
         let prim_weight = weight.clone().into_primitive().tensor();
         let weight_ad: WgpuFusionAutodiffTensor<BT> = try_cast_primitive::<B, _>(prim_weight)?;
-        let fusion_weight: FusionTensor<FusionCubeRuntime<WgpuRuntime, BT>> =
+        let fusion_weight: FusionTensor<FusionCubeRuntime<WgpuRuntime>> =
             <WgpuFusionAutodiffBackend<BT> as AutodiffBackend>::inner(weight_ad.clone());
         let weight = fusion_client
             .resolve_tensor_float::<CubeBackend<WgpuRuntime, f32, i32, BT>>(fusion_weight);
@@ -225,7 +224,7 @@ where
 
         let prim_meta = meta.clone().into_primitive().tensor();
         let meta_ad: WgpuFusionAutodiffTensor<BT> = try_cast_primitive::<B, _>(prim_meta)?;
-        let fusion_meta: FusionTensor<FusionCubeRuntime<WgpuRuntime, BT>> =
+        let fusion_meta: FusionTensor<FusionCubeRuntime<WgpuRuntime>> =
             <WgpuFusionAutodiffBackend<BT> as AutodiffBackend>::inner(meta_ad);
         let meta = fusion_client
             .resolve_tensor_float::<CubeBackend<WgpuRuntime, f32, i32, BT>>(fusion_meta);
@@ -238,7 +237,7 @@ where
             try_cast_primitive::<B, WgpuFusionAutodiffTensor<BT>>(prim_mask)
         });
         let mask = mask_ad.clone().map(|mask| {
-            let fusion_mask: FusionTensor<FusionCubeRuntime<WgpuRuntime, BT>> =
+            let fusion_mask: FusionTensor<FusionCubeRuntime<WgpuRuntime>> =
                 <WgpuFusionAutodiffBackend<BT> as AutodiffBackend>::inner(mask);
             fusion_client
                 .resolve_tensor_float::<CubeBackend<WgpuRuntime, f32, i32, BT>>(fusion_mask)
@@ -267,7 +266,7 @@ where
     if TypeId::of::<R>() == TypeId::of::<CudaRuntime>() {
         let prim_input = input.clone().into_primitive().tensor();
         let input_ad: CudaFusionAutodiffTensor<BT> = try_cast_primitive::<B, _>(prim_input)?;
-        let fusion_input: FusionTensor<FusionCubeRuntime<CudaRuntime, BT>> =
+        let fusion_input: FusionTensor<FusionCubeRuntime<CudaRuntime>> =
             <CudaFusionAutodiffBackend<BT> as AutodiffBackend>::inner(input_ad.clone());
         let fusion_client = fusion_input.client.clone();
         let input = fusion_client
@@ -278,7 +277,7 @@ where
 
         let prim_weight = weight.clone().into_primitive().tensor();
         let weight_ad: CudaFusionAutodiffTensor<BT> = try_cast_primitive::<B, _>(prim_weight)?;
-        let fusion_weight: FusionTensor<FusionCubeRuntime<CudaRuntime, BT>> =
+        let fusion_weight: FusionTensor<FusionCubeRuntime<CudaRuntime>> =
             <CudaFusionAutodiffBackend<BT> as AutodiffBackend>::inner(weight_ad.clone());
         let weight = fusion_client
             .resolve_tensor_float::<CubeBackend<CudaRuntime, f32, i32, BT>>(fusion_weight);
@@ -288,7 +287,7 @@ where
 
         let prim_meta = meta.clone().into_primitive().tensor();
         let meta_ad: CudaFusionAutodiffTensor<BT> = try_cast_primitive::<B, _>(prim_meta)?;
-        let fusion_meta: FusionTensor<FusionCubeRuntime<CudaRuntime, BT>> =
+        let fusion_meta: FusionTensor<FusionCubeRuntime<CudaRuntime>> =
             <CudaFusionAutodiffBackend<BT> as AutodiffBackend>::inner(meta_ad);
         let meta = fusion_client
             .resolve_tensor_float::<CubeBackend<CudaRuntime, f32, i32, BT>>(fusion_meta);
@@ -301,7 +300,7 @@ where
             try_cast_primitive::<B, CudaFusionAutodiffTensor<BT>>(prim_mask)
         });
         let mask = mask_ad.clone().map(|mask| {
-            let fusion_mask: FusionTensor<FusionCubeRuntime<CudaRuntime, BT>> =
+            let fusion_mask: FusionTensor<FusionCubeRuntime<CudaRuntime>> =
                 <CudaFusionAutodiffBackend<BT> as AutodiffBackend>::inner(mask);
             fusion_client
                 .resolve_tensor_float::<CubeBackend<CudaRuntime, f32, i32, BT>>(fusion_mask)
@@ -332,7 +331,7 @@ where
 
     let prim_input = input.clone().into_primitive().tensor();
     let input_ad: B::FloatTensorPrimitive = try_cast_primitive::<B, _>(prim_input)?;
-    let fusion_input: FusionTensor<FusionCubeRuntime<R, BT>> =
+    let fusion_input: FusionTensor<FusionCubeRuntime<R>> =
         extract_fusion_autodiff_inner::<B, BT, R>(input_ad.clone())?;
     let fusion_client = fusion_input.client.clone();
     let input = fusion_client.resolve_tensor_float::<CubeBackend<R, f32, i32, BT>>(fusion_input);
@@ -342,7 +341,7 @@ where
 
     let prim_weight = weight.clone().into_primitive().tensor();
     let weight_ad: B::FloatTensorPrimitive = try_cast_primitive::<B, _>(prim_weight)?;
-    let fusion_weight: FusionTensor<FusionCubeRuntime<R, BT>> =
+    let fusion_weight: FusionTensor<FusionCubeRuntime<R>> =
         extract_fusion_autodiff_inner::<B, BT, R>(weight_ad.clone())?;
     let weight = fusion_client.resolve_tensor_float::<CubeBackend<R, f32, i32, BT>>(fusion_weight);
     if weight.dtype != DType::F32 {
@@ -351,7 +350,7 @@ where
 
     let prim_meta = meta.clone().into_primitive().tensor();
     let meta_ad: B::FloatTensorPrimitive = try_cast_primitive::<B, _>(prim_meta)?;
-    let fusion_meta: FusionTensor<FusionCubeRuntime<R, BT>> =
+    let fusion_meta: FusionTensor<FusionCubeRuntime<R>> =
         extract_fusion_autodiff_inner::<B, BT, R>(meta_ad)?;
     let meta = fusion_client.resolve_tensor_float::<CubeBackend<R, f32, i32, BT>>(fusion_meta);
     if meta.dtype != DType::F32 {
@@ -363,7 +362,7 @@ where
         try_cast_primitive::<B, B::FloatTensorPrimitive>(prim_mask)
     });
     let mask = mask_ad.clone().and_then(|mask| {
-        let fusion_mask: FusionTensor<FusionCubeRuntime<R, BT>> =
+        let fusion_mask: FusionTensor<FusionCubeRuntime<R>> =
             extract_fusion_autodiff_inner::<B, BT, R>(mask)?;
         Some(fusion_client.resolve_tensor_float::<CubeBackend<R, f32, i32, BT>>(fusion_mask))
     });
@@ -428,16 +427,14 @@ pub(super) fn relu_lowrank_wgsl_runtime<R: CubeRuntime>(
         (shape.batch * shape.heads) as u32,
     );
     let kernel = SourceKernel::new(ReluLowrankKernel, CubeDim::new_3d(WORKGROUP_SIZE_X, 1, 1));
-    let bindings = Bindings::new().with_buffers(vec![
+    let bindings = KernelArguments::new().with_buffers(vec![
         input.handle.clone().binding(),
         weight.handle.clone().binding(),
         output.handle.clone().binding(),
         meta.handle.clone().binding(),
         mask.handle.clone().binding(),
     ]);
-    client
-        .launch(Box::new(kernel), count, bindings)
-        .expect("launch relu lowrank kernel");
+    client.launch(Box::new(kernel), count, bindings);
     if let Some(start) = total_start {
         profile_record(&RELU_LOWRANK_FORWARD_PROFILE, |state| {
             state.calls = state.calls.saturating_add(1);
@@ -484,11 +481,11 @@ fn relu_lowrank_cube_runtime<R: CubeRuntime>(
         &client,
         cube_count,
         cube_dim,
-        input.as_tensor_arg(1),
-        weight.as_tensor_arg(1),
-        output.as_tensor_arg(1),
-        meta.as_tensor_arg(1),
-        mask.as_tensor_arg(1),
+        input.clone().into_tensor_arg(),
+        weight.clone().into_tensor_arg(),
+        output.clone().into_tensor_arg(),
+        meta.clone().into_tensor_arg(),
+        mask.clone().into_tensor_arg(),
     );
 
     if let Some(start) = total_start {

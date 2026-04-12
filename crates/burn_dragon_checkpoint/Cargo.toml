@@ -3,7 +3,7 @@ name = "burn_dragon_checkpoint"
 description = "Shared checkpoint and deployment utilities for burn_dragon"
 version = "0.5.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.92"
 authors = ["mosure <mitchell@mosure.me>"]
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/mosure/burn_bdh"
@@ -15,8 +15,8 @@ default = []
 
 [dependencies]
 anyhow = "1"
-burn = { version = "0.21.0-pre.2", default-features = false, features = ["std"] }
-burn-store = "0.21.0-pre.2"
+burn = { version = "0.21.0-pre.3", default-features = false, features = ["std"] }
+burn-store = "0.21.0-pre.3"
 ciborium = "0.2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -24,6 +24,6 @@ sha2 = "0.10"
 ureq = "2.10"
 
 [dev-dependencies]
-burn = { version = "0.21.0-pre.2", default-features = false, features = ["std", "ndarray"] }
-burn-ndarray = "0.21.0-pre.2"
+burn = { version = "0.21.0-pre.3", default-features = false, features = ["std", "ndarray"] }
+burn-ndarray = "0.21.0-pre.3"
 tempfile = "3"

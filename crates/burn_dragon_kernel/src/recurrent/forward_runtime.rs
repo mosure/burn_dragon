@@ -1,5 +1,12 @@
 use super::*;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RecurrentForwardRuntimeKind {
+    Wgsl,
+    Exact,
+    Tiled,
+}
+
 pub(super) fn try_fusion_path_runtime<B, BT, R>(
     query: &BurnTensor<B, 4>,
     value: &BurnTensor<B, 4>,
@@ -13,13 +20,12 @@ where
     BT: BoolElement + 'static,
     R: CubeRuntime + 'static,
 {
-    if !matches_type::<B::FloatTensorPrimitive, FusionTensor<FusionCubeRuntime<R, BT>>>() {
+    if !matches_type::<B::FloatTensorPrimitive, FusionTensor<FusionCubeRuntime<R>>>() {
         return None;
     }
 
     let prim_query = query.clone().into_primitive().tensor();
-    let fusion_query: FusionTensor<FusionCubeRuntime<R, BT>> =
-        try_cast_primitive::<B, _>(prim_query)?;
+    let fusion_query: FusionTensor<FusionCubeRuntime<R>> = try_cast_primitive::<B, _>(prim_query)?;
     let fusion_client = fusion_query.client.clone();
     let query = fusion_client.resolve_tensor_float::<CubeBackend<R, f32, i32, BT>>(fusion_query);
     if query.dtype != DType::F32 {
@@ -179,26 +185,73 @@ fn recurrent_attention_runtime<R: CubeRuntime>(
     meta: CubeTensor<R>,
     capture_state_history: bool,
 ) -> RecurrentRuntimeOutput<R> {
-    #[cfg(feature = "cuda")]
-    {
-        if TypeId::of::<R>() == TypeId::of::<CudaRuntime>() {
-            if capture_state_history {
-                return recurrent_attention_cube_exact_runtime::<R>(
-                    query, value, rho, decay, meta, true,
-                );
-            }
-            if use_cuda_tiled_recurrent_experimental() {
-                return recurrent_attention_cube_tiled_runtime::<R>(query, value, rho, decay, meta);
-            }
-            return recurrent_attention_cube_exact_runtime::<R>(
-                query, value, rho, decay, meta, false,
-            );
+    let time = query.meta.shape.dims::<4>()[2];
+    match select_recurrent_forward_runtime::<R>(capture_state_history, time) {
+        RecurrentForwardRuntimeKind::Wgsl => {
+            recurrent_attention_wgsl_runtime::<R>(query, value, rho, decay, meta)
         }
+        RecurrentForwardRuntimeKind::Exact => recurrent_attention_cube_exact_runtime::<R>(
+            query,
+            value,
+            rho,
+            decay,
+            meta,
+            capture_state_history,
+        ),
+        RecurrentForwardRuntimeKind::Tiled => recurrent_attention_cube_tiled_runtime::<R>(
+            query,
+            value,
+            rho,
+            decay,
+            meta,
+            capture_state_history,
+        ),
     }
+}
+
+fn select_recurrent_forward_runtime<R: CubeRuntime>(
+    capture_state_history: bool,
+    time: usize,
+) -> RecurrentForwardRuntimeKind {
+    #[cfg(feature = "cuda")]
+    if TypeId::of::<R>() == TypeId::of::<CudaRuntime>() {
+        if capture_state_history {
+            return RecurrentForwardRuntimeKind::Exact;
+        }
+        return match std::env::var("BURN_DRAGON_CUDA_RECURRENT_RUNTIME")
+            .ok()
+            .as_deref()
+        {
+            Some("tiled") => RecurrentForwardRuntimeKind::Tiled,
+            Some("exact") => RecurrentForwardRuntimeKind::Exact,
+            _ if use_cuda_tiled_recurrent_experimental() => RecurrentForwardRuntimeKind::Tiled,
+            _ => RecurrentForwardRuntimeKind::Exact,
+        };
+    }
+
     if capture_state_history {
-        recurrent_attention_cube_exact_runtime::<R>(query, value, rho, decay, meta, true)
-    } else {
-        recurrent_attention_wgsl_runtime::<R>(query, value, rho, decay, meta)
+        return match std::env::var("BURN_DRAGON_WGPU_RECURRENT_HISTORY_RUNTIME")
+            .ok()
+            .as_deref()
+        {
+            Some("exact") => RecurrentForwardRuntimeKind::Exact,
+            Some("tiled") => RecurrentForwardRuntimeKind::Tiled,
+            Some("auto") | None if time >= 128 => RecurrentForwardRuntimeKind::Tiled,
+            Some("auto") | None => RecurrentForwardRuntimeKind::Exact,
+            _ => RecurrentForwardRuntimeKind::Exact,
+        };
+    }
+
+    match std::env::var("BURN_DRAGON_WGPU_RECURRENT_RUNTIME")
+        .ok()
+        .as_deref()
+    {
+        Some("wgsl") => RecurrentForwardRuntimeKind::Wgsl,
+        Some("exact") => RecurrentForwardRuntimeKind::Exact,
+        Some("tiled") => RecurrentForwardRuntimeKind::Tiled,
+        Some("auto") | None if time >= 128 => RecurrentForwardRuntimeKind::Exact,
+        Some("auto") | None => RecurrentForwardRuntimeKind::Wgsl,
+        _ => RecurrentForwardRuntimeKind::Wgsl,
     }
 }
 
@@ -233,7 +286,7 @@ pub(super) fn recurrent_attention_wgsl_runtime<R: CubeRuntime>(
         RecurrentAttentionKernel,
         CubeDim::new_3d(WORKGROUP_SIZE_X, 1, 1),
     );
-    let bindings = Bindings::new().with_buffers(vec![
+    let bindings = KernelArguments::new().with_buffers(vec![
         query.handle.clone().binding(),
         value.handle.clone().binding(),
         rho.handle.clone().binding(),
@@ -243,9 +296,7 @@ pub(super) fn recurrent_attention_wgsl_runtime<R: CubeRuntime>(
     ]);
 
     let dispatch_start = profile_enabled().then(Instant::now);
-    client
-        .launch(Box::new(kernel), count, bindings)
-        .expect("launch recurrent attention kernel");
+    client.launch(Box::new(kernel), count, bindings);
     if let Some(start) = dispatch_start {
         let dispatch_ns = start.elapsed().as_nanos();
         profile_record(&RECURRENT_PROFILE, |state| {
@@ -311,13 +362,13 @@ fn recurrent_attention_cube_exact_runtime<R: CubeRuntime>(
             &client,
             cube_count,
             cube_dim,
-            query.as_tensor_arg(1),
-            value.as_tensor_arg(1),
-            rho.as_tensor_arg(1),
-            decay.as_tensor_arg(1),
-            context.as_tensor_arg(1),
-            history.as_tensor_arg(1),
-            meta.as_tensor_arg(1),
+            query.clone().into_tensor_arg(),
+            value.clone().into_tensor_arg(),
+            rho.clone().into_tensor_arg(),
+            decay.clone().into_tensor_arg(),
+            context.clone().into_tensor_arg(),
+            history.clone().into_tensor_arg(),
+            meta.clone().into_tensor_arg(),
         );
         RecurrentRuntimeOutput {
             context,
@@ -329,12 +380,12 @@ fn recurrent_attention_cube_exact_runtime<R: CubeRuntime>(
             &client,
             cube_count,
             cube_dim,
-            query.as_tensor_arg(1),
-            value.as_tensor_arg(1),
-            rho.as_tensor_arg(1),
-            decay.as_tensor_arg(1),
-            context.as_tensor_arg(1),
-            meta.as_tensor_arg(1),
+            query.clone().into_tensor_arg(),
+            value.clone().into_tensor_arg(),
+            rho.clone().into_tensor_arg(),
+            decay.clone().into_tensor_arg(),
+            context.clone().into_tensor_arg(),
+            meta.clone().into_tensor_arg(),
         );
 
         RecurrentRuntimeOutput {
@@ -345,13 +396,13 @@ fn recurrent_attention_cube_exact_runtime<R: CubeRuntime>(
     }
 }
 
-#[cfg(feature = "cuda")]
 fn recurrent_attention_cube_tiled_runtime<R: CubeRuntime>(
     query: CubeTensor<R>,
     value: CubeTensor<R>,
     rho: CubeTensor<R>,
     decay: CubeTensor<R>,
     meta: CubeTensor<R>,
+    capture_state_history: bool,
 ) -> RecurrentRuntimeOutput<R> {
     let query = into_contiguous(query);
     let value = into_contiguous(value);
@@ -369,6 +420,19 @@ fn recurrent_attention_cube_tiled_runtime<R: CubeRuntime>(
         device,
         Shape::new([batch, heads, query.meta.shape.dims::<4>()[2], embd]),
     );
+    let state_history = capture_state_history.then(|| {
+        empty_device::<R, f32>(
+            client.clone(),
+            query.device.clone(),
+            Shape::new([
+                batch,
+                heads,
+                query.meta.shape.dims::<4>()[2],
+                query.meta.shape.dims::<4>()[3],
+                embd,
+            ]),
+        )
+    });
 
     let cube_dim = CubeDim::new_1d(WORKGROUP_SIZE_X);
     let cube_count = CubeCount::Static(
@@ -377,23 +441,44 @@ fn recurrent_attention_cube_tiled_runtime<R: CubeRuntime>(
         batch as u32,
     );
 
-    let _ = recurrent_attention_cube_tiled_kernel::launch::<R>(
-        &client,
-        cube_count,
-        cube_dim,
-        query.as_tensor_arg(1),
-        value.as_tensor_arg(1),
-        rho.as_tensor_arg(1),
-        decay.as_tensor_arg(1),
-        context.as_tensor_arg(1),
-        meta.as_tensor_arg(1),
-        RECURRENT_TILED_WORKGROUP_SIZE_X as usize,
-    );
+    if let Some(history) = state_history.clone() {
+        let _ = recurrent_attention_cube_tiled_history_kernel::launch::<R>(
+            &client,
+            cube_count,
+            cube_dim,
+            query.clone().into_tensor_arg(),
+            value.clone().into_tensor_arg(),
+            rho.clone().into_tensor_arg(),
+            decay.clone().into_tensor_arg(),
+            context.clone().into_tensor_arg(),
+            history.clone().into_tensor_arg(),
+            meta.clone().into_tensor_arg(),
+            RECURRENT_TILED_WORKGROUP_SIZE_X as usize,
+        );
+        RecurrentRuntimeOutput {
+            context,
+            rho,
+            state_history: Some(history),
+        }
+    } else {
+        let _ = recurrent_attention_cube_tiled_kernel::launch::<R>(
+            &client,
+            cube_count,
+            cube_dim,
+            query.clone().into_tensor_arg(),
+            value.clone().into_tensor_arg(),
+            rho.clone().into_tensor_arg(),
+            decay.clone().into_tensor_arg(),
+            context.clone().into_tensor_arg(),
+            meta.clone().into_tensor_arg(),
+            RECURRENT_TILED_WORKGROUP_SIZE_X as usize,
+        );
 
-    RecurrentRuntimeOutput {
-        context,
-        rho,
-        state_history: None,
+        RecurrentRuntimeOutput {
+            context,
+            rho,
+            state_history: None,
+        }
     }
 }
 

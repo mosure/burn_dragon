@@ -3,19 +3,22 @@ name = "burn_dragon_dreamer"
 description = "Dreamer-style latent imagination over burn dragon active vision"
 version = "0.5.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.92"
 authors = ["mosure <mitchell@mosure.me>"]
 license = "MIT OR Apache-2.0"
+homepage = "https://github.com/mosure/burn_bdh"
+repository = "https://github.com/mosure/burn_bdh"
+readme = "../../README.md"
 
 [lib]
 doctest = false
 
 [dependencies]
 anyhow = "1"
-burn = { version = "0.21.0-pre.2", default-features = false, features = ["fusion", "ndarray", "std", "wgpu"] }
-burn-autodiff = { version = "0.21.0-pre.2" }
-burn-cuda = { version = "0.21.0-pre.2", default-features = false, features = ["std"] }
-burn-ndarray = { version = "0.21.0-pre.2" }
+burn = { version = "0.21.0-pre.3", default-features = false, features = ["fusion", "ndarray", "std", "wgpu"] }
+burn-autodiff = { version = "0.21.0-pre.3" }
+burn-cuda = { version = "0.21.0-pre.3", default-features = false, features = ["std"] }
+burn-ndarray = { version = "0.21.0-pre.3" }
 burn_autogaze = { path = "../burn_autogaze", version = "0.5.0" }
 burn_vjepa = { path = "../burn_vjepa", version = "0.5.0", features = ["train"] }
 burn_dragon_core = { path = "../burn_dragon_core", version = "0.5.0", default-features = false }

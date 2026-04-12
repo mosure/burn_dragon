@@ -1,7 +1,7 @@
 use crate::config::{AutoGazeConfig, ConnectorConfig, GazeModelConfig, VisionModelConfig};
 use crate::{FixationPoint, FixationSet, FrameFixationTrace};
 use anyhow::{Context, Result, bail};
-use burn::module::{Ignored, Module, Param};
+use burn::module::{Module, Param};
 use burn::nn::conv::{Conv3d, Conv3dConfig};
 use burn::nn::{
     Embedding, EmbeddingConfig, LayerNorm, LayerNormConfig, Linear, LinearConfig, PaddingConfig3d,
@@ -17,7 +17,7 @@ use std::path::Path;
 #[derive(Module, Debug)]
 pub struct Conv3dBlockForStreaming<B: Backend> {
     pub conv3d: Conv3d<B>,
-    #[module(ignore)]
+    #[module(skip)]
     temporal_patch_size: usize,
 }
 
@@ -108,7 +108,7 @@ pub struct ShallowVideoConvNet<B: Backend> {
     pub norm: LayerNorm<B>,
     pub blocks: Vec<Conv3dBlockForStreaming<B>>,
     pub out_proj: Conv3d<B>,
-    #[module(ignore)]
+    #[module(skip)]
     temporal_patch_size: usize,
 }
 
@@ -227,7 +227,7 @@ pub struct AutoGazeCausalLmOutput<B: Backend> {
 #[derive(Module, Debug)]
 pub struct LlamaRmsNorm<B: Backend> {
     pub weight: Param<Tensor<B, 1>>,
-    #[module(ignore)]
+    #[module(skip)]
     eps: f32,
 }
 
@@ -254,13 +254,13 @@ pub struct AutoGazeLlamaAttention<B: Backend> {
     pub k_proj: Linear<B>,
     pub v_proj: Linear<B>,
     pub o_proj: Linear<B>,
-    #[module(ignore)]
+    #[module(skip)]
     num_heads: usize,
-    #[module(ignore)]
+    #[module(skip)]
     num_key_value_heads: usize,
-    #[module(ignore)]
+    #[module(skip)]
     head_dim: usize,
-    #[module(ignore)]
+    #[module(skip)]
     inv_freq: Tensor<B, 1>,
 }
 
@@ -464,9 +464,9 @@ pub struct AutoGazeLlamaForCausalLmMultiTokenPred<B: Backend> {
     pub model: AutoGazeLlamaModel<B>,
     pub lm_head: Linear<B>,
     pub task_loss_prediction_head: Linear<B>,
-    #[module(ignore)]
+    #[module(skip)]
     vocab_size: usize,
-    #[module(ignore)]
+    #[module(skip)]
     num_multi_token_pred: usize,
 }
 
@@ -517,15 +517,15 @@ pub struct AutoGazeGazingModel<B: Backend> {
     pub vision_model: ShallowVideoConvNet<B>,
     pub connector: Connector<B>,
     pub gaze_decoder: AutoGazeLlamaForCausalLmMultiTokenPred<B>,
-    #[module(ignore)]
+    #[module(skip)]
     input_img_size: usize,
-    #[module(ignore)]
+    #[module(skip)]
     num_vision_tokens_each_frame: usize,
-    #[module(ignore)]
+    #[module(skip)]
     frame_sampling_rate: usize,
-    #[module(ignore)]
+    #[module(skip)]
     num_multi_token_pred: usize,
-    #[module(ignore)]
+    #[module(skip)]
     eos_token_id: i64,
 }
 
@@ -715,15 +715,15 @@ impl<B: Backend> AutoGazeGazingModel<B> {
 #[derive(Module, Debug)]
 pub struct NativeAutoGazeModel<B: Backend> {
     pub gazing_model: AutoGazeGazingModel<B>,
-    #[module(ignore)]
-    pub config: Ignored<AutoGazeConfig>,
+    #[module(skip)]
+    pub config: AutoGazeConfig,
 }
 
 impl<B: Backend> NativeAutoGazeModel<B> {
     pub fn new(config: &AutoGazeConfig, device: &B::Device) -> Self {
         Self {
             gazing_model: AutoGazeGazingModel::new(&config.gaze_model_config, device),
-            config: Ignored(config.clone()),
+            config: config.clone(),
         }
     }
 
@@ -764,7 +764,7 @@ impl<B: Backend> NativeAutoGazeModel<B> {
         max_gaze_tokens_each_frame: usize,
     ) -> Vec<FrameFixationTrace> {
         let generated = self.generate(video, max_gaze_tokens_each_frame.max(k.max(1)));
-        generated_to_traces(&generated, &self.config.0, k)
+        generated_to_traces(&generated, &self.config, k)
     }
 
     pub fn trace_clip_from_frames(

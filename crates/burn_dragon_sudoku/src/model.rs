@@ -55,35 +55,35 @@ pub struct SudokuSaccadeModel<B: Backend> {
     pub summary_norm: LayerNorm<B>,
     pub cache_norm: LayerNorm<B>,
     pub halt_head: HaltHead<B>,
-    #[module(ignore)]
+    #[module(skip)]
     summary_token_count: usize,
-    #[module(ignore)]
+    #[module(skip)]
     policy_heads: usize,
-    #[module(ignore)]
+    #[module(skip)]
     policy_head_dim: usize,
-    #[module(ignore)]
+    #[module(skip)]
     policy_head_kind: u8,
-    #[module(ignore)]
+    #[module(skip)]
     policy_mlp_hidden: usize,
-    #[module(ignore)]
+    #[module(skip)]
     ca_heads: usize,
-    #[module(ignore)]
+    #[module(skip)]
     ca_head_dim: usize,
-    #[module(ignore)]
+    #[module(skip)]
     grid_positional: SudokuGridPositional,
-    #[module(ignore)]
+    #[module(skip)]
     grid_rope_theta: f32,
-    #[module(ignore)]
+    #[module(skip)]
     grid_rope_freqs: Option<Tensor<B, 2>>,
-    #[module(ignore)]
+    #[module(skip)]
     grid_rope_row_cos: Option<Tensor<B, 3>>,
-    #[module(ignore)]
+    #[module(skip)]
     grid_rope_row_sin: Option<Tensor<B, 3>>,
-    #[module(ignore)]
+    #[module(skip)]
     grid_rope_col_cos: Option<Tensor<B, 3>>,
-    #[module(ignore)]
+    #[module(skip)]
     grid_rope_col_sin: Option<Tensor<B, 3>>,
-    #[module(ignore)]
+    #[module(skip)]
     cache_streams: usize,
 }
 

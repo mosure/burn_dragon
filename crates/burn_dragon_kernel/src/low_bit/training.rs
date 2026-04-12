@@ -1,3 +1,4 @@
+#[cfg(feature = "cuda")]
 use std::sync::Once;
 
 #[cfg(feature = "cuda")]
@@ -7,10 +8,12 @@ use super::wgpu::{
 };
 use super::*;
 
+#[cfg(feature = "cuda")]
 fn low_bit_training_debug_enabled() -> bool {
     std::env::var_os("BDH_STAGE_PROFILE_LOWBIT_DEBUG").is_some()
 }
 
+#[cfg(feature = "cuda")]
 fn emit_lowrank_training_debug_once(message: impl FnOnce() -> String) {
     if !low_bit_training_debug_enabled() {
         return;

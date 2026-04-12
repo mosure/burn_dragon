@@ -975,17 +975,20 @@ where
     );
     let input_ptr = input
         .client
-        .get_resource(input.handle.clone().binding())
+        .get_resource(input.handle.clone())
+        .expect("cubecl resource lookup failed")
         .resource()
         .ptr;
     let weight_ptr = weight
         .client
-        .get_resource(weight.handle.clone().binding())
+        .get_resource(weight.handle.clone())
+        .expect("cubecl resource lookup failed")
         .resource()
         .ptr;
     let output_ptr = output
         .client
-        .get_resource(output.handle.clone().binding())
+        .get_resource(output.handle.clone())
+        .expect("cubecl resource lookup failed")
         .resource()
         .ptr;
     let block_size_x = raw_cuda_workgroup_size_x();
@@ -1060,22 +1063,26 @@ where
     );
     let input_ptr = input
         .client
-        .get_resource(input.handle.clone().binding())
+        .get_resource(input.handle.clone())
+        .expect("cubecl resource lookup failed")
         .resource()
         .ptr;
     let weight_ptr = weight
         .client
-        .get_resource(weight.handle.clone().binding())
+        .get_resource(weight.handle.clone())
+        .expect("cubecl resource lookup failed")
         .resource()
         .ptr;
     let scale_ptr = scale
         .client
-        .get_resource(scale.handle.clone().binding())
+        .get_resource(scale.handle.clone())
+        .expect("cubecl resource lookup failed")
         .resource()
         .ptr;
     let output_ptr = output
         .client
-        .get_resource(output.handle.clone().binding())
+        .get_resource(output.handle.clone())
+        .expect("cubecl resource lookup failed")
         .resource()
         .ptr;
     let block_size_x = raw_cuda_workgroup_size_x();
@@ -1178,17 +1185,20 @@ where
     );
     let input_ptr = input
         .client
-        .get_resource(input.handle.clone().binding())
+        .get_resource(input.handle.clone())
+        .expect("cubecl resource lookup failed")
         .resource()
         .ptr;
     let weight_ptr = weight
         .client
-        .get_resource(weight.handle.clone().binding())
+        .get_resource(weight.handle.clone())
+        .expect("cubecl resource lookup failed")
         .resource()
         .ptr;
     let output_ptr = output
         .client
-        .get_resource(output.handle.clone().binding())
+        .get_resource(output.handle.clone())
+        .expect("cubecl resource lookup failed")
         .resource()
         .ptr;
     let block_size_x = raw_cuda_workgroup_size_x();
@@ -1265,22 +1275,26 @@ where
     );
     let input_ptr = input
         .client
-        .get_resource(input.handle.clone().binding())
+        .get_resource(input.handle.clone())
+        .expect("cubecl resource lookup failed")
         .resource()
         .ptr;
     let weight_ptr = weight
         .client
-        .get_resource(weight.handle.clone().binding())
+        .get_resource(weight.handle.clone())
+        .expect("cubecl resource lookup failed")
         .resource()
         .ptr;
     let scale_ptr = scale
         .client
-        .get_resource(scale.handle.clone().binding())
+        .get_resource(scale.handle.clone())
+        .expect("cubecl resource lookup failed")
         .resource()
         .ptr;
     let output_ptr = output
         .client
-        .get_resource(output.handle.clone().binding())
+        .get_resource(output.handle.clone())
+        .expect("cubecl resource lookup failed")
         .resource()
         .ptr;
     let block_size_x = raw_cuda_workgroup_size_x();
@@ -1350,17 +1364,20 @@ where
     );
     let input_ptr = input_tensor
         .client
-        .get_resource(input_tensor.handle.clone().binding())
+        .get_resource(input_tensor.handle.clone())
+        .expect("cubecl resource lookup failed")
         .resource()
         .ptr;
     let scale_ptr = scale
         .client
-        .get_resource(scale.handle.clone().binding())
+        .get_resource(scale.handle.clone())
+        .expect("cubecl resource lookup failed")
         .resource()
         .ptr;
     let output_ptr = output
         .client
-        .get_resource(output.handle.clone().binding())
+        .get_resource(output.handle.clone())
+        .expect("cubecl resource lookup failed")
         .resource()
         .ptr;
     let block_size_x = raw_cuda_workgroup_size_x();
@@ -1430,12 +1447,14 @@ where
     );
     let input_ptr = input_tensor
         .client
-        .get_resource(input_tensor.handle.clone().binding())
+        .get_resource(input_tensor.handle.clone())
+        .expect("cubecl resource lookup failed")
         .resource()
         .ptr;
     let output_ptr = output
         .client
-        .get_resource(output.handle.clone().binding())
+        .get_resource(output.handle.clone())
+        .expect("cubecl resource lookup failed")
         .resource()
         .ptr;
     let block_size_x = raw_cuda_workgroup_size_x();
@@ -1465,6 +1484,7 @@ where
 }
 
 #[cfg(not(feature = "cuda"))]
+#[allow(dead_code)]
 pub fn try_raw_cuda_pack_activation_codes_i8x4<B: BackendTrait>(
     _input_codes: &BurnTensor<B, 4, Int>,
 ) -> Option<BurnTensor<B, 4, Int>>
@@ -1539,17 +1559,20 @@ where
     );
     let y_ptr = y
         .client
-        .get_resource(y.handle.clone().binding())
+        .get_resource(y.handle.clone())
+        .expect("cubecl resource lookup failed")
         .resource()
         .ptr;
     let weight_ptr = weight
         .client
-        .get_resource(weight.handle.clone().binding())
+        .get_resource(weight.handle.clone())
+        .expect("cubecl resource lookup failed")
         .resource()
         .ptr;
     let output_ptr = output
         .client
-        .get_resource(output.handle.clone().binding())
+        .get_resource(output.handle.clone())
+        .expect("cubecl resource lookup failed")
         .resource()
         .ptr;
     let block_size_x = raw_cuda_workgroup_size_x();
@@ -1622,22 +1645,26 @@ where
     );
     let y_ptr = y
         .client
-        .get_resource(y.handle.clone().binding())
+        .get_resource(y.handle.clone())
+        .expect("cubecl resource lookup failed")
         .resource()
         .ptr;
     let weight_ptr = weight
         .client
-        .get_resource(weight.handle.clone().binding())
+        .get_resource(weight.handle.clone())
+        .expect("cubecl resource lookup failed")
         .resource()
         .ptr;
     let scale_ptr = scale
         .client
-        .get_resource(scale.handle.clone().binding())
+        .get_resource(scale.handle.clone())
+        .expect("cubecl resource lookup failed")
         .resource()
         .ptr;
     let output_ptr = output
         .client
-        .get_resource(output.handle.clone().binding())
+        .get_resource(output.handle.clone())
+        .expect("cubecl resource lookup failed")
         .resource()
         .ptr;
     let block_size_x = raw_cuda_workgroup_size_x();
@@ -1732,17 +1759,20 @@ where
     );
     let grad_ptr = grad
         .client
-        .get_resource(grad.handle.clone().binding())
+        .get_resource(grad.handle.clone())
+        .expect("cubecl resource lookup failed")
         .resource()
         .ptr;
     let weight_ptr = weight
         .client
-        .get_resource(weight.handle.clone().binding())
+        .get_resource(weight.handle.clone())
+        .expect("cubecl resource lookup failed")
         .resource()
         .ptr;
     let output_ptr = output
         .client
-        .get_resource(output.handle.clone().binding())
+        .get_resource(output.handle.clone())
+        .expect("cubecl resource lookup failed")
         .resource()
         .ptr;
     let block_size_x = raw_cuda_workgroup_size_x();
@@ -1823,17 +1853,20 @@ where
     );
     let input_ptr = input
         .client
-        .get_resource(input.handle.clone().binding())
+        .get_resource(input.handle.clone())
+        .expect("cubecl resource lookup failed")
         .resource()
         .ptr;
     let grad_ptr = grad
         .client
-        .get_resource(grad.handle.clone().binding())
+        .get_resource(grad.handle.clone())
+        .expect("cubecl resource lookup failed")
         .resource()
         .ptr;
     let output_ptr = output
         .client
-        .get_resource(output.handle.clone().binding())
+        .get_resource(output.handle.clone())
+        .expect("cubecl resource lookup failed")
         .resource()
         .ptr;
     let block_size_x = raw_cuda_workgroup_size_x();
@@ -1915,17 +1948,20 @@ where
     );
     let grad_ptr = grad
         .client
-        .get_resource(grad.handle.clone().binding())
+        .get_resource(grad.handle.clone())
+        .expect("cubecl resource lookup failed")
         .resource()
         .ptr;
     let weight_ptr = weight
         .client
-        .get_resource(weight.handle.clone().binding())
+        .get_resource(weight.handle.clone())
+        .expect("cubecl resource lookup failed")
         .resource()
         .ptr;
     let output_ptr = output
         .client
-        .get_resource(output.handle.clone().binding())
+        .get_resource(output.handle.clone())
+        .expect("cubecl resource lookup failed")
         .resource()
         .ptr;
     let block_size_x = raw_cuda_workgroup_size_x();
@@ -2005,17 +2041,20 @@ where
     );
     let y_ptr = y
         .client
-        .get_resource(y.handle.clone().binding())
+        .get_resource(y.handle.clone())
+        .expect("cubecl resource lookup failed")
         .resource()
         .ptr;
     let grad_ptr = grad
         .client
-        .get_resource(grad.handle.clone().binding())
+        .get_resource(grad.handle.clone())
+        .expect("cubecl resource lookup failed")
         .resource()
         .ptr;
     let output_ptr = output
         .client
-        .get_resource(output.handle.clone().binding())
+        .get_resource(output.handle.clone())
+        .expect("cubecl resource lookup failed")
         .resource()
         .ptr;
     let block_size_x = raw_cuda_workgroup_size_x();
@@ -2098,17 +2137,20 @@ where
     );
     let y_ptr = y
         .client
-        .get_resource(y.handle.clone().binding())
+        .get_resource(y.handle.clone())
+        .expect("cubecl resource lookup failed")
         .resource()
         .ptr;
     let weight_ptr = weight
         .client
-        .get_resource(weight.handle.clone().binding())
+        .get_resource(weight.handle.clone())
+        .expect("cubecl resource lookup failed")
         .resource()
         .ptr;
     let output_ptr = output
         .client
-        .get_resource(output.handle.clone().binding())
+        .get_resource(output.handle.clone())
+        .expect("cubecl resource lookup failed")
         .resource()
         .ptr;
     let block_size_x = raw_cuda_workgroup_size_x();
@@ -2183,22 +2225,26 @@ where
     );
     let y_ptr = y
         .client
-        .get_resource(y.handle.clone().binding())
+        .get_resource(y.handle.clone())
+        .expect("cubecl resource lookup failed")
         .resource()
         .ptr;
     let weight_ptr = weight
         .client
-        .get_resource(weight.handle.clone().binding())
+        .get_resource(weight.handle.clone())
+        .expect("cubecl resource lookup failed")
         .resource()
         .ptr;
     let scale_ptr = scale
         .client
-        .get_resource(scale.handle.clone().binding())
+        .get_resource(scale.handle.clone())
+        .expect("cubecl resource lookup failed")
         .resource()
         .ptr;
     let output_ptr = output
         .client
-        .get_resource(output.handle.clone().binding())
+        .get_resource(output.handle.clone())
+        .expect("cubecl resource lookup failed")
         .resource()
         .ptr;
     let block_size_x = raw_cuda_workgroup_size_x();

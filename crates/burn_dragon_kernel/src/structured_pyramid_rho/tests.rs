@@ -366,7 +366,9 @@ struct MemorySnapshot {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn memory_snapshot(device: &<WgpuBackend as BackendTrait>::Device) -> MemorySnapshot {
-    let usage = <WgpuRuntime as Runtime>::client(device).memory_usage();
+    let usage = <WgpuRuntime as Runtime>::client(device)
+        .memory_usage()
+        .expect("wgpu memory usage");
     MemorySnapshot {
         reserved: usage.bytes_reserved,
         in_use: usage.bytes_in_use,

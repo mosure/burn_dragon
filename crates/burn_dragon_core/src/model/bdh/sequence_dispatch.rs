@@ -238,7 +238,7 @@ impl<B: Backend> BDH<B> {
                     "Mamba dense stream dim {} must match model dim {}",
                     dim, self.n_embd
                 );
-                let config = self.mamba_config.0;
+                let config = self.mamba_config;
                 let device = value.device();
                 if matches!(
                     self.sequence_kernel.memory_system,

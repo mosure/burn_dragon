@@ -422,7 +422,7 @@ impl<B: Backend> BDH<B> {
     }
 
     pub(crate) fn language_head_runtime(&self) -> LanguageHeadRuntimeRef<'_, B> {
-        match &self.language_head.0 {
+        match &self.language_head {
             LanguageHeadRuntimeKind::StandardTokenClassification => {
                 LanguageHeadRuntimeRef::StandardTokenClassification {
                     lm_head: self
@@ -440,7 +440,6 @@ impl<B: Backend> BDH<B> {
                     special_lm_head: self.nca_special_lm_head.as_ref(),
                     tables: self
                         .nca_factorized_head_tables
-                        .0
                         .as_ref()
                         .expect("factorized NCA head tables missing"),
                 }

@@ -503,13 +503,13 @@ pub(crate) struct VisionSaccadeModel<B: BackendTrait> {
     pub(crate) upsample_weights_cache: UpsampleWeightsCache<B>,
     pub(crate) fovea_grid_cache: FoveaBaseGridCache<B>,
     pub(crate) fovea_jitter_cache: FoveaJitterCache<B>,
-    #[module(ignore)]
+    #[module(skip)]
     pub(crate) pyramid_dim: usize,
-    #[module(ignore)]
+    #[module(skip)]
     pub(crate) rollout: VisionRollout,
-    #[module(ignore)]
+    #[module(skip)]
     pub(crate) train_repeats: usize,
-    #[module(ignore)]
+    #[module(skip)]
     pub(crate) train_repeat_chunk: usize,
 }
 

@@ -5,7 +5,7 @@ pub(crate) struct VisionSaccadeInputProjection<B: BackendTrait> {
     linear: Option<VisionSaccadeProjection<B>>,
     cnn: Option<VisionInputProjectionCnn<B>>,
     micro_vit: Option<VisionInputProjectionMicroVit<B>>,
-    #[module(ignore)]
+    #[module(skip)]
     param_count: usize,
 }
 
@@ -82,15 +82,15 @@ struct VisionInputProjectionCnn<B: BackendTrait> {
     in_proj: Linear<B>,
     blocks: Vec<VisionInputProjectionCnnBlock<B>>,
     out_proj: Linear<B>,
-    #[module(ignore)]
+    #[module(skip)]
     embed_dim: usize,
-    #[module(ignore)]
+    #[module(skip)]
     channels: usize,
-    #[module(ignore)]
+    #[module(skip)]
     kernel: usize,
-    #[module(ignore)]
+    #[module(skip)]
     expansion: usize,
-    #[module(ignore)]
+    #[module(skip)]
     param_count: usize,
 }
 
@@ -194,13 +194,13 @@ impl<B: BackendTrait> VisionInputProjectionCnnBlock<B> {
 struct VisionInputProjectionMicroVit<B: BackendTrait> {
     radial: VisionInputProjectionRadial<B>,
     blocks: Vec<VisionInputProjectionMicroVitBlock<B>>,
-    #[module(ignore)]
+    #[module(skip)]
     embed_dim: usize,
-    #[module(ignore)]
+    #[module(skip)]
     heads: usize,
-    #[module(ignore)]
+    #[module(skip)]
     mlp_ratio: usize,
-    #[module(ignore)]
+    #[module(skip)]
     radial_hidden_dim: usize,
 }
 
@@ -266,7 +266,7 @@ impl<B: BackendTrait> VisionInputProjectionMicroVit<B> {
 struct VisionInputProjectionRadial<B: BackendTrait> {
     in_proj: Linear<B>,
     out_proj: Linear<B>,
-    #[module(ignore)]
+    #[module(skip)]
     scale: f32,
 }
 
@@ -308,9 +308,9 @@ struct VisionInputProjectionMicroVitBlock<B: BackendTrait> {
     norm_mlp: LayerNorm<B>,
     mlp_in: Linear<B>,
     mlp_out: Linear<B>,
-    #[module(ignore)]
+    #[module(skip)]
     heads: usize,
-    #[module(ignore)]
+    #[module(skip)]
     head_dim: usize,
 }
 

@@ -25,7 +25,7 @@ use burn_cubecl::cubecl;
 #[cfg(feature = "cuda")]
 use burn_cubecl::cubecl::cuda::CudaRuntime;
 use burn_cubecl::cubecl::prelude::*;
-use burn_cubecl::cubecl::server::Bindings;
+use burn_cubecl::cubecl::server::KernelArguments;
 use burn_cubecl::fusion::FusionCubeRuntime;
 use burn_cubecl::kernel::into_contiguous;
 use burn_cubecl::ops::numeric::empty_device;
@@ -65,15 +65,15 @@ const CUDA_RAW_WORKGROUP_SIZE_X: u32 = 256;
 #[derive(Clone)]
 enum WgpuFloatOutputOrigin {
     Plain,
-    FusionU32(Client<FusionCubeRuntime<WgpuRuntime, u32>>),
-    FusionU8(Client<FusionCubeRuntime<WgpuRuntime, u8>>),
+    FusionU32(Client<FusionCubeRuntime<WgpuRuntime>>),
+    FusionU8(Client<FusionCubeRuntime<WgpuRuntime>>),
 }
 
 #[derive(Clone)]
 enum WgpuIntOutputOrigin {
     Plain,
-    FusionU32(Client<FusionCubeRuntime<WgpuRuntime, u32>>),
-    FusionU8(Client<FusionCubeRuntime<WgpuRuntime, u8>>),
+    FusionU32(Client<FusionCubeRuntime<WgpuRuntime>>),
+    FusionU8(Client<FusionCubeRuntime<WgpuRuntime>>),
 }
 
 mod cuda;
@@ -1084,10 +1084,10 @@ fn packed_lowrank_projection_cube_runtime<R: CubeRuntime>(
         &client,
         cube_count,
         cube_dim,
-        input.as_tensor_arg(1),
-        weight.as_tensor_arg(1),
-        output.as_tensor_arg(1),
-        params.as_tensor_arg(1),
+        input.clone().into_tensor_arg(),
+        weight.clone().into_tensor_arg(),
+        output.clone().into_tensor_arg(),
+        params.clone().into_tensor_arg(),
     );
     output
 }
@@ -1120,10 +1120,10 @@ fn packed_decoder_tail_cube_runtime<R: CubeRuntime>(
         &client,
         cube_count,
         cube_dim,
-        y.as_tensor_arg(1),
-        weight.as_tensor_arg(1),
-        output.as_tensor_arg(1),
-        params.as_tensor_arg(1),
+        y.clone().into_tensor_arg(),
+        weight.clone().into_tensor_arg(),
+        output.clone().into_tensor_arg(),
+        params.clone().into_tensor_arg(),
     );
     output
 }
@@ -1158,10 +1158,10 @@ fn packed_lowrank_grad_input_cube_runtime<R: CubeRuntime>(
         &client,
         cube_count,
         cube_dim,
-        grad.as_tensor_arg(1),
-        weight.as_tensor_arg(1),
-        output.as_tensor_arg(1),
-        params.as_tensor_arg(1),
+        grad.clone().into_tensor_arg(),
+        weight.clone().into_tensor_arg(),
+        output.clone().into_tensor_arg(),
+        params.clone().into_tensor_arg(),
     );
     output
 }
@@ -1192,10 +1192,10 @@ fn packed_lowrank_grad_weight_cube_runtime<R: CubeRuntime>(
         &client,
         cube_count,
         cube_dim,
-        input.as_tensor_arg(1),
-        grad.as_tensor_arg(1),
-        output.as_tensor_arg(1),
-        params.as_tensor_arg(1),
+        input.clone().into_tensor_arg(),
+        grad.clone().into_tensor_arg(),
+        output.clone().into_tensor_arg(),
+        params.clone().into_tensor_arg(),
     );
     output
 }
@@ -1230,10 +1230,10 @@ fn packed_decoder_tail_grad_input_cube_runtime<R: CubeRuntime>(
         &client,
         cube_count,
         cube_dim,
-        grad.as_tensor_arg(1),
-        weight.as_tensor_arg(1),
-        output.as_tensor_arg(1),
-        params.as_tensor_arg(1),
+        grad.clone().into_tensor_arg(),
+        weight.clone().into_tensor_arg(),
+        output.clone().into_tensor_arg(),
+        params.clone().into_tensor_arg(),
     );
     output
 }
@@ -1263,20 +1263,20 @@ fn packed_decoder_tail_grad_weight_cube_runtime<R: CubeRuntime>(
         &client,
         cube_count,
         cube_dim,
-        y.as_tensor_arg(1),
-        grad.as_tensor_arg(1),
-        output.as_tensor_arg(1),
-        params.as_tensor_arg(1),
+        y.clone().into_tensor_arg(),
+        grad.clone().into_tensor_arg(),
+        output.clone().into_tensor_arg(),
+        params.clone().into_tensor_arg(),
     );
     output
 }
 
 #[cube(launch)]
 fn quantize_pack_i8x4_cube_kernel(
-    input: &burn_cubecl::cubecl::prelude::Tensor<Line<f32>>,
-    activation_scale: &burn_cubecl::cubecl::prelude::Tensor<Line<f32>>,
-    output: &mut burn_cubecl::cubecl::prelude::Tensor<Line<i32>>,
-    params: &burn_cubecl::cubecl::prelude::Tensor<Line<f32>>,
+    input: &burn_cubecl::cubecl::prelude::Tensor<f32>,
+    activation_scale: &burn_cubecl::cubecl::prelude::Tensor<f32>,
+    output: &mut burn_cubecl::cubecl::prelude::Tensor<i32>,
+    params: &burn_cubecl::cubecl::prelude::Tensor<f32>,
 ) {
     let outer = u32::cast_from(params[0]) as usize;
     let inner = u32::cast_from(params[1]) as usize;
@@ -1295,9 +1295,9 @@ fn quantize_pack_i8x4_cube_kernel(
     let value_offset = pack_offset * 4usize;
     let total_values = outer * inner;
     let scale = activation_scale[0];
-    let zero = Line::cast_from(0u32);
-    let one = Line::cast_from(1u32);
-    let half = one / Line::cast_from(2u32);
+    let zero = f32::cast_from(0u32);
+    let one = f32::cast_from(1u32);
+    let half = one / f32::cast_from(2u32);
     let inv_scale = if scale > zero { one / scale } else { zero };
     let idx0 = value_offset;
     let idx1 = value_offset + 1usize;
@@ -1428,15 +1428,15 @@ fn quantize_pack_i8x4_cube_kernel(
     let b1 = if v1 < 0i32 { v1 + 256i32 } else { v1 };
     let b2 = if v2 < 0i32 { v2 + 256i32 } else { v2 };
     let packed = b0 + b1 * 256i32 + b2 * 65536i32 + v3 * 16777216i32;
-    output[packed_idx] = Line::cast_from(packed);
+    output[packed_idx] = packed;
 }
 
 #[cube(launch)]
 fn quantize_codes_i32_cube_kernel(
-    input: &burn_cubecl::cubecl::prelude::Tensor<Line<f32>>,
-    activation_scale: &burn_cubecl::cubecl::prelude::Tensor<Line<f32>>,
-    output: &mut burn_cubecl::cubecl::prelude::Tensor<Line<i32>>,
-    params: &burn_cubecl::cubecl::prelude::Tensor<Line<f32>>,
+    input: &burn_cubecl::cubecl::prelude::Tensor<f32>,
+    activation_scale: &burn_cubecl::cubecl::prelude::Tensor<f32>,
+    output: &mut burn_cubecl::cubecl::prelude::Tensor<i32>,
+    params: &burn_cubecl::cubecl::prelude::Tensor<f32>,
 ) {
     let total = u32::cast_from(params[0]) as usize;
     let qmax = i32::cast_from(params[1]);
@@ -1449,9 +1449,9 @@ fn quantize_codes_i32_cube_kernel(
     }
 
     let scale = activation_scale[0];
-    let zero = Line::cast_from(0u32);
-    let one = Line::cast_from(1u32);
-    let half = one / Line::cast_from(2u32);
+    let zero = f32::cast_from(0u32);
+    let one = f32::cast_from(1u32);
+    let half = one / f32::cast_from(2u32);
     let inv_scale = if scale > zero { one / scale } else { zero };
 
     let mut lane = 0usize;
@@ -1483,7 +1483,7 @@ fn quantize_codes_i32_cube_kernel(
                     code = qmax;
                 }
             }
-            output[idx] = Line::cast_from(code);
+            output[idx] = code;
         }
         lane += 1usize;
     }
@@ -1553,7 +1553,7 @@ fn resolve_wgpu_fusion_float_tensor<B, BT, const D: usize>(
     tensor: &BurnTensor<B, D>,
 ) -> Option<(
     CubeTensor<WgpuRuntime>,
-    Client<FusionCubeRuntime<WgpuRuntime, BT>>,
+    Client<FusionCubeRuntime<WgpuRuntime>>,
 )>
 where
     B: BackendTrait,
@@ -1561,7 +1561,7 @@ where
     BT: BoolElement + 'static,
 {
     let prim = tensor.clone().into_primitive().tensor();
-    let fusion: FusionTensor<FusionCubeRuntime<WgpuRuntime, BT>> =
+    let fusion: FusionTensor<FusionCubeRuntime<WgpuRuntime>> =
         try_cast_float_primitive::<B, _>(prim)?;
     let client = fusion.client.clone();
     let cube = client.resolve_tensor_float::<CubeBackend<WgpuRuntime, f32, i32, BT>>(fusion);
@@ -1580,7 +1580,7 @@ where
     BT: BoolElement + 'static,
 {
     let prim = tensor.clone().into_primitive();
-    let fusion: FusionTensor<FusionCubeRuntime<WgpuRuntime, BT>> =
+    let fusion: FusionTensor<FusionCubeRuntime<WgpuRuntime>> =
         try_cast_int_primitive::<B, _>(prim)?;
     let client = fusion.client.clone();
     let cube = client.resolve_tensor_int::<CubeBackend<WgpuRuntime, f32, i32, BT>>(fusion);
@@ -1745,10 +1745,10 @@ where
 
 #[cube(launch)]
 fn packed_lowrank_projection_cube_kernel(
-    input: &burn_cubecl::cubecl::prelude::Tensor<Line<i32>>,
-    weight: &burn_cubecl::cubecl::prelude::Tensor<Line<i32>>,
-    output: &mut burn_cubecl::cubecl::prelude::Tensor<Line<f32>>,
-    params: &burn_cubecl::cubecl::prelude::Tensor<Line<f32>>,
+    input: &burn_cubecl::cubecl::prelude::Tensor<i32>,
+    weight: &burn_cubecl::cubecl::prelude::Tensor<i32>,
+    output: &mut burn_cubecl::cubecl::prelude::Tensor<f32>,
+    params: &burn_cubecl::cubecl::prelude::Tensor<f32>,
 ) {
     let batch = u32::cast_from(params[0]) as usize;
     let input_heads = u32::cast_from(params[1]) as usize;
@@ -1773,7 +1773,7 @@ fn packed_lowrank_projection_cube_kernel(
         input_head = 0usize;
     }
 
-    let mut acc = Line::cast_from(0u32);
+    let mut acc = i32::cast_from(0u32);
     let input_base = ((b * input_heads + input_head) * time + t) * embd;
     let weight_base = h * embd * latent + l;
     let mut e = 0usize;
@@ -1792,15 +1792,15 @@ fn packed_lowrank_projection_cube_kernel(
     }
 
     let output_index = ((b * heads + h) * time + t) * latent + l;
-    output[output_index] = Line::cast_from(acc) * activation_scale * weight_scale;
+    output[output_index] = f32::cast_from(acc) * activation_scale * weight_scale;
 }
 
 #[cube(launch)]
 fn packed_decoder_tail_cube_kernel(
-    y: &burn_cubecl::cubecl::prelude::Tensor<Line<i32>>,
-    weight: &burn_cubecl::cubecl::prelude::Tensor<Line<i32>>,
-    output: &mut burn_cubecl::cubecl::prelude::Tensor<Line<f32>>,
-    params: &burn_cubecl::cubecl::prelude::Tensor<Line<f32>>,
+    y: &burn_cubecl::cubecl::prelude::Tensor<i32>,
+    weight: &burn_cubecl::cubecl::prelude::Tensor<i32>,
+    output: &mut burn_cubecl::cubecl::prelude::Tensor<f32>,
+    params: &burn_cubecl::cubecl::prelude::Tensor<f32>,
 ) {
     let batch = u32::cast_from(params[0]) as usize;
     let heads = u32::cast_from(params[1]) as usize;
@@ -1818,7 +1818,7 @@ fn packed_decoder_tail_cube_kernel(
         terminate!();
     }
 
-    let mut acc = Line::cast_from(0u32);
+    let mut acc = i32::cast_from(0u32);
     let mut h = 0usize;
     while h < heads {
         let input_base = ((b * heads + h) * time + t) * latent;
@@ -1839,15 +1839,15 @@ fn packed_decoder_tail_cube_kernel(
         h += 1usize;
     }
 
-    output[(b * time + t) * dim + d] = Line::cast_from(acc) * activation_scale * weight_scale;
+    output[(b * time + t) * dim + d] = f32::cast_from(acc) * activation_scale * weight_scale;
 }
 
 #[cube(launch)]
 fn packed_lowrank_grad_input_cube_kernel(
-    grad: &burn_cubecl::cubecl::prelude::Tensor<Line<f32>>,
-    weight: &burn_cubecl::cubecl::prelude::Tensor<Line<i32>>,
-    output: &mut burn_cubecl::cubecl::prelude::Tensor<Line<f32>>,
-    params: &burn_cubecl::cubecl::prelude::Tensor<Line<f32>>,
+    grad: &burn_cubecl::cubecl::prelude::Tensor<f32>,
+    weight: &burn_cubecl::cubecl::prelude::Tensor<i32>,
+    output: &mut burn_cubecl::cubecl::prelude::Tensor<f32>,
+    params: &burn_cubecl::cubecl::prelude::Tensor<f32>,
 ) {
     let batch = u32::cast_from(params[0]) as usize;
     let input_heads = u32::cast_from(params[1]) as usize;
@@ -1866,7 +1866,7 @@ fn packed_lowrank_grad_input_cube_kernel(
 
     let input_head = bih % input_heads;
     let b = bih / input_heads;
-    let mut acc = Line::cast_from(0u32);
+    let mut acc = f32::cast_from(0u32);
     if input_heads == 1usize {
         let mut h = 0usize;
         while h < heads {
@@ -1874,16 +1874,16 @@ fn packed_lowrank_grad_input_cube_kernel(
             while l + 4usize <= latent {
                 let grad_index = ((b * heads + h) * time + t) * latent + l;
                 let weight_index = (h * embd + e) * latent + l;
-                acc += grad[grad_index] * Line::cast_from(weight[weight_index]);
-                acc += grad[grad_index + 1usize] * Line::cast_from(weight[weight_index + 1usize]);
-                acc += grad[grad_index + 2usize] * Line::cast_from(weight[weight_index + 2usize]);
-                acc += grad[grad_index + 3usize] * Line::cast_from(weight[weight_index + 3usize]);
+                acc += grad[grad_index] * f32::cast_from(weight[weight_index]);
+                acc += grad[grad_index + 1usize] * f32::cast_from(weight[weight_index + 1usize]);
+                acc += grad[grad_index + 2usize] * f32::cast_from(weight[weight_index + 2usize]);
+                acc += grad[grad_index + 3usize] * f32::cast_from(weight[weight_index + 3usize]);
                 l += 4usize;
             }
             while l < latent {
                 let grad_index = ((b * heads + h) * time + t) * latent + l;
                 let weight_index = (h * embd + e) * latent + l;
-                acc += grad[grad_index] * Line::cast_from(weight[weight_index]);
+                acc += grad[grad_index] * f32::cast_from(weight[weight_index]);
                 l += 1usize;
             }
             h += 1usize;
@@ -1894,16 +1894,16 @@ fn packed_lowrank_grad_input_cube_kernel(
         while l + 4usize <= latent {
             let grad_index = ((b * heads + h) * time + t) * latent + l;
             let weight_index = (h * embd + e) * latent + l;
-            acc += grad[grad_index] * Line::cast_from(weight[weight_index]);
-            acc += grad[grad_index + 1usize] * Line::cast_from(weight[weight_index + 1usize]);
-            acc += grad[grad_index + 2usize] * Line::cast_from(weight[weight_index + 2usize]);
-            acc += grad[grad_index + 3usize] * Line::cast_from(weight[weight_index + 3usize]);
+            acc += grad[grad_index] * f32::cast_from(weight[weight_index]);
+            acc += grad[grad_index + 1usize] * f32::cast_from(weight[weight_index + 1usize]);
+            acc += grad[grad_index + 2usize] * f32::cast_from(weight[weight_index + 2usize]);
+            acc += grad[grad_index + 3usize] * f32::cast_from(weight[weight_index + 3usize]);
             l += 4usize;
         }
         while l < latent {
             let grad_index = ((b * heads + h) * time + t) * latent + l;
             let weight_index = (h * embd + e) * latent + l;
-            acc += grad[grad_index] * Line::cast_from(weight[weight_index]);
+            acc += grad[grad_index] * f32::cast_from(weight[weight_index]);
             l += 1usize;
         }
     }
@@ -1914,10 +1914,10 @@ fn packed_lowrank_grad_input_cube_kernel(
 
 #[cube(launch)]
 fn packed_lowrank_grad_weight_cube_kernel(
-    input: &burn_cubecl::cubecl::prelude::Tensor<Line<i32>>,
-    grad: &burn_cubecl::cubecl::prelude::Tensor<Line<f32>>,
-    output: &mut burn_cubecl::cubecl::prelude::Tensor<Line<f32>>,
-    params: &burn_cubecl::cubecl::prelude::Tensor<Line<f32>>,
+    input: &burn_cubecl::cubecl::prelude::Tensor<i32>,
+    grad: &burn_cubecl::cubecl::prelude::Tensor<f32>,
+    output: &mut burn_cubecl::cubecl::prelude::Tensor<f32>,
+    params: &burn_cubecl::cubecl::prelude::Tensor<f32>,
 ) {
     let batch = u32::cast_from(params[0]) as usize;
     let input_heads = u32::cast_from(params[1]) as usize;
@@ -1938,14 +1938,14 @@ fn packed_lowrank_grad_weight_cube_kernel(
     if input_heads == 1usize {
         input_head = 0usize;
     }
-    let mut acc = Line::cast_from(0u32);
+    let mut acc = f32::cast_from(0u32);
     let mut b = 0usize;
     while b < batch {
         let mut t = 0usize;
         while t < time {
             let input_index = ((b * input_heads + input_head) * time + t) * embd + e;
             let grad_index = ((b * heads + h) * time + t) * latent + l;
-            acc += Line::cast_from(input[input_index]) * grad[grad_index];
+            acc += f32::cast_from(input[input_index]) * grad[grad_index];
             t += 1usize;
         }
         b += 1usize;
@@ -1957,10 +1957,10 @@ fn packed_lowrank_grad_weight_cube_kernel(
 
 #[cube(launch)]
 fn packed_decoder_tail_grad_input_cube_kernel(
-    grad: &burn_cubecl::cubecl::prelude::Tensor<Line<f32>>,
-    weight: &burn_cubecl::cubecl::prelude::Tensor<Line<i32>>,
-    output: &mut burn_cubecl::cubecl::prelude::Tensor<Line<f32>>,
-    params: &burn_cubecl::cubecl::prelude::Tensor<Line<f32>>,
+    grad: &burn_cubecl::cubecl::prelude::Tensor<f32>,
+    weight: &burn_cubecl::cubecl::prelude::Tensor<i32>,
+    output: &mut burn_cubecl::cubecl::prelude::Tensor<f32>,
+    params: &burn_cubecl::cubecl::prelude::Tensor<f32>,
 ) {
     let batch = u32::cast_from(params[0]) as usize;
     let heads = u32::cast_from(params[1]) as usize;
@@ -1979,17 +1979,17 @@ fn packed_decoder_tail_grad_input_cube_kernel(
     let b = bh / heads;
     let weight_row_base = (h * latent + l) * dim;
     let grad_base = (b * time + t) * dim;
-    let mut acc = Line::cast_from(0u32);
+    let mut acc = f32::cast_from(0u32);
     let mut d = 0usize;
     while d + 4usize <= dim {
-        acc += grad[grad_base + d] * Line::cast_from(weight[weight_row_base + d]);
-        acc += grad[grad_base + d + 1usize] * Line::cast_from(weight[weight_row_base + d + 1usize]);
-        acc += grad[grad_base + d + 2usize] * Line::cast_from(weight[weight_row_base + d + 2usize]);
-        acc += grad[grad_base + d + 3usize] * Line::cast_from(weight[weight_row_base + d + 3usize]);
+        acc += grad[grad_base + d] * f32::cast_from(weight[weight_row_base + d]);
+        acc += grad[grad_base + d + 1usize] * f32::cast_from(weight[weight_row_base + d + 1usize]);
+        acc += grad[grad_base + d + 2usize] * f32::cast_from(weight[weight_row_base + d + 2usize]);
+        acc += grad[grad_base + d + 3usize] * f32::cast_from(weight[weight_row_base + d + 3usize]);
         d += 4usize;
     }
     while d < dim {
-        acc += grad[grad_base + d] * Line::cast_from(weight[weight_row_base + d]);
+        acc += grad[grad_base + d] * f32::cast_from(weight[weight_row_base + d]);
         d += 1usize;
     }
     let output_index = ((b * heads + h) * time + t) * latent + l;
@@ -1998,10 +1998,10 @@ fn packed_decoder_tail_grad_input_cube_kernel(
 
 #[cube(launch)]
 fn packed_decoder_tail_grad_weight_cube_kernel(
-    y: &burn_cubecl::cubecl::prelude::Tensor<Line<i32>>,
-    grad: &burn_cubecl::cubecl::prelude::Tensor<Line<f32>>,
-    output: &mut burn_cubecl::cubecl::prelude::Tensor<Line<f32>>,
-    params: &burn_cubecl::cubecl::prelude::Tensor<Line<f32>>,
+    y: &burn_cubecl::cubecl::prelude::Tensor<i32>,
+    grad: &burn_cubecl::cubecl::prelude::Tensor<f32>,
+    output: &mut burn_cubecl::cubecl::prelude::Tensor<f32>,
+    params: &burn_cubecl::cubecl::prelude::Tensor<f32>,
 ) {
     let batch = u32::cast_from(params[0]) as usize;
     let heads = u32::cast_from(params[1]) as usize;
@@ -2017,14 +2017,14 @@ fn packed_decoder_tail_grad_weight_cube_kernel(
     }
     let h = hl / latent;
     let l = hl % latent;
-    let mut acc = Line::cast_from(0u32);
+    let mut acc = f32::cast_from(0u32);
     let mut b = 0usize;
     while b < batch {
         let mut t = 0usize;
         while t < time {
             let y_index = ((b * heads + h) * time + t) * latent + l;
             let grad_index = (b * time + t) * dim + d;
-            acc += Line::cast_from(y[y_index]) * grad[grad_index];
+            acc += f32::cast_from(y[y_index]) * grad[grad_index];
             t += 1usize;
         }
         b += 1usize;

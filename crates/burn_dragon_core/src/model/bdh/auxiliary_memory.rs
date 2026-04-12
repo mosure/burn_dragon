@@ -214,7 +214,7 @@ impl<B: Backend> BDH<B> {
                 self.y_relu_threshold,
                 true,
                 self.low_bit_projection_plan(),
-                self.low_bit_quant.0.saved_activations.clone(),
+                self.low_bit_quant.saved_activations.clone(),
                 self.packed_low_bit_projection_artifacts(),
                 latent_pattern,
                 self.kernel.lowrank_grad_input_executor,

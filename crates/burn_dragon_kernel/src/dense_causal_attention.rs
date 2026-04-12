@@ -11,7 +11,7 @@ use burn_autodiff::ops::{Backward, Ops, OpsKind};
 use burn_cubecl::cubecl;
 #[cfg(feature = "cuda")]
 use burn_cubecl::cubecl::cuda::CudaRuntime;
-use burn_cubecl::cubecl::{prelude::*, server::Bindings};
+use burn_cubecl::cubecl::{prelude::*, server::KernelArguments};
 use burn_cubecl::fusion::FusionCubeRuntime;
 use burn_cubecl::kernel::into_contiguous;
 use burn_cubecl::ops::numeric::empty_device;
@@ -298,11 +298,11 @@ fn div_ceil_u32(value: u32, divisor: u32) -> u32 {
 
 #[cube(launch)]
 fn dense_causal_attention_cube_kernel(
-    query: &Tensor<Line<f32>>,
-    value: &Tensor<Line<f32>>,
-    context: &mut Tensor<Line<f32>>,
-    decay: &Tensor<Line<f32>>,
-    params: &Tensor<Line<f32>>,
+    query: &Tensor<f32>,
+    value: &Tensor<f32>,
+    context: &mut Tensor<f32>,
+    decay: &Tensor<f32>,
+    params: &Tensor<f32>,
     #[comptime] max_fused_time: usize,
 ) {
     let batch = u32::cast_from(params[0]) as usize;
@@ -323,12 +323,12 @@ fn dense_causal_attention_cube_kernel(
         terminate!();
     }
 
-    let mut row_scores = SharedMemory::<f32>::new_lined(max_fused_time, 1usize);
+    let mut row_scores = SharedMemory::<f32>::new_aligned(max_fused_time, 1usize);
     let decay_value = decay[h * decay.stride(0)];
 
     let mut col = lane;
     while col < row {
-        let mut dot = Line::cast_from(0u32);
+        let mut dot = f32::cast_from(0u32);
         let mut l = 0usize;
         while l < latent {
             let q_row = query[b * query.stride(0)
@@ -342,7 +342,7 @@ fn dense_causal_attention_cube_kernel(
             dot += q_row * q_col;
             l += 1usize;
         }
-        let exponent = Line::cast_from((row - col) as u32);
+        let exponent = f32::cast_from((row - col) as u32);
         row_scores[col] = dot * decay_value.powf(exponent);
         col += CUBE_DIM_X as usize;
     }
@@ -357,7 +357,7 @@ fn dense_causal_attention_cube_kernel(
     if value_heads == 1usize {
         value_head = 0usize;
     }
-    let mut acc = Line::cast_from(0u32);
+    let mut acc = f32::cast_from(0u32);
     col = 0usize;
     while col < row {
         let value_index = b * value.stride(0)
@@ -385,7 +385,7 @@ where
     R: CubeRuntime + 'static,
 {
     let prim = tensor.clone().into_primitive().tensor();
-    let fusion: FusionTensor<FusionCubeRuntime<R, BT>> = try_cast_primitive::<B, _>(prim)?;
+    let fusion: FusionTensor<FusionCubeRuntime<R>> = try_cast_primitive::<B, _>(prim)?;
     let client = fusion.client.clone();
     let cube = client.resolve_tensor_float::<CubeBackend<R, f32, i32, BT>>(fusion);
     if cube.dtype != DType::F32 {
@@ -416,7 +416,7 @@ where
 
 fn extract_fusion_autodiff_inner<B, BT, R>(
     value: B::FloatTensorPrimitive,
-) -> Option<FusionTensor<FusionCubeRuntime<R, BT>>>
+) -> Option<FusionTensor<FusionCubeRuntime<R>>>
 where
     B: BackendTrait,
     B::FloatTensorPrimitive: 'static,
@@ -428,7 +428,7 @@ where
         let inner = <WgpuFusionAutodiffBackend<BT> as AutodiffBackend>::inner(query_ad);
         let boxed: Box<dyn Any> = Box::new(inner);
         return boxed
-            .downcast::<FusionTensor<FusionCubeRuntime<R, BT>>>()
+            .downcast::<FusionTensor<FusionCubeRuntime<R>>>()
             .ok()
             .map(|boxed| *boxed);
     }
@@ -439,7 +439,7 @@ where
             let inner = <CudaFusionAutodiffBackend<BT> as AutodiffBackend>::inner(query_ad);
             let boxed: Box<dyn Any> = Box::new(inner);
             return boxed
-                .downcast::<FusionTensor<FusionCubeRuntime<R, BT>>>()
+                .downcast::<FusionTensor<FusionCubeRuntime<R>>>()
                 .ok()
                 .map(|boxed| *boxed);
         }
@@ -448,7 +448,7 @@ where
 }
 
 fn wrap_fusion_autodiff_inner<B, BT, R>(
-    value: FusionTensor<FusionCubeRuntime<R, BT>>,
+    value: FusionTensor<FusionCubeRuntime<R>>,
 ) -> Option<B::FloatTensorPrimitive>
 where
     B: BackendTrait,
@@ -459,7 +459,7 @@ where
     if TypeId::of::<R>() == TypeId::of::<WgpuRuntime>() {
         let boxed: Box<dyn Any> = Box::new(value);
         let inner = boxed
-            .downcast::<FusionTensor<FusionCubeRuntime<WgpuRuntime, BT>>>()
+            .downcast::<FusionTensor<FusionCubeRuntime<WgpuRuntime>>>()
             .ok()
             .map(|boxed| *boxed)?;
         let ad = <WgpuFusionAutodiffBackend<BT> as AutodiffBackend>::from_inner(inner);
@@ -470,7 +470,7 @@ where
         if TypeId::of::<R>() == TypeId::of::<CudaRuntime>() {
             let boxed: Box<dyn Any> = Box::new(value);
             let inner = boxed
-                .downcast::<FusionTensor<FusionCubeRuntime<CudaRuntime, BT>>>()
+                .downcast::<FusionTensor<FusionCubeRuntime<CudaRuntime>>>()
                 .ok()
                 .map(|boxed| *boxed)?;
             let ad = <CudaFusionAutodiffBackend<BT> as AutodiffBackend>::from_inner(inner);

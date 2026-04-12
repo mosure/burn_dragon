@@ -3,7 +3,7 @@ name = "burn_dragon_vision"
 description = "Foveation and vision sampling utilities for burn dragon"
 version = "0.5.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.92"
 authors = ["mosure <mitchell@mosure.me>"]
 license = "MIT OR Apache-2.0"
 keywords = ["vision", "foveation", "sampling", "burn"]
@@ -55,17 +55,17 @@ burn_dragon_core = { path = "../burn_dragon_core", version = "0.5.0", default-fe
 burn_dragon_kernel = { path = "../burn_dragon_kernel", version = "0.5.0", default-features = false }
 burn_dragon_train = { path = "../burn_dragon_train", version = "0.5.0", default-features = false, optional = true }
 anyhow = { version = "1", optional = true }
-burn = { version = "0.21.0-pre.2", default-features = false, features = ["fusion", "ndarray", "std", "wgpu"] }
-burn-autodiff = { version = "0.21.0-pre.2", optional = true }
-burn-dataset = { version = "0.21.0-pre.2", optional = true, features = ["vision"] }
-burn-ndarray = { version = "0.21.0-pre.2", optional = true }
-burn-train = { version = "0.21.0-pre.2", optional = true, default-features = false }
-burn-wgpu = { version = "0.21.0-pre.2", default-features = false, optional = true, features = ["fusion", "std", "template"] }
-burn-cubecl = { version = "0.21.0-pre.2", default-features = false, optional = true, features = ["std", "fusion"] }
-burn-fusion = { version = "0.21.0-pre.2", default-features = false, optional = true, features = ["std"] }
-burn-ir = { version = "0.21.0-pre.2", optional = true }
-burn-cuda = { version = "0.21.0-pre.2", optional = true, default-features = false, features = ["std"] }
-cubecl = { version = "0.10.0-pre.2", default-features = true, optional = true, features = ["std"] }
+burn = { version = "0.21.0-pre.3", default-features = false, features = ["fusion", "ndarray", "std", "wgpu"] }
+burn-autodiff = { version = "0.21.0-pre.3", optional = true }
+burn-dataset = { version = "0.21.0-pre.3", optional = true, features = ["vision"] }
+burn-ndarray = { version = "0.21.0-pre.3", optional = true }
+burn-train = { version = "0.21.0-pre.3", optional = true, default-features = false }
+burn-wgpu = { version = "0.21.0-pre.3", default-features = false, optional = true, features = ["fusion", "std", "template"] }
+burn-cubecl = { version = "0.21.0-pre.3", default-features = false, optional = true, features = ["std", "fusion"] }
+burn-fusion = { version = "0.21.0-pre.3", default-features = false, optional = true, features = ["std"] }
+burn-ir = { version = "0.21.0-pre.3", optional = true }
+burn-cuda = { version = "0.21.0-pre.3", optional = true, default-features = false, features = ["std"] }
+cubecl = { version = "0.10.0-pre.3", default-features = true, optional = true, features = ["std"] }
 names = { version = "0.14", optional = true }
 toml = { version = "0.9", optional = true }
 ureq = { version = "2.9", features = ["tls"], optional = true }
@@ -92,9 +92,9 @@ required-features = ["cli"]
 
 [dev-dependencies]
 bytemuck = { version = "1", features = ["derive"] }
-burn-autodiff = "0.21.0-pre.2"
+burn-autodiff = "0.21.0-pre.3"
 burn_dragon_language = { path = "../burn_dragon_language", version = "0.5.0", default-features = false, features = ["train"] }
-burn-ndarray = { version = "0.21.0-pre.2" }
+burn-ndarray = { version = "0.21.0-pre.3" }
 criterion = { version = "0.7", features = ["html_reports"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 pollster = "0.3"

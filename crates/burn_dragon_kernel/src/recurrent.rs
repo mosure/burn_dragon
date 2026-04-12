@@ -12,7 +12,7 @@ use burn_autodiff::ops::{Backward, Ops, OpsKind};
 use burn_cubecl::cubecl;
 #[cfg(feature = "cuda")]
 use burn_cubecl::cubecl::cuda::CudaRuntime;
-use burn_cubecl::cubecl::{prelude::*, server::Bindings};
+use burn_cubecl::cubecl::{prelude::*, server::KernelArguments};
 use burn_cubecl::fusion::FusionCubeRuntime;
 use burn_cubecl::kernel::into_contiguous;
 use burn_cubecl::ops::numeric::empty_device;
@@ -37,10 +37,7 @@ use self::forward_runtime::{
 };
 
 const WORKGROUP_SIZE_X: u32 = 64;
-#[cfg(feature = "cuda")]
 const RECURRENT_TILED_WORKGROUP_SIZE_X: u32 = 128;
-#[cfg(not(feature = "cuda"))]
-const RECURRENT_TILED_WORKGROUP_SIZE_X: u32 = WORKGROUP_SIZE_X;
 const META_LEN: usize = 6;
 const RECURRENT_ATTENTION_SHADER: &str = include_str!("recurrent.wgsl");
 type WgpuCubeBackend = CubeBackend<WgpuRuntime, f32, i32, u32>;
@@ -159,37 +156,25 @@ where
     {
         matches_type::<B::FloatTensorPrimitive, CubeTensor<WgpuRuntime>>()
             || matches_type::<B::FloatTensorPrimitive, WgpuCubeAutodiffTensor>()
-            || matches_type::<
-                B::FloatTensorPrimitive,
-                FusionTensor<FusionCubeRuntime<WgpuRuntime, u32>>,
-            >()
-            || matches_type::<
-                B::FloatTensorPrimitive,
-                FusionTensor<FusionCubeRuntime<WgpuRuntime, u8>>,
-            >()
+            || matches_type::<B::FloatTensorPrimitive, FusionTensor<FusionCubeRuntime<WgpuRuntime>>>(
+            )
+            || matches_type::<B::FloatTensorPrimitive, FusionTensor<FusionCubeRuntime<WgpuRuntime>>>(
+            )
             || matches_type::<B::FloatTensorPrimitive, CubeTensor<CudaRuntime>>()
             || matches_type::<B::FloatTensorPrimitive, CudaCubeAutodiffTensor>()
-            || matches_type::<
-                B::FloatTensorPrimitive,
-                FusionTensor<FusionCubeRuntime<CudaRuntime, u32>>,
-            >()
-            || matches_type::<
-                B::FloatTensorPrimitive,
-                FusionTensor<FusionCubeRuntime<CudaRuntime, u8>>,
-            >()
+            || matches_type::<B::FloatTensorPrimitive, FusionTensor<FusionCubeRuntime<CudaRuntime>>>(
+            )
+            || matches_type::<B::FloatTensorPrimitive, FusionTensor<FusionCubeRuntime<CudaRuntime>>>(
+            )
     }
     #[cfg(not(feature = "cuda"))]
     {
         matches_type::<B::FloatTensorPrimitive, CubeTensor<WgpuRuntime>>()
             || matches_type::<B::FloatTensorPrimitive, WgpuCubeAutodiffTensor>()
-            || matches_type::<
-                B::FloatTensorPrimitive,
-                FusionTensor<FusionCubeRuntime<WgpuRuntime, u32>>,
-            >()
-            || matches_type::<
-                B::FloatTensorPrimitive,
-                FusionTensor<FusionCubeRuntime<WgpuRuntime, u8>>,
-            >()
+            || matches_type::<B::FloatTensorPrimitive, FusionTensor<FusionCubeRuntime<WgpuRuntime>>>(
+            )
+            || matches_type::<B::FloatTensorPrimitive, FusionTensor<FusionCubeRuntime<WgpuRuntime>>>(
+            )
     }
 }
 
@@ -385,12 +370,12 @@ fn div_ceil_u32(value: u32, divisor: u32) -> u32 {
 
 #[cube(launch)]
 fn recurrent_attention_cube_exact_kernel(
-    query: &Tensor<Line<f32>>,
-    value: &Tensor<Line<f32>>,
-    rho_state: &mut Tensor<Line<f32>>,
-    decay: &Tensor<Line<f32>>,
-    context: &mut Tensor<Line<f32>>,
-    params: &Tensor<Line<f32>>,
+    query: &Tensor<f32>,
+    value: &Tensor<f32>,
+    rho_state: &mut Tensor<f32>,
+    decay: &Tensor<f32>,
+    context: &mut Tensor<f32>,
+    params: &Tensor<f32>,
 ) {
     let batch = u32::cast_from(params[0]) as usize;
     let heads = u32::cast_from(params[1]) as usize;
@@ -419,7 +404,7 @@ fn recurrent_attention_cube_exact_kernel(
             + e * value.stride(3);
         let value_t = value[value_index];
 
-        let mut acc = Line::cast_from(0u32);
+        let mut acc = f32::cast_from(0u32);
         let mut l = 0usize;
         while l < latent {
             let query_index = b * query.stride(0)
@@ -448,13 +433,13 @@ fn recurrent_attention_cube_exact_kernel(
 
 #[cube(launch)]
 fn recurrent_attention_cube_exact_history_kernel(
-    query: &Tensor<Line<f32>>,
-    value: &Tensor<Line<f32>>,
-    rho_state: &mut Tensor<Line<f32>>,
-    decay: &Tensor<Line<f32>>,
-    context: &mut Tensor<Line<f32>>,
-    state_history: &mut Tensor<Line<f32>>,
-    params: &Tensor<Line<f32>>,
+    query: &Tensor<f32>,
+    value: &Tensor<f32>,
+    rho_state: &mut Tensor<f32>,
+    decay: &Tensor<f32>,
+    context: &mut Tensor<f32>,
+    state_history: &mut Tensor<f32>,
+    params: &Tensor<f32>,
 ) {
     let batch = u32::cast_from(params[0]) as usize;
     let heads = u32::cast_from(params[1]) as usize;
@@ -483,7 +468,7 @@ fn recurrent_attention_cube_exact_history_kernel(
             + e * value.stride(3);
         let value_t = value[value_index];
 
-        let mut acc = Line::cast_from(0u32);
+        let mut acc = f32::cast_from(0u32);
         let mut l = 0usize;
         while l < latent {
             let query_index = b * query.stride(0)
@@ -518,12 +503,12 @@ fn recurrent_attention_cube_exact_history_kernel(
 
 #[cube(launch)]
 fn recurrent_attention_cube_tiled_kernel(
-    query: &Tensor<Line<f32>>,
-    value: &Tensor<Line<f32>>,
-    rho_state: &mut Tensor<Line<f32>>,
-    decay: &Tensor<Line<f32>>,
-    context: &mut Tensor<Line<f32>>,
-    params: &Tensor<Line<f32>>,
+    query: &Tensor<f32>,
+    value: &Tensor<f32>,
+    rho_state: &mut Tensor<f32>,
+    decay: &Tensor<f32>,
+    context: &mut Tensor<f32>,
+    params: &Tensor<f32>,
     #[comptime] query_tile_size: usize,
 ) {
     let batch = u32::cast_from(params[0]) as usize;
@@ -542,7 +527,7 @@ fn recurrent_attention_cube_tiled_kernel(
     }
     let active_e = e < embd;
 
-    let mut query_tile = SharedMemory::<f32>::new_lined(query_tile_size, 1usize);
+    let mut query_tile = SharedMemory::<f32>::new_aligned(query_tile_size, 1usize);
     let decay_value = decay[h * decay.stride(0)];
     let mut value_head = h;
     if value_heads == 1usize {
@@ -551,7 +536,7 @@ fn recurrent_attention_cube_tiled_kernel(
 
     let mut t = 0usize;
     while t < time {
-        let mut value_t = Line::cast_from(0u32);
+        let mut value_t = f32::cast_from(0u32);
         if active_e {
             let value_index = b * value.stride(0)
                 + value_head * value.stride(1)
@@ -560,19 +545,21 @@ fn recurrent_attention_cube_tiled_kernel(
             value_t = value[value_index];
         }
 
-        let mut acc = Line::cast_from(0u32);
+        let mut acc = f32::cast_from(0u32);
         let mut latent_base = 0usize;
         while latent_base < latent {
-            if lane < query_tile_size {
-                if latent_base + lane < latent {
+            let mut load_offset = lane;
+            while load_offset < query_tile_size {
+                if latent_base + load_offset < latent {
                     let query_index = b * query.stride(0)
                         + h * query.stride(1)
                         + t * query.stride(2)
-                        + (latent_base + lane) * query.stride(3);
-                    query_tile[lane] = query[query_index];
+                        + (latent_base + load_offset) * query.stride(3);
+                    query_tile[load_offset] = query[query_index];
                 } else {
-                    query_tile[lane] = Line::cast_from(0u32);
+                    query_tile[load_offset] = f32::cast_from(0u32);
                 }
+                load_offset += CUBE_DIM_X as usize;
             }
             sync_cube();
 
@@ -607,6 +594,106 @@ fn recurrent_attention_cube_tiled_kernel(
     }
 }
 
+#[cube(launch)]
+fn recurrent_attention_cube_tiled_history_kernel(
+    query: &Tensor<f32>,
+    value: &Tensor<f32>,
+    rho_state: &mut Tensor<f32>,
+    decay: &Tensor<f32>,
+    context: &mut Tensor<f32>,
+    state_history: &mut Tensor<f32>,
+    params: &Tensor<f32>,
+    #[comptime] query_tile_size: usize,
+) {
+    let batch = u32::cast_from(params[0]) as usize;
+    let heads = u32::cast_from(params[1]) as usize;
+    let value_heads = u32::cast_from(params[2]) as usize;
+    let time = u32::cast_from(params[3]) as usize;
+    let latent = u32::cast_from(params[4]) as usize;
+    let embd = u32::cast_from(params[5]) as usize;
+
+    let b = CUBE_POS_Z as usize;
+    let h = CUBE_POS_Y as usize;
+    let e = (CUBE_POS_X * CUBE_DIM_X + UNIT_POS_X) as usize;
+    let lane = UNIT_POS_X as usize;
+    if b >= batch || h >= heads {
+        terminate!();
+    }
+    let active_e = e < embd;
+
+    let mut query_tile = SharedMemory::<f32>::new_aligned(query_tile_size, 1usize);
+    let decay_value = decay[h * decay.stride(0)];
+    let mut value_head = h;
+    if value_heads == 1usize {
+        value_head = 0usize;
+    }
+
+    let mut t = 0usize;
+    while t < time {
+        let mut value_t = f32::cast_from(0u32);
+        if active_e {
+            let value_index = b * value.stride(0)
+                + value_head * value.stride(1)
+                + t * value.stride(2)
+                + e * value.stride(3);
+            value_t = value[value_index];
+        }
+
+        let mut acc = f32::cast_from(0u32);
+        let mut latent_base = 0usize;
+        while latent_base < latent {
+            let mut load_offset = lane;
+            while load_offset < query_tile_size {
+                if latent_base + load_offset < latent {
+                    let query_index = b * query.stride(0)
+                        + h * query.stride(1)
+                        + t * query.stride(2)
+                        + (latent_base + load_offset) * query.stride(3);
+                    query_tile[load_offset] = query[query_index];
+                } else {
+                    query_tile[load_offset] = f32::cast_from(0u32);
+                }
+                load_offset += CUBE_DIM_X as usize;
+            }
+            sync_cube();
+
+            let mut tile_offset = 0usize;
+            while tile_offset < query_tile_size {
+                let l = latent_base + tile_offset;
+                if active_e && l < latent {
+                    let rho_index = b * rho_state.stride(0)
+                        + h * rho_state.stride(1)
+                        + l * rho_state.stride(2)
+                        + e * rho_state.stride(3);
+                    let history_index = b * state_history.stride(0)
+                        + h * state_history.stride(1)
+                        + t * state_history.stride(2)
+                        + l * state_history.stride(3)
+                        + e * state_history.stride(4);
+                    let q = query_tile[tile_offset];
+                    let rho_prev = rho_state[rho_index];
+                    state_history[history_index] = rho_prev;
+                    acc += rho_prev * q;
+                    rho_state[rho_index] = (rho_prev + q * value_t) * decay_value;
+                }
+                tile_offset += 1usize;
+            }
+
+            sync_cube();
+            latent_base += query_tile_size;
+        }
+
+        if active_e {
+            let out_index = b * context.stride(0)
+                + h * context.stride(1)
+                + t * context.stride(2)
+                + e * context.stride(3);
+            context[out_index] = acc;
+        }
+        t += 1usize;
+    }
+}
+
 fn resolve_fusion_tensor_runtime<B, BT, R, const D: usize>(
     tensor: &BurnTensor<B, D>,
 ) -> Option<CubeTensor<R>>
@@ -617,7 +704,7 @@ where
     R: CubeRuntime + 'static,
 {
     let prim = tensor.clone().into_primitive().tensor();
-    let fusion: FusionTensor<FusionCubeRuntime<R, BT>> = try_cast_primitive::<B, _>(prim)?;
+    let fusion: FusionTensor<FusionCubeRuntime<R>> = try_cast_primitive::<B, _>(prim)?;
     let client = fusion.client.clone();
     let cube = client.resolve_tensor_float::<CubeBackend<R, f32, i32, BT>>(fusion);
     if cube.dtype != DType::F32 {

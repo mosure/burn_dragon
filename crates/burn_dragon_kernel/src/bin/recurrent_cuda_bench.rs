@@ -306,7 +306,9 @@ mod app {
     }
 
     fn memory_snapshot(device: &Device) -> MemorySnapshot {
-        let usage = <CudaRuntime as Runtime>::client(device).memory_usage();
+        let usage = <CudaRuntime as Runtime>::client(device)
+            .memory_usage()
+            .expect("cuda memory usage");
         MemorySnapshot {
             reserved: usage.bytes_reserved,
             in_use: usage.bytes_in_use,

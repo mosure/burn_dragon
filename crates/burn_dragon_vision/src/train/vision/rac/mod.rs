@@ -181,7 +181,7 @@ pub(crate) struct VisionRacModel<B: BackendTrait> {
     semantic_patch_head: Option<VisionProjectionHead<B>>,
     probe: VisionProbe<B>,
     probe_loss: burn::nn::loss::CrossEntropyLoss<B>,
-    #[module(ignore)]
+    #[module(skip)]
     pub(crate) config: VisionRacConfig,
 }
 

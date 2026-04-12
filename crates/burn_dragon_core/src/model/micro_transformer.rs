@@ -12,9 +12,9 @@ pub struct MicroTransformerBlock<B: Backend> {
     norm_mlp: LayerNorm<B>,
     mlp_in: Linear<B>,
     mlp_out: Linear<B>,
-    #[module(ignore)]
+    #[module(skip)]
     heads: usize,
-    #[module(ignore)]
+    #[module(skip)]
     head_dim: usize,
 }
 

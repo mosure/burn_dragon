@@ -3,7 +3,7 @@ name = "burn_dragon_web"
 description = "Web/WASM interface for burn_dragon"
 version = "0.5.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.92"
 authors = ["mosure <mitchell@mosure.me>"]
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/mosure/burn_bdh"
@@ -19,8 +19,8 @@ anyhow = "1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 flate2 = "1.1"
-burn = { version = "0.21.0-pre.2", default-features = false, features = ["std", "webgpu"] }
-burn-wgpu = { version = "0.21.0-pre.2", default-features = false, features = ["webgpu", "std"] }
+burn = { version = "0.21.0-pre.3", default-features = false, features = ["std", "webgpu"] }
+burn-wgpu = { version = "0.21.0-pre.3", default-features = false, features = ["webgpu", "std"] }
 burn_dragon_checkpoint = { path = "../burn_dragon_checkpoint", version = "0.5.0", default-features = false }
 burn_dragon_core = { path = "../burn_dragon_core", version = "0.5.0", default-features = false, features = ["web"] }
 burn_dragon_language = { path = "../burn_dragon_language", version = "0.5.0", default-features = false, features = ["web"] }

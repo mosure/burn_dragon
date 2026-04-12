@@ -12,7 +12,6 @@ use burn_wgpu::CubeBackend;
 type WgpuCubeBackend = CubeBackend<WgpuRuntime, f32, i32, u32>;
 #[cfg(feature = "cuda")]
 type CudaCubeBackend = CubeBackend<CudaRuntime, f32, i32, u8>;
-
 const MAMBA2_SSD_WGPU_WORKGROUP_X: u32 = 64;
 const MAMBA2_SSD_WGPU_MAX_DSTATE: usize = 64;
 #[cfg(feature = "cuda")]
@@ -128,17 +127,17 @@ pub(crate) fn fused_mamba2_ssd_forward_wgpu(
             &client,
             cube_count,
             cube_dim,
-            x_grouped.as_tensor_arg(1),
-            b_group.as_tensor_arg(1),
-            c_group.as_tensor_arg(1),
-            dt_grouped.as_tensor_arg(1),
-            a_log.as_tensor_arg(1),
-            d_skip.as_tensor_arg(1),
-            initial_ssm.as_tensor_arg(1),
-            y_grouped.as_tensor_arg(1),
-            final_ssm.as_tensor_arg(1),
-            state_history_arg.as_tensor_arg(1),
-            params.as_tensor_arg(1),
+            x_grouped.clone().into_tensor_arg(),
+            b_group.clone().into_tensor_arg(),
+            c_group.clone().into_tensor_arg(),
+            dt_grouped.clone().into_tensor_arg(),
+            a_log.clone().into_tensor_arg(),
+            d_skip.clone().into_tensor_arg(),
+            initial_ssm.clone().into_tensor_arg(),
+            y_grouped.clone().into_tensor_arg(),
+            final_ssm.clone().into_tensor_arg(),
+            state_history_arg.clone().into_tensor_arg(),
+            params.clone().into_tensor_arg(),
             MAMBA2_SSD_WGPU_MAX_DSTATE,
         );
     }
@@ -233,17 +232,17 @@ pub(crate) fn fused_mamba2_ssd_forward_cuda(
             &client,
             cube_count,
             cube_dim,
-            x_grouped.as_tensor_arg(1),
-            b_group.as_tensor_arg(1),
-            c_group.as_tensor_arg(1),
-            dt_grouped.as_tensor_arg(1),
-            a_log.as_tensor_arg(1),
-            d_skip.as_tensor_arg(1),
-            initial_ssm.as_tensor_arg(1),
-            y_grouped.as_tensor_arg(1),
-            final_ssm.as_tensor_arg(1),
-            state_history_arg.as_tensor_arg(1),
-            params.as_tensor_arg(1),
+            x_grouped.clone().into_tensor_arg(),
+            b_group.clone().into_tensor_arg(),
+            c_group.clone().into_tensor_arg(),
+            dt_grouped.clone().into_tensor_arg(),
+            a_log.clone().into_tensor_arg(),
+            d_skip.clone().into_tensor_arg(),
+            initial_ssm.clone().into_tensor_arg(),
+            y_grouped.clone().into_tensor_arg(),
+            final_ssm.clone().into_tensor_arg(),
+            state_history_arg.clone().into_tensor_arg(),
+            params.clone().into_tensor_arg(),
         );
     }
 
@@ -356,45 +355,45 @@ pub(crate) fn fused_mamba2_ssd_backward_cuda(
                 &client,
                 cube_count,
                 cube_dim,
-                x_grouped.as_tensor_arg(1),
-                b_group.as_tensor_arg(1),
-                c_group.as_tensor_arg(1),
-                dt_grouped.as_tensor_arg(1),
-                a_log.as_tensor_arg(1),
-                d_skip.as_tensor_arg(1),
-                initial_ssm.as_tensor_arg(1),
-                grad_y_grouped.as_tensor_arg(1),
-                state_history.as_tensor_arg(1),
-                grad_x_grouped.as_tensor_arg(1),
-                grad_b_group.as_tensor_arg(1),
-                grad_c_group.as_tensor_arg(1),
-                grad_dt_grouped.as_tensor_arg(1),
-                grad_a_log.as_tensor_arg(1),
-                grad_d_skip.as_tensor_arg(1),
-                grad_initial_ssm.as_tensor_arg(1),
-                params.as_tensor_arg(1),
+                x_grouped.clone().into_tensor_arg(),
+                b_group.clone().into_tensor_arg(),
+                c_group.clone().into_tensor_arg(),
+                dt_grouped.clone().into_tensor_arg(),
+                a_log.clone().into_tensor_arg(),
+                d_skip.clone().into_tensor_arg(),
+                initial_ssm.clone().into_tensor_arg(),
+                grad_y_grouped.clone().into_tensor_arg(),
+                state_history.clone().into_tensor_arg(),
+                grad_x_grouped.clone().into_tensor_arg(),
+                grad_b_group.clone().into_tensor_arg(),
+                grad_c_group.clone().into_tensor_arg(),
+                grad_dt_grouped.clone().into_tensor_arg(),
+                grad_a_log.clone().into_tensor_arg(),
+                grad_d_skip.clone().into_tensor_arg(),
+                grad_initial_ssm.clone().into_tensor_arg(),
+                params.clone().into_tensor_arg(),
             );
         } else {
             let _ = mamba2_ssd_backward_from_history_cuda_kernel::launch_unchecked::<CudaRuntime>(
                 &client,
                 cube_count,
                 cube_dim,
-                x_grouped.as_tensor_arg(1),
-                b_group.as_tensor_arg(1),
-                c_group.as_tensor_arg(1),
-                dt_grouped.as_tensor_arg(1),
-                a_log.as_tensor_arg(1),
-                d_skip.as_tensor_arg(1),
-                initial_ssm.as_tensor_arg(1),
-                grad_y_grouped.as_tensor_arg(1),
-                state_history.as_tensor_arg(1),
-                grad_x_grouped.as_tensor_arg(1),
-                grad_b_group.as_tensor_arg(1),
-                grad_c_group.as_tensor_arg(1),
-                grad_dt_grouped.as_tensor_arg(1),
-                grad_a_log.as_tensor_arg(1),
-                grad_d_skip.as_tensor_arg(1),
-                params.as_tensor_arg(1),
+                x_grouped.clone().into_tensor_arg(),
+                b_group.clone().into_tensor_arg(),
+                c_group.clone().into_tensor_arg(),
+                dt_grouped.clone().into_tensor_arg(),
+                a_log.clone().into_tensor_arg(),
+                d_skip.clone().into_tensor_arg(),
+                initial_ssm.clone().into_tensor_arg(),
+                grad_y_grouped.clone().into_tensor_arg(),
+                state_history.clone().into_tensor_arg(),
+                grad_x_grouped.clone().into_tensor_arg(),
+                grad_b_group.clone().into_tensor_arg(),
+                grad_c_group.clone().into_tensor_arg(),
+                grad_dt_grouped.clone().into_tensor_arg(),
+                grad_a_log.clone().into_tensor_arg(),
+                grad_d_skip.clone().into_tensor_arg(),
+                params.clone().into_tensor_arg(),
             );
         }
     }
@@ -437,17 +436,17 @@ fn div_ceil_u32(value: u32, divisor: u32) -> u32 {
 
 #[cube(launch_unchecked)]
 fn mamba2_ssd_forward_wgpu_kernel(
-    x_grouped: &Tensor<Line<f32>>,
-    b_group: &Tensor<Line<f32>>,
-    c_group: &Tensor<Line<f32>>,
-    dt_grouped: &Tensor<Line<f32>>,
-    a_log: &Tensor<Line<f32>>,
-    d_skip: &Tensor<Line<f32>>,
-    initial_ssm: &Tensor<Line<f32>>,
-    y_grouped: &mut Tensor<Line<f32>>,
-    final_ssm: &mut Tensor<Line<f32>>,
-    state_history: &mut Tensor<Line<f32>>,
-    params: &Tensor<Line<f32>>,
+    x_grouped: &Tensor<f32>,
+    b_group: &Tensor<f32>,
+    c_group: &Tensor<f32>,
+    dt_grouped: &Tensor<f32>,
+    a_log: &Tensor<f32>,
+    d_skip: &Tensor<f32>,
+    initial_ssm: &Tensor<f32>,
+    y_grouped: &mut Tensor<f32>,
+    final_ssm: &mut Tensor<f32>,
+    state_history: &mut Tensor<f32>,
+    params: &Tensor<f32>,
     #[comptime] max_d_state: usize,
 ) {
     let batch = u32::cast_from(params[0]) as usize;
@@ -456,8 +455,8 @@ fn mamba2_ssd_forward_wgpu_kernel(
     let heads_per_group = u32::cast_from(params[3]) as usize;
     let headdim = u32::cast_from(params[4]) as usize;
     let d_state = u32::cast_from(params[5]) as usize;
-    let has_initial = params[6] > Line::cast_from(0u32);
-    let capture_state_history = params[7] > Line::cast_from(0u32);
+    let has_initial = params[6] > f32::cast_from(0u32);
+    let capture_state_history = params[7] > f32::cast_from(0u32);
 
     let b = CUBE_POS_Z as usize;
     let ghm = CUBE_POS_Y as usize;
@@ -473,8 +472,8 @@ fn mamba2_ssd_forward_wgpu_kernel(
     let head_flat = g * heads_per_group + h;
     let active_s = s < d_state;
 
-    let mut contrib_tile = SharedMemory::<f32>::new_lined(max_d_state, 1usize);
-    let a = Line::cast_from(0u32) - a_log[head_flat * a_log.stride(0)].exp();
+    let mut contrib_tile = SharedMemory::<f32>::new_aligned(max_d_state, 1usize);
+    let a = f32::cast_from(0u32) - a_log[head_flat * a_log.stride(0)].exp();
     let d = d_skip[head_flat * d_skip.stride(0)];
     let init_idx = b * initial_ssm.stride(0)
         + g * initial_ssm.stride(1)
@@ -484,7 +483,7 @@ fn mamba2_ssd_forward_wgpu_kernel(
     let mut state = if active_s && has_initial {
         initial_ssm[init_idx]
     } else {
-        Line::cast_from(0u32)
+        f32::cast_from(0u32)
     };
 
     let mut t = 0usize;
@@ -501,7 +500,7 @@ fn mamba2_ssd_forward_wgpu_kernel(
         let x_t = x_grouped[x_idx];
         let dt_t = dt_grouped[dt_idx];
 
-        let mut contrib = Line::cast_from(0u32);
+        let mut contrib = f32::cast_from(0u32);
         if active_s {
             let b_idx = b * b_group.stride(0)
                 + t * b_group.stride(1)

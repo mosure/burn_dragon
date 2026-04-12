@@ -12,7 +12,6 @@ use burn_wgpu::CubeBackend;
 type WgpuCubeBackend = CubeBackend<WgpuRuntime, f32, i32, u32>;
 #[cfg(feature = "cuda")]
 type CudaCubeBackend = CubeBackend<CudaRuntime, f32, i32, u8>;
-
 const BC_PARAMS_LEN: usize = 6;
 const BC_WGPU_WORKGROUP_X: u32 = 64;
 #[cfg(feature = "cuda")]
@@ -87,12 +86,12 @@ pub(crate) fn fused_mamba3_bc_forward_wgpu(
             &client,
             cube_count,
             cube_dim,
-            grouped.as_tensor_arg(1),
-            weight.as_tensor_arg(1),
-            bias.as_tensor_arg(1),
-            expanded.as_tensor_arg(1),
-            inv_rms.as_tensor_arg(1),
-            params.as_tensor_arg(1),
+            grouped.clone().into_tensor_arg(),
+            weight.clone().into_tensor_arg(),
+            bias.clone().into_tensor_arg(),
+            expanded.clone().into_tensor_arg(),
+            inv_rms.clone().into_tensor_arg(),
+            params.clone().into_tensor_arg(),
             BC_WGPU_WORKGROUP_X as usize,
         );
     }
@@ -148,13 +147,13 @@ pub(crate) fn fused_mamba3_bc_backward_wgpu(
             &client,
             cube_count,
             cube_dim,
-            grouped.as_tensor_arg(1),
-            weight.as_tensor_arg(1),
-            grad_expanded.as_tensor_arg(1),
-            inv_rms.as_tensor_arg(1),
-            grad_input.as_tensor_arg(1),
-            grad_weight_contrib.as_tensor_arg(1),
-            params.as_tensor_arg(1),
+            grouped.clone().into_tensor_arg(),
+            weight.clone().into_tensor_arg(),
+            grad_expanded.clone().into_tensor_arg(),
+            inv_rms.clone().into_tensor_arg(),
+            grad_input.clone().into_tensor_arg(),
+            grad_weight_contrib.clone().into_tensor_arg(),
+            params.clone().into_tensor_arg(),
             BC_WGPU_WORKGROUP_X as usize,
         );
     }
@@ -213,12 +212,12 @@ pub(crate) fn fused_mamba3_bc_forward_cuda(
             &client,
             cube_count,
             cube_dim,
-            grouped.as_tensor_arg(1),
-            weight.as_tensor_arg(1),
-            bias.as_tensor_arg(1),
-            expanded.as_tensor_arg(1),
-            inv_rms.as_tensor_arg(1),
-            params.as_tensor_arg(1),
+            grouped.clone().into_tensor_arg(),
+            weight.clone().into_tensor_arg(),
+            bias.clone().into_tensor_arg(),
+            expanded.clone().into_tensor_arg(),
+            inv_rms.clone().into_tensor_arg(),
+            params.clone().into_tensor_arg(),
             BC_CUDA_WORKGROUP_X as usize,
         );
     }
@@ -275,13 +274,13 @@ pub(crate) fn fused_mamba3_bc_backward_cuda(
             &client,
             cube_count,
             cube_dim,
-            grouped.as_tensor_arg(1),
-            weight.as_tensor_arg(1),
-            grad_expanded.as_tensor_arg(1),
-            inv_rms.as_tensor_arg(1),
-            grad_input.as_tensor_arg(1),
-            grad_weight_contrib.as_tensor_arg(1),
-            params.as_tensor_arg(1),
+            grouped.clone().into_tensor_arg(),
+            weight.clone().into_tensor_arg(),
+            grad_expanded.clone().into_tensor_arg(),
+            inv_rms.clone().into_tensor_arg(),
+            grad_input.clone().into_tensor_arg(),
+            grad_weight_contrib.clone().into_tensor_arg(),
+            params.clone().into_tensor_arg(),
             BC_CUDA_WORKGROUP_X as usize,
         );
     }
@@ -315,12 +314,12 @@ fn params_tensor_wgpu(
 
 #[cube(launch_unchecked)]
 fn mamba3_bc_forward_wgpu_kernel(
-    grouped: &Tensor<Line<f32>>,
-    weight: &Tensor<Line<f32>>,
-    bias: &Tensor<Line<f32>>,
-    expanded: &mut Tensor<Line<f32>>,
-    inv_rms: &mut Tensor<Line<f32>>,
-    params: &Tensor<Line<f32>>,
+    grouped: &Tensor<f32>,
+    weight: &Tensor<f32>,
+    bias: &Tensor<f32>,
+    expanded: &mut Tensor<f32>,
+    inv_rms: &mut Tensor<f32>,
+    params: &Tensor<f32>,
     #[comptime] workgroup_size: usize,
 ) {
     bc_forward_wgpu_impl(
@@ -358,12 +357,12 @@ fn mamba3_bc_forward_cuda_kernel(
 
 #[cube]
 fn bc_forward_wgpu_impl(
-    grouped: &Tensor<Line<f32>>,
-    weight: &Tensor<Line<f32>>,
-    bias: &Tensor<Line<f32>>,
-    expanded: &mut Tensor<Line<f32>>,
-    inv_rms: &mut Tensor<Line<f32>>,
-    params: &Tensor<Line<f32>>,
+    grouped: &Tensor<f32>,
+    weight: &Tensor<f32>,
+    bias: &Tensor<f32>,
+    expanded: &mut Tensor<f32>,
+    inv_rms: &mut Tensor<f32>,
+    params: &Tensor<f32>,
     #[comptime] workgroup_size: usize,
 ) {
     let batch = u32::cast_from(params[0]) as usize;
@@ -382,32 +381,24 @@ fn bc_forward_wgpu_impl(
 
     let b = bt / time;
     let t = bt % time;
-    let mut partials = SharedMemory::<f32>::new_lined(workgroup_size, 1usize);
-    let mut local_sum = Line::cast_from(0u32);
-    if lane < d_state {
+    let mut partials = SharedMemory::<f32>::new_aligned(workgroup_size, 1usize);
+    let zero = f32::cast_from(0u32);
+    let local_sum = if lane < d_state {
         let input_idx = b * grouped.stride(0)
             + t * grouped.stride(1)
             + g * grouped.stride(2)
             + lane * grouped.stride(3);
         let value = grouped[input_idx];
-        local_sum = value * value;
-    }
+        value * value
+    } else {
+        zero
+    };
     partials[lane] = local_sum;
     sync_cube();
+    reduce_partials_wgpu(&mut partials, lane, workgroup_size);
 
-    let mut stride = workgroup_size / 2usize;
-    while stride > 0usize {
-        if lane < stride {
-            let lhs = partials[lane];
-            let rhs = partials[lane + stride];
-            partials[lane] = lhs + rhs;
-        }
-        sync_cube();
-        stride /= 2usize;
-    }
-
-    let one = Line::cast_from(1u32);
-    let inv_rms_row = one / (partials[0] / Line::cast_from(d_state as u32) + eps).sqrt();
+    let one = f32::cast_from(1u32);
+    let inv_rms_row = one / (partials[0] / f32::cast_from(d_state as u32) + eps).sqrt();
     if lane == 0usize {
         let inv_idx = b * inv_rms.stride(0) + t * inv_rms.stride(1) + g * inv_rms.stride(2);
         inv_rms[inv_idx] = inv_rms_row;
@@ -418,8 +409,7 @@ fn bc_forward_wgpu_impl(
             + g * grouped.stride(2)
             + lane * grouped.stride(3);
         let base = grouped[input_idx] * inv_rms_row * weight[lane * weight.stride(0)];
-        let mut head_offset = 0usize;
-        while head_offset < heads_per_group {
+        for head_offset in 0..heads_per_group {
             let h = g * heads_per_group + head_offset;
             let out_idx = b * expanded.stride(0)
                 + t * expanded.stride(1)
@@ -427,7 +417,6 @@ fn bc_forward_wgpu_impl(
                 + lane * expanded.stride(3);
             let bias_idx = h * bias.stride(0) + lane * bias.stride(1);
             expanded[out_idx] = base + bias[bias_idx];
-            head_offset += 1usize;
         }
     }
 }
@@ -506,13 +495,13 @@ fn bc_forward_cuda_impl(
 
 #[cube(launch_unchecked)]
 fn mamba3_bc_backward_wgpu_kernel(
-    grouped: &Tensor<Line<f32>>,
-    weight: &Tensor<Line<f32>>,
-    grad_expanded: &Tensor<Line<f32>>,
-    inv_rms: &Tensor<Line<f32>>,
-    grad_input: &mut Tensor<Line<f32>>,
-    grad_weight_contrib: &mut Tensor<Line<f32>>,
-    params: &Tensor<Line<f32>>,
+    grouped: &Tensor<f32>,
+    weight: &Tensor<f32>,
+    grad_expanded: &Tensor<f32>,
+    inv_rms: &Tensor<f32>,
+    grad_input: &mut Tensor<f32>,
+    grad_weight_contrib: &mut Tensor<f32>,
+    params: &Tensor<f32>,
     #[comptime] workgroup_size: usize,
 ) {
     bc_backward_wgpu_impl(
@@ -553,13 +542,13 @@ fn mamba3_bc_backward_cuda_kernel(
 
 #[cube]
 fn bc_backward_wgpu_impl(
-    grouped: &Tensor<Line<f32>>,
-    weight: &Tensor<Line<f32>>,
-    grad_expanded: &Tensor<Line<f32>>,
-    inv_rms: &Tensor<Line<f32>>,
-    grad_input: &mut Tensor<Line<f32>>,
-    grad_weight_contrib: &mut Tensor<Line<f32>>,
-    params: &Tensor<Line<f32>>,
+    grouped: &Tensor<f32>,
+    weight: &Tensor<f32>,
+    grad_expanded: &Tensor<f32>,
+    inv_rms: &Tensor<f32>,
+    grad_input: &mut Tensor<f32>,
+    grad_weight_contrib: &mut Tensor<f32>,
+    params: &Tensor<f32>,
     #[comptime] workgroup_size: usize,
 ) {
     let batch = u32::cast_from(params[0]) as usize;
@@ -579,30 +568,27 @@ fn bc_backward_wgpu_impl(
     let t = bt % time;
     let inv_idx = b * inv_rms.stride(0) + t * inv_rms.stride(1) + g * inv_rms.stride(2);
     let inv_rms_row = inv_rms[inv_idx];
-    let mut partials = SharedMemory::<f32>::new_lined(workgroup_size, 1usize);
-    let mut dot_local = Line::cast_from(0u32);
+    let mut partials = SharedMemory::<f32>::new_aligned(workgroup_size, 1usize);
+    let zero = f32::cast_from(0u32);
+    let mut dot_local = zero;
 
-    let mut grad_sum = Line::cast_from(0u32);
-    let mut value = Line::cast_from(0u32);
-    let mut grad_normalized = Line::cast_from(0u32);
+    let mut grad_sum = zero;
     if lane < d_state {
         let input_idx = b * grouped.stride(0)
             + t * grouped.stride(1)
             + g * grouped.stride(2)
             + lane * grouped.stride(3);
-        value = grouped[input_idx];
+        let value = grouped[input_idx];
         let normalized = value * inv_rms_row;
-        let mut head_offset = 0usize;
-        while head_offset < heads_per_group {
+        for head_offset in 0..heads_per_group {
             let h = g * heads_per_group + head_offset;
             let grad_idx = b * grad_expanded.stride(0)
                 + t * grad_expanded.stride(1)
                 + h * grad_expanded.stride(2)
                 + lane * grad_expanded.stride(3);
             grad_sum += grad_expanded[grad_idx];
-            head_offset += 1usize;
         }
-        grad_normalized = grad_sum * weight[lane * weight.stride(0)];
+        let grad_normalized = grad_sum * weight[lane * weight.stride(0)];
         dot_local = grad_normalized * value;
         let grad_weight_idx = b * grad_weight_contrib.stride(0)
             + t * grad_weight_contrib.stride(1)
@@ -613,25 +599,21 @@ fn bc_backward_wgpu_impl(
 
     partials[lane] = dot_local;
     sync_cube();
-    let mut stride = workgroup_size / 2usize;
-    while stride > 0usize {
-        if lane < stride {
-            let lhs = partials[lane];
-            let rhs = partials[lane + stride];
-            partials[lane] = lhs + rhs;
-        }
-        sync_cube();
-        stride /= 2usize;
-    }
+    reduce_partials_wgpu(&mut partials, lane, workgroup_size);
 
     if lane < d_state {
         let input_idx = b * grad_input.stride(0)
             + t * grad_input.stride(1)
             + g * grad_input.stride(2)
             + lane * grad_input.stride(3);
+        let value = grouped[b * grouped.stride(0)
+            + t * grouped.stride(1)
+            + g * grouped.stride(2)
+            + lane * grouped.stride(3)];
+        let grad_normalized = grad_sum * weight[lane * weight.stride(0)];
         grad_input[input_idx] = grad_normalized * inv_rms_row
             - value * partials[0] * inv_rms_row * inv_rms_row * inv_rms_row
-                / Line::cast_from(d_state as u32);
+                / f32::cast_from(d_state as u32);
     }
 }
 
@@ -734,6 +716,70 @@ fn bc_backward_cuda_impl(
 #[cfg(feature = "cuda")]
 #[cube]
 fn reduce_partials_cuda(
+    partials: &mut SharedMemory<f32>,
+    lane: usize,
+    #[comptime] workgroup_size: usize,
+) {
+    if comptime!(workgroup_size >= 128usize) {
+        if lane < 64usize {
+            let rhs = partials[lane + 64usize];
+            let lhs = partials[lane];
+            partials[lane] = lhs + rhs;
+        }
+        sync_cube();
+    }
+    if comptime!(workgroup_size >= 64usize) {
+        if lane < 32usize {
+            let rhs = partials[lane + 32usize];
+            let lhs = partials[lane];
+            partials[lane] = lhs + rhs;
+        }
+        sync_cube();
+    }
+    if comptime!(workgroup_size >= 32usize) {
+        if lane < 16usize {
+            let rhs = partials[lane + 16usize];
+            let lhs = partials[lane];
+            partials[lane] = lhs + rhs;
+        }
+        sync_cube();
+    }
+    if comptime!(workgroup_size >= 16usize) {
+        if lane < 8usize {
+            let rhs = partials[lane + 8usize];
+            let lhs = partials[lane];
+            partials[lane] = lhs + rhs;
+        }
+        sync_cube();
+    }
+    if comptime!(workgroup_size >= 8usize) {
+        if lane < 4usize {
+            let rhs = partials[lane + 4usize];
+            let lhs = partials[lane];
+            partials[lane] = lhs + rhs;
+        }
+        sync_cube();
+    }
+    if comptime!(workgroup_size >= 4usize) {
+        if lane < 2usize {
+            let rhs = partials[lane + 2usize];
+            let lhs = partials[lane];
+            partials[lane] = lhs + rhs;
+        }
+        sync_cube();
+    }
+    if comptime!(workgroup_size >= 2usize) {
+        if lane < 1usize {
+            let rhs = partials[lane + 1usize];
+            let lhs = partials[lane];
+            partials[lane] = lhs + rhs;
+        }
+        sync_cube();
+    }
+}
+
+#[cube]
+fn reduce_partials_wgpu(
     partials: &mut SharedMemory<f32>,
     lane: usize,
     #[comptime] workgroup_size: usize,

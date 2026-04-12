@@ -30,15 +30,15 @@ pub struct VisionRacVelocityBackbone<B: Backend> {
     token_norm: DragonNorm<B>,
     hidden: Option<Linear<B>>,
     out: Linear<B>,
-    #[module(ignore)]
+    #[module(skip)]
     state_channels: usize,
-    #[module(ignore)]
+    #[module(skip)]
     observe_steps: usize,
-    #[module(ignore)]
+    #[module(skip)]
     backprop_steps: usize,
-    #[module(ignore)]
+    #[module(skip)]
     disable_writes: bool,
-    #[module(ignore)]
+    #[module(skip)]
     velocity_tanh_scale: f32,
 }
 

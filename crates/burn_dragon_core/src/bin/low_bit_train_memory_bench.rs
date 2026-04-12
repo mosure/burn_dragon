@@ -46,7 +46,9 @@ fn init_wgpu(device: &<WgpuAutodiffBackend as BackendTrait>::Device) {
 }
 
 fn memory_snapshot_wgpu(device: &<WgpuAutodiffBackend as BackendTrait>::Device) -> MemorySnapshot {
-    let usage = <WgpuRuntime as Runtime>::client(device).memory_usage();
+    let usage = <WgpuRuntime as Runtime>::client(device)
+        .memory_usage()
+        .expect("wgpu memory usage");
     MemorySnapshot {
         reserved: usage.bytes_reserved,
         in_use: usage.bytes_in_use,
@@ -55,7 +57,9 @@ fn memory_snapshot_wgpu(device: &<WgpuAutodiffBackend as BackendTrait>::Device) 
 
 #[cfg(feature = "cuda")]
 fn memory_snapshot_cuda(device: &<CudaAutodiffBackend as BackendTrait>::Device) -> MemorySnapshot {
-    let usage = <CudaRuntime as Runtime>::client(device).memory_usage();
+    let usage = <CudaRuntime as Runtime>::client(device)
+        .memory_usage()
+        .expect("cuda memory usage");
     MemorySnapshot {
         reserved: usage.bytes_reserved,
         in_use: usage.bytes_in_use,

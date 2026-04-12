@@ -172,6 +172,7 @@ fn run_case(case: BenchCase, device: &Device) -> CaseResult {
 
     let reserved_before = <WgpuRuntime as Runtime>::client(device)
         .memory_usage()
+        .expect("wgpu memory usage")
         .bytes_reserved;
     let reference_ms = measure_ms(repetitions, || {
         let _ = dense_causal_attention_reference(query.clone(), value.clone(), decay.clone());
@@ -188,6 +189,7 @@ fn run_case(case: BenchCase, device: &Device) -> CaseResult {
     });
     let reserved_after = <WgpuRuntime as Runtime>::client(device)
         .memory_usage()
+        .expect("wgpu memory usage")
         .bytes_reserved;
 
     let (context_max_abs, context_rmse) = diff_metrics(reference_output, fused_output);

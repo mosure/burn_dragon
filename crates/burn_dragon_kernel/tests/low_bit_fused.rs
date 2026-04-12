@@ -6,15 +6,16 @@ use burn_autodiff::checkpoint::strategy::BalancedCheckpointing;
 use burn_cubecl::CubeBackend;
 #[cfg(feature = "cuda")]
 use burn_cuda::Cuda;
+#[cfg(feature = "cuda")]
+use burn_dragon_kernel::api::low_bit::try_fused_packed_lowrank_training_autodiff_cuda_device_projection_scale;
 use burn_dragon_kernel::api::low_bit::{
     pack_decoder_input_codes_i8x4, pack_decoder_weight_codes_i8x4, pack_lowrank_input_codes_i8x4,
     pack_lowrank_weight_codes_i8x4, packed_decoder_tail_device_reference,
     packed_lowrank_projection_device_reference, try_cube_fused_packed_decoder_tail_wgpu,
     try_cube_fused_packed_lowrank_projection_wgpu, try_fused_packed_decoder_tail,
     try_fused_packed_decoder_tail_training_autodiff, try_fused_packed_lowrank_projection,
-    try_fused_packed_lowrank_training_autodiff,
-    try_fused_packed_lowrank_training_autodiff_cuda_device_projection_scale,
-    try_wgpu_packed_dot_decoder_tail, try_wgpu_packed_dot_decoder_tail_device_scale,
+    try_fused_packed_lowrank_training_autodiff, try_wgpu_packed_dot_decoder_tail,
+    try_wgpu_packed_dot_decoder_tail_device_scale,
     try_wgpu_packed_dot_decoder_tail_prepacked_input_device_scale,
     try_wgpu_packed_dot_lowrank_projection, try_wgpu_packed_dot_lowrank_projection_device_scale,
     try_wgpu_packed_dot_lowrank_projection_from_f32_device_scale,

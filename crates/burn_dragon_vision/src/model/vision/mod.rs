@@ -38,6 +38,7 @@ mod config;
 mod embedding;
 mod pyramid_ops;
 mod pyramid_runtime;
+#[cfg(feature = "train")]
 mod rac;
 mod rho_stream;
 mod rollout_state;
@@ -57,6 +58,7 @@ pub use pyramid_ops::{
     StageAwareHostProfileSnapshot, stage_aware_host_profile_reset,
     stage_aware_host_profile_snapshot,
 };
+#[cfg(feature = "train")]
 pub use rac::{VisionRacVelocityBackbone, VisionRacVelocityOutput};
 pub use rollout_state::VisionRolloutState;
 
@@ -100,24 +102,24 @@ pub struct VisionDragon<B: Backend> {
     embed_dim: usize,
     mlp_internal_dim_multiplier: usize,
     use_cls_token: bool,
-    #[module(ignore)]
+    #[module(skip)]
     backbone_kind: VisionBackboneKind,
-    #[module(ignore)]
+    #[module(skip)]
     normalization: DragonNormConfig,
-    #[module(ignore)]
+    #[module(skip)]
     image_size: usize,
-    #[module(ignore)]
+    #[module(skip)]
     in_channels: usize,
-    #[module(ignore)]
+    #[module(skip)]
     projection_dim: usize,
     attention_mode: VisionAttentionMode,
     use_alibi: bool,
     alibi_slopes: Option<Tensor<B, 1>>,
     latent_activation: VisionLatentActivation,
     kernel: FusedKernelConfig,
-    #[module(ignore)]
+    #[module(skip)]
     trm_graph: VisionTrmGraphConfig,
-    #[module(ignore)]
+    #[module(skip)]
     rho_stream: VisionRhoStreamConfig,
     cellular_step_mode_embeddings: Option<Param<Tensor<B, 2>>>,
     cellular_query_mode_offsets: Option<Param<Tensor<B, 2>>>,

@@ -32,7 +32,9 @@ fn init_wgpu_runtime(device: &<WgpuBackend as Backend>::Device) {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn memory_snapshot(device: &<WgpuBackend as Backend>::Device) -> MemorySnapshot {
-    let usage = <WgpuRuntime as Runtime>::client(device).memory_usage();
+    let usage = <WgpuRuntime as Runtime>::client(device)
+        .memory_usage()
+        .expect("wgpu memory usage");
     MemorySnapshot {
         bytes_in_use: usage.bytes_in_use,
         bytes_reserved: usage.bytes_reserved,

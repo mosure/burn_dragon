@@ -990,17 +990,16 @@ fn try_accelerated_depthwise_conv_forward_core_cuda_fusion<
 where
     B::FloatTensorPrimitive: 'static,
 {
-    if !matches_type::<B::FloatTensorPrimitive, FusionTensor<FusionCubeRuntime<CudaRuntime, BT>>>()
-    {
+    if !matches_type::<B::FloatTensorPrimitive, FusionTensor<FusionCubeRuntime<CudaRuntime>>>() {
         return None;
     }
 
-    let x_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime, BT>> =
+    let x_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime>> =
         try_cast_primitive::<B, _>(x.into_primitive().tensor())?;
     let client = x_fusion.client.clone();
-    let conv_weight_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime, BT>> =
+    let conv_weight_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime>> =
         try_cast_primitive::<B, _>(conv_weight.into_primitive().tensor())?;
-    let conv_bias_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime, BT>> =
+    let conv_bias_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime>> =
         try_cast_primitive::<B, _>(conv_bias.into_primitive().tensor())?;
     let [batch, views, channels, _time] = client
         .resolve_tensor_float::<CubeBackend<CudaRuntime, f32, i32, BT>>(x_fusion.clone())
@@ -1020,7 +1019,7 @@ where
         client.resolve_tensor_float::<CubeBackend<CudaRuntime, f32, i32, BT>>(conv_bias_fusion);
     let state_raw = match state {
         Some(state) => {
-            let state_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime, BT>> =
+            let state_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime>> =
                 try_cast_primitive::<B, _>(state.into_primitive().tensor())?;
             client.resolve_tensor_float::<CubeBackend<CudaRuntime, f32, i32, BT>>(state_fusion)
         }
@@ -1185,17 +1184,16 @@ fn try_accelerated_rmsnorm_gated_forward_core_cuda_fusion<
 where
     B::FloatTensorPrimitive: 'static,
 {
-    if !matches_type::<B::FloatTensorPrimitive, FusionTensor<FusionCubeRuntime<CudaRuntime, BT>>>()
-    {
+    if !matches_type::<B::FloatTensorPrimitive, FusionTensor<FusionCubeRuntime<CudaRuntime>>>() {
         return None;
     }
 
-    let y_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime, BT>> =
+    let y_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime>> =
         try_cast_primitive::<B, _>(y.into_primitive().tensor())?;
     let client = y_fusion.client.clone();
-    let z_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime, BT>> =
+    let z_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime>> =
         try_cast_primitive::<B, _>(z.into_primitive().tensor())?;
-    let weight_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime, BT>> =
+    let weight_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime>> =
         try_cast_primitive::<B, _>(weight.into_primitive().tensor())?;
 
     let y_raw = client.resolve_tensor_float::<CubeBackend<CudaRuntime, f32, i32, BT>>(y_fusion);
@@ -2545,7 +2543,7 @@ where
 }
 
 fn wrap_fusion_autodiff_inner<B, BT, R>(
-    value: FusionTensor<FusionCubeRuntime<R, BT>>,
+    value: FusionTensor<FusionCubeRuntime<R>>,
 ) -> Option<B::FloatTensorPrimitive>
 where
     B: BackendTrait,
@@ -2556,7 +2554,7 @@ where
     if TypeId::of::<R>() == TypeId::of::<WgpuRuntime>() {
         let boxed: Box<dyn Any> = Box::new(value);
         let inner = boxed
-            .downcast::<FusionTensor<FusionCubeRuntime<WgpuRuntime, BT>>>()
+            .downcast::<FusionTensor<FusionCubeRuntime<WgpuRuntime>>>()
             .ok()
             .map(|boxed| *boxed)?;
         let ad = <WgpuFusionAutodiffBackend<BT> as AutodiffBackend>::from_inner(inner);
@@ -2567,7 +2565,7 @@ where
         if TypeId::of::<R>() == TypeId::of::<CudaRuntime>() {
             let boxed: Box<dyn Any> = Box::new(value);
             let inner = boxed
-                .downcast::<FusionTensor<FusionCubeRuntime<CudaRuntime, BT>>>()
+                .downcast::<FusionTensor<FusionCubeRuntime<CudaRuntime>>>()
                 .ok()
                 .map(|boxed| *boxed)?;
             let ad = <CudaFusionAutodiffBackend<BT> as AutodiffBackend>::from_inner(inner);

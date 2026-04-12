@@ -5,7 +5,7 @@ use burn::tensor::Tensor as BurnTensor;
 use burn::tensor::backend::{AutodiffBackend, Backend as BackendTrait};
 use burn::tensor::{DType, Shape, TensorData, TensorPrimitive};
 use burn_autodiff::Autodiff;
-use burn_cubecl::cubecl::{prelude::*, server::Bindings};
+use burn_cubecl::cubecl::{prelude::*, server::KernelArguments};
 use burn_cubecl::fusion::FusionCubeRuntime;
 use burn_cubecl::kernel::into_contiguous;
 use burn_cubecl::ops::numeric::empty_device;
@@ -361,13 +361,12 @@ where
     B::FloatTensorPrimitive: 'static,
     BT: BoolElement + 'static,
 {
-    if !matches_type::<B::FloatTensorPrimitive, FusionTensor<FusionCubeRuntime<WgpuRuntime, BT>>>()
-    {
+    if !matches_type::<B::FloatTensorPrimitive, FusionTensor<FusionCubeRuntime<WgpuRuntime>>>() {
         return None;
     }
 
     let prim_query = query.clone().into_primitive().tensor();
-    let fusion_query: FusionTensor<FusionCubeRuntime<WgpuRuntime, BT>> =
+    let fusion_query: FusionTensor<FusionCubeRuntime<WgpuRuntime>> =
         try_cast_primitive::<B, _>(prim_query)?;
     let fusion_client = fusion_query.client.clone();
     let query =
@@ -548,7 +547,7 @@ fn local_grid_rho_attention_wgsl_runtime<R: CubeRuntime>(
         LocalGridRhoAttentionKernel,
         CubeDim::new_3d(WORKGROUP_SIZE_X, WORKGROUP_SIZE_Y, 1),
     );
-    let bindings = Bindings::new().with_buffers(vec![
+    let bindings = KernelArguments::new().with_buffers(vec![
         query.handle.clone().binding(),
         value.handle.clone().binding(),
         rho.handle.clone().binding(),
@@ -558,9 +557,7 @@ fn local_grid_rho_attention_wgsl_runtime<R: CubeRuntime>(
         meta.handle.clone().binding(),
     ]);
     let dispatch_start = profile_enabled().then(Instant::now);
-    client
-        .launch(Box::new(kernel), count, bindings)
-        .expect("launch local grid rho kernel");
+    client.launch(Box::new(kernel), count, bindings);
     if let Some(start) = dispatch_start {
         profile_record(&LOCAL_GRID_RHO_PROFILE, |state| {
             state.launches = state.launches.saturating_add(1);
@@ -584,8 +581,7 @@ where
     BT: BoolElement + 'static,
 {
     let prim = tensor.clone().into_primitive().tensor();
-    let fusion: FusionTensor<FusionCubeRuntime<WgpuRuntime, BT>> =
-        try_cast_primitive::<B, _>(prim)?;
+    let fusion: FusionTensor<FusionCubeRuntime<WgpuRuntime>> = try_cast_primitive::<B, _>(prim)?;
     let client = fusion.client.clone();
     let cube = client.resolve_tensor_float::<CubeBackend<WgpuRuntime, f32, i32, BT>>(fusion);
     if cube.dtype != DType::F32 {
@@ -690,7 +686,9 @@ mod tests {
     }
 
     fn memory_snapshot(device: &<Backend as BackendTrait>::Device) -> MemorySnapshot {
-        let usage = <WgpuRuntime as Runtime>::client(device).memory_usage();
+        let usage = <WgpuRuntime as Runtime>::client(device)
+            .memory_usage()
+            .expect("wgpu memory usage");
         MemorySnapshot {
             reserved: usage.bytes_reserved,
             in_use: usage.bytes_in_use,

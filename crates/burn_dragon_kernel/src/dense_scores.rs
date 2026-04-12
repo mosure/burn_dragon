@@ -8,7 +8,7 @@ use burn_autodiff::Autodiff;
 use burn_autodiff::checkpoint::{base::Checkpointer, strategy::NoCheckpointing};
 use burn_autodiff::grads::Gradients;
 use burn_autodiff::ops::{Backward, Ops, OpsKind};
-use burn_cubecl::cubecl::{prelude::*, server::Bindings};
+use burn_cubecl::cubecl::{prelude::*, server::KernelArguments};
 use burn_cubecl::fusion::FusionCubeRuntime;
 use burn_cubecl::kernel::into_contiguous;
 use burn_cubecl::ops::numeric::empty_device;
@@ -238,13 +238,12 @@ where
     B::FloatTensorPrimitive: 'static,
     BT: BoolElement + 'static,
 {
-    if !matches_type::<B::FloatTensorPrimitive, FusionTensor<FusionCubeRuntime<WgpuRuntime, BT>>>()
-    {
+    if !matches_type::<B::FloatTensorPrimitive, FusionTensor<FusionCubeRuntime<WgpuRuntime>>>() {
         return None;
     }
 
     let prim_query = query.clone().into_primitive().tensor();
-    let fusion_query: FusionTensor<FusionCubeRuntime<WgpuRuntime, BT>> =
+    let fusion_query: FusionTensor<FusionCubeRuntime<WgpuRuntime>> =
         try_cast_primitive::<B, _>(prim_query)?;
     let fusion_client = fusion_query.client.clone();
     let query =
@@ -306,13 +305,12 @@ where
     B::FloatTensorPrimitive: 'static,
     BT: BoolElement + 'static,
 {
-    if !matches_type::<B::FloatTensorPrimitive, FusionTensor<FusionCubeRuntime<WgpuRuntime, BT>>>()
-    {
+    if !matches_type::<B::FloatTensorPrimitive, FusionTensor<FusionCubeRuntime<WgpuRuntime>>>() {
         return None;
     }
 
     let prim_query = query.clone().into_primitive().tensor();
-    let fusion_query: FusionTensor<FusionCubeRuntime<WgpuRuntime, BT>> =
+    let fusion_query: FusionTensor<FusionCubeRuntime<WgpuRuntime>> =
         try_cast_primitive::<B, _>(prim_query)?;
     let fusion_client = fusion_query.client.clone();
     let query =
@@ -426,7 +424,7 @@ where
 
     let prim_query = query.clone().into_primitive().tensor();
     let query_ad: WgpuFusionAutodiffTensor<BT> = try_cast_primitive::<B, _>(prim_query)?;
-    let fusion_query: FusionTensor<FusionCubeRuntime<WgpuRuntime, BT>> =
+    let fusion_query: FusionTensor<FusionCubeRuntime<WgpuRuntime>> =
         <WgpuFusionAutodiffBackend<BT> as AutodiffBackend>::inner(query_ad.clone());
     let fusion_client = fusion_query.client.clone();
     let query =
@@ -437,7 +435,7 @@ where
 
     let prim_slopes = slopes.clone().into_primitive().tensor();
     let slopes_ad: WgpuFusionAutodiffTensor<BT> = try_cast_primitive::<B, _>(prim_slopes)?;
-    let fusion_slopes: FusionTensor<FusionCubeRuntime<WgpuRuntime, BT>> =
+    let fusion_slopes: FusionTensor<FusionCubeRuntime<WgpuRuntime>> =
         <WgpuFusionAutodiffBackend<BT> as AutodiffBackend>::inner(slopes_ad.clone());
     let slopes =
         fusion_client.resolve_tensor_float::<CubeBackend<WgpuRuntime, f32, i32, BT>>(fusion_slopes);
@@ -447,7 +445,7 @@ where
 
     let prim_meta = meta.clone().into_primitive().tensor();
     let meta_ad: WgpuFusionAutodiffTensor<BT> = try_cast_primitive::<B, _>(prim_meta)?;
-    let fusion_meta: FusionTensor<FusionCubeRuntime<WgpuRuntime, BT>> =
+    let fusion_meta: FusionTensor<FusionCubeRuntime<WgpuRuntime>> =
         <WgpuFusionAutodiffBackend<BT> as AutodiffBackend>::inner(meta_ad);
     let meta =
         fusion_client.resolve_tensor_float::<CubeBackend<WgpuRuntime, f32, i32, BT>>(fusion_meta);
@@ -531,8 +529,8 @@ where
     BT: BoolElement + 'static,
 {
     type State = (
-        FusionTensor<FusionCubeRuntime<WgpuRuntime, BT>>,
-        FusionTensor<FusionCubeRuntime<WgpuRuntime, BT>>,
+        FusionTensor<FusionCubeRuntime<WgpuRuntime>>,
+        FusionTensor<FusionCubeRuntime<WgpuRuntime>>,
     );
 
     fn backward(
@@ -571,7 +569,7 @@ fn fused_dense_scores_autodiff_wgpu(
 fn fused_dense_scores_autodiff_fusion_wgpu<BT: BoolElement + 'static>(
     query: WgpuFusionAutodiffTensor<BT>,
     slopes: WgpuFusionAutodiffTensor<BT>,
-    scores: FusionTensor<FusionCubeRuntime<WgpuRuntime, BT>>,
+    scores: FusionTensor<FusionCubeRuntime<WgpuRuntime>>,
 ) -> WgpuFusionAutodiffTensor<BT> {
     let query_inner = <WgpuFusionAutodiffBackend<BT> as AutodiffBackend>::inner(query.clone());
     let slopes_inner = <WgpuFusionAutodiffBackend<BT> as AutodiffBackend>::inner(slopes.clone());
@@ -610,15 +608,13 @@ fn dense_row_l1_scores_wgsl_runtime<R: CubeRuntime>(
         DenseRowL1ScoresKernel,
         CubeDim::new_3d(WORKGROUP_SIZE_X, 1, 1),
     );
-    let bindings = Bindings::new().with_buffers(vec![
+    let bindings = KernelArguments::new().with_buffers(vec![
         query.handle.clone().binding(),
         scores.handle.clone().binding(),
         slopes.handle.clone().binding(),
         meta.handle.clone().binding(),
     ]);
-    client
-        .launch(Box::new(kernel), count, bindings)
-        .expect("launch dense row_l1 scores kernel");
+    client.launch(Box::new(kernel), count, bindings);
     scores
 }
 
@@ -647,16 +643,14 @@ fn dense_row_l1_scores_and_denom_wgsl_runtime<R: CubeRuntime>(
         DenseRowL1ScoresWithDenomKernel,
         CubeDim::new_3d(WORKGROUP_SIZE_X, 1, 1),
     );
-    let bindings = Bindings::new().with_buffers(vec![
+    let bindings = KernelArguments::new().with_buffers(vec![
         query.handle.clone().binding(),
         scores.handle.clone().binding(),
         slopes.handle.clone().binding(),
         meta.handle.clone().binding(),
         denom.handle.clone().binding(),
     ]);
-    client
-        .launch(Box::new(kernel), count, bindings)
-        .expect("launch dense row_l1 scores+denom kernel");
+    client.launch(Box::new(kernel), count, bindings);
     (scores, denom)
 }
 
@@ -673,8 +667,7 @@ where
     BT: BoolElement + 'static,
 {
     let prim = tensor.clone().into_primitive().tensor();
-    let fusion: FusionTensor<FusionCubeRuntime<WgpuRuntime, BT>> =
-        try_cast_primitive::<B, _>(prim)?;
+    let fusion: FusionTensor<FusionCubeRuntime<WgpuRuntime>> = try_cast_primitive::<B, _>(prim)?;
     let client = fusion.client.clone();
     let cube = client.resolve_tensor_float::<CubeBackend<WgpuRuntime, f32, i32, BT>>(fusion);
     if cube.dtype != DType::F32 {

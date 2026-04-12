@@ -12,7 +12,6 @@ use burn_wgpu::CubeBackend;
 type WgpuCubeBackend = CubeBackend<WgpuRuntime, f32, i32, u32>;
 #[cfg(feature = "cuda")]
 type CudaCubeBackend = CubeBackend<CudaRuntime, f32, i32, u8>;
-
 const RMSNORM_GATED_PARAMS_LEN: usize = 4;
 const RMSNORM_GATED_WGPU_WORKGROUP_X: u32 = 64;
 #[cfg(feature = "cuda")]
@@ -67,12 +66,12 @@ pub(crate) fn fused_mamba2_rmsnorm_gated_forward_wgpu(
             &client,
             cube_count,
             cube_dim,
-            y.as_tensor_arg(1),
-            z.as_tensor_arg(1),
-            weight.as_tensor_arg(1),
-            gated.as_tensor_arg(1),
-            inv_rms.as_tensor_arg(1),
-            params.as_tensor_arg(1),
+            y.clone().into_tensor_arg(),
+            z.clone().into_tensor_arg(),
+            weight.clone().into_tensor_arg(),
+            gated.clone().into_tensor_arg(),
+            inv_rms.clone().into_tensor_arg(),
+            params.clone().into_tensor_arg(),
             RMSNORM_GATED_WGPU_WORKGROUP_X as usize,
         );
     }
@@ -112,12 +111,12 @@ pub(crate) fn fused_mamba2_rmsnorm_gated_forward_cuda(
             &client,
             cube_count,
             cube_dim,
-            y.as_tensor_arg(1),
-            z.as_tensor_arg(1),
-            weight.as_tensor_arg(1),
-            gated.as_tensor_arg(1),
-            inv_rms.as_tensor_arg(1),
-            params.as_tensor_arg(1),
+            y.clone().into_tensor_arg(),
+            z.clone().into_tensor_arg(),
+            weight.clone().into_tensor_arg(),
+            gated.clone().into_tensor_arg(),
+            inv_rms.clone().into_tensor_arg(),
+            params.clone().into_tensor_arg(),
             RMSNORM_GATED_CUDA_WORKGROUP_X as usize,
         );
     }
@@ -166,15 +165,15 @@ pub(crate) fn fused_mamba2_rmsnorm_gated_backward_cuda(
             &client,
             cube_count,
             cube_dim,
-            y.as_tensor_arg(1),
-            z.as_tensor_arg(1),
-            weight.as_tensor_arg(1),
-            grad_output.as_tensor_arg(1),
-            inv_rms.as_tensor_arg(1),
-            grad_y.as_tensor_arg(1),
-            grad_z.as_tensor_arg(1),
-            grad_weight.as_tensor_arg(1),
-            params.as_tensor_arg(1),
+            y.clone().into_tensor_arg(),
+            z.clone().into_tensor_arg(),
+            weight.clone().into_tensor_arg(),
+            grad_output.clone().into_tensor_arg(),
+            inv_rms.clone().into_tensor_arg(),
+            grad_y.clone().into_tensor_arg(),
+            grad_z.clone().into_tensor_arg(),
+            grad_weight.clone().into_tensor_arg(),
+            params.clone().into_tensor_arg(),
             RMSNORM_GATED_CUDA_WORKGROUP_X as usize,
         );
     }
@@ -209,12 +208,12 @@ fn params_tensor_wgpu(
 
 #[cube(launch_unchecked)]
 fn mamba2_rmsnorm_gated_forward_wgpu_kernel(
-    y: &Tensor<Line<f32>>,
-    z: &Tensor<Line<f32>>,
-    weight: &Tensor<Line<f32>>,
-    gated: &mut Tensor<Line<f32>>,
-    inv_rms: &mut Tensor<Line<f32>>,
-    params: &Tensor<Line<f32>>,
+    y: &Tensor<f32>,
+    z: &Tensor<f32>,
+    weight: &Tensor<f32>,
+    gated: &mut Tensor<f32>,
+    inv_rms: &mut Tensor<f32>,
+    params: &Tensor<f32>,
     #[comptime] workgroup_size: usize,
 ) {
     let batch = u32::cast_from(params[0]) as usize;
@@ -229,8 +228,8 @@ fn mamba2_rmsnorm_gated_forward_wgpu_kernel(
         terminate!();
     }
 
-    let mut partials = SharedMemory::<f32>::new_lined(workgroup_size, 1usize);
-    let mut local_sum = Line::cast_from(0u32);
+    let mut partials = SharedMemory::<f32>::new_aligned(workgroup_size, 1usize);
+    let mut local_sum = f32::cast_from(0u32);
     let mut idx = lane;
     while idx < width {
         let y_idx = b * y.stride(0) + t * y.stride(1) + idx * y.stride(2);
@@ -243,8 +242,8 @@ fn mamba2_rmsnorm_gated_forward_wgpu_kernel(
 
     reduce_partials_wgpu(&mut partials, lane, workgroup_size);
 
-    let one = Line::cast_from(1u32);
-    let inv_rms_row = one / (partials[0] / Line::cast_from(width as u32) + eps).sqrt();
+    let one = f32::cast_from(1u32);
+    let inv_rms_row = one / (partials[0] / f32::cast_from(width as u32) + eps).sqrt();
     if lane == 0usize {
         let inv_idx = b * inv_rms.stride(0) + t * inv_rms.stride(1);
         inv_rms[inv_idx] = inv_rms_row;
@@ -256,7 +255,7 @@ fn mamba2_rmsnorm_gated_forward_wgpu_kernel(
         let y_idx = b * y.stride(0) + t * y.stride(1) + out_lane * y.stride(2);
         let z_idx = b * z.stride(0) + t * z.stride(1) + out_lane * z.stride(2);
         let w_idx = out_lane * weight.stride(0);
-        let sigmoid = one / (one + (Line::cast_from(0u32) - z[z_idx]).exp());
+        let sigmoid = one / (one + (f32::cast_from(0u32) - z[z_idx]).exp());
         let out_idx = b * gated.stride(0) + t * gated.stride(1) + out_lane * gated.stride(2);
         gated[out_idx] = (y[y_idx] * inv_rms_row) * weight[w_idx] * (z[z_idx] * sigmoid);
         out_lane += workgroup_size;
@@ -399,7 +398,7 @@ fn mamba2_rmsnorm_gated_backward_cuda_kernel(
 
 #[cube]
 fn reduce_partials_wgpu(
-    partials: &mut SharedMemory<Line<f32>>,
+    partials: &mut SharedMemory<f32>,
     lane: usize,
     #[comptime] workgroup_size: usize,
 ) {

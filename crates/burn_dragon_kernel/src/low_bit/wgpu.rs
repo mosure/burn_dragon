@@ -516,15 +516,13 @@ pub(super) fn packed_lowrank_projection_packed_dot_wgsl_runtime(
         time as u32,
         (batch * heads) as u32,
     );
-    let bindings = Bindings::new().with_buffers(vec![
+    let bindings = KernelArguments::new().with_buffers(vec![
         input.handle.clone().binding(),
         weight.handle.clone().binding(),
         output.handle.clone().binding(),
         meta.handle.clone().binding(),
     ]);
-    client
-        .launch(Box::new(kernel), count, bindings)
-        .map_err(|err| format!("wgpu packed-dot lowrank launch failed: {err:?}"))?;
+    client.launch(Box::new(kernel), count, bindings);
     Ok(output)
 }
 
@@ -573,16 +571,14 @@ fn packed_lowrank_projection_packed_dot_wgsl_runtime_device_scale(
         time as u32,
         (batch * heads) as u32,
     );
-    let bindings = Bindings::new().with_buffers(vec![
+    let bindings = KernelArguments::new().with_buffers(vec![
         input.handle.clone().binding(),
         weight.handle.clone().binding(),
         output.handle.clone().binding(),
         activation_scale.handle.clone().binding(),
         meta.handle.clone().binding(),
     ]);
-    client
-        .launch(Box::new(kernel), count, bindings)
-        .map_err(|err| format!("wgpu packed-dot lowrank device-scale launch failed: {err:?}"))?;
+    client.launch(Box::new(kernel), count, bindings);
     Ok(output)
 }
 
@@ -659,18 +655,14 @@ fn packed_lowrank_projection_prepacked_packed_dot_wgsl_runtime_device_scale(
         time as u32,
         (batch * heads) as u32,
     );
-    let bindings = Bindings::new().with_buffers(vec![
+    let bindings = KernelArguments::new().with_buffers(vec![
         input_packed.handle.clone().binding(),
         weight_packed.handle.clone().binding(),
         output.handle.clone().binding(),
         activation_scale.handle.clone().binding(),
         meta.handle.clone().binding(),
     ]);
-    client
-        .launch(Box::new(kernel), count, bindings)
-        .map_err(|err| {
-            format!("wgpu packed-dot lowrank prepacked device-scale launch failed: {err:?}")
-        })?;
+    client.launch(Box::new(kernel), count, bindings);
     Ok(output)
 }
 
@@ -759,18 +751,14 @@ fn packed_lowrank_projection_from_f32_packed_dot_wgsl_runtime_device_scale(
         time as u32,
         (batch * heads) as u32,
     );
-    let bindings = Bindings::new().with_buffers(vec![
+    let bindings = KernelArguments::new().with_buffers(vec![
         input.handle.clone().binding(),
         weight_packed.handle.clone().binding(),
         output.handle.clone().binding(),
         activation_scale.handle.clone().binding(),
         meta.handle.clone().binding(),
     ]);
-    client
-        .launch(Box::new(kernel), count, bindings)
-        .map_err(|err| {
-            format!("wgpu packed-dot lowrank from-f32 device-scale launch failed: {err:?}")
-        })?;
+    client.launch(Box::new(kernel), count, bindings);
     Ok(output)
 }
 
@@ -868,15 +856,13 @@ pub(super) fn packed_decoder_tail_packed_dot_wgsl_runtime(
         time as u32,
         batch as u32,
     );
-    let bindings = Bindings::new().with_buffers(vec![
+    let bindings = KernelArguments::new().with_buffers(vec![
         y.handle.clone().binding(),
         weight.handle.clone().binding(),
         output.handle.clone().binding(),
         meta.handle.clone().binding(),
     ]);
-    client
-        .launch(Box::new(kernel), count, bindings)
-        .map_err(|err| format!("wgpu packed-dot decoder-tail launch failed: {err:?}"))?;
+    client.launch(Box::new(kernel), count, bindings);
     Ok(output)
 }
 
@@ -920,18 +906,14 @@ fn packed_decoder_tail_packed_dot_wgsl_runtime_device_scale(
         time as u32,
         batch as u32,
     );
-    let bindings = Bindings::new().with_buffers(vec![
+    let bindings = KernelArguments::new().with_buffers(vec![
         y.handle.clone().binding(),
         weight.handle.clone().binding(),
         output.handle.clone().binding(),
         activation_scale.handle.clone().binding(),
         meta.handle.clone().binding(),
     ]);
-    client
-        .launch(Box::new(kernel), count, bindings)
-        .map_err(|err| {
-            format!("wgpu packed-dot decoder-tail device-scale launch failed: {err:?}")
-        })?;
+    client.launch(Box::new(kernel), count, bindings);
     Ok(output)
 }
 
@@ -997,18 +979,14 @@ fn packed_decoder_tail_prepacked_packed_dot_wgsl_runtime_device_scale(
         time as u32,
         batch as u32,
     );
-    let bindings = Bindings::new().with_buffers(vec![
+    let bindings = KernelArguments::new().with_buffers(vec![
         y_packed.handle.clone().binding(),
         weight_packed.handle.clone().binding(),
         output.handle.clone().binding(),
         activation_scale.handle.clone().binding(),
         meta.handle.clone().binding(),
     ]);
-    client
-        .launch(Box::new(kernel), count, bindings)
-        .map_err(|err| {
-            format!("wgpu packed-dot decoder-tail prepacked device-scale launch failed: {err:?}")
-        })?;
+    client.launch(Box::new(kernel), count, bindings);
     Ok(output)
 }
 
@@ -1088,10 +1066,10 @@ fn quantize_pack_i8x4_cube_runtime(
         &client,
         cube_count,
         cube_dim,
-        input.as_tensor_arg(1),
-        activation_scale.as_tensor_arg(1),
-        output.as_tensor_arg(1),
-        params.as_tensor_arg(1),
+        input.clone().into_tensor_arg(),
+        activation_scale.clone().into_tensor_arg(),
+        output.clone().into_tensor_arg(),
+        params.clone().into_tensor_arg(),
     );
     Ok(output)
 }
@@ -1120,10 +1098,10 @@ fn quantize_codes_i32_cube_runtime(
         &client,
         cube_count,
         cube_dim,
-        input.as_tensor_arg(1),
-        activation_scale.as_tensor_arg(1),
-        output.as_tensor_arg(1),
-        params.as_tensor_arg(1),
+        input.clone().into_tensor_arg(),
+        activation_scale.clone().into_tensor_arg(),
+        output.clone().into_tensor_arg(),
+        params.clone().into_tensor_arg(),
     );
     Ok(output)
 }

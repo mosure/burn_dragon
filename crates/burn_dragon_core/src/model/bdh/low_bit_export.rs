@@ -71,30 +71,30 @@ impl<B: Backend> BDH<B> {
         artifacts: &BdhBitNetStaticArtifacts,
         device: &B::Device,
     ) -> Result<()> {
-        self.packed_decoder_x.0 = validate_weight_artifact_shape(
+        self.packed_decoder_x = validate_weight_artifact_shape(
             artifacts.decoder_x.as_ref(),
             self.encoder.val().shape().dims::<3>(),
             "decoder_x",
         )?;
-        if let Some(artifact) = self.packed_decoder_x.0.as_ref() {
+        if let Some(artifact) = self.packed_decoder_x.as_ref() {
             let _ =
                 cache_lowrank_projection_artifact::<B>(artifact, device, "cached packed decoder_x");
         }
-        self.packed_decoder_y.0 = validate_weight_artifact_shape(
+        self.packed_decoder_y = validate_weight_artifact_shape(
             artifacts.decoder_y.as_ref(),
             self.encoder_v.val().shape().dims::<3>(),
             "decoder_y",
         )?;
-        if let Some(artifact) = self.packed_decoder_y.0.as_ref() {
+        if let Some(artifact) = self.packed_decoder_y.as_ref() {
             let _ =
                 cache_lowrank_projection_artifact::<B>(artifact, device, "cached packed decoder_y");
         }
-        self.packed_encoder.0 = validate_weight_artifact_shape(
+        self.packed_encoder = validate_weight_artifact_shape(
             artifacts.encoder.as_ref(),
             self.decoder.val().shape().dims::<2>(),
             "encoder",
         )?;
-        if let Some(artifact) = self.packed_encoder.0.as_ref() {
+        if let Some(artifact) = self.packed_encoder.as_ref() {
             let heads = self.n_head;
             let latent_per_head = self.decoder.val().shape().dims::<2>()[0] / heads;
             let _ = cache_decoder_tail_artifact::<B>(
@@ -109,9 +109,9 @@ impl<B: Backend> BDH<B> {
     }
 
     pub fn clear_bitnet_static_artifacts(&mut self) {
-        self.packed_decoder_x.0 = None;
-        self.packed_decoder_y.0 = None;
-        self.packed_encoder.0 = None;
+        self.packed_decoder_x = None;
+        self.packed_decoder_y = None;
+        self.packed_encoder = None;
     }
 }
 

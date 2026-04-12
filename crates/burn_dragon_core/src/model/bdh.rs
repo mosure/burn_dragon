@@ -22,7 +22,7 @@ pub use interpretability::{
 };
 pub use low_bit_export::BdhBitNetDeployScaffold;
 
-use burn::module::{Ignored, Module, Param};
+use burn::module::{Module, Param};
 use burn::nn::{Dropout, DropoutConfig, Embedding, EmbeddingConfig};
 use burn::tensor::backend::Backend;
 use burn::tensor::{Int, Tensor, TensorData, activation};
@@ -121,7 +121,8 @@ pub struct BDH<B: Backend> {
     n_head: usize,
     mlp_internal_dim_multiplier: usize,
     vocab_size: usize,
-    language_head: Ignored<LanguageHeadRuntimeKind>,
+    #[module(skip)]
+    language_head: LanguageHeadRuntimeKind,
     sequence_kernel: SequenceKernelConfig,
     rollout_fast_steps_per_slow_step: usize,
     kernel: FusedKernelConfig,
@@ -130,19 +131,20 @@ pub struct BDH<B: Backend> {
     y_neuron_recurrence: YNeuronRecurrenceConfig,
     clocked_slow_memory: ClockedSlowMemoryConfig,
     summary_memory: SummaryMemoryConfig,
-    #[module(ignore)]
-    low_bit_quant: Ignored<LowBitQuantizationConfig>,
-    #[module(ignore)]
-    low_bit_rho: Ignored<LowBitRhoConfig>,
-    #[module(ignore)]
-    packed_decoder_x: Ignored<Option<PackedWeightArtifact>>,
-    #[module(ignore)]
-    packed_decoder_y: Ignored<Option<PackedWeightArtifact>>,
-    #[module(ignore)]
-    packed_encoder: Ignored<Option<PackedWeightArtifact>>,
-    layer_latent_totals: Ignored<Vec<usize>>,
-    #[module(ignore)]
-    shared_lowrank_continual_backprop: Ignored<Option<SharedLowrankContinualBackpropRuntime>>,
+    #[module(skip)]
+    low_bit_quant: LowBitQuantizationConfig,
+    #[module(skip)]
+    low_bit_rho: LowBitRhoConfig,
+    #[module(skip)]
+    packed_decoder_x: Option<PackedWeightArtifact>,
+    #[module(skip)]
+    packed_decoder_y: Option<PackedWeightArtifact>,
+    #[module(skip)]
+    packed_encoder: Option<PackedWeightArtifact>,
+    #[module(skip)]
+    layer_latent_totals: Vec<usize>,
+    #[module(skip)]
+    shared_lowrank_continual_backprop: Option<SharedLowrankContinualBackpropRuntime>,
     embed: Embedding<B>,
     dropout: Dropout,
     norm: DragonNorm<B>,
@@ -158,13 +160,14 @@ pub struct BDH<B: Backend> {
     encoder: Param<Tensor<B, 3>>,
     encoder_v: Param<Tensor<B, 3>>,
     decoder: Param<Tensor<B, 2>>,
-    mamba_config: Ignored<ResolvedMambaSequenceConfig>,
+    #[module(skip)]
+    mamba_config: ResolvedMambaSequenceConfig,
     mamba: Option<MambaSequenceParameters<B>>,
     lm_head: Option<Param<Tensor<B, 2>>>,
     nca_factorized_lm_head: Option<Param<Tensor<B, 2>>>,
     nca_special_lm_head: Option<Param<Tensor<B, 2>>>,
-    #[module(ignore)]
-    nca_factorized_head_tables: Ignored<Option<NcaFactorizedHeadTables>>,
+    #[module(skip)]
+    nca_factorized_head_tables: Option<NcaFactorizedHeadTables>,
 }
 
 #[derive(Clone)]
@@ -471,11 +474,9 @@ impl<B: Backend> BDH<B> {
                 ))
             })
         });
-        let layer_latent_totals = Ignored(
-            (0..config.n_layer)
-                .map(|layer_idx| config.latent_total_for_layer(layer_idx))
-                .collect(),
-        );
+        let layer_latent_totals = (0..config.n_layer)
+            .map(|layer_idx| config.latent_total_for_layer(layer_idx))
+            .collect();
 
         Self {
             n_layer: config.n_layer,
@@ -483,7 +484,7 @@ impl<B: Backend> BDH<B> {
             n_head: config.n_head,
             mlp_internal_dim_multiplier: config.mlp_internal_dim_multiplier,
             vocab_size: config.vocab_size,
-            language_head: Ignored(language_head),
+            language_head,
             sequence_kernel,
             rollout_fast_steps_per_slow_step: config.rollout_fast_steps_per_slow_step,
             kernel: config.fused_kernels,
@@ -500,13 +501,13 @@ impl<B: Backend> BDH<B> {
             y_neuron_recurrence: config.y_neuron_recurrence,
             clocked_slow_memory: config.clocked_slow_memory,
             summary_memory: config.summary_memory,
-            low_bit_quant: Ignored(config.quant),
-            low_bit_rho: Ignored(config.rho),
-            packed_decoder_x: Ignored(None),
-            packed_decoder_y: Ignored(None),
-            packed_encoder: Ignored(None),
+            low_bit_quant: config.quant,
+            low_bit_rho: config.rho,
+            packed_decoder_x: None,
+            packed_decoder_y: None,
+            packed_encoder: None,
             layer_latent_totals,
-            shared_lowrank_continual_backprop: Ignored(None),
+            shared_lowrank_continual_backprop: None,
             embed,
             dropout,
             norm,
@@ -522,12 +523,12 @@ impl<B: Backend> BDH<B> {
             encoder,
             encoder_v,
             decoder,
-            mamba_config: Ignored(mamba_config),
+            mamba_config,
             mamba,
             lm_head,
             nca_factorized_lm_head,
             nca_special_lm_head,
-            nca_factorized_head_tables: Ignored(nca_factorized_head_tables),
+            nca_factorized_head_tables,
         }
     }
 
@@ -801,7 +802,6 @@ impl<B: Backend> BDH<B> {
 
     fn layer_latent_total(&self, layer_idx: usize) -> usize {
         self.layer_latent_totals
-            .0
             .get(layer_idx)
             .copied()
             .unwrap_or(self.mlp_internal_dim_multiplier * self.n_embd)
@@ -811,7 +811,7 @@ impl<B: Backend> BDH<B> {
         &self,
     ) -> PackedLowBitProjectionArtifacts<'_, B> {
         if !matches!(
-            self.low_bit_quant.0.inference_mode,
+            self.low_bit_quant.inference_mode,
             LowBitInferenceMode::OfflinePack
         ) {
             return PackedLowBitProjectionArtifacts::default();
@@ -819,17 +819,16 @@ impl<B: Backend> BDH<B> {
 
         PackedLowBitProjectionArtifacts {
             runtime: LowBitKernelRuntimeKind::FakeQuantReference,
-            x: self.packed_decoder_x.0.as_ref(),
-            y: self.packed_decoder_y.0.as_ref(),
-            residual: self.packed_encoder.0.as_ref(),
+            x: self.packed_decoder_x.as_ref(),
+            y: self.packed_decoder_y.as_ref(),
+            residual: self.packed_encoder.as_ref(),
             _marker: core::marker::PhantomData,
         }
     }
 
     fn packed_low_bit_projection_artifacts(&self) -> PackedLowBitProjectionArtifacts<'_, B> {
         let artifacts = self.available_packed_low_bit_projection_artifacts();
-        let kernel_plan =
-            resolve_low_bit_kernel_plan::<B>(&self.low_bit_quant.0, artifacts.clone());
+        let kernel_plan = resolve_low_bit_kernel_plan::<B>(&self.low_bit_quant, artifacts.clone());
         PackedLowBitProjectionArtifacts {
             runtime: kernel_plan.runtime,
             ..if matches!(
@@ -845,9 +844,9 @@ impl<B: Backend> BDH<B> {
     }
 
     fn low_bit_projection_plan(&self) -> LowBitProjectionPlan {
-        let mut plan = LowBitProjectionPlan::from_config(&self.low_bit_quant.0);
+        let mut plan = LowBitProjectionPlan::from_config(&self.low_bit_quant);
         let kernel_plan = resolve_low_bit_kernel_plan::<B>(
-            &self.low_bit_quant.0,
+            &self.low_bit_quant,
             self.available_packed_low_bit_projection_artifacts(),
         );
         if matches!(
@@ -855,13 +854,13 @@ impl<B: Backend> BDH<B> {
             LowBitKernelRuntimeKind::PackedReference
                 | LowBitKernelRuntimeKind::PackedNativeInference
         ) {
-            if self.packed_decoder_x.0.is_some() {
+            if self.packed_decoder_x.is_some() {
                 plan.x_weight_format = None;
             }
-            if self.packed_decoder_y.0.is_some() {
+            if self.packed_decoder_y.is_some() {
                 plan.y_weight_format = None;
             }
-            if self.packed_encoder.0.is_some() {
+            if self.packed_encoder.is_some() {
                 plan.residual_weight_format = None;
             }
         }
@@ -869,10 +868,10 @@ impl<B: Backend> BDH<B> {
     }
 
     fn rho_chunk_compression(&self) -> Option<RhoCompressionConfig> {
-        match self.low_bit_rho.0.compression {
+        match self.low_bit_rho.compression {
             RhoCompressionConfig::Int8BlockExp
             | RhoCompressionConfig::TernaryBlockExp
-            | RhoCompressionConfig::BinaryBlockExp => Some(self.low_bit_rho.0.compression),
+            | RhoCompressionConfig::BinaryBlockExp => Some(self.low_bit_rho.compression),
             _ => None,
         }
     }
@@ -900,7 +899,7 @@ impl<B: Backend> BDH<B> {
     fn write_linear_attention_rho_state(&self, layer_state: &mut LayerState<B>, rho: Tensor<B, 4>) {
         if let Some(compression) = self.rho_chunk_compression() {
             if resolve_low_bit_kernel_plan::<B>(
-                &self.low_bit_quant.0,
+                &self.low_bit_quant,
                 self.available_packed_low_bit_projection_artifacts(),
             )
             .capabilities
@@ -950,7 +949,7 @@ impl<B: Backend> BDH<B> {
     ) {
         if let Some(compression) = self.rho_chunk_compression() {
             if resolve_low_bit_kernel_plan::<B>(
-                &self.low_bit_quant.0,
+                &self.low_bit_quant,
                 self.available_packed_low_bit_projection_artifacts(),
             )
             .capabilities
@@ -1025,22 +1024,21 @@ impl<B: Backend> BDH<B> {
             LowBitKernelRuntimeKind::PackedNativeTrainingForward
         ) && weight_format.is_some()
         {
-            let fused_relu_threshold = (!self.low_bit_quant.0.strict_bitnet_reference).then_some(
-                if relu_threshold != 0.0 {
+            let fused_relu_threshold =
+                (!self.low_bit_quant.strict_bitnet_reference).then_some(if relu_threshold != 0.0 {
                     relu_threshold
                 } else {
                     0.0
-                },
-            );
+                });
             let mut projected = packed_lowrank_projection_training_native(
                 dense,
                 projector,
                 weight_format.expect("native training forward requires low-bit weight format"),
                 activation_format,
                 latent_out,
-                self.low_bit_quant.0.saved_activations.mode,
+                self.low_bit_quant.saved_activations.mode,
                 fused_relu_threshold,
-                (!self.low_bit_quant.0.strict_bitnet_reference).then_some(scale_cache_kind),
+                (!self.low_bit_quant.strict_bitnet_reference).then_some(scale_cache_kind),
             );
             let activated = if fused_relu_threshold.is_some() {
                 projected
@@ -1050,7 +1048,7 @@ impl<B: Backend> BDH<B> {
                 }
                 activation::relu(projected)
             };
-            return if !self.low_bit_quant.0.strict_bitnet_reference {
+            return if !self.low_bit_quant.strict_bitnet_reference {
                 activated
             } else if let Some(format) = activation_format {
                 fake_quantize_activation_ste(activated, format)
@@ -1497,7 +1495,7 @@ impl<B: Backend> BDH<B> {
                     self.y_relu_threshold,
                     true,
                     self.low_bit_projection_plan(),
-                    self.low_bit_quant.0.saved_activations.clone(),
+                    self.low_bit_quant.saved_activations.clone(),
                     self.packed_low_bit_projection_artifacts(),
                     latent_pattern,
                     self.kernel.lowrank_grad_input_executor,
@@ -1537,7 +1535,7 @@ impl<B: Backend> BDH<B> {
                     self.y_relu_threshold,
                     true,
                     self.low_bit_projection_plan(),
-                    self.low_bit_quant.0.saved_activations.clone(),
+                    self.low_bit_quant.saved_activations.clone(),
                     self.packed_low_bit_projection_artifacts(),
                     latent_pattern,
                     self.kernel.lowrank_grad_input_executor,
@@ -1799,8 +1797,8 @@ impl<B: Backend> BDH<B> {
                             .residual_weight_format
                             .expect("native training decoder tail requires low-bit weight format"),
                         None,
-                        self.low_bit_quant.0.saved_activations.mode,
-                        (!self.low_bit_quant.0.strict_bitnet_reference).then_some("decoder_tail"),
+                        self.low_bit_quant.saved_activations.mode,
+                        (!self.low_bit_quant.strict_bitnet_reference).then_some("decoder_tail"),
                     )
                 } else if let Some(artifact) = packed_artifacts.residual {
                     match packed_artifacts.runtime {
@@ -1916,7 +1914,7 @@ impl<B: Backend> BDH<B> {
 
     fn project_hidden_to_logits(&self, hidden: Tensor<B, 3>) -> Tensor<B, 3> {
         assert!(
-            self.language_head.0.uses_flat_token_logits(),
+            self.language_head.uses_flat_token_logits(),
             "flat token logits are not available for the configured NCA factorized language head; use hidden-state loss helpers instead"
         );
         let prof_enabled = logits_projection_profile_enabled();
@@ -1942,7 +1940,7 @@ impl<B: Backend> BDH<B> {
     }
 
     pub fn uses_factorized_language_head(&self) -> bool {
-        !self.language_head.0.uses_flat_token_logits()
+        !self.language_head.uses_flat_token_logits()
     }
 
     pub fn forward_with_state(

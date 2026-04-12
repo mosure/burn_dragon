@@ -394,7 +394,9 @@ fn adapter_info() -> (String, wgpu::DeviceType) {
 }
 
 fn memory_snapshot(device: &Device) -> MemorySnapshot {
-    let usage = <burn_wgpu::WgpuRuntime as Runtime>::client(device).memory_usage();
+    let usage = <burn_wgpu::WgpuRuntime as Runtime>::client(device)
+        .memory_usage()
+        .expect("wgpu memory usage");
     MemorySnapshot {
         reserved: usage.bytes_reserved,
         in_use: usage.bytes_in_use,

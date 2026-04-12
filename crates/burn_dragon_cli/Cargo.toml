@@ -2,7 +2,7 @@
 name = "burn_dragon_cli"
 version = "0.5.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.92"
 authors = ["mosure <mitchell@mosure.me>"]
 license = "MIT OR Apache-2.0"
 description = "CLI for burn_dragon"
@@ -61,14 +61,14 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 image = "0.25"
 rand = "0.8"
-burn = { version = "0.21.0-pre.2", default-features = false, features = ["ndarray", "std", "wgpu", "fusion"] }
-burn-autodiff = "0.21.0-pre.2"
-burn-wgpu = { version = "0.21.0-pre.2", default-features = false, features = ["fusion", "std"] }
-burn-ndarray = "0.21.0-pre.2"
+burn = { version = "0.21.0-pre.3", default-features = false, features = ["ndarray", "std", "wgpu", "fusion"] }
+burn-autodiff = "0.21.0-pre.3"
+burn-wgpu = { version = "0.21.0-pre.3", default-features = false, features = ["fusion", "std"] }
+burn-ndarray = "0.21.0-pre.3"
 bevy_burn = { version = "0.4", optional = true }
 ctrlc = { version = "3.4", optional = true }
-burn-cuda = { version = "0.21.0-pre.2", optional = true, default-features = false, features = ["std"] }
-burn-collective = { version = "0.21.0-pre.2", optional = true, features = ["orchestrator"] }
+burn-cuda = { version = "0.21.0-pre.3", optional = true, default-features = false, features = ["std"] }
+burn-collective = { version = "0.21.0-pre.3", optional = true, features = ["orchestrator"] }
 burn_dragon = { path = "../..", version = "0.5.0", default-features = false }
 burn_dragon_language = { path = "../burn_dragon_language", version = "0.5.0", default-features = false, optional = true }
 burn_dragon_reasoning = { path = "../burn_dragon_reasoning", version = "0.5.0", default-features = false, optional = true }

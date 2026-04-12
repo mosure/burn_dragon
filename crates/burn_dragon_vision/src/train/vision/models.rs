@@ -1068,11 +1068,11 @@ pub(crate) struct VisionMaeModel<B: BackendTrait> {
     pub(crate) visible_token: Param<Tensor<B, 2>>,
     pub(crate) view_embed: Option<Linear<B>>,
     pub(crate) config: VisionMaeConfig,
-    #[module(ignore)]
+    #[module(skip)]
     pub(crate) denorm_std_patch: Option<Tensor<B, 3>>,
-    #[module(ignore)]
+    #[module(skip)]
     pub(crate) num_eyes: usize,
-    #[module(ignore)]
+    #[module(skip)]
     pub(crate) rollout: VisionRollout,
 }
 

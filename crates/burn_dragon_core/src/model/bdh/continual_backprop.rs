@@ -138,7 +138,7 @@ impl<B: Backend> BDH<B> {
         mut self,
         runtime: Option<SharedLowrankContinualBackpropRuntime>,
     ) -> Self {
-        self.shared_lowrank_continual_backprop = Ignored(runtime);
+        self.shared_lowrank_continual_backprop = runtime;
         self
     }
 

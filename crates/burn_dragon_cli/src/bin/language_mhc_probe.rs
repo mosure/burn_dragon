@@ -254,7 +254,8 @@ mod real {
         device: &B::Device,
     ) -> Result<Vec<EvalBatch<B>>> {
         let (offset, span) = dataset.split_offset_and_span(split);
-        let tokens = dataset.tokens();
+        let mut tokens = vec![0u32; dataset.token_count()];
+        dataset.copy_token_range(0, &mut tokens);
         let required = block_size.checked_add(1).context("block size overflow")?;
         if span <= required {
             anyhow::bail!("validation split too small for block_size={block_size}");

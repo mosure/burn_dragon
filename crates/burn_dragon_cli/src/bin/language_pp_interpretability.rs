@@ -227,8 +227,8 @@ mod real {
     fn load_architecture_specs(spec_path: &Path) -> Result<Vec<ArchitectureSpec>> {
         let spec_json = fs::read_to_string(spec_path)
             .with_context(|| format!("read {}", spec_path.display()))?;
-        let spec_file: ProbeSpecFile =
-            serde_json::from_str(&spec_json).with_context(|| format!("parse {}", spec_path.display()))?;
+        let spec_file: ProbeSpecFile = serde_json::from_str(&spec_json)
+            .with_context(|| format!("parse {}", spec_path.display()))?;
         if spec_file.probe_runs.is_empty() {
             anyhow::bail!(
                 "no probe_runs configured in interpretability spec {}",

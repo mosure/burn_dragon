@@ -906,25 +906,24 @@ fn try_cuda_fused_ssd_backward_core_fusion<B: BackendTrait, BT: BoolElement + 's
 where
     B::FloatTensorPrimitive: 'static,
 {
-    if !matches_type::<B::FloatTensorPrimitive, FusionTensor<FusionCubeRuntime<CudaRuntime, BT>>>()
-    {
+    if !matches_type::<B::FloatTensorPrimitive, FusionTensor<FusionCubeRuntime<CudaRuntime>>>() {
         return None;
     }
 
-    let x_grouped_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime, BT>> =
+    let x_grouped_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime>> =
         try_cast_primitive::<B, _>(x_grouped.into_primitive().tensor())?;
     let client = x_grouped_fusion.client.clone();
-    let b_group_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime, BT>> =
+    let b_group_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime>> =
         try_cast_primitive::<B, _>(b_group.into_primitive().tensor())?;
-    let c_group_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime, BT>> =
+    let c_group_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime>> =
         try_cast_primitive::<B, _>(c_group.into_primitive().tensor())?;
-    let dt_grouped_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime, BT>> =
+    let dt_grouped_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime>> =
         try_cast_primitive::<B, _>(dt_grouped.into_primitive().tensor())?;
-    let a_log_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime, BT>> =
+    let a_log_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime>> =
         try_cast_primitive::<B, _>(a_log.into_primitive().tensor())?;
-    let d_skip_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime, BT>> =
+    let d_skip_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime>> =
         try_cast_primitive::<B, _>(d_skip.into_primitive().tensor())?;
-    let grad_y_grouped_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime, BT>> =
+    let grad_y_grouped_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime>> =
         try_cast_primitive::<B, _>(grad_y_grouped.into_primitive().tensor())?;
 
     let x_grouped_raw =
@@ -943,7 +942,7 @@ where
         .resolve_tensor_float::<CubeBackend<CudaRuntime, f32, i32, BT>>(grad_y_grouped_fusion);
     let initial_ssm_raw = match initial_ssm {
         Some(state) => {
-            let fusion: FusionTensor<FusionCubeRuntime<CudaRuntime, BT>> =
+            let fusion: FusionTensor<FusionCubeRuntime<CudaRuntime>> =
                 try_cast_primitive::<B, _>(state.into_primitive().tensor())?;
             Some(client.resolve_tensor_float::<CubeBackend<CudaRuntime, f32, i32, BT>>(fusion))
         }
@@ -951,7 +950,7 @@ where
     };
     let ssd_state_history_raw = match ssd_state_history {
         Some(history) => {
-            let fusion: FusionTensor<FusionCubeRuntime<CudaRuntime, BT>> =
+            let fusion: FusionTensor<FusionCubeRuntime<CudaRuntime>> =
                 try_cast_primitive::<B, _>(history.into_primitive().tensor())?;
             Some(client.resolve_tensor_float::<CubeBackend<CudaRuntime, f32, i32, BT>>(fusion))
         }
@@ -1135,21 +1134,20 @@ fn try_cuda_fused_rmsnorm_gated_backward_core_fusion<B: BackendTrait, BT: BoolEl
 where
     B::FloatTensorPrimitive: 'static,
 {
-    if !matches_type::<B::FloatTensorPrimitive, FusionTensor<FusionCubeRuntime<CudaRuntime, BT>>>()
-    {
+    if !matches_type::<B::FloatTensorPrimitive, FusionTensor<FusionCubeRuntime<CudaRuntime>>>() {
         return None;
     }
 
-    let y_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime, BT>> =
+    let y_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime>> =
         try_cast_primitive::<B, _>(y.into_primitive().tensor())?;
     let client = y_fusion.client.clone();
-    let z_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime, BT>> =
+    let z_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime>> =
         try_cast_primitive::<B, _>(z.into_primitive().tensor())?;
-    let weight_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime, BT>> =
+    let weight_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime>> =
         try_cast_primitive::<B, _>(weight.into_primitive().tensor())?;
-    let grad_output_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime, BT>> =
+    let grad_output_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime>> =
         try_cast_primitive::<B, _>(grad_output.into_primitive().tensor())?;
-    let inv_rms_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime, BT>> =
+    let inv_rms_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime>> =
         try_cast_primitive::<B, _>(inv_rms.into_primitive().tensor())?;
 
     let y_raw = client.resolve_tensor_float::<CubeBackend<CudaRuntime, f32, i32, BT>>(y_fusion);
@@ -1286,17 +1284,16 @@ fn try_cuda_fused_depthwise_conv_forward_core_fusion<B: BackendTrait, BT: BoolEl
 where
     B::FloatTensorPrimitive: 'static,
 {
-    if !matches_type::<B::FloatTensorPrimitive, FusionTensor<FusionCubeRuntime<CudaRuntime, BT>>>()
-    {
+    if !matches_type::<B::FloatTensorPrimitive, FusionTensor<FusionCubeRuntime<CudaRuntime>>>() {
         return None;
     }
 
-    let x_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime, BT>> =
+    let x_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime>> =
         try_cast_primitive::<B, _>(x.into_primitive().tensor())?;
     let client = x_fusion.client.clone();
-    let conv_weight_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime, BT>> =
+    let conv_weight_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime>> =
         try_cast_primitive::<B, _>(conv_weight.into_primitive().tensor())?;
-    let conv_bias_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime, BT>> =
+    let conv_bias_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime>> =
         try_cast_primitive::<B, _>(conv_bias.into_primitive().tensor())?;
     let x_raw =
         client.resolve_tensor_float::<CubeBackend<CudaRuntime, f32, i32, BT>>(x_fusion.clone());
@@ -1308,7 +1305,7 @@ where
         client.resolve_tensor_float::<CubeBackend<CudaRuntime, f32, i32, BT>>(conv_bias_fusion);
     let state_raw = match state {
         Some(state) => {
-            let state_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime, BT>> =
+            let state_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime>> =
                 try_cast_primitive::<B, _>(state.into_primitive().tensor())?;
             client.resolve_tensor_float::<CubeBackend<CudaRuntime, f32, i32, BT>>(state_fusion)
         }
@@ -1436,17 +1433,16 @@ fn try_cuda_fused_depthwise_conv_backward_core_fusion<B: BackendTrait, BT: BoolE
 where
     B::FloatTensorPrimitive: 'static,
 {
-    if !matches_type::<B::FloatTensorPrimitive, FusionTensor<FusionCubeRuntime<CudaRuntime, BT>>>()
-    {
+    if !matches_type::<B::FloatTensorPrimitive, FusionTensor<FusionCubeRuntime<CudaRuntime>>>() {
         return None;
     }
 
-    let x_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime, BT>> =
+    let x_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime>> =
         try_cast_primitive::<B, _>(x.into_primitive().tensor())?;
     let client = x_fusion.client.clone();
-    let conv_weight_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime, BT>> =
+    let conv_weight_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime>> =
         try_cast_primitive::<B, _>(conv_weight.into_primitive().tensor())?;
-    let grad_preact_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime, BT>> =
+    let grad_preact_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime>> =
         try_cast_primitive::<B, _>(grad_preact.into_primitive().tensor())?;
     let x_raw =
         client.resolve_tensor_float::<CubeBackend<CudaRuntime, f32, i32, BT>>(x_fusion.clone());
@@ -1458,7 +1454,7 @@ where
         client.resolve_tensor_float::<CubeBackend<CudaRuntime, f32, i32, BT>>(grad_preact_fusion);
     let state_raw = match state {
         Some(state) => {
-            let state_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime, BT>> =
+            let state_fusion: FusionTensor<FusionCubeRuntime<CudaRuntime>> =
                 try_cast_primitive::<B, _>(state.into_primitive().tensor())?;
             client.resolve_tensor_float::<CubeBackend<CudaRuntime, f32, i32, BT>>(state_fusion)
         }
@@ -1591,7 +1587,7 @@ impl<BT> Backward<WgpuFusionBackend<BT>, 9> for TensorizedMamba2Backward<WgpuFus
 where
     BT: BoolElement + 'static,
 {
-    type State = Mamba2TensorizedBackwardState<FusionTensor<FusionCubeRuntime<WgpuRuntime, BT>>>;
+    type State = Mamba2TensorizedBackwardState<FusionTensor<FusionCubeRuntime<WgpuRuntime>>>;
 
     fn backward(
         self,
@@ -1622,7 +1618,7 @@ impl<BT> Backward<CudaFusionBackend<BT>, 9> for TensorizedMamba2Backward<CudaFus
 where
     BT: BoolElement + 'static,
 {
-    type State = Mamba2TensorizedBackwardState<FusionTensor<FusionCubeRuntime<CudaRuntime, BT>>>;
+    type State = Mamba2TensorizedBackwardState<FusionTensor<FusionCubeRuntime<CudaRuntime>>>;
 
     fn backward(
         self,

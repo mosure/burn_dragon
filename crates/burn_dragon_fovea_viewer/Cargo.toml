@@ -3,7 +3,7 @@ name = "burn_dragon_fovea_viewer"
 description = "Foveation viewer for burn_dragon vision sampling"
 version = "0.5.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.92"
 authors = ["mosure <mitchell@mosure.me>"]
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/mosure/burn_bdh"
@@ -12,13 +12,14 @@ readme = "../../README.md"
 
 [features]
 default = []
+app = ["dep:bevy_burn"]
 gpu_tests = []
 
 [dependencies]
 anyhow = "1"
 bevy-inspector-egui = "0.35"
 bevy_egui = "0.38"
-bevy_burn = "0.4"
+bevy_burn = { version = "0.4", optional = true }
 bevy = { version = "0.17", default-features = false, features = [
   "bevy_asset",
   "bevy_camera",
@@ -35,8 +36,8 @@ bevy = { version = "0.17", default-features = false, features = [
   "bevy_winit",
 ] }
 bevy_shader = "0.17"
-burn = { version = "0.21.0-pre.2", default-features = false, features = ["std", "wgpu"] }
-burn-wgpu = { version = "0.21.0-pre.2", default-features = false, features = ["std"] }
+burn = { version = "0.21.0-pre.3", default-features = false, features = ["std", "wgpu"] }
+burn-wgpu = { version = "0.21.0-pre.3", default-features = false, features = ["std"] }
 burn_dragon_vision = { path = "../burn_dragon_vision", version = "0.5.0", default-features = false, features = ["train"] }
 half = "2"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
@@ -45,3 +46,8 @@ wgpu = "26"
 
 [dev-dependencies]
 pollster = "0.3"
+
+[[bin]]
+name = "burn_dragon_fovea_viewer"
+path = "src/main.rs"
+required-features = ["app"]

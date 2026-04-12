@@ -13,7 +13,7 @@ use burn_autodiff::ops::{Backward, Ops, OpsKind};
 use burn_cubecl::cubecl;
 #[cfg(feature = "cuda")]
 use burn_cubecl::cubecl::cuda::CudaRuntime;
-use burn_cubecl::cubecl::{prelude::*, server::Bindings};
+use burn_cubecl::cubecl::{prelude::*, server::KernelArguments};
 use burn_cubecl::fusion::FusionCubeRuntime;
 use burn_cubecl::kernel::into_contiguous;
 use burn_cubecl::kernel::into_contiguous_aligned;
@@ -97,6 +97,7 @@ impl LowrankForwardRouteProfileSnapshot {
     }
 }
 
+#[cfg_attr(not(feature = "cuda"), allow(dead_code))]
 #[derive(Clone, Copy, Debug)]
 enum LowrankForwardRouteKind {
     WgpuFusionAutodiff,
@@ -491,9 +492,9 @@ where
     BT: BoolElement + 'static,
 {
     type State = (
-        FusionTensor<FusionCubeRuntime<WgpuRuntime, BT>>,
-        FusionTensor<FusionCubeRuntime<WgpuRuntime, BT>>,
-        Option<FusionTensor<FusionCubeRuntime<WgpuRuntime, BT>>>,
+        FusionTensor<FusionCubeRuntime<WgpuRuntime>>,
+        FusionTensor<FusionCubeRuntime<WgpuRuntime>>,
+        Option<FusionTensor<FusionCubeRuntime<WgpuRuntime>>>,
         LowrankProjectionShape,
     );
 
@@ -532,9 +533,9 @@ where
     BT: BoolElement + 'static,
 {
     type State = (
-        FusionTensor<FusionCubeRuntime<CudaRuntime, BT>>,
-        FusionTensor<FusionCubeRuntime<CudaRuntime, BT>>,
-        Option<FusionTensor<FusionCubeRuntime<CudaRuntime, BT>>>,
+        FusionTensor<FusionCubeRuntime<CudaRuntime>>,
+        FusionTensor<FusionCubeRuntime<CudaRuntime>>,
+        Option<FusionTensor<FusionCubeRuntime<CudaRuntime>>>,
         LowrankProjectionShape,
     );
 
@@ -585,7 +586,7 @@ fn fused_relu_lowrank_autodiff_fusion_wgpu<BT: BoolElement + 'static>(
     weight: WgpuFusionAutodiffTensor<BT>,
     _mask: Option<WgpuFusionAutodiffTensor<BT>>,
     shape: LowrankProjectionShape,
-    output: FusionTensor<FusionCubeRuntime<WgpuRuntime, BT>>,
+    output: FusionTensor<FusionCubeRuntime<WgpuRuntime>>,
 ) -> WgpuFusionAutodiffTensor<BT> {
     let input_inner = <WgpuFusionAutodiffBackend<BT> as AutodiffBackend>::inner(input.clone());
     let weight_inner = <WgpuFusionAutodiffBackend<BT> as AutodiffBackend>::inner(weight.clone());
@@ -644,7 +645,7 @@ fn fused_relu_lowrank_autodiff_fusion_cuda<BT: BoolElement + 'static>(
     weight: CudaFusionAutodiffTensor<BT>,
     mask: Option<CudaFusionAutodiffTensor<BT>>,
     shape: LowrankProjectionShape,
-    output: FusionTensor<FusionCubeRuntime<CudaRuntime, BT>>,
+    output: FusionTensor<FusionCubeRuntime<CudaRuntime>>,
 ) -> CudaFusionAutodiffTensor<BT> {
     let input_inner = <CudaFusionAutodiffBackend<BT> as AutodiffBackend>::inner(input.clone());
     let weight_inner = <CudaFusionAutodiffBackend<BT> as AutodiffBackend>::inner(weight.clone());
@@ -670,10 +671,8 @@ where
     B::FloatTensorPrimitive: 'static,
 {
     matches_type::<B::FloatTensorPrimitive, CubeTensor<WgpuRuntime>>()
-        || matches_type::<B::FloatTensorPrimitive, FusionTensor<FusionCubeRuntime<WgpuRuntime, u32>>>(
-        )
-        || matches_type::<B::FloatTensorPrimitive, FusionTensor<FusionCubeRuntime<WgpuRuntime, u8>>>(
-        )
+        || matches_type::<B::FloatTensorPrimitive, FusionTensor<FusionCubeRuntime<WgpuRuntime>>>()
+        || matches_type::<B::FloatTensorPrimitive, FusionTensor<FusionCubeRuntime<WgpuRuntime>>>()
         || matches_type::<B::FloatTensorPrimitive, WgpuCubeAutodiffTensor>()
         || matches_type::<B::FloatTensorPrimitive, WgpuFusionAutodiffTensor<u32>>()
         || matches_type::<B::FloatTensorPrimitive, WgpuFusionAutodiffTensor<u8>>()
@@ -1018,13 +1017,12 @@ where
     B::FloatTensorPrimitive: 'static,
     BT: BoolElement + 'static,
 {
-    if !matches_type::<B::FloatTensorPrimitive, FusionTensor<FusionCubeRuntime<WgpuRuntime, BT>>>()
-    {
+    if !matches_type::<B::FloatTensorPrimitive, FusionTensor<FusionCubeRuntime<WgpuRuntime>>>() {
         return None;
     }
 
     let prim_grad = grad_projected.clone().into_primitive().tensor();
-    let fusion_grad: FusionTensor<FusionCubeRuntime<WgpuRuntime, BT>> =
+    let fusion_grad: FusionTensor<FusionCubeRuntime<WgpuRuntime>> =
         try_cast_primitive::<B, _>(prim_grad)?;
     let fusion_client = fusion_grad.client.clone();
     let grad =
@@ -1053,13 +1051,12 @@ where
     B::FloatTensorPrimitive: 'static,
     BT: BoolElement + 'static,
 {
-    if !matches_type::<B::FloatTensorPrimitive, FusionTensor<FusionCubeRuntime<WgpuRuntime, BT>>>()
-    {
+    if !matches_type::<B::FloatTensorPrimitive, FusionTensor<FusionCubeRuntime<WgpuRuntime>>>() {
         return None;
     }
 
     let prim_grad = grad_projected.clone().into_primitive().tensor();
-    let fusion_grad: FusionTensor<FusionCubeRuntime<WgpuRuntime, BT>> =
+    let fusion_grad: FusionTensor<FusionCubeRuntime<WgpuRuntime>> =
         try_cast_primitive::<B, _>(prim_grad)?;
     let fusion_client = fusion_grad.client.clone();
     let grad =
@@ -1175,15 +1172,13 @@ fn head_aligned_grad_input_wgsl_runtime<R: CubeRuntime>(
         ReluLowrankGradInputKernel,
         CubeDim::new_3d(WORKGROUP_SIZE_X, 1, 1),
     );
-    let bindings = Bindings::new().with_buffers(vec![
+    let bindings = KernelArguments::new().with_buffers(vec![
         grad.handle.clone().binding(),
         weight.handle.clone().binding(),
         output.handle.clone().binding(),
         meta.handle.clone().binding(),
     ]);
-    client
-        .launch(Box::new(kernel), count, bindings)
-        .expect("launch relu lowrank grad-input kernel");
+    client.launch(Box::new(kernel), count, bindings);
     output
 }
 
@@ -1211,15 +1206,13 @@ fn head_aligned_grad_input_tiled_wgsl_runtime<R: CubeRuntime>(
         ReluLowrankGradInputTiledKernel,
         CubeDim::new_3d(WORKGROUP_SIZE_X, 1, 1),
     );
-    let bindings = Bindings::new().with_buffers(vec![
+    let bindings = KernelArguments::new().with_buffers(vec![
         grad.handle.clone().binding(),
         weight.handle.clone().binding(),
         output.handle.clone().binding(),
         meta.handle.clone().binding(),
     ]);
-    client
-        .launch(Box::new(kernel), count, bindings)
-        .expect("launch relu lowrank tiled grad-input kernel");
+    client.launch(Box::new(kernel), count, bindings);
     output
 }
 
@@ -1255,10 +1248,10 @@ fn lowrank_grad_input_cube_runtime<R: CubeRuntime>(
         &client,
         cube_count,
         cube_dim,
-        grad.as_tensor_arg(1),
-        weight.as_tensor_arg(1),
-        output.as_tensor_arg(1),
-        meta.as_tensor_arg(1),
+        grad.clone().into_tensor_arg(),
+        weight.clone().into_tensor_arg(),
+        output.clone().into_tensor_arg(),
+        meta.clone().into_tensor_arg(),
     );
 
     if let Some(start) = total_start {
@@ -1344,8 +1337,7 @@ where
     BT: BoolElement + 'static,
 {
     let prim = tensor.clone().into_primitive().tensor();
-    let fusion: FusionTensor<FusionCubeRuntime<WgpuRuntime, BT>> =
-        try_cast_primitive::<B, _>(prim)?;
+    let fusion: FusionTensor<FusionCubeRuntime<WgpuRuntime>> = try_cast_primitive::<B, _>(prim)?;
     let client = fusion.client.clone();
     let cube = client.resolve_tensor_float::<CubeBackend<WgpuRuntime, f32, i32, BT>>(fusion);
     if cube.dtype != DType::F32 {
@@ -1364,7 +1356,7 @@ where
     R: CubeRuntime + 'static,
 {
     let prim = tensor.clone().into_primitive().tensor();
-    let fusion: FusionTensor<FusionCubeRuntime<R, BT>> = try_cast_primitive::<B, _>(prim)?;
+    let fusion: FusionTensor<FusionCubeRuntime<R>> = try_cast_primitive::<B, _>(prim)?;
     let client = fusion.client.clone();
     let cube = client.resolve_tensor_float::<CubeBackend<R, f32, i32, BT>>(fusion);
     if cube.dtype != DType::F32 {
@@ -1449,7 +1441,7 @@ where
 
 fn extract_fusion_autodiff_inner<B, BT, R>(
     value: B::FloatTensorPrimitive,
-) -> Option<FusionTensor<FusionCubeRuntime<R, BT>>>
+) -> Option<FusionTensor<FusionCubeRuntime<R>>>
 where
     B: BackendTrait,
     B::FloatTensorPrimitive: 'static,
@@ -1461,7 +1453,7 @@ where
         let inner = <WgpuFusionAutodiffBackend<BT> as AutodiffBackend>::inner(ad);
         let boxed: Box<dyn Any> = Box::new(inner);
         return boxed
-            .downcast::<FusionTensor<FusionCubeRuntime<R, BT>>>()
+            .downcast::<FusionTensor<FusionCubeRuntime<R>>>()
             .ok()
             .map(|boxed| *boxed);
     }
@@ -1472,7 +1464,7 @@ where
             let inner = <CudaFusionAutodiffBackend<BT> as AutodiffBackend>::inner(ad);
             let boxed: Box<dyn Any> = Box::new(inner);
             return boxed
-                .downcast::<FusionTensor<FusionCubeRuntime<R, BT>>>()
+                .downcast::<FusionTensor<FusionCubeRuntime<R>>>()
                 .ok()
                 .map(|boxed| *boxed);
         }
@@ -1481,7 +1473,7 @@ where
 }
 
 fn wrap_fusion_autodiff_inner<B, BT, R>(
-    value: FusionTensor<FusionCubeRuntime<R, BT>>,
+    value: FusionTensor<FusionCubeRuntime<R>>,
 ) -> Option<B::FloatTensorPrimitive>
 where
     B: BackendTrait,
@@ -1492,7 +1484,7 @@ where
     if TypeId::of::<R>() == TypeId::of::<WgpuRuntime>() {
         let boxed: Box<dyn Any> = Box::new(value);
         let inner = boxed
-            .downcast::<FusionTensor<FusionCubeRuntime<WgpuRuntime, BT>>>()
+            .downcast::<FusionTensor<FusionCubeRuntime<WgpuRuntime>>>()
             .ok()
             .map(|boxed| *boxed)?;
         let ad = <WgpuFusionAutodiffBackend<BT> as AutodiffBackend>::from_inner(inner);
@@ -1503,7 +1495,7 @@ where
         if TypeId::of::<R>() == TypeId::of::<CudaRuntime>() {
             let boxed: Box<dyn Any> = Box::new(value);
             let inner = boxed
-                .downcast::<FusionTensor<FusionCubeRuntime<CudaRuntime, BT>>>()
+                .downcast::<FusionTensor<FusionCubeRuntime<CudaRuntime>>>()
                 .ok()
                 .map(|boxed| *boxed)?;
             let ad = <CudaFusionAutodiffBackend<BT> as AutodiffBackend>::from_inner(inner);
@@ -1515,11 +1507,11 @@ where
 
 #[cube(launch)]
 fn relu_lowrank_cube_kernel(
-    input: &Tensor<Line<f32>>,
-    weight: &Tensor<Line<f32>>,
-    output: &mut Tensor<Line<f32>>,
-    params: &Tensor<Line<f32>>,
-    sparse_mask: &Tensor<Line<f32>>,
+    input: &Tensor<f32>,
+    weight: &Tensor<f32>,
+    output: &mut Tensor<f32>,
+    params: &Tensor<f32>,
+    sparse_mask: &Tensor<f32>,
 ) {
     let batch = u32::cast_from(params[0]) as usize;
     let input_heads = u32::cast_from(params[1]) as usize;
@@ -1528,7 +1520,7 @@ fn relu_lowrank_cube_kernel(
     let embd = u32::cast_from(params[4]) as usize;
     let latent = u32::cast_from(params[5]) as usize;
     let threshold = params[6];
-    let has_mask = params[7] > Line::cast_from(0u32);
+    let has_mask = params[7] > f32::cast_from(0u32);
 
     let l = (CUBE_POS_X * CUBE_DIM_X + UNIT_POS_X) as usize;
     let t = CUBE_POS_Y as usize;
@@ -1544,7 +1536,7 @@ fn relu_lowrank_cube_kernel(
         input_head = 0usize;
     }
 
-    let mut sum = Line::cast_from(0u32);
+    let mut sum = f32::cast_from(0u32);
     let mut e = 0usize;
     while e < embd {
         let input_index = ((b * input_heads + input_head) * time + t) * embd + e;
@@ -1554,8 +1546,8 @@ fn relu_lowrank_cube_kernel(
     }
 
     sum -= threshold;
-    if sum < Line::cast_from(0u32) {
-        sum = Line::cast_from(0u32);
+    if sum < f32::cast_from(0u32) {
+        sum = f32::cast_from(0u32);
     }
     if has_mask {
         sum *= sparse_mask[l];
@@ -1567,10 +1559,10 @@ fn relu_lowrank_cube_kernel(
 
 #[cube(launch)]
 fn lowrank_grad_input_cube_kernel(
-    grad: &Tensor<Line<f32>>,
-    weight: &Tensor<Line<f32>>,
-    output: &mut Tensor<Line<f32>>,
-    params: &Tensor<Line<f32>>,
+    grad: &Tensor<f32>,
+    weight: &Tensor<f32>,
+    output: &mut Tensor<f32>,
+    params: &Tensor<f32>,
 ) {
     let batch = u32::cast_from(params[0]) as usize;
     let input_heads = u32::cast_from(params[1]) as usize;
@@ -1589,7 +1581,7 @@ fn lowrank_grad_input_cube_kernel(
     let input_head = bih % input_heads;
     let b = bih / input_heads;
 
-    let mut acc = Line::cast_from(0u32);
+    let mut acc = f32::cast_from(0u32);
     if input_heads == 1usize {
         let mut h = 0usize;
         while h < heads {

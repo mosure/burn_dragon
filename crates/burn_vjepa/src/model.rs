@@ -1,6 +1,6 @@
 use crate::config::Vjepa2Config;
 use anyhow::{Context, Result, bail};
-use burn::module::{Ignored, Module, Param};
+use burn::module::{Module, Param};
 use burn::nn::conv::{Conv3d, Conv3dConfig};
 use burn::nn::{LayerNorm, LayerNormConfig, Linear, LinearConfig};
 use burn::prelude::ElementConversion;
@@ -26,11 +26,11 @@ pub struct Vjepa2ModelOutput<B: Backend> {
 #[derive(Module, Debug)]
 pub struct Vjepa2PatchEmbeddings3d<B: Backend> {
     pub proj: Conv3d<B>,
-    #[module(ignore)]
+    #[module(skip)]
     patch_size: usize,
-    #[module(ignore)]
+    #[module(skip)]
     tubelet_size: usize,
-    #[module(ignore)]
+    #[module(skip)]
     hidden_size: usize,
 }
 
@@ -68,7 +68,7 @@ impl<B: Backend> Vjepa2PatchEmbeddings3d<B> {
 #[derive(Module, Debug)]
 pub struct Vjepa2Embeddings<B: Backend> {
     pub patch_embeddings: Vjepa2PatchEmbeddings3d<B>,
-    #[module(ignore)]
+    #[module(skip)]
     tubelet_size: usize,
 }
 
@@ -96,25 +96,25 @@ pub struct Vjepa2RopeAttention<B: Backend> {
     pub key: Linear<B>,
     pub value: Linear<B>,
     pub proj: Linear<B>,
-    #[module(ignore)]
+    #[module(skip)]
     hidden_size: usize,
-    #[module(ignore)]
+    #[module(skip)]
     num_attention_heads: usize,
-    #[module(ignore)]
+    #[module(skip)]
     attention_head_size: usize,
-    #[module(ignore)]
+    #[module(skip)]
     all_head_size: usize,
-    #[module(ignore)]
+    #[module(skip)]
     grid_size: usize,
-    #[module(ignore)]
+    #[module(skip)]
     d_dim: usize,
-    #[module(ignore)]
+    #[module(skip)]
     h_dim: usize,
-    #[module(ignore)]
+    #[module(skip)]
     w_dim: usize,
-    #[module(ignore)]
+    #[module(skip)]
     scaling: f32,
-    #[module(ignore)]
+    #[module(skip)]
     omega_cache: Tensor<B, 1>,
 }
 
@@ -319,8 +319,8 @@ impl<B: Backend> Vjepa2RopeAttention<B> {
 pub struct Vjepa2Mlp<B: Backend> {
     pub fc1: Linear<B>,
     pub fc2: Linear<B>,
-    #[module(ignore)]
-    hidden_act: Ignored<String>,
+    #[module(skip)]
+    hidden_act: String,
 }
 
 impl<B: Backend> Vjepa2Mlp<B> {
@@ -334,13 +334,13 @@ impl<B: Backend> Vjepa2Mlp<B> {
         Self {
             fc1: LinearConfig::new(hidden_size, hidden_features.max(1)).init(device),
             fc2: LinearConfig::new(hidden_features.max(1), hidden_size).init(device),
-            hidden_act: Ignored(config.hidden_act.clone()),
+            hidden_act: config.hidden_act.clone(),
         }
     }
 
     pub fn forward(&self, hidden_state: Tensor<B, 3>) -> Tensor<B, 3> {
         let hidden_state = self.fc1.forward(hidden_state);
-        let hidden_state = match self.hidden_act.0.as_str() {
+        let hidden_state = match self.hidden_act.as_str() {
             "relu" => activation::relu(hidden_state),
             "gelu" | "gelu_new" => activation::gelu(hidden_state),
             other => panic!("unsupported V-JEPA2 activation {other}"),
@@ -434,9 +434,9 @@ impl<B: Backend> Vjepa2Encoder<B> {
 pub struct Vjepa2PredictorEmbeddings<B: Backend> {
     pub predictor_embeddings: Linear<B>,
     pub mask_tokens: Param<Tensor<B, 4>>,
-    #[module(ignore)]
+    #[module(skip)]
     pred_hidden_size: usize,
-    #[module(ignore)]
+    #[module(skip)]
     pred_num_mask_tokens: usize,
 }
 
@@ -572,8 +572,8 @@ impl<B: Backend> Vjepa2Predictor<B> {
 pub struct Vjepa2Model<B: Backend> {
     pub encoder: Vjepa2Encoder<B>,
     pub predictor: Vjepa2Predictor<B>,
-    #[module(ignore)]
-    pub config: Ignored<Vjepa2Config>,
+    #[module(skip)]
+    pub config: Vjepa2Config,
 }
 
 impl<B: Backend> Vjepa2Model<B> {
@@ -581,7 +581,7 @@ impl<B: Backend> Vjepa2Model<B> {
         Self {
             encoder: Vjepa2Encoder::new(config.clone(), device),
             predictor: Vjepa2Predictor::new(config.clone(), device),
-            config: Ignored(config),
+            config,
         }
     }
 

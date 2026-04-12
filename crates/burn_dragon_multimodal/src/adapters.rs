@@ -82,7 +82,7 @@ pub struct VisionDragonFusionAdapter<B: Backend> {
     token_projector: Linear<B>,
     summary_projector: Linear<B>,
     summary_norm: LayerNorm<B>,
-    #[module(ignore)]
+    #[module(skip)]
     backbone: VisionBackboneKind,
     fusion_dim: usize,
     rollout_steps: usize,
@@ -621,15 +621,15 @@ pub struct TargetTextDragonEncoderAdapter<B: Backend> {
     encoder: BDH<B>,
     projector: Linear<B>,
     norm: LayerNorm<B>,
-    #[module(ignore)]
+    #[module(skip)]
     use_fixed_fourier_mean: bool,
-    #[module(ignore)]
+    #[module(skip)]
     target_dim: usize,
-    #[module(ignore)]
+    #[module(skip)]
     passthrough_projection: bool,
-    #[module(ignore)]
+    #[module(skip)]
     freeze_encoder_core: bool,
-    #[module(ignore)]
+    #[module(skip)]
     force_projection: bool,
 }
 

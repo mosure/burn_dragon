@@ -1,7 +1,6 @@
 #[cfg(feature = "train")]
 pub mod artifacts;
 pub mod core;
-#[cfg(feature = "train")]
 pub mod optimizer;
 pub mod run_layout;
 
@@ -20,7 +19,6 @@ pub use core::{
     WgpuGenerationExecutor, WgpuInferenceConfig, WgpuMemoryConfig, WgpuRuntimeConfig,
     WgpuStartupAutotuneConfig, WgpuTrainingConfig,
 };
-#[cfg(feature = "train")]
 pub use optimizer::{
     LearningRateScheduleConfig, MuonAdjustLrFn, MuonHybridConfig, OptimizerConfig, OptimizerKind,
     OptimizerScheduleMode,

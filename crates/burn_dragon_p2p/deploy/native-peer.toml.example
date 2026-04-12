@@ -1,0 +1,26 @@
+training_config_paths = ["config/local/generated/p2p/nca.toml"]
+storage_root = "runs/p2p/mainnet-native-wgpu"
+target = "auto"
+app_semver = "0.5.0"
+enabled_features_label = "native,wgpu"
+
+[network]
+# Fill these at deploy time or override them via CLI flags.
+edge_base_url = "https://MAINNET_EDGE_URL"
+seed_node_urls = []
+
+[manifest]
+project_family_id = "burn-dragon-language"
+network_id = "burn-dragon-net"
+study_id = "burn-dragon-study"
+experiment_id = "language-pretraining"
+revision_id = "r1"
+display_name = "burn_dragon language pretraining"
+description = "burn_dragon peer-to-peer language training network"
+protocol_major = 0
+authority_public_keys = []
+bootstrap_addrs = []
+
+[capability_policy]
+native_wgpu_memory_budget_bytes = 4294967296
+allow_native_validator_fallback = true

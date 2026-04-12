@@ -1,0 +1,117 @@
+[package]
+name = "burn_dragon_p2p"
+description = "Peer-to-peer experiment integration for burn_dragon language training"
+version = "0.5.0"
+edition = "2024"
+rust-version = "1.92"
+authors = ["mosure <mitchell@mosure.me>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/mosure/burn_bdh"
+repository = "https://github.com/mosure/burn_bdh"
+readme = "README.md"
+
+[features]
+default = ["native"]
+native = [
+  "dep:burn-autodiff",
+  "dep:burn-ndarray",
+  "dep:burn-train",
+  "dep:burn_dragon_language",
+  "dep:burn_dragon_train",
+  "dep:burn_dragon_universality",
+  "dep:reqwest",
+]
+wasm-peer = [
+  "wasm-ui",
+  "dep:burn-autodiff",
+  "dep:burn_dragon_core",
+  "dep:burn_dragon_universality",
+]
+wgpu = [
+  "dep:burn-wgpu",
+]
+cuda = [
+  "native",
+  "burn_dragon_language/cuda",
+  "dep:burn-cuda",
+]
+wasm-ui = [
+  "dep:burn_p2p_app",
+  "dep:burn_p2p_browser",
+  "dep:burn_p2p_views",
+  "dep:dioxus",
+  "dep:gloo-net",
+  "dep:js-sys",
+  "dep:wasm-bindgen",
+  "dep:wasm-bindgen-futures",
+  "dep:web-sys",
+]
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.5", features = ["derive"] }
+hex = "0.4"
+libp2p-identity = "0.2.13"
+semver = { version = "1", features = ["serde"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+toml = "0.8"
+url = "2"
+reqwest = { version = "0.12", optional = true, default-features = false, features = ["json", "rustls-tls"] }
+
+burn = { version = "0.21.0-pre.3", default-features = false, features = ["fusion", "ndarray", "std", "wgpu"] }
+burn-autodiff = { version = "0.21.0-pre.3", optional = true }
+burn-ndarray = { version = "0.21.0-pre.3", optional = true }
+burn-train = { version = "0.21.0-pre.3", optional = true, default-features = false }
+burn-wgpu = { version = "0.21.0-pre.3", optional = true, default-features = false, features = ["fusion", "std", "webgpu"] }
+burn-cuda = { version = "0.21.0-pre.3", optional = true, default-features = false, features = ["std"] }
+
+burn_p2p = { version = "=0.21.0-pre.12", default-features = false }
+burn_p2p_app = { version = "=0.21.0-pre.12", optional = true, default-features = false, features = ["readonly"] }
+burn_p2p_browser = { version = "=0.21.0-pre.12", optional = true }
+burn_p2p_views = { version = "=0.21.0-pre.12", optional = true }
+burn_dragon_core = { path = "../burn_dragon_core", version = "0.5.0", optional = true, default-features = false }
+burn_dragon_universality = { path = "../burn_dragon_universality", version = "0.5.0", optional = true, default-features = false }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+burn_p2p = { version = "=0.21.0-pre.12", default-features = false, features = ["burn"] }
+burn_p2p_bootstrap = { version = "=0.21.0-pre.12" }
+ctrlc = "3.4"
+tokio = { version = "1", features = ["rt", "signal", "time"] }
+
+burn_dragon_language = { path = "../burn_dragon_language", version = "0.5.0", optional = true, default-features = false, features = ["train"] }
+burn_dragon_train = { path = "../burn_dragon_train", version = "0.5.0", optional = true, default-features = false, features = ["train"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+dioxus = { version = "0.7.4", optional = true, default-features = false, features = ["lib", "web"] }
+getrandom = { version = "0.4", features = ["wasm_js"] }
+gloo-net = { version = "0.6", optional = true }
+js-sys = { version = "0.3", optional = true }
+web-time = "1"
+wasm-bindgen = { version = "0.2", optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
+web-sys = { version = "0.3", optional = true, features = ["Document", "HtmlInputElement", "Location", "Storage", "Window"] }
+burn_p2p_browser = { version = "=0.21.0-pre.12", optional = true }
+burn_p2p_core = { version = "=0.21.0-pre.12" }
+burn_p2p_dataloader = { version = "=0.21.0-pre.12" }
+burn_p2p_views = { version = "=0.21.0-pre.12", optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"
+
+[dev-dependencies]
+tempfile = "3"
+tiny_http = "0.12"
+burn_p2p_browser = { version = "=0.21.0-pre.12" }
+burn_p2p_core = { version = "=0.21.0-pre.12" }
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["rlib", "cdylib"]
+
+[[bin]]
+name = "burn_dragon_p2p_native"
+path = "src/bin/burn_dragon_p2p_native.rs"
+required-features = ["native"]

@@ -2,6 +2,7 @@ use crate::OptimizerScheduleMode;
 use crate::train::prelude::*;
 use std::f64::consts::PI;
 
+#[derive(Clone, Debug)]
 pub enum ResolvedLrScheduler {
     Constant(LearningRate),
     Cosine(WarmupCosineLrScheduler),
@@ -10,6 +11,18 @@ pub enum ResolvedLrScheduler {
     Step(StepLrScheduler),
     Noam(NoamLrScheduler),
     BitNetTwoStage(BitNetTwoStageLrScheduler),
+}
+
+#[derive(Record, Clone, Debug)]
+pub struct ResolvedLrSchedulerRecord<B: BackendTrait> {
+    kind: u8,
+    constant: Option<LearningRate>,
+    cosine: Option<WarmupCosineLrSchedulerRecord>,
+    linear: Option<<LinearLrScheduler as LrScheduler>::Record<B>>,
+    exponential: Option<<ExponentialLrScheduler as LrScheduler>::Record<B>>,
+    step: Option<<StepLrScheduler as LrScheduler>::Record<B>>,
+    noam: Option<<NoamLrScheduler as LrScheduler>::Record<B>>,
+    bitnet_two_stage: Option<BitNetTwoStageLrSchedulerRecord>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -230,6 +243,140 @@ impl LrScheduler for BitNetTwoStageLrScheduler {
             second_stage_start_step: record.second_stage_start_step,
             total_steps: record.total_steps,
             current_step: record.current_step,
+        }
+    }
+}
+
+impl LrScheduler for ResolvedLrScheduler {
+    type Record<B: BackendTrait> = ResolvedLrSchedulerRecord<B>;
+
+    fn step(&mut self) -> LearningRate {
+        match self {
+            Self::Constant(lr) => *lr,
+            Self::Cosine(scheduler) => scheduler.step(),
+            Self::Linear(scheduler) => scheduler.step(),
+            Self::Exponential(scheduler) => scheduler.step(),
+            Self::Step(scheduler) => scheduler.step(),
+            Self::Noam(scheduler) => scheduler.step(),
+            Self::BitNetTwoStage(scheduler) => scheduler.step(),
+        }
+    }
+
+    fn to_record<B: BackendTrait>(&self) -> Self::Record<B> {
+        match self {
+            Self::Constant(lr) => ResolvedLrSchedulerRecord {
+                kind: 0,
+                constant: Some(*lr),
+                cosine: None,
+                linear: None,
+                exponential: None,
+                step: None,
+                noam: None,
+                bitnet_two_stage: None,
+            },
+            Self::Cosine(scheduler) => ResolvedLrSchedulerRecord {
+                kind: 1,
+                constant: None,
+                cosine: Some(scheduler.to_record::<B>()),
+                linear: None,
+                exponential: None,
+                step: None,
+                noam: None,
+                bitnet_two_stage: None,
+            },
+            Self::Linear(scheduler) => ResolvedLrSchedulerRecord {
+                kind: 2,
+                constant: None,
+                cosine: None,
+                linear: Some(scheduler.to_record::<B>()),
+                exponential: None,
+                step: None,
+                noam: None,
+                bitnet_two_stage: None,
+            },
+            Self::Exponential(scheduler) => ResolvedLrSchedulerRecord {
+                kind: 3,
+                constant: None,
+                cosine: None,
+                linear: None,
+                exponential: Some(scheduler.to_record::<B>()),
+                step: None,
+                noam: None,
+                bitnet_two_stage: None,
+            },
+            Self::Step(scheduler) => ResolvedLrSchedulerRecord {
+                kind: 4,
+                constant: None,
+                cosine: None,
+                linear: None,
+                exponential: None,
+                step: Some(scheduler.to_record::<B>()),
+                noam: None,
+                bitnet_two_stage: None,
+            },
+            Self::Noam(scheduler) => ResolvedLrSchedulerRecord {
+                kind: 5,
+                constant: None,
+                cosine: None,
+                linear: None,
+                exponential: None,
+                step: None,
+                noam: Some(scheduler.to_record::<B>()),
+                bitnet_two_stage: None,
+            },
+            Self::BitNetTwoStage(scheduler) => ResolvedLrSchedulerRecord {
+                kind: 6,
+                constant: None,
+                cosine: None,
+                linear: None,
+                exponential: None,
+                step: None,
+                noam: None,
+                bitnet_two_stage: Some(scheduler.to_record::<B>()),
+            },
+        }
+    }
+
+    fn load_record<B: BackendTrait>(self, record: Self::Record<B>) -> Self {
+        match (self, record.kind) {
+            (Self::Constant(_), 0) => {
+                Self::Constant(record.constant.expect("constant lr scheduler record"))
+            }
+            (Self::Cosine(scheduler), 1) => Self::Cosine(
+                scheduler.load_record::<B>(record.cosine.expect("cosine lr scheduler record")),
+            ),
+            (Self::Linear(scheduler), 2) => Self::Linear(
+                scheduler.load_record::<B>(record.linear.expect("linear lr scheduler record")),
+            ),
+            (Self::Exponential(scheduler), 3) => Self::Exponential(
+                scheduler
+                    .load_record::<B>(record.exponential.expect("exponential lr scheduler record")),
+            ),
+            (Self::Step(scheduler), 4) => Self::Step(
+                scheduler.load_record::<B>(record.step.expect("step lr scheduler record")),
+            ),
+            (Self::Noam(scheduler), 5) => Self::Noam(
+                scheduler.load_record::<B>(record.noam.expect("noam lr scheduler record")),
+            ),
+            (Self::BitNetTwoStage(scheduler), 6) => Self::BitNetTwoStage(
+                scheduler.load_record::<B>(
+                    record
+                        .bitnet_two_stage
+                        .expect("bitnet two-stage lr scheduler record"),
+                ),
+            ),
+            (variant, kind) => panic!(
+                "resolved lr scheduler record kind {kind} does not match scheduler variant {}",
+                match variant {
+                    Self::Constant(_) => "constant",
+                    Self::Cosine(_) => "cosine",
+                    Self::Linear(_) => "linear",
+                    Self::Exponential(_) => "exponential",
+                    Self::Step(_) => "step",
+                    Self::Noam(_) => "noam",
+                    Self::BitNetTwoStage(_) => "bitnet_two_stage",
+                }
+            ),
         }
     }
 }

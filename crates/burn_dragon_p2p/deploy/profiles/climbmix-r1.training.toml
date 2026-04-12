@@ -1,0 +1,31 @@
+[dataset]
+cache_dir = "./cache/climbmix-r1"
+train_split_ratio = 0.9
+type = "nemotron_climb_mix"
+max_records = 256
+
+[dataset.tokenizer]
+type = "pretokenized"
+vocab_size = 50257
+eos_id = 50256
+
+[model]
+n_layer = 6
+n_embd = 96
+n_head = 8
+latent_total = 192
+
+[training]
+block_size = 128
+batch_size = 4
+max_iters = 32
+checkpoint_interval_iters = 4
+log_frequency = 1
+seed = 1337
+
+[optimizer]
+learning_rate = 0.003
+weight_decay = 0.0
+
+[generation]
+prompt = "1 2 3"

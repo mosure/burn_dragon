@@ -15,6 +15,9 @@ use std::sync::atomic::Ordering;
 use burn_dragon_core::{
     SharedLowrankActivationBatchStats, SharedLowrankContinualBackpropRuntime, SharedLowrankParamIds,
 };
+use burn_dragon_train::train::pipeline::{
+    ResolvedOptimizer, ResolvedOptimizerRecord, resolve_optimizer,
+};
 
 #[derive(Clone)]
 struct DragonAdamW {
@@ -143,6 +146,64 @@ where
     base_learning_rate: LearningRate,
     fresh_model: BDH<B>,
     module: PhantomData<LanguageTrainModel<B>>,
+}
+
+#[derive(burn::record::Record, Clone)]
+pub struct LanguageOptimizerRecord<B: AutodiffBackend> {
+    kind: u8,
+    standard: Option<ResolvedOptimizerRecord<LanguageTrainModel<B>, B>>,
+    continual_backprop: Option<ContinualBackpropAdamWRecord<B>>,
+}
+
+#[derive(Clone)]
+pub struct LanguageOptimizer<B: AutodiffBackend> {
+    kind: LanguageOptimizerKind<B>,
+}
+
+#[derive(Clone)]
+enum LanguageOptimizerKind<B: AutodiffBackend> {
+    Standard(ResolvedOptimizer<B, LanguageTrainModel<B>>),
+    ContinualBackprop(ContinualBackpropAdamWOptimizer<B>),
+}
+
+pub fn validate_language_continual_backprop<B: BackendTrait>(
+    training: &TrainingHyperparameters,
+    model: &BDH<B>,
+    world_size: usize,
+) -> Result<()> {
+    anyhow::ensure!(
+        !training.continual_backprop.enabled || world_size == 1,
+        "training.continual_backprop currently requires single-process training"
+    );
+    anyhow::ensure!(
+        !training.continual_backprop.enabled || model.supports_shared_lowrank_continual_backprop(),
+        "training.continual_backprop currently requires rollout_fast_steps_per_slow_step = 1 and y_neuron_recurrence disabled"
+    );
+    Ok(())
+}
+
+pub fn resolve_language_optimizer<B>(
+    training: &TrainingHyperparameters,
+    optimizer_cfg: &OptimizerConfig,
+    total_steps: usize,
+    fresh_model: BDH<B>,
+) -> Result<LanguageOptimizer<B>>
+where
+    B: AutodiffBackend,
+{
+    let kind = if training.continual_backprop.enabled {
+        LanguageOptimizerKind::ContinualBackprop(ContinualBackpropAdamWOptimizer::new(
+            optimizer_cfg,
+            training.continual_backprop.clone(),
+            fresh_model,
+        )?)
+    } else {
+        LanguageOptimizerKind::Standard(resolve_optimizer::<B, LanguageTrainModel<B>>(
+            optimizer_cfg,
+            total_steps,
+        )?)
+    };
+    Ok(LanguageOptimizer { kind })
 }
 
 impl<B> ContinualBackpropAdamWOptimizer<B>
@@ -544,8 +605,83 @@ where
     }
 }
 
+impl<B> Optimizer<LanguageTrainModel<B>, B> for LanguageOptimizer<B>
+where
+    B: AutodiffBackend,
+{
+    type Record = LanguageOptimizerRecord<B>;
+
+    fn step(
+        &mut self,
+        lr: LearningRate,
+        module: LanguageTrainModel<B>,
+        grads: GradientsParams,
+    ) -> LanguageTrainModel<B> {
+        match &mut self.kind {
+            LanguageOptimizerKind::Standard(optimizer) => optimizer.step(lr, module, grads),
+            LanguageOptimizerKind::ContinualBackprop(optimizer) => {
+                optimizer.step(lr, module, grads)
+            }
+        }
+    }
+
+    fn step_multi(
+        &mut self,
+        lr: LearningRate,
+        module: LanguageTrainModel<B>,
+        grads: MultiGradientsParams,
+    ) -> LanguageTrainModel<B> {
+        match &mut self.kind {
+            LanguageOptimizerKind::Standard(optimizer) => optimizer.step_multi(lr, module, grads),
+            LanguageOptimizerKind::ContinualBackprop(optimizer) => {
+                optimizer.step_multi(lr, module, grads)
+            }
+        }
+    }
+
+    fn to_record(&self) -> Self::Record {
+        match &self.kind {
+            LanguageOptimizerKind::Standard(optimizer) => LanguageOptimizerRecord {
+                kind: 0,
+                standard: Some(optimizer.to_record()),
+                continual_backprop: None,
+            },
+            LanguageOptimizerKind::ContinualBackprop(optimizer) => LanguageOptimizerRecord {
+                kind: 1,
+                standard: None,
+                continual_backprop: Some(optimizer.to_record()),
+            },
+        }
+    }
+
+    fn load_record(self, record: Self::Record) -> Self {
+        let kind = match (self.kind, record.kind) {
+            (LanguageOptimizerKind::Standard(optimizer), 0) => LanguageOptimizerKind::Standard(
+                optimizer.load_record(record.standard.expect("language optimizer record")),
+            ),
+            (LanguageOptimizerKind::ContinualBackprop(optimizer), 1) => {
+                LanguageOptimizerKind::ContinualBackprop(
+                    optimizer.load_record(
+                        record
+                            .continual_backprop
+                            .expect("continual backprop optimizer record"),
+                    ),
+                )
+            }
+            (variant, kind) => panic!(
+                "language optimizer record kind {kind} does not match optimizer variant {}",
+                match variant {
+                    LanguageOptimizerKind::Standard(_) => "standard",
+                    LanguageOptimizerKind::ContinualBackprop(_) => "continual_backprop",
+                }
+            ),
+        };
+        Self { kind }
+    }
+}
+
 impl<B: BackendTrait> LanguageTrainModel<B> {
-    pub(crate) fn with_continual_backprop(mut self, config: &ContinualBackpropConfig) -> Self {
+    pub fn with_continual_backprop(mut self, config: &ContinualBackpropConfig) -> Self {
         if !config.enabled {
             return self;
         }

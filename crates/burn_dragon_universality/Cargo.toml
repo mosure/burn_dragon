@@ -3,7 +3,7 @@ name = "burn_dragon_universality"
 description = "Synthetic universality and NCA corpus generation for burn_dragon"
 version = "0.5.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.92"
 authors = ["mosure <mitchell@mosure.me>"]
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/mosure/burn_bdh"
@@ -12,12 +12,12 @@ readme = "../../README.md"
 
 [dependencies]
 anyhow = "1"
+burn_dragon_tokenizer = { path = "../burn_dragon_tokenizer", version = "0.5.0" }
 flate2 = "1"
 rand = "0.8"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 toml = "0.9"
-rustbpe = { path = "../../vendor/rustbpe" }
 
 [dev-dependencies]
 tempfile = "3"

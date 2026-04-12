@@ -1,0 +1,8 @@
+${edge_domain_name} {
+    encode gzip zstd
+    handle /dragon-datasets/* {
+        root * /var/lib/burn-p2p/public
+        file_server
+    }
+    reverse_proxy 127.0.0.1:${http_port}
+}

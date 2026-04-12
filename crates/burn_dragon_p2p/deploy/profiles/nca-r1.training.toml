@@ -1,0 +1,38 @@
+[dataset]
+cache_dir = "./cache/nca-r1"
+train_split_ratio = 0.9
+type = "universality_nca"
+config = "crates/burn_dragon_p2p/deploy/profiles/nca-r1.corpus.toml"
+
+[dataset.tokenizer]
+type = "pretokenized"
+vocab_size = 50257
+eos_id = 50256
+
+[model]
+n_layer = 4
+n_embd = 64
+n_head = 4
+latent_total = 128
+
+[model.language_head]
+type = "nca_factorized_patch"
+state_count = 10
+patch_size = 2
+frame_special_tokens = true
+eos_id = 50256
+
+[training]
+block_size = 128
+batch_size = 4
+max_iters = 24
+checkpoint_interval_iters = 4
+log_frequency = 1
+seed = 1337
+
+[optimizer]
+learning_rate = 0.001
+weight_decay = 0.0
+
+[generation]
+prompt = "0 0 0"

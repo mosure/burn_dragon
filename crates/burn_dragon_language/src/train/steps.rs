@@ -1,5 +1,4 @@
 use crate::train::prelude::*;
-use burn::module::Ignored;
 use burn_dragon_core::ModelState;
 use std::any::{Any, TypeId};
 use std::collections::{HashMap, HashSet};
@@ -250,67 +249,65 @@ fn scale_gradients_by_schedule<B, M>(
 }
 
 #[derive(Module, Debug)]
-pub(crate) struct LanguageTrainModel<B: BackendTrait> {
-    pub(crate) model: BDH<B>,
-    pub(crate) tbptt_chunk_size: Option<usize>,
-    pub(crate) pipeline_plan: Ignored<Option<PipelinePlan>>,
-    #[module(ignore)]
-    pub(crate) tbptt_persist_across_steps: bool,
-    #[module(ignore)]
+pub struct LanguageTrainModel<B: BackendTrait> {
+    pub model: BDH<B>,
+    pub tbptt_chunk_size: Option<usize>,
+    #[module(skip)]
+    pub pipeline_plan: Option<PipelinePlan>,
+    #[module(skip)]
+    pub tbptt_persist_across_steps: bool,
+    #[module(skip)]
     streaming_runtime_key: usize,
-    gradient_scale_schedule: Ignored<GradientScaleSchedule>,
-    gradient_scale_step: Ignored<Arc<AtomicUsize>>,
+    #[module(skip)]
+    gradient_scale_schedule: GradientScaleSchedule,
+    #[module(skip)]
+    gradient_scale_step: Arc<AtomicUsize>,
 }
 
 impl<B: BackendTrait> LanguageTrainModel<B> {
-    pub(crate) fn new(model: BDH<B>) -> Self {
+    pub fn new(model: BDH<B>) -> Self {
         Self {
             model,
             tbptt_chunk_size: None,
-            pipeline_plan: Ignored(None),
+            pipeline_plan: None,
             tbptt_persist_across_steps: false,
             streaming_runtime_key: next_streaming_runtime_key(),
-            gradient_scale_schedule: Ignored(GradientScaleSchedule::default()),
-            gradient_scale_step: Ignored(Arc::new(AtomicUsize::new(0))),
+            gradient_scale_schedule: GradientScaleSchedule::default(),
+            gradient_scale_step: Arc::new(AtomicUsize::new(0)),
         }
     }
 
-    pub(crate) fn with_tbptt_chunk_size(mut self, tbptt_chunk_size: Option<usize>) -> Self {
+    pub fn with_tbptt_chunk_size(mut self, tbptt_chunk_size: Option<usize>) -> Self {
         self.tbptt_chunk_size = tbptt_chunk_size;
         self
     }
 
-    pub(crate) fn with_pipeline_plan(mut self, pipeline_plan: Option<PipelinePlan>) -> Self {
-        self.pipeline_plan = Ignored(pipeline_plan);
+    pub fn with_pipeline_plan(mut self, pipeline_plan: Option<PipelinePlan>) -> Self {
+        self.pipeline_plan = pipeline_plan;
         self
     }
 
-    pub(crate) fn with_tbptt_persist_across_steps(mut self, enabled: bool) -> Self {
+    pub fn with_tbptt_persist_across_steps(mut self, enabled: bool) -> Self {
         self.tbptt_persist_across_steps = enabled;
         self
     }
 
-    pub(crate) fn with_gradient_scale_schedule(
+    pub fn with_gradient_scale_schedule(
         mut self,
         training: &TrainingHyperparameters,
         total_steps: usize,
     ) -> Self {
-        self.gradient_scale_schedule = Ignored(GradientScaleSchedule::from_training(
-            &self.model,
-            training,
-            total_steps,
-        ));
+        self.gradient_scale_schedule =
+            GradientScaleSchedule::from_training(&self.model, training, total_steps);
         self
     }
 
-    pub(crate) fn continual_backprop_target_lr_scale(&self) -> f32 {
+    pub fn continual_backprop_target_lr_scale(&self) -> f32 {
         let step_index = self
             .gradient_scale_step
-            .0
             .load(Ordering::Relaxed)
             .saturating_sub(1);
         self.gradient_scale_schedule
-            .0
             .shared_lowrank_target_lr_scale_for_step_index(step_index)
     }
 
@@ -318,19 +315,18 @@ impl<B: BackendTrait> LanguageTrainModel<B> {
     where
         B: AutodiffBackend,
     {
-        let step = self.gradient_scale_step.0.fetch_add(1, Ordering::Relaxed) + 1;
+        let step = self.gradient_scale_step.fetch_add(1, Ordering::Relaxed) + 1;
         let step_index = step.saturating_sub(1);
         let extra_scale = self
             .gradient_scale_schedule
-            .0
             .backbone_grad_scale
-            .filter(|_| step <= self.gradient_scale_schedule.0.backbone_grad_scale_steps);
+            .filter(|_| step <= self.gradient_scale_schedule.backbone_grad_scale_steps);
         scale_gradients_by_schedule::<B, _>(
             self,
             &mut grads,
-            self.gradient_scale_schedule.0.param_scale_rules.as_ref(),
+            self.gradient_scale_schedule.param_scale_rules.as_ref(),
             step_index,
-            self.gradient_scale_schedule.0.backbone_param_ids.as_ref(),
+            self.gradient_scale_schedule.backbone_param_ids.as_ref(),
             extra_scale,
         );
         grads

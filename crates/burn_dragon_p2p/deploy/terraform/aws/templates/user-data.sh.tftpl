@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+set -euxo pipefail
+
+export DEBIAN_FRONTEND=noninteractive
+
+apt-get update
+apt-get install -y --no-install-recommends \
+  build-essential \
+  ca-certificates \
+  curl \
+  git \
+  jq \
+  python3 \
+  pkg-config \
+  libssl-dev \
+  unzip \
+  awscli \
+  caddy
+
+if [ ! -x /root/.cargo/bin/cargo ]; then
+  curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal
+fi
+
+source /root/.cargo/env
+
+cargo install \
+  --locked \
+  --git "${bootstrap_git_repo}" \
+  --rev "${bootstrap_git_ref}" \
+  burn_p2p_bootstrap \
+  --bin burn-p2p-bootstrap \
+  --no-default-features \
+  --features admin-http,artifact-fs,browser-edge,browser-join,${bootstrap_auth_feature},rbac,social
+
+install -d -m 0755 /usr/local/bin
+ln -sf /root/.cargo/bin/burn-p2p-bootstrap /usr/local/bin/burn-p2p-bootstrap
+
+install -d -m 0755 /etc/burn-dragon-p2p
+install -d -m 0755 /var/lib/burn-p2p
+install -d -m 0755 /var/lib/burn-p2p/auth
+install -d -m 0755 /var/lib/burn-p2p/bootstrap-peer
+install -d -m 0755 /var/lib/burn-p2p/publication/hot
+install -d -m 0755 /var/lib/burn-p2p/public
+
+cat >/usr/local/bin/burn-dragon-p2p-sync-secrets <<'EOF_SYNC'
+${secret_sync_script}
+EOF_SYNC
+chmod 0755 /usr/local/bin/burn-dragon-p2p-sync-secrets
+
+cat >/tmp/burn-dragon-static-datasets.json <<'EOF_DATASETS'
+${static_dataset_files}
+EOF_DATASETS
+
+python3 - <<'PY'
+import base64
+import json
+from pathlib import Path
+
+target_root = Path("/var/lib/burn-p2p/public")
+files = json.loads(Path("/tmp/burn-dragon-static-datasets.json").read_text())
+for relative_path, encoded in files.items():
+    destination = target_root / relative_path
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(base64.b64decode(encoded))
+PY
+
+rm -f /tmp/burn-dragon-static-datasets.json
+
+cat >/etc/burn-dragon-p2p/bootstrap.json <<'EOF_CONFIG'
+${bootstrap_config_json}
+EOF_CONFIG
+
+cat >/etc/caddy/Caddyfile <<'EOF_CADDY'
+${caddyfile}
+EOF_CADDY
+
+cat >/etc/systemd/system/burn-p2p-bootstrap.service <<'EOF_SERVICE'
+[Unit]
+Description=burn_dragon P2P bootstrap edge
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/var/lib/burn-p2p
+EnvironmentFile=-/etc/burn-dragon-p2p/bootstrap.env
+ExecStartPre=/usr/local/bin/burn-dragon-p2p-sync-secrets
+ExecStart=/usr/local/bin/burn-p2p-bootstrap /etc/burn-dragon-p2p/bootstrap.json
+Restart=always
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
+EOF_SERVICE
+
+systemctl daemon-reload
+systemctl enable caddy burn-p2p-bootstrap
+systemctl restart caddy
+systemctl start burn-p2p-bootstrap

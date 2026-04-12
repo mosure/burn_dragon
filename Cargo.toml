@@ -3,7 +3,7 @@ name = "burn_dragon"
 description = "burn dragon inference and training"
 version = "0.5.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.92"
 authors = ["mosure <mitchell@mosure.me>"]
 license = "MIT OR Apache-2.0"
 keywords = [
@@ -17,8 +17,8 @@ categories = [
   "science",
   "science::neuroscience",
 ]
-homepage = "https://github.com/mosure/burn_dragon"
-repository = "https://github.com/mosure/burn_dragon"
+homepage = "https://github.com/mosure/burn_bdh"
+repository = "https://github.com/mosure/burn_bdh"
 readme = "README.md"
 exclude = [
   ".devcontainer",
@@ -33,6 +33,7 @@ exclude = [
 [workspace]
 members = [
   ".",
+  "xtask",
   "crates/bevy_dragon",
   "crates/burn_autogaze",
   "crates/burn_vjepa",
@@ -42,10 +43,12 @@ members = [
   "crates/burn_dragon_dreamer",
   "crates/burn_dragon_language",
   "crates/burn_dragon_multimodal",
+  "crates/burn_dragon_p2p",
   "crates/burn_dragon_reasoning",
   "crates/burn_dragon_sudoku",
   "crates/burn_dragon_stream",
   "crates/burn_dragon_train",
+  "crates/burn_dragon_tokenizer",
   "crates/burn_dragon_kernel",
   "crates/burn_dragon_universality",
   "crates/burn_dragon_vision",
@@ -123,9 +126,9 @@ burn_dragon_web = { path = "crates/burn_dragon_web", version = "0.5.0", default-
 
 
 [dev-dependencies]
-burn = { version = "0.21.0-pre.2", default-features = false, features = ["fusion", "ndarray", "std", "wgpu"] }
-burn-autodiff = { version = "0.21.0-pre.2" }
-burn-ndarray = "0.21.0-pre.2"
+burn = { version = "0.21.0-pre.3", default-features = false, features = ["fusion", "ndarray", "std", "wgpu"] }
+burn-autodiff = { version = "0.21.0-pre.3" }
+burn-ndarray = "0.21.0-pre.3"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.9"
@@ -158,11 +161,6 @@ opt-level = "z"
 lto = "fat"
 codegen-units = 1
 panic = "abort"
-
-[patch.crates-io]
-cubecl-cuda = { path = "vendor/cubecl-cuda-0.10.0-pre.2" }
-burn-collective = { path = "vendor/burn-collective-0.21.0-pre.2" }
-
 
 [lib]
 path = "src/lib.rs"

@@ -1603,7 +1603,11 @@ fn rwkv8_tensorized_scan_threshold_bytes<B: BackendTrait>() -> usize {
         .unwrap_or_else(|| {
             let backend_name = std::any::type_name::<B>();
             if backend_name.contains("CudaRuntime") {
-                4 * 1024 * 1024 * 1024
+                4_u64
+                    .saturating_mul(1024)
+                    .saturating_mul(1024)
+                    .saturating_mul(1024)
+                    .min(usize::MAX as u64) as usize
             } else {
                 128 * 1024 * 1024
             }

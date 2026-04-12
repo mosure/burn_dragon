@@ -1,0 +1,33 @@
+[package]
+name = "burn_dragon_tokenizer"
+description = "Tokenizer primitives for burn_dragon"
+version = "0.5.0"
+edition = "2024"
+rust-version = "1.92"
+authors = ["mosure <mitchell@mosure.me>"]
+license = "MIT"
+homepage = "https://github.com/mosure/burn_bdh"
+repository = "https://github.com/mosure/burn_bdh"
+readme = "README.md"
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+pyo3 = { version = "0.27", optional = true }
+dary_heap = "0.3"
+indexmap = "2.2"
+fancy-regex = "0.16.1"
+log = "0.4.28"
+pyo3-log = { version = "0.13", optional = true }
+ahash = "0.8.12"
+rayon = "1.11.0"
+compact_str = "0.9.0"
+
+[dev-dependencies]
+criterion = "0.5"
+
+[features]
+default = []
+python-bindings = ["dep:pyo3", "dep:pyo3-log"]
+extension-module = ["python-bindings", "pyo3/extension-module"]

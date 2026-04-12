@@ -420,7 +420,7 @@ where
 
     let primary_id = primary_device.id();
     let type_id = resolve_replica_type_id(primary_device, primary_id.type_id, replica_count);
-    let available = <B::Device as Device>::device_count(type_id);
+    let available = B::device_count(type_id);
     if available < replica_count {
         return Err(anyhow!(
             "parallel local multi-device bridge requested {replica_count} replicas, but only {available} devices are available for type_id={type_id}"
@@ -448,7 +448,7 @@ where
     let primary_id = primary_device.id();
     let replica_count = local_rank.saturating_add(1);
     let type_id = resolve_replica_type_id(primary_device, primary_id.type_id, replica_count);
-    let available = <B::Device as Device>::device_count(type_id);
+    let available = B::device_count(type_id);
     if available <= local_rank {
         return Err(anyhow!(
             "parallel process-group launch requested LOCAL_RANK={local_rank}, but only {available} devices are available for type_id={type_id}"
@@ -498,8 +498,9 @@ where
 {
     #[cfg(feature = "cuda")]
     if let Some(cuda_device) = (device as &dyn Any).downcast_ref::<CudaDevice>() {
-        let usage =
-            <burn_cubecl::cubecl::cuda::CudaRuntime as Runtime>::client(cuda_device).memory_usage();
+        let usage = <burn_cubecl::cubecl::cuda::CudaRuntime as Runtime>::client(cuda_device)
+            .memory_usage()
+            .expect("cuda memory usage");
         return Some(DeviceMemoryUsage {
             reserved_bytes: usage.bytes_reserved,
             in_use_bytes: usage.bytes_in_use,
@@ -507,7 +508,9 @@ where
     }
 
     if let Some(wgpu_device) = (device as &dyn Any).downcast_ref::<WgpuDevice>() {
-        let usage = <burn_wgpu::WgpuRuntime as Runtime>::client(wgpu_device).memory_usage();
+        let usage = <burn_wgpu::WgpuRuntime as Runtime>::client(wgpu_device)
+            .memory_usage()
+            .expect("wgpu memory usage");
         return Some(DeviceMemoryUsage {
             reserved_bytes: usage.bytes_reserved,
             in_use_bytes: usage.bytes_in_use,

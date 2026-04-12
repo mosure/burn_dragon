@@ -1,0 +1,41 @@
+stack_name              = "burn-dragon-p2p-mainnet"
+environment_name        = "production"
+aws_region              = "us-east-1"
+route53_zone_name       = "example.com"
+edge_domain_name        = "dragon-net.example.com"
+bootstrap_git_ref       = "51717da4e4f8332a711519188e4897f4002a273d"
+secret_parameter_prefix = "/burn-dragon-p2p/mainnet/bootstrap"
+
+network_id              = "burn-dragon-mainnet"
+project_family_id       = "burn-dragon-language"
+study_id                = "burn-dragon-mainnet"
+release_train_hash      = "burn-dragon-mainnet-train"
+
+auth_connector_kind     = "github"
+auth_authority_name     = "burn-dragon-auth"
+github_required_org     = "mosure"
+github_required_team    = "mosure/trainers"
+github_required_repo    = "mosure/burn_bdh"
+github_admin_logins     = ["mosure"]
+github_admin_required_repo_permission = "admin"
+
+instance_type           = "t3.large"
+root_volume_size_gib    = 256
+
+# Optional:
+# auth_principals_json = jsonencode([
+#   {
+#     principal_id     = "burn-dragon-admin"
+#     display_name     = "burn_dragon admin"
+#     org_memberships  = []
+#     group_memberships = []
+#     granted_roles    = { roles = ["TrainerGpu", "Validator", "Archive"] }
+#     granted_scopes   = ["Connect", "Discover", { Admin = { study_id = "burn-dragon-mainnet" } }]
+#     allowed_networks = ["burn-dragon-mainnet"]
+#     custom_claims    = { operator_role = "admin", admin_capabilities = "all" }
+#   }
+# ])
+# ssh_cidr_blocks       = ["203.0.113.10/32"]
+# tags = {
+#   Owner = "ml-platform"
+# }

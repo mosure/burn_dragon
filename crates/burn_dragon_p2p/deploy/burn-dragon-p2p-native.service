@@ -1,0 +1,21 @@
+[Unit]
+Description=burn_dragon_p2p native peer
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/burn_dragon
+Environment=RUST_LOG=info
+ExecStart=/usr/local/bin/burn_dragon_p2p_native run-peer \
+  --config /etc/burn_dragon_p2p/native-peer.toml \
+  --experiment-kind nca \
+  --backend wgpu \
+  --auth-bundle /var/lib/burn_dragon_p2p/auth-bundle.json
+Restart=always
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

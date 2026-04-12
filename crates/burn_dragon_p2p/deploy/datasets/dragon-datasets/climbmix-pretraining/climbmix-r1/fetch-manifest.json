@@ -1,0 +1,19 @@
+{
+  "dataset_view_id": "burn-dragon-climbmix-v1",
+  "entries": [
+    {
+      "microshard_id": "climbmix-r1-shard-0",
+      "ordinal": 0,
+      "locator": "00000.bin",
+      "content_hash": "12200235097abae6ec9ccfd768c93bde6235b01d9938ed32bd3c874d944c192a4372",
+      "bytes_len": 187188
+    },
+    {
+      "microshard_id": "climbmix-r1-shard-1",
+      "ordinal": 1,
+      "locator": "00001.bin",
+      "content_hash": "12202eafae82f7598a70be7bb3f3a175d54fc60a8f55d9e308c1f456ef014df0dba6",
+      "bytes_len": 202106
+    }
+  ]
+}

@@ -3,7 +3,7 @@ name = "burn_dragon_train"
 description = "Training utilities for burn_dragon"
 version = "0.5.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.92"
 authors = ["mosure <mitchell@mosure.me>"]
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/mosure/burn_bdh"
@@ -53,21 +53,21 @@ tracing = { version = "0.1", optional = true }
 tracing-appender = { version = "0.2", optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
 
-burn = { version = "0.21.0-pre.2", default-features = false, features = ["fusion", "ndarray", "std", "wgpu"] }
-burn-wgpu = { version = "0.21.0-pre.2", default-features = false, features = ["fusion", "std"] }
-burn-ndarray = { version = "0.21.0-pre.2", optional = true }
-burn-autodiff = { version = "0.21.0-pre.2", optional = true }
-burn-train = { version = "0.21.0-pre.2", optional = true, default-features = false }
-burn-collective = { version = "0.21.0-pre.2", optional = true }
-burn-communication = { version = "0.21.0-pre.2", optional = true }
-burn-cubecl = { version = "0.21.0-pre.2", default-features = false, features = ["std", "fusion"] }
-burn-fusion = { version = "0.21.0-pre.2", default-features = false, features = ["std"] }
-burn-ir = "0.21.0-pre.2"
-burn-cuda = { version = "0.21.0-pre.2", optional = true, default-features = false, features = ["std"] }
+burn = { version = "0.21.0-pre.3", default-features = false, features = ["fusion", "ndarray", "std", "wgpu"] }
+burn-wgpu = { version = "0.21.0-pre.3", default-features = false, features = ["fusion", "std"] }
+burn-ndarray = { version = "0.21.0-pre.3", optional = true }
+burn-autodiff = { version = "0.21.0-pre.3", optional = true }
+burn-train = { version = "0.21.0-pre.3", optional = true, default-features = false }
+burn-collective = { version = "0.21.0-pre.3", optional = true }
+burn-communication = { version = "0.21.0-pre.3", optional = true }
+burn-cubecl = { version = "0.21.0-pre.3", default-features = false, features = ["std", "fusion"] }
+burn-fusion = { version = "0.21.0-pre.3", default-features = false, features = ["std"] }
+burn-ir = "0.21.0-pre.3"
+burn-cuda = { version = "0.21.0-pre.3", optional = true, default-features = false, features = ["std"] }
 
 [dev-dependencies]
 avirus = "0.2"
-burn-ndarray = "0.21.0-pre.2"
+burn-ndarray = "0.21.0-pre.3"
 criterion = { version = "0.7", features = ["html_reports"] }
 tempfile = "3"
 

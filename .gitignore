@@ -82,3 +82,15 @@ program.md
 results_autoresearch.tsv
 results_*.tsv
 *.exp.tsv
+
+# Terraform local state/provider cache.
+**/.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraform.tfstate.lock.info

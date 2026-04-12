@@ -1,0 +1,212 @@
+{
+  "version": 1,
+  "experiment_kind": "climb_mix_pretraining",
+  "native": {
+    "training_toml": "[dataset]\ncache_dir = \"__dragon_network_profile_cache__\"\ntrain_split_ratio = 0.8999999761581421\ntype = \"nemotron_climb_mix\"\nmax_records = 256\n\n[dataset.tokenizer]\ntype = \"pretokenized\"\nvocab_size = 50257\neos_id = 50256\n\n[training]\nblock_size = 128\ntbptt_persist_across_steps = false\nbatch_size = 4\nseed = 1337\ngradient_accumulation_steps = 1\nmax_iters = 32\ncheckpoint_interval_iters = 4\nlog_frequency = 1\nlaunch_mode = \"fresh\"\nmodule_lr_scales = []\n\n[training.init_transfer]\npreserve_interface_input_embedding = false\npreserve_interface_output_head = false\npreserve_fresh_decoder = false\npreserve_fresh_norm = false\nmatch_fresh_rms = false\n\n[training.continual_backprop]\nenabled = false\ntarget = \"shared_lowrank_latents\"\nutility_decay = 0.9900000095367432\nreplacement_rate = 0.00009999999747378752\nmaturity_steps = 100\nsample_interval_steps = 8\nreplace_interval_steps = 64\nutility_epsilon = 0.0000009999999974752427\nlr_coupling = \"none\"\nlr_coupling_power = 1.0\n\n[training.context_strategy]\ntype = \"infinite\"\n\n[optimizer]\nname = \"adamw\"\nlearning_rate = 0.003\nweight_decay = 0.0\nschedule_mode = \"bdh_reference\"\n\n[parallel]\nmode = \"single\"\nworld_size = 1\n\n[parallel.data]\nsize = 1\nbackend = \"auto\"\nfind_unused_parameters = false\ngradient_as_bucket_view = true\n\n[parallel.tensor]\nsize = 1\naxis = \"neuron\"\npartition = \"contiguous\"\nsequence_parallel = false\n\n[parallel.fsdp]\nenabled = false\nreshard_after_forward = false\ncpu_offload = false\nmixed_precision = \"disabled\"\n\n[parallel.checkpoint]\nformat = \"unsharded_v1\"\nasync_write = false\n\n[parallel.pipeline]\nenabled = false\nstage_count = 1\nvirtual_stages_per_rank = 1\nschedule = \"interleaved_1f1b\"\nmicrobatches = 1\npartition = \"layer_contiguous\"\nactivation_checkpointing = false\nshared_weight_sync = \"all_reduce_per_step\"\ncommunication = \"activation_tensor\"\n\n[parallel.pipeline.cache]\nenabled = false\npolicy = \"disabled\"\nreuse_across_backward = true\nmax_inflight_microbatches = 1\neviction = \"step_boundary\"\ntransport_dtype = \"auto\"\n\n[generation]\nprompt = \"1 2 3\"\ntemperature = 1.0\noutput_format = \"auto\"\n\n[generation.context_strategy]\ntype = \"infinite\"\n\n[generation.prompt_tokenizer]\nsource = \"dataset\"\n\n[generation.decode_tokenizer]\nsource = \"dataset\"\n\n[wgpu]\nbackend = \"auto\"\nmemory = \"subslices\"\n\n[wgpu.training.startup_autotune]\nenabled = false\ntarget_device_memory_mb = 0\nmin_batch_size = 1\nprobe_steps = 1\nbinary_search = true\n\n[wgpu.inference]\ngeneration_executor = \"baseline\"\ngeneration_chunk_tokens = 8\ngeneration_device_buffer_tokens = 64\n\n[run_layout]\nmirror_config_path = true\n\n[model]\nn_layer = 6\nn_embd = 96\nn_head = 8\nlatent_total = 192\n",
+    "nca_corpus_toml": null
+  },
+  "browser": {
+    "model_config": {
+      "n_layer": 6,
+      "n_embd": 96,
+      "dropout": 0.1,
+      "n_head": 8,
+      "mlp_internal_dim_multiplier": 2,
+      "initialization": {
+        "kind": "simple_normal",
+        "residual_scaling": {
+          "kind": "depth_scaled",
+          "gain": 1.0
+        },
+        "neuron_gains": {
+          "kind": "heavy_tailed_log_normal",
+          "log_sigma": 0.75,
+          "max_gain": 4.0
+        },
+        "topology_prior": {
+          "kind": "iid",
+          "community_count": 4,
+          "bridge_fraction": 0.05,
+          "intra_community_gain": 1.5,
+          "inter_community_gain": 0.5,
+          "bridge_gain": 1.0
+        },
+        "firing_targets": {
+          "kind": "disabled",
+          "x_target": 0.15,
+          "y_target": 0.05,
+          "x_threshold": 0.0,
+          "y_threshold": 0.0
+        },
+        "simple_normal_std": 0.02
+      },
+      "sequence_kernel": "linear_attention",
+      "latent_fanout_schedule": null,
+      "mamba": {
+        "d_state": 16,
+        "d_conv": 4,
+        "expand": 2,
+        "dt_rank": null,
+        "dt_min": 0.001,
+        "dt_max": 0.1,
+        "dt_scale": 1.0,
+        "conv_bias": true,
+        "use_fast_path": true,
+        "headdim": 128,
+        "ngroups": 1,
+        "a_init_min": 1.0,
+        "a_init_max": 16.0,
+        "norm_eps": 0.00001,
+        "rope_fraction": 0.5,
+        "dt_init_floor": 0.0001,
+        "a_floor": 0.0001,
+        "chunk_size": 64,
+        "is_outproj_norm": false,
+        "is_mimo": false,
+        "mimo_rank": 1
+      },
+      "n_expert": 1,
+      "vocab_size": 50257,
+      "language_head": {
+        "type": "standard_token_classification"
+      },
+      "rollout_fast_steps_per_slow_step": 1,
+      "fused_kernels": {
+        "enabled": false,
+        "wgpu_recurrent_kernel": true,
+        "wgpu_rollout_fused": false,
+        "attention_executor": "attention_context",
+        "projection_executor": "both",
+        "lowrank_grad_input_executor": "auto",
+        "block_sparse": {
+          "latent": {
+            "block_size": 128,
+            "active_blocks": null
+          },
+          "time": {
+            "block_size": 128,
+            "active_pairs": null
+          }
+        },
+        "rope_theta": 65536.0,
+        "relu_threshold": 0.0,
+        "alibi_slopes": null,
+        "rotary_embedding": "alibi"
+      },
+      "normalization": {
+        "kind": "layer_norm",
+        "eps": 0.00001,
+        "alpha_init": null,
+        "shift_init": null
+      },
+      "residual_connector": "vanilla",
+      "quant": {
+        "enable": false,
+        "protocol": "none",
+        "training_mode": "qat_ste",
+        "inference_mode": "offline_pack",
+        "weight_format": "fp16",
+        "act_format": "fp16",
+        "saved_activations": {
+          "mode": "disabled",
+          "format": "int8"
+        },
+        "target_modules": [],
+        "decoder_x_mode": "fp16",
+        "encoder_mode": null,
+        "act_grouping": "per_token",
+        "weight_grouping": "per_tensor",
+        "strict_bitnet_reference": false
+      },
+      "rho": {
+        "precision": "bf16",
+        "carry_across_tbptt": true,
+        "detach_between_windows": true,
+        "compression": "none",
+        "compression_interval": "chunk",
+        "stats_monitoring": true
+      },
+      "mhc": {
+        "enabled": false,
+        "num_streams": 1,
+        "num_views": 1,
+        "last_layers": null,
+        "coefficient_policy": "static_sinkhorn",
+        "mhc_iters": 10,
+        "mhc_tau": 0.05,
+        "add_branch_out_to_residual": true,
+        "dropout": 0.0
+      },
+      "attention_residual": {
+        "enabled": false,
+        "last_layers": null,
+        "num_heads": 4,
+        "history_window": null,
+        "dropout": 0.0,
+        "recency_bias": 2.0
+      },
+      "block_attention_residual": {
+        "enabled": false,
+        "last_layers": null,
+        "num_heads": 4,
+        "layers_per_block": 2,
+        "block_history_window": null,
+        "intra_block_history_window": null,
+        "summary_mode": "learned_projection",
+        "dropout": 0.0,
+        "recency_bias": 2.0,
+        "cache_block_summaries": true,
+        "two_phase_compute": true
+      },
+      "y_neuron_recurrence": {
+        "enabled": false,
+        "carry_in_scale": 0.125,
+        "last_layers": null,
+        "chunk_tokens": 1,
+        "state_decay": 0.5,
+        "state_update_scale": 1.0,
+        "state_rms_cap": 1.0
+      },
+      "clocked_slow_memory": {
+        "enabled": false,
+        "last_layers": null,
+        "chunk_tokens": 4,
+        "residual_scale": 1.0
+      },
+      "summary_memory": {
+        "enabled": false,
+        "last_layers": null,
+        "chunk_tokens": 32,
+        "residual_scale": 0.25,
+        "state_decay": 0.75,
+        "state_update_scale": 0.5,
+        "surprise_gate_threshold": 0.0,
+        "surprise_gate_sharpness": 8.0,
+        "write_trigger_text": null,
+        "write_trigger_token_ids": null
+      }
+    },
+    "execution_backend": "auto",
+    "block_size": 128,
+    "learning_rate": 0.003,
+    "weight_decay": 0.0,
+    "batch_size": 4,
+    "max_train_batches": 32,
+    "max_eval_batches": null,
+    "capability_policy": {
+      "native_cpu_memory_budget_bytes": 8589934592,
+      "native_wgpu_memory_budget_bytes": 4294967296,
+      "native_cuda_memory_budget_bytes": 6442450944,
+      "browser_wgpu_memory_budget_bytes": 2147483648,
+      "allow_native_validator_fallback": true,
+      "allow_browser_verifier_fallback": true
+    },
+    "train_source": {
+      "type": "shard_manifest_http",
+      "manifest_url": "/dragon-datasets/climbmix-pretraining/climbmix-r1/fetch-manifest.json",
+      "selection": "deterministic_peer",
+      "max_shards_per_window": 4
+    },
+    "eval_source": null
+  }
+}

@@ -24,29 +24,15 @@ where
 {
     #[cfg(feature = "cuda")]
     {
-        matches_type::<B::FloatTensorPrimitive, FusionTensor<FusionCubeRuntime<WgpuRuntime, u32>>>()
-            || matches_type::<
-                B::FloatTensorPrimitive,
-                FusionTensor<FusionCubeRuntime<WgpuRuntime, u8>>,
-            >()
+        matches_type::<B::FloatTensorPrimitive, FusionTensor<FusionCubeRuntime<WgpuRuntime>>>()
             || matches_type::<B::FloatTensorPrimitive, CubeTensor<WgpuRuntime>>()
-            || matches_type::<
-                B::FloatTensorPrimitive,
-                FusionTensor<FusionCubeRuntime<CudaRuntime, u32>>,
-            >()
-            || matches_type::<
-                B::FloatTensorPrimitive,
-                FusionTensor<FusionCubeRuntime<CudaRuntime, u8>>,
-            >()
+            || matches_type::<B::FloatTensorPrimitive, FusionTensor<FusionCubeRuntime<CudaRuntime>>>(
+            )
             || matches_type::<B::FloatTensorPrimitive, CubeTensor<CudaRuntime>>()
     }
     #[cfg(not(feature = "cuda"))]
     {
-        matches_type::<B::FloatTensorPrimitive, FusionTensor<FusionCubeRuntime<WgpuRuntime, u32>>>()
-            || matches_type::<
-                B::FloatTensorPrimitive,
-                FusionTensor<FusionCubeRuntime<WgpuRuntime, u8>>,
-            >()
+        matches_type::<B::FloatTensorPrimitive, FusionTensor<FusionCubeRuntime<WgpuRuntime>>>()
             || matches_type::<B::FloatTensorPrimitive, CubeTensor<WgpuRuntime>>()
     }
 }
@@ -82,17 +68,6 @@ where
     {
         return Some(result);
     }
-    if let Some(result) =
-        try_percentile_thresholds_cubecl_fusion::<B, u8, WgpuRuntime>(values, quantile)
-    {
-        return Some(result);
-    }
-    #[cfg(feature = "cuda")]
-    if let Some(result) =
-        try_percentile_thresholds_cubecl_fusion::<B, u32, CudaRuntime>(values, quantile)
-    {
-        return Some(result);
-    }
     #[cfg(feature = "cuda")]
     if let Some(result) =
         try_percentile_thresholds_cubecl_fusion::<B, u8, CudaRuntime>(values, quantile)
@@ -120,11 +95,11 @@ where
     BT: BoolElement + 'static,
     R: CubeRuntime + 'static,
 {
-    if !matches_type::<B::FloatTensorPrimitive, FusionTensor<FusionCubeRuntime<R, BT>>>() {
+    if !matches_type::<B::FloatTensorPrimitive, FusionTensor<FusionCubeRuntime<R>>>() {
         return None;
     }
     let prim_values = values.clone().into_primitive().tensor();
-    let fusion_values: FusionTensor<FusionCubeRuntime<R, BT>> =
+    let fusion_values: FusionTensor<FusionCubeRuntime<R>> =
         try_cast_primitive::<B, _>(prim_values)?;
     let fusion_client = fusion_values.client.clone();
     let values = fusion_client.resolve_tensor_float::<CubeBackend<R, f32, i32, BT>>(fusion_values);
@@ -195,9 +170,9 @@ fn percentile_thresholds_cubecl_runtime<R: CubeRuntime>(
         &client,
         cube_count,
         cube_dim,
-        values.as_tensor_arg(1),
-        output.as_tensor_arg(1),
-        ScalarArg::new(quantile),
+        values.clone().into_tensor_arg(),
+        output.clone().into_tensor_arg(),
+        quantile,
     );
 
     output

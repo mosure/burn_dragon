@@ -3,7 +3,7 @@
 mod prelude;
 
 pub mod backend;
-pub(crate) mod continual_backprop;
+mod continual_backprop;
 pub mod profile;
 #[cfg(feature = "rerun")]
 pub mod rerun;
@@ -14,6 +14,8 @@ pub mod utils;
 
 #[allow(unused_imports)]
 pub use backend::*;
+#[allow(unused_imports)]
+pub use continual_backprop::*;
 #[allow(unused_imports)]
 pub use profile::*;
 #[cfg(feature = "rerun")]

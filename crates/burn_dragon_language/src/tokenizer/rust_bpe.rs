@@ -4,8 +4,8 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow};
+use burn_dragon_tokenizer::Tokenizer as RustBpeInner;
 use fancy_regex::Regex;
-use rustbpe::Tokenizer as RustBpeInner;
 use serde::{Deserialize, Serialize};
 
 use super::Tokenizer;
@@ -32,7 +32,7 @@ impl RustBpeTokenizer {
         pad: Option<u32>,
         unk: Option<u32>,
     ) -> Result<Self> {
-        let pattern = pattern.unwrap_or(rustbpe::GPT4_PATTERN);
+        let pattern = pattern.unwrap_or(burn_dragon_tokenizer::GPT4_PATTERN);
         let inner = RustBpeInner::new_with_pattern(pattern)
             .map_err(|err| anyhow!("failed to compile rustbpe pattern: {err}"))?;
         Ok(Self::from_inner(

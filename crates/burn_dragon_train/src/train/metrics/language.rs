@@ -41,6 +41,7 @@ impl<B: BackendTrait> LossValue<B> {
     }
 }
 
+#[derive(Clone)]
 pub struct LanguageModelTrainItem<B: AutodiffBackend> {
     loss: Tensor<B, 1>,
 }

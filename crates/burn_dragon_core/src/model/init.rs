@@ -4,6 +4,7 @@ use burn::module::{
 };
 use burn::tensor::backend::{AutodiffBackend, Backend};
 use burn::tensor::{Distribution as TensorDistribution, Tensor, TensorData};
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 
 const CONTROLLED_INIT_STD_CAP: f64 = 0.02;
@@ -725,9 +726,8 @@ impl<'a> BdhInitializer<'a> {
                     .powf_scalar(2.0)
                     .mean()
                     .sqrt()
-                    .clamp_min(1.0e-6)
-                    .into_scalar();
-                gains.div_scalar(rms)
+                    .clamp_min(1.0e-6);
+                gains.div(rms)
             }
         }
     }
@@ -753,9 +753,8 @@ impl<'a> BdhInitializer<'a> {
                     .powf_scalar(2.0)
                     .mean()
                     .sqrt()
-                    .clamp_min(1.0e-6)
-                    .into_scalar();
-                gains.div_scalar(rms)
+                    .clamp_min(1.0e-6);
+                gains.div(rms.reshape([1, 1]))
             }
         }
     }
@@ -963,12 +962,21 @@ fn make_semi_orthogonal_values<B: Backend>(
 }
 
 fn sample_orthonormal_block<B: Backend>(size: usize, device: &B::Device) -> Vec<f32> {
-    let samples =
-        Tensor::<B, 2>::random([size, size], TensorDistribution::Normal(0.0, 1.0), device)
-            .to_data()
-            .convert::<f32>()
-            .into_vec::<f32>()
-            .expect("orthogonal init samples");
+    let _ = device;
+    let mut rng = rand::thread_rng();
+    let mut samples = Vec::with_capacity(size * size);
+    while samples.len() < size * size {
+        let u1 = rng
+            .r#gen::<f64>()
+            .clamp(f64::MIN_POSITIVE, 1.0 - f64::EPSILON);
+        let u2 = rng.r#gen::<f64>();
+        let radius = (-2.0 * u1.ln()).sqrt();
+        let theta = 2.0 * std::f64::consts::PI * u2;
+        samples.push((radius * theta.cos()) as f32);
+        if samples.len() < size * size {
+            samples.push((radius * theta.sin()) as f32);
+        }
+    }
     orthonormalize_columns(&samples, size)
 }
 

@@ -1,0 +1,412 @@
+name: deploy burn_dragon_p2p aws
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: GitHub environment suffix to deploy
+        required: true
+        default: production
+        type: choice
+        options:
+          - staging
+          - production
+      terraform_workspace:
+        description: Terraform workspace name
+        required: true
+        default: mainnet
+        type: string
+      auth_connector_kind:
+        description: Optional auth connector kind override. Leave empty to use the GitHub environment variable, or default to github. Supported values: github, oidc, oauth, static, external.
+        required: false
+        default: ""
+        type: string
+      github_admin_logins:
+        description: Comma-separated GitHub username handles granted admin session rights when auth_connector_kind resolves to github. Leave empty to default to the triggering GitHub account.
+        required: false
+        default: ""
+        type: string
+      climbmix_browser_dataset_base_url:
+        description: Optional public base URL for the full browser ClimbMix shard pool. The workflow publishes `${base_url}/fetch-manifest.json` into the initial ClimbMix browser profile when set.
+        required: false
+        default: ""
+        type: string
+      force_replace_bootstrap:
+        description: Replace the EC2 bootstrap host during apply. This is destructive to host-local bootstrap/publication state.
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: deploy-burn-dragon-p2p-${{ github.event.inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: burn-dragon-p2p-${{ github.event.inputs.environment }}
+    env:
+      TF_ROOT: crates/burn_dragon_p2p/deploy/terraform/aws
+      DEPLOY_ENVIRONMENT: ${{ github.event.inputs.environment }}
+      TF_WORKSPACE_NAME: ${{ github.event.inputs.terraform_workspace }}
+      AUTH_CLIENT_ID: ${{ secrets.BURN_DRAGON_P2P_AUTH_CLIENT_ID }}
+      AUTH_CLIENT_SECRET: ${{ secrets.BURN_DRAGON_P2P_AUTH_CLIENT_SECRET }}
+      GITHUB_CLIENT_ID: ${{ secrets.BURN_DRAGON_P2P_GITHUB_CLIENT_ID }}
+      GITHUB_CLIENT_SECRET: ${{ secrets.BURN_DRAGON_P2P_GITHUB_CLIENT_SECRET }}
+
+    steps:
+      - name: checkout repository
+        uses: actions/checkout@v4
+
+      - name: resolve deployment settings
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          stack_name="${{ vars.BURN_DRAGON_P2P_STACK_NAME }}"
+          if [ -z "$stack_name" ]; then
+            stack_name="burn-dragon-p2p-${DEPLOY_ENVIRONMENT}"
+          fi
+
+          aws_region="${{ vars.BURN_DRAGON_P2P_AWS_REGION }}"
+          aws_role_arn="${{ vars.BURN_DRAGON_P2P_AWS_ROLE_ARN }}"
+          edge_domain_name="${{ vars.BURN_DRAGON_P2P_EDGE_DOMAIN_NAME }}"
+          route53_zone_name="${{ vars.BURN_DRAGON_P2P_ROUTE53_ZONE_NAME }}"
+          network_id="${{ vars.BURN_DRAGON_P2P_NETWORK_ID }}"
+          project_family_id="${{ vars.BURN_DRAGON_P2P_PROJECT_FAMILY_ID }}"
+          study_id="${{ vars.BURN_DRAGON_P2P_STUDY_ID }}"
+          release_train_hash="${{ vars.BURN_DRAGON_P2P_RELEASE_TRAIN_HASH }}"
+          auth_connector_kind_input="${{ github.event.inputs.auth_connector_kind }}"
+          auth_connector_kind_var="${{ vars.BURN_DRAGON_P2P_AUTH_CONNECTOR_KIND }}"
+          auth_authority_name="${{ vars.BURN_DRAGON_P2P_AUTH_AUTHORITY_NAME }}"
+          auth_principals_json="${{ vars.BURN_DRAGON_P2P_AUTH_PRINCIPALS_JSON }}"
+          auth_authorize_base_url="${{ vars.BURN_DRAGON_P2P_AUTH_AUTHORIZE_BASE_URL }}"
+          auth_exchange_url="${{ vars.BURN_DRAGON_P2P_AUTH_EXCHANGE_URL }}"
+          auth_token_url="${{ vars.BURN_DRAGON_P2P_AUTH_TOKEN_URL }}"
+          auth_api_base_url="${{ vars.BURN_DRAGON_P2P_AUTH_API_BASE_URL }}"
+          auth_userinfo_url="${{ vars.BURN_DRAGON_P2P_AUTH_USERINFO_URL }}"
+          auth_refresh_url="${{ vars.BURN_DRAGON_P2P_AUTH_REFRESH_URL }}"
+          auth_revoke_url="${{ vars.BURN_DRAGON_P2P_AUTH_REVOKE_URL }}"
+          auth_jwks_url="${{ vars.BURN_DRAGON_P2P_AUTH_JWKS_URL }}"
+          auth_oidc_issuer="${{ vars.BURN_DRAGON_P2P_AUTH_OIDC_ISSUER }}"
+          auth_oauth_provider="${{ vars.BURN_DRAGON_P2P_AUTH_OAUTH_PROVIDER }}"
+          auth_external_authority="${{ vars.BURN_DRAGON_P2P_AUTH_EXTERNAL_AUTHORITY }}"
+          auth_external_trusted_principal_header="${{ vars.BURN_DRAGON_P2P_AUTH_EXTERNAL_TRUSTED_PRINCIPAL_HEADER }}"
+          auth_external_trusted_internal_only="${{ vars.BURN_DRAGON_P2P_AUTH_EXTERNAL_TRUSTED_INTERNAL_ONLY }}"
+          github_required_org="${{ vars.BURN_DRAGON_P2P_GITHUB_REQUIRED_ORG }}"
+          github_required_team="${{ vars.BURN_DRAGON_P2P_GITHUB_REQUIRED_TEAM }}"
+          github_required_repo="${{ vars.BURN_DRAGON_P2P_GITHUB_REQUIRED_REPO }}"
+          github_admin_required_repo_permission="${{ vars.BURN_DRAGON_P2P_GITHUB_ADMIN_REQUIRED_REPO_PERMISSION }}"
+          github_admin_logins_input="${{ github.event.inputs.github_admin_logins }}"
+          github_admin_logins_var="${{ vars.BURN_DRAGON_P2P_GITHUB_ADMIN_LOGINS }}"
+          climbmix_dataset_base_url_input="${{ github.event.inputs.climbmix_browser_dataset_base_url }}"
+          climbmix_dataset_base_url_var="${{ vars.BURN_DRAGON_P2P_CLIMBMIX_BROWSER_DATASET_BASE_URL }}"
+          bootstrap_git_ref="${{ vars.BURN_DRAGON_P2P_BOOTSTRAP_GIT_REF }}"
+          instance_type="${{ vars.BURN_DRAGON_P2P_INSTANCE_TYPE }}"
+          root_volume_size_gib="${{ vars.BURN_DRAGON_P2P_ROOT_VOLUME_SIZE_GIB }}"
+
+          : "${aws_region:?missing BURN_DRAGON_P2P_AWS_REGION}"
+          : "${aws_role_arn:?missing BURN_DRAGON_P2P_AWS_ROLE_ARN}"
+          : "${edge_domain_name:?missing BURN_DRAGON_P2P_EDGE_DOMAIN_NAME}"
+          : "${route53_zone_name:?missing BURN_DRAGON_P2P_ROUTE53_ZONE_NAME}"
+          : "${network_id:?missing BURN_DRAGON_P2P_NETWORK_ID}"
+          : "${project_family_id:?missing BURN_DRAGON_P2P_PROJECT_FAMILY_ID}"
+          : "${study_id:?missing BURN_DRAGON_P2P_STUDY_ID}"
+          : "${release_train_hash:?missing BURN_DRAGON_P2P_RELEASE_TRAIN_HASH}"
+          : "${bootstrap_git_ref:?missing BURN_DRAGON_P2P_BOOTSTRAP_GIT_REF}"
+
+          secret_parameter_prefix="/${stack_name}/${TF_WORKSPACE_NAME}/bootstrap"
+          auth_connector_kind="$auth_connector_kind_input"
+          if [ -z "$auth_connector_kind" ]; then
+            auth_connector_kind="$auth_connector_kind_var"
+          fi
+          if [ -z "$auth_connector_kind" ]; then
+            auth_connector_kind="github"
+          fi
+          auth_connector_kind="$(printf '%s' "$auth_connector_kind" | tr '[:upper:]' '[:lower:]' | xargs)"
+          case "$auth_connector_kind" in
+            github|oidc|oauth|static|external) ;;
+            *)
+              echo "unsupported auth connector kind: $auth_connector_kind" >&2
+              exit 1
+              ;;
+          esac
+          if [ -z "$auth_authority_name" ]; then
+            auth_authority_name="burn-dragon-auth"
+          fi
+          if [ -z "$auth_principals_json" ]; then
+            auth_principals_json="[]"
+          fi
+          if [ -z "$auth_external_trusted_principal_header" ]; then
+            auth_external_trusted_principal_header="x-forwarded-user"
+          fi
+          if [ -z "$auth_external_trusted_internal_only" ]; then
+            auth_external_trusted_internal_only="true"
+          fi
+
+          resolved_auth_client_id="$AUTH_CLIENT_ID"
+          resolved_auth_client_secret="$AUTH_CLIENT_SECRET"
+          if [ "$auth_connector_kind" = "github" ]; then
+            if [ -z "$resolved_auth_client_id" ]; then
+              resolved_auth_client_id="$GITHUB_CLIENT_ID"
+            fi
+            if [ -z "$resolved_auth_client_secret" ]; then
+              resolved_auth_client_secret="$GITHUB_CLIENT_SECRET"
+            fi
+          fi
+
+          github_admin_logins="$github_admin_logins_input"
+          if [ -z "$github_admin_logins" ]; then
+            github_admin_logins="$github_admin_logins_var"
+          fi
+          if [ "$auth_connector_kind" = "github" ] && [ -z "$github_admin_logins" ]; then
+            github_admin_logins="${{ github.actor }}"
+          fi
+          climbmix_dataset_base_url="$climbmix_dataset_base_url_input"
+          if [ -z "$climbmix_dataset_base_url" ]; then
+            climbmix_dataset_base_url="$climbmix_dataset_base_url_var"
+          fi
+
+          admin_logins_json="$(
+            python3 - "$github_admin_logins" <<'PY'
+import json
+import sys
+
+raw = sys.argv[1]
+seen = set()
+values = []
+for token in raw.replace("\n", ",").split(","):
+    login = token.strip().lower()
+    if not login or login in seen:
+        continue
+    seen.add(login)
+    values.append(login)
+print(json.dumps(values))
+PY
+          )"
+          admin_logins_csv="$(
+            python3 - "$admin_logins_json" <<'PY'
+import json
+import sys
+print(",".join(json.loads(sys.argv[1])))
+PY
+          )"
+
+          if [ "$auth_connector_kind" = "github" ]; then
+            : "${github_required_org:?missing BURN_DRAGON_P2P_GITHUB_REQUIRED_ORG}"
+            : "${github_required_repo:?missing BURN_DRAGON_P2P_GITHUB_REQUIRED_REPO}"
+            : "${admin_logins_csv:?no admin logins resolved for github deployment}"
+            : "${resolved_auth_client_id:?missing BURN_DRAGON_P2P_AUTH_CLIENT_ID or BURN_DRAGON_P2P_GITHUB_CLIENT_ID secret}"
+            : "${resolved_auth_client_secret:?missing BURN_DRAGON_P2P_AUTH_CLIENT_SECRET or BURN_DRAGON_P2P_GITHUB_CLIENT_SECRET secret}"
+          elif [ "$auth_connector_kind" = "oidc" ] || [ "$auth_connector_kind" = "oauth" ]; then
+            : "${resolved_auth_client_id:?missing BURN_DRAGON_P2P_AUTH_CLIENT_ID secret}"
+            : "${resolved_auth_client_secret:?missing BURN_DRAGON_P2P_AUTH_CLIENT_SECRET secret}"
+          fi
+
+          if [ "$auth_connector_kind" = "oidc" ] && [ -z "$auth_oidc_issuer" ]; then
+            echo "missing BURN_DRAGON_P2P_AUTH_OIDC_ISSUER for oidc deployment" >&2
+            exit 1
+          fi
+          if [ "$auth_connector_kind" = "oauth" ] && [ -z "$auth_oauth_provider" ]; then
+            echo "missing BURN_DRAGON_P2P_AUTH_OAUTH_PROVIDER for oauth deployment" >&2
+            exit 1
+          fi
+          if [ "$auth_connector_kind" = "external" ] && [ -z "$auth_external_authority" ]; then
+            echo "missing BURN_DRAGON_P2P_AUTH_EXTERNAL_AUTHORITY for external deployment" >&2
+            exit 1
+          fi
+
+          if [ "$auth_connector_kind" != "github" ] && [ -n "$github_admin_logins_input$github_admin_logins_var" ]; then
+            echo "github_admin_logins are ignored because auth_connector_kind=$auth_connector_kind"
+          fi
+
+          {
+            echo "AWS_REGION=$aws_region"
+            echo "AWS_ROLE_ARN=$aws_role_arn"
+            echo "STACK_NAME=$stack_name"
+            echo "EDGE_DOMAIN_NAME=$edge_domain_name"
+            echo "ROUTE53_ZONE_NAME=$route53_zone_name"
+            echo "SECRET_PARAMETER_PREFIX=$secret_parameter_prefix"
+            echo "TF_VAR_aws_region=$aws_region"
+            echo "TF_VAR_stack_name=$stack_name"
+            echo "TF_VAR_environment_name=${DEPLOY_ENVIRONMENT}"
+            echo "TF_VAR_route53_zone_name=$route53_zone_name"
+            echo "TF_VAR_edge_domain_name=$edge_domain_name"
+            echo "TF_VAR_secret_parameter_prefix=$secret_parameter_prefix"
+            echo "TF_VAR_network_id=$network_id"
+            echo "TF_VAR_project_family_id=$project_family_id"
+            echo "TF_VAR_study_id=$study_id"
+            echo "TF_VAR_release_train_hash=$release_train_hash"
+            echo "TF_VAR_bootstrap_git_ref=$bootstrap_git_ref"
+            echo "AUTH_CONNECTOR_KIND=$auth_connector_kind"
+            echo "TF_VAR_auth_connector_kind=$auth_connector_kind"
+            echo "TF_VAR_auth_authority_name=$auth_authority_name"
+          } >>"$GITHUB_ENV"
+          {
+            echo "TF_VAR_auth_principals_json<<__AUTH_PRINCIPALS_JSON__"
+            printf '%s\n' "$auth_principals_json"
+            echo "__AUTH_PRINCIPALS_JSON__"
+          } >>"$GITHUB_ENV"
+
+          if [ "$auth_connector_kind" = "github" ]; then
+            {
+              echo "TF_VAR_github_required_org=$github_required_org"
+              echo "TF_VAR_github_required_team=$github_required_team"
+              echo "TF_VAR_github_required_repo=$github_required_repo"
+              echo "TF_VAR_github_admin_logins=$admin_logins_json"
+              echo "ADMIN_LOGINS_CSV=$admin_logins_csv"
+            } >>"$GITHUB_ENV"
+          fi
+
+          if [ -n "$auth_authorize_base_url" ]; then echo "TF_VAR_auth_authorize_base_url=$auth_authorize_base_url" >>"$GITHUB_ENV"; fi
+          if [ -n "$auth_exchange_url" ]; then echo "TF_VAR_auth_exchange_url=$auth_exchange_url" >>"$GITHUB_ENV"; fi
+          if [ -n "$auth_token_url" ]; then echo "TF_VAR_auth_token_url=$auth_token_url" >>"$GITHUB_ENV"; fi
+          if [ -n "$auth_api_base_url" ]; then echo "TF_VAR_auth_api_base_url=$auth_api_base_url" >>"$GITHUB_ENV"; fi
+          if [ -n "$auth_userinfo_url" ]; then echo "TF_VAR_auth_userinfo_url=$auth_userinfo_url" >>"$GITHUB_ENV"; fi
+          if [ -n "$auth_refresh_url" ]; then echo "TF_VAR_auth_refresh_url=$auth_refresh_url" >>"$GITHUB_ENV"; fi
+          if [ -n "$auth_revoke_url" ]; then echo "TF_VAR_auth_revoke_url=$auth_revoke_url" >>"$GITHUB_ENV"; fi
+          if [ -n "$auth_jwks_url" ]; then echo "TF_VAR_auth_jwks_url=$auth_jwks_url" >>"$GITHUB_ENV"; fi
+          if [ -n "$auth_oidc_issuer" ]; then echo "TF_VAR_auth_oidc_issuer=$auth_oidc_issuer" >>"$GITHUB_ENV"; fi
+          if [ -n "$auth_oauth_provider" ]; then echo "TF_VAR_auth_oauth_provider=$auth_oauth_provider" >>"$GITHUB_ENV"; fi
+          if [ -n "$auth_external_authority" ]; then echo "TF_VAR_auth_external_authority=$auth_external_authority" >>"$GITHUB_ENV"; fi
+          if [ -n "$auth_external_trusted_principal_header" ]; then echo "TF_VAR_auth_external_trusted_principal_header=$auth_external_trusted_principal_header" >>"$GITHUB_ENV"; fi
+          if [ -n "$auth_external_trusted_internal_only" ]; then echo "TF_VAR_auth_external_trusted_internal_only=$auth_external_trusted_internal_only" >>"$GITHUB_ENV"; fi
+          if [ -n "$github_admin_required_repo_permission" ]; then
+            echo "TF_VAR_github_admin_required_repo_permission=$github_admin_required_repo_permission" >>"$GITHUB_ENV"
+          fi
+          if [ "$auth_connector_kind" = "github" ] || [ "$auth_connector_kind" = "oidc" ] || [ "$auth_connector_kind" = "oauth" ]; then
+            {
+              echo "AUTH_CLIENT_ID_RESOLVED=$resolved_auth_client_id"
+              echo "AUTH_CLIENT_SECRET_RESOLVED=$resolved_auth_client_secret"
+            } >>"$GITHUB_ENV"
+          fi
+
+          if [ -n "$climbmix_dataset_base_url" ]; then
+            echo "TF_VAR_climbmix_browser_dataset_base_url=$climbmix_dataset_base_url" >>"$GITHUB_ENV"
+          fi
+
+          if [ -n "$instance_type" ]; then
+            echo "TF_VAR_instance_type=$instance_type" >>"$GITHUB_ENV"
+          fi
+
+          if [ -n "$root_volume_size_gib" ]; then
+            echo "TF_VAR_root_volume_size_gib=$root_volume_size_gib" >>"$GITHUB_ENV"
+          fi
+
+      - name: configure aws credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: seed bootstrap auth secrets in ssm parameter store
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${AUTH_CLIENT_ID_RESOLVED:-}" ] || [ -z "${AUTH_CLIENT_SECRET_RESOLVED:-}" ]; then
+            echo "auth connector does not require client credentials; skipping SSM auth secret sync"
+            exit 0
+          fi
+
+          aws ssm put-parameter \
+            --region "$AWS_REGION" \
+            --type SecureString \
+            --overwrite \
+            --name "${SECRET_PARAMETER_PREFIX}/auth_client_id" \
+            --value "$AUTH_CLIENT_ID_RESOLVED"
+
+          aws ssm put-parameter \
+            --region "$AWS_REGION" \
+            --type SecureString \
+            --overwrite \
+            --name "${SECRET_PARAMETER_PREFIX}/auth_client_secret" \
+            --value "$AUTH_CLIENT_SECRET_RESOLVED"
+
+      - name: setup terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.14.8
+
+      - name: terraform fmt check
+        run: terraform -chdir="$TF_ROOT" fmt -check -recursive
+
+      - name: terraform init
+        run: terraform -chdir="$TF_ROOT" init -input=false
+
+      - name: terraform workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          terraform -chdir="$TF_ROOT" workspace select "$TF_WORKSPACE_NAME" || \
+          terraform -chdir="$TF_ROOT" workspace new "$TF_WORKSPACE_NAME"
+
+      - name: terraform validate
+        run: terraform -chdir="$TF_ROOT" validate
+
+      - name: terraform plan
+        shell: bash
+        run: |
+          set -euo pipefail
+          plan_args=(-input=false -out=tfplan)
+          if [ "${{ github.event.inputs.force_replace_bootstrap }}" = "true" ]; then
+            plan_args+=(-replace=aws_instance.bootstrap)
+          fi
+          terraform -chdir="$TF_ROOT" plan "${plan_args[@]}"
+
+      - name: terraform apply
+        run: terraform -chdir="$TF_ROOT" apply -input=false -auto-approve tfplan
+
+      - name: capture outputs
+        id: outputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          edge_url="$(terraform -chdir="$TF_ROOT" output -raw edge_url)"
+          seed_tcp="$(terraform -chdir="$TF_ROOT" output -raw seed_node_tcp_multiaddr)"
+          seed_quic="$(terraform -chdir="$TF_ROOT" output -raw seed_node_quic_multiaddr)"
+          public_ip="$(terraform -chdir="$TF_ROOT" output -raw bootstrap_public_ip)"
+          instance_id="$(terraform -chdir="$TF_ROOT" output -raw bootstrap_instance_id)"
+
+          {
+            echo "edge_url=$edge_url"
+            echo "seed_tcp=$seed_tcp"
+            echo "seed_quic=$seed_quic"
+            echo "public_ip=$public_ip"
+            echo "instance_id=$instance_id"
+          } >>"$GITHUB_OUTPUT"
+
+      - name: wait for browser edge https health
+        shell: bash
+        run: |
+          set -euo pipefail
+          edge_url="${{ steps.outputs.outputs.edge_url }}"
+          for attempt in $(seq 1 40); do
+            if curl --fail --silent --show-error --location "$edge_url/" >/dev/null; then
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "edge did not become healthy: $edge_url" >&2
+          exit 1
+
+      - name: publish workflow summary
+        shell: bash
+        run: |
+          cat >>"$GITHUB_STEP_SUMMARY" <<EOF
+          ## burn_dragon_p2p deployment
+
+          - Environment: \`${DEPLOY_ENVIRONMENT}\`
+          - Terraform workspace: \`${TF_WORKSPACE_NAME}\`
+          - Edge URL: ${{ steps.outputs.outputs.edge_url }}
+          - Seed TCP: \`${{ steps.outputs.outputs.seed_tcp }}\`
+          - Seed QUIC: \`${{ steps.outputs.outputs.seed_quic }}\`
+          - Public IP: \`${{ steps.outputs.outputs.public_ip }}\`
+          - EC2 instance id: \`${{ steps.outputs.outputs.instance_id }}\`
+          - Auth connector: \`${AUTH_CONNECTOR_KIND}\`
+          - GitHub admin logins: \`${ADMIN_LOGINS_CSV:-n/a}\`
+          - Secret prefix: \`${SECRET_PARAMETER_PREFIX}\`
+          EOF

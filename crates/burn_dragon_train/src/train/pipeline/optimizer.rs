@@ -34,6 +34,7 @@ const DEFAULT_MUON_TARGET_MODULES: &[&str] = &[
     "dt_proj_weight",
 ];
 
+#[derive(Clone)]
 pub enum ResolvedOptimizer<B, M>
 where
     B: AutodiffBackend,
@@ -42,6 +43,18 @@ where
     AdamW(OptimizerAdaptor<AdamW, M, B>),
     BitNetAdamW(OptimizerAdaptor<BitNetAdamW, M, B>),
     MuonHybrid(MuonHybridOptimizer<M, B>),
+}
+
+#[derive(Record, Clone)]
+pub struct ResolvedOptimizerRecord<M, B>
+where
+    B: AutodiffBackend,
+    M: AutodiffModule<B>,
+{
+    kind: u8,
+    adamw: Option<<OptimizerAdaptor<AdamW, M, B> as Optimizer<M, B>>::Record>,
+    bitnet_adamw: Option<<OptimizerAdaptor<BitNetAdamW, M, B> as Optimizer<M, B>>::Record>,
+    muon_hybrid: Option<MuonHybridOptimizerRecord<B>>,
 }
 
 #[derive(Clone)]
@@ -353,6 +366,75 @@ where
         self.muon_records = record.muon_records;
         self.fallback_records = record.fallback_records;
         self
+    }
+}
+
+impl<B, M> Optimizer<M, B> for ResolvedOptimizer<B, M>
+where
+    B: AutodiffBackend,
+    M: AutodiffModule<B>,
+{
+    type Record = ResolvedOptimizerRecord<M, B>;
+
+    fn step(&mut self, lr: LearningRate, module: M, grads: GradientsParams) -> M {
+        match self {
+            Self::AdamW(optimizer) => optimizer.step(lr, module, grads),
+            Self::BitNetAdamW(optimizer) => optimizer.step(lr, module, grads),
+            Self::MuonHybrid(optimizer) => optimizer.step(lr, module, grads),
+        }
+    }
+
+    fn step_multi(&mut self, lr: LearningRate, module: M, grads: MultiGradientsParams) -> M {
+        match self {
+            Self::AdamW(optimizer) => optimizer.step_multi(lr, module, grads),
+            Self::BitNetAdamW(optimizer) => optimizer.step_multi(lr, module, grads),
+            Self::MuonHybrid(optimizer) => optimizer.step_multi(lr, module, grads),
+        }
+    }
+
+    fn to_record(&self) -> Self::Record {
+        match self {
+            Self::AdamW(optimizer) => ResolvedOptimizerRecord {
+                kind: 0,
+                adamw: Some(optimizer.to_record()),
+                bitnet_adamw: None,
+                muon_hybrid: None,
+            },
+            Self::BitNetAdamW(optimizer) => ResolvedOptimizerRecord {
+                kind: 1,
+                adamw: None,
+                bitnet_adamw: Some(optimizer.to_record()),
+                muon_hybrid: None,
+            },
+            Self::MuonHybrid(optimizer) => ResolvedOptimizerRecord {
+                kind: 2,
+                adamw: None,
+                bitnet_adamw: None,
+                muon_hybrid: Some(optimizer.to_record()),
+            },
+        }
+    }
+
+    fn load_record(self, record: Self::Record) -> Self {
+        match (self, record.kind) {
+            (Self::AdamW(optimizer), 0) => {
+                Self::AdamW(optimizer.load_record(record.adamw.expect("adamw optimizer record")))
+            }
+            (Self::BitNetAdamW(optimizer), 1) => Self::BitNetAdamW(
+                optimizer.load_record(record.bitnet_adamw.expect("bitnet optimizer record")),
+            ),
+            (Self::MuonHybrid(optimizer), 2) => Self::MuonHybrid(
+                optimizer.load_record(record.muon_hybrid.expect("muon hybrid optimizer record")),
+            ),
+            (variant, kind) => panic!(
+                "resolved optimizer record kind {kind} does not match optimizer variant {}",
+                match variant {
+                    Self::AdamW(_) => "adamw",
+                    Self::BitNetAdamW(_) => "bitnet_adamw",
+                    Self::MuonHybrid(_) => "muon_hybrid",
+                }
+            ),
+        }
     }
 }
 

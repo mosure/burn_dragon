@@ -203,21 +203,23 @@ where
         return train_with_process_group_scheduler(env, model, optimizer, scheduler);
     }
     let training_strategy = match env.parallel_runtime.mode {
-        ParallelismKind::Single => LearningStrategy::SingleDevice(env.device.clone()),
+        ParallelismKind::Single => {
+            LearningStrategy::Default(ExecutionStrategy::single(env.device.clone()))
+        }
         ParallelismKind::Ddp => {
             #[cfg(feature = "ddp")]
             {
-                LearningStrategy::DistributedDataParallel {
-                    devices: env.devices.to_vec(),
-                    config: resolve_collective_config(env.parallel_runtime, env.parallel_config)?,
-                }
+                LearningStrategy::Default(ExecutionStrategy::ddp(
+                    env.devices.to_vec(),
+                    resolve_collective_config(env.parallel_runtime, env.parallel_config)?,
+                ))
             }
             #[cfg(not(feature = "ddp"))]
             {
-                LearningStrategy::MultiDevice(
+                LearningStrategy::Default(ExecutionStrategy::multi(
                     env.devices.to_vec(),
                     MultiDeviceOptim::OptimMainDevice,
-                )
+                ))
             }
         }
         mode => {

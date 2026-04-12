@@ -1,5 +1,4 @@
 use crate::checkpoint::{RUN_DIR_ENV, RUN_NAME_ENV};
-use crate::train::continual_backprop::ContinualBackpropAdamWOptimizer;
 use crate::train::prelude::*;
 use crate::train::schedule::{
     TrainEnvironment, resolve_lr_scheduler, resolve_train_schedule, train_with_scheduler,
@@ -8,6 +7,7 @@ use crate::train::startup_autotune::{
     resolve_gradient_accumulation_steps, resolve_startup_batch_size,
 };
 use crate::train::utils::{build_training_execution_form, write_run_config};
+use crate::train::{resolve_language_optimizer, validate_language_continual_backprop};
 use crate::write_training_snapshot;
 use burn_dragon_core::SequenceMemorySystem;
 use serde::Serialize;
@@ -782,15 +782,7 @@ where
         &device,
         backend_name,
     )?;
-    anyhow::ensure!(
-        !training.continual_backprop.enabled || parallel_runtime.world_size == 1,
-        "training.continual_backprop currently requires single-process training"
-    );
-    anyhow::ensure!(
-        !training.continual_backprop.enabled
-            || base_model.supports_shared_lowrank_continual_backprop(),
-        "training.continual_backprop currently requires rollout_fast_steps_per_slow_step = 1 and y_neuron_recurrence disabled"
-    );
+    validate_language_continual_backprop(training, &base_model, parallel_runtime.world_size)?;
     let prepared_model = LanguageTrainModel::new(base_model)
         .with_pipeline_plan(pipeline_plan.clone())
         .with_tbptt_chunk_size(training.tbptt_chunk_size)
@@ -798,23 +790,12 @@ where
         .with_continual_backprop(&training.continual_backprop)
         .with_gradient_scale_schedule(training, total_steps);
     let mut model = Some(prepared_model);
-    let mut cbp_optim = if training.continual_backprop.enabled {
-        Some(ContinualBackpropAdamWOptimizer::new(
-            optimizer_cfg,
-            training.continual_backprop.clone(),
-            fresh_model,
-        )?)
-    } else {
-        None
-    };
-    let mut optim = if cbp_optim.is_none() {
-        Some(resolve_optimizer::<B, LanguageTrainModel<B>>(
-            optimizer_cfg,
-            total_steps,
-        )?)
-    } else {
-        None
-    };
+    let mut optim = Some(resolve_language_optimizer::<B>(
+        training,
+        optimizer_cfg,
+        total_steps,
+        fresh_model,
+    )?);
     let scheduler_iters = match schedule.source {
         ScheduleSource::Epochs => Some(total_steps),
         ScheduleSource::MaxIters => None,
@@ -912,35 +893,12 @@ where
         valid_loader,
         epochs: total_epochs,
     };
-    let _model = if let Some(optimizer) = cbp_optim.take() {
-        train_with_resolved_scheduler(
-            &context,
-            model.take().expect("model initialized"),
-            optimizer,
-            scheduler,
-        )?
-    } else {
-        match optim.take().expect("optimizer initialized") {
-            ResolvedOptimizer::AdamW(optimizer) => train_with_resolved_scheduler(
-                &context,
-                model.take().expect("model initialized"),
-                optimizer,
-                scheduler,
-            )?,
-            ResolvedOptimizer::BitNetAdamW(optimizer) => train_with_resolved_scheduler(
-                &context,
-                model.take().expect("model initialized"),
-                optimizer,
-                scheduler,
-            )?,
-            ResolvedOptimizer::MuonHybrid(optimizer) => train_with_resolved_scheduler(
-                &context,
-                model.take().expect("model initialized"),
-                optimizer,
-                scheduler,
-            )?,
-        }
-    };
+    let _model = train_with_resolved_scheduler(
+        &context,
+        model.take().expect("model initialized"),
+        optim.take().expect("optimizer initialized"),
+        scheduler,
+    )?;
 
     info!("Training complete on {backend_name}");
 

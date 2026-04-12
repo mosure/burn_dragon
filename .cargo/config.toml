@@ -1,7 +1,7 @@
-# alternatively, `export CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=wasm-server-runner`
-
 [target.wasm32-unknown-unknown]
-runner = "wasm-server-runner"
+# Intentionally leave the runner unset at the workspace level.
+# Use `cargo run -p xtask -- wasm-smoke` for browser wasm tests, or set
+# `CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER` explicitly per invocation.
 rustflags = [
     "--cfg=web_sys_unstable_apis",
     "--cfg=getrandom_backend=\"wasm_js\"",

@@ -1,0 +1,6 @@
+output_dir = "./generated/nca-r1"
+seed = 1337
+name = "burn-dragon-mainnet-nca-r1"
+train_samples = 256
+validation_samples = 64
+chunk_token_capacity = 4096

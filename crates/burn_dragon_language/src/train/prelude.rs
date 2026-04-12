@@ -40,8 +40,9 @@ pub(crate) use burn_collective::{
 pub(crate) use burn_train::checkpoint::{Checkpointer, FileCheckpointer};
 pub(crate) use burn_train::metric::{Adaptor, ItemLazy, LearningRateMetric, LossMetric};
 pub(crate) use burn_train::{
-    InferenceStep as ValidStep, LearningResult as TrainingResult, MultiDeviceOptim,
-    SupervisedTraining, TrainOutput, TrainStep, TrainingStrategy as LearningStrategy,
+    ExecutionStrategy, InferenceStep as ValidStep, LearningResult as TrainingResult,
+    MultiDeviceOptim, SupervisedTraining, TrainOutput, TrainStep,
+    TrainingStrategy as LearningStrategy,
 };
 pub(crate) use tracing::info;
 

@@ -3,7 +3,7 @@ name = "burn_dragon_language"
 description = "Language modeling components for burn_dragon"
 version = "0.5.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.92"
 authors = ["mosure <mitchell@mosure.me>"]
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/mosure/burn_bdh"
@@ -45,9 +45,9 @@ web = ["burn_dragon_core/web"]
 [dependencies]
 burn_dragon_checkpoint = { path = "../burn_dragon_checkpoint", version = "0.5.0", default-features = false, optional = true }
 burn_dragon_core = { path = "../burn_dragon_core", version = "0.5.0", default-features = false }
+burn_dragon_tokenizer = { path = "../burn_dragon_tokenizer", version = "0.5.0" }
 burn_dragon_train = { path = "../burn_dragon_train", version = "0.5.0", default-features = false, optional = true }
 burn_dragon_universality = { path = "../burn_dragon_universality", version = "0.5.0", default-features = false, optional = true }
-rustbpe = { path = "../../vendor/rustbpe" }
 
 anyhow = "1"
 rand = "0.8"
@@ -71,12 +71,12 @@ rerun = { version = "0.30.2", default-features = false, features = ["sdk", "serv
 urlencoding = { version = "2.1", optional = true }
 hashbrown = "0.16"
 
-burn = { version = "0.21.0-pre.2", default-features = false, features = ["fusion", "ndarray", "std", "wgpu"] }
-burn-autodiff = { version = "0.21.0-pre.2", optional = true }
-burn-ndarray = { version = "0.21.0-pre.2", optional = true }
-burn-train = { version = "0.21.0-pre.2", optional = true, default-features = false }
-burn-collective = { version = "0.21.0-pre.2", optional = true }
-burn-cuda = { version = "0.21.0-pre.2", optional = true, default-features = false, features = ["std"] }
+burn = { version = "0.21.0-pre.3", default-features = false, features = ["fusion", "ndarray", "std", "wgpu"] }
+burn-autodiff = { version = "0.21.0-pre.3", optional = true }
+burn-ndarray = { version = "0.21.0-pre.3", optional = true }
+burn-train = { version = "0.21.0-pre.3", optional = true, default-features = false }
+burn-collective = { version = "0.21.0-pre.3", optional = true }
+burn-cuda = { version = "0.21.0-pre.3", optional = true, default-features = false, features = ["std"] }
 
 [lib]
 path = "src/lib.rs"
@@ -84,9 +84,9 @@ crate-type = ["rlib"]
 
 [dev-dependencies]
 criterion = { version = "0.7", features = ["html_reports"] }
-burn-autodiff = "0.21.0-pre.2"
-burn-ndarray = "0.21.0-pre.2"
-burn-wgpu = { version = "0.21.0-pre.2", default-features = false, features = ["fusion", "std"] }
+burn-autodiff = "0.21.0-pre.3"
+burn-ndarray = "0.21.0-pre.3"
+burn-wgpu = { version = "0.21.0-pre.3", default-features = false, features = ["fusion", "std"] }
 tempfile = "3"
 
 [[bench]]
@@ -99,4 +99,9 @@ required-features = ["train"]
 name = "train"
 harness = false
 path = "benches/train.rs"
+required-features = ["train"]
+
+[[bin]]
+name = "inspect_parquet"
+path = "src/bin/inspect_parquet.rs"
 required-features = ["train"]

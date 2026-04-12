@@ -3,7 +3,7 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow};
-use rustbpe::Tokenizer as RustBpeInner;
+use burn_dragon_tokenizer::Tokenizer as RustBpeInner;
 use serde::Deserialize;
 
 use crate::config::NcaTokenizationConfig;

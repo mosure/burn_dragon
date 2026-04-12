@@ -27,7 +27,7 @@ on:
         default: ""
         type: string
       climbmix_browser_dataset_base_url:
-        description: Optional public base URL for the full browser ClimbMix shard pool. The workflow publishes `${base_url}/fetch-manifest.json` into the initial ClimbMix browser profile when set.
+        description: Public base URL for the full browser ClimbMix shard pool. The workflow publishes `${base_url}/fetch-manifest.json` into the initial ClimbMix browser profile.
         required: false
         default: ""
         type: string
@@ -170,6 +170,10 @@ jobs:
           if [ -z "$climbmix_dataset_base_url" ]; then
             climbmix_dataset_base_url="$climbmix_dataset_base_url_var"
           fi
+          if [ -z "$climbmix_dataset_base_url" ]; then
+            echo "missing ClimbMix browser dataset base URL; set BURN_DRAGON_P2P_CLIMBMIX_BROWSER_DATASET_BASE_URL or provide the workflow input" >&2
+            exit 1
+          fi
 
           admin_logins_json="$(
             python3 - "$github_admin_logins" <<'PY'
@@ -285,9 +289,7 @@ PY
             } >>"$GITHUB_ENV"
           fi
 
-          if [ -n "$climbmix_dataset_base_url" ]; then
-            echo "TF_VAR_climbmix_browser_dataset_base_url=$climbmix_dataset_base_url" >>"$GITHUB_ENV"
-          fi
+          echo "TF_VAR_climbmix_browser_dataset_base_url=$climbmix_dataset_base_url" >>"$GITHUB_ENV"
 
           if [ -n "$instance_type" ]; then
             echo "TF_VAR_instance_type=$instance_type" >>"$GITHUB_ENV"

@@ -47,24 +47,6 @@ ${secret_sync_script}
 EOF_SYNC
 chmod 0755 /usr/local/bin/burn-dragon-p2p-sync-secrets
 
-cat >/tmp/burn-dragon-static-datasets.json <<'EOF_DATASETS'
-${static_dataset_files}
-EOF_DATASETS
-
-python3 - <<'PY'
-import base64
-import json
-from pathlib import Path
-
-target_root = Path("/var/lib/burn-p2p/public")
-files = json.loads(Path("/tmp/burn-dragon-static-datasets.json").read_text())
-for relative_path, encoded in files.items():
-    destination = target_root / relative_path
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_bytes(base64.b64decode(encoded))
-PY
-
-rm -f /tmp/burn-dragon-static-datasets.json
 
 cat >/etc/burn-dragon-p2p/bootstrap.json <<'EOF_CONFIG'
 ${bootstrap_config_json}

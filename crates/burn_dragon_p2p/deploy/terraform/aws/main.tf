@@ -142,7 +142,12 @@ locals {
   nca_profile_json      = trimspace(file("${path.module}/../../profiles/nca-r1.profile.json"))
   climbmix_profile = jsondecode(trimspace(file("${path.module}/../../profiles/climbmix-r1.profile.json")))
   climbmix_profile_json = jsonencode(
-    local.climbmix_browser_manifest_url == null ? local.climbmix_profile : merge(
+    local.climbmix_browser_manifest_url == null ? merge(
+      local.climbmix_profile,
+      {
+        browser = null
+      }
+    ) : merge(
       local.climbmix_profile,
       {
         browser = merge(
@@ -159,10 +164,6 @@ locals {
       }
     )
   )
-  static_dataset_files = {
-    for rel_path in fileset("${path.module}/../../datasets", "**") :
-    rel_path => filebase64("${path.module}/../../datasets/${rel_path}")
-  }
 
   contributor_rule = {
     principal_id   = var.github_principal_id
@@ -650,7 +651,6 @@ resource "aws_instance" "bootstrap" {
     caddyfile             = local.caddyfile
     http_port             = var.http_port
     secret_sync_script    = local.secret_sync_script
-    static_dataset_files  = jsonencode(local.static_dataset_files)
   })
 
   tags = merge(local.tags, {

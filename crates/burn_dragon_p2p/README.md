@@ -143,10 +143,9 @@ directly instead of the deterministic fallback.
 The mainnet join flow requires an edge URL from the deployment operator. This README uses `MAINNET_EDGE_URL` as a placeholder for that value.
 
 The deployed network can publish Dragon experiment profiles directly in the directory. When those profiles are present, peers do not need a matching static experiment config on disk.
-The checked-in initial ClimbMix revision publishes a browser shard source at
-`/dragon-datasets/climbmix-pretraining/climbmix-r1/fetch-manifest.json`, which is served by the
-bootstrap edge from the checked-in deploy dataset bundle. Production deploys can override that
-initial manifest URL to point at a full external ClimbMix shard pool without changing peer code.
+The deployed initial ClimbMix revision should point at a full external shard pool base URL. The
+AWS deploy workflow publishes `${base_url}/fetch-manifest.json` into the initial browser profile,
+so browser peers still fetch only the shards they train on without relying on repo-tracked shard blobs.
 When the browser runtime has already persisted an exact training lease for the current assignment,
 the Dragon browser app now picks that lease up automatically before local training starts.
 

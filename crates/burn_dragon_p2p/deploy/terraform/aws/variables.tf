@@ -217,7 +217,7 @@ variable "github_admin_required_repo_permission" {
 }
 
 variable "climbmix_browser_dataset_base_url" {
-  description = "Optional public base URL for the full browser ClimbMix shard pool. When set, the initial ClimbMix browser profile points at the base URL plus /fetch-manifest.json instead of the checked-in bootstrap dataset bundle."
+  description = "Public base URL for the full browser ClimbMix shard pool. A browser-capable deployment should point the initial ClimbMix profile at this external shard pool instead of repo-tracked dataset artifacts."
   type        = string
   default     = ""
 }

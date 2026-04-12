@@ -5,7 +5,7 @@ This folder contains the operator-facing deployment assets for the `burn_dragon_
 - `native-peer.toml.example`: example native peer config
 - `burn-dragon-p2p-native.service`: example native peer systemd unit
 - `profiles/`: checked-in Dragon experiment profile sources and initial published profile payloads
-- `datasets/`: checked-in browser-facing static shard datasets served from the edge
+- `datasets/README.md`: notes on external browser shard pools that stay out of git
 - `terraform/aws`: the checked-in AWS bootstrap/edge deployment
 
 The AWS Terraform root deploys a single-region bootstrap plane for the Dragon network:
@@ -24,11 +24,9 @@ The bootstrap publishes initial Dragon experiment directory entries for:
 - `climbmix-pretraining`
 
 Those entries include Dragon profile metadata, so peers can resolve experiment and training configuration from the network instead of requiring a matching static local config.
-The initial ClimbMix revision also includes a browser shard-manifest source at
-`/dragon-datasets/climbmix-pretraining/climbmix-r1/fetch-manifest.json`, served directly by the
-bootstrap edge from the checked-in dataset bundle in this folder. That checked-in dataset is only a
-bootstrap-compatible starter slice. For a real deployment, point the initial ClimbMix browser
-profile at a full external shard pool so browser peers can fetch only the shards they train on.
+The initial ClimbMix revision is intended to point at a full external browser shard pool. The
+deploy workflow publishes `${base_url}/fetch-manifest.json` into the initial ClimbMix browser
+profile, and browser peers fetch only the shards they train on from that external pool.
 
 ## One-Click GitHub Action
 
@@ -128,9 +126,8 @@ Configure the workflow to target one of those environments. Put the following va
 - `BURN_DRAGON_P2P_ROOT_VOLUME_SIZE_GIB`
   - override encrypted EBS root size, default `256`
 - `BURN_DRAGON_P2P_CLIMBMIX_BROWSER_DATASET_BASE_URL`
-  - optional public base URL for the full browser ClimbMix shard pool. When set, the deploy
-    workflow publishes `${base_url}/fetch-manifest.json` into the initial ClimbMix browser profile
-    instead of the checked-in bootstrap dataset bundle.
+  - public base URL for the full browser ClimbMix shard pool. The deploy workflow publishes
+    `${base_url}/fetch-manifest.json` into the initial ClimbMix browser profile.
 
 ### Required Environment Secrets
 
@@ -221,17 +218,12 @@ The initial directory entries are seeded from:
 - `crates/burn_dragon_p2p/deploy/profiles/nca-r1.profile.json`
 - `crates/burn_dragon_p2p/deploy/profiles/climbmix-r1.profile.json`
 
-The initial browser ClimbMix shard bundle is seeded from:
-
-- `crates/burn_dragon_p2p/deploy/datasets/dragon-datasets/climbmix-pretraining/climbmix-r1/`
-
-If `BURN_DRAGON_P2P_CLIMBMIX_BROWSER_DATASET_BASE_URL` is set in the selected GitHub environment
-or passed as a workflow input, Terraform overrides the initial ClimbMix browser profile so it
-points at the external shard pool instead of this checked-in bundle. Browser peers still fetch
-only the shards they train on. With a runtime-provided training lease they use the exact assigned
-microshards; otherwise they use the bounded deterministic per-peer fallback advertised by the
-profile. The shipped Dragon browser app now reads that persisted browser training lease
-automatically before local training starts.
+`BURN_DRAGON_P2P_CLIMBMIX_BROWSER_DATASET_BASE_URL` must point at the external ClimbMix shard
+pool used for browser training. Terraform publishes `${base_url}/fetch-manifest.json` into the
+initial ClimbMix browser profile. Browser peers still fetch only the shards they train on. With a
+runtime-provided training lease they use the exact assigned microshards; otherwise they use the
+bounded deterministic per-peer fallback advertised by the profile. The shipped Dragon browser app
+now reads that persisted browser training lease automatically before local training starts.
 
 Those profile payloads are derived from the source configs in the same folder. To regenerate a profile locally:
 

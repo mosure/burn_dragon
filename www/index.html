@@ -221,7 +221,7 @@
       const params = new URLSearchParams(window.location.search);
       const modelName = params.get("model_name") || "tiny_shakespeare";
       const modelBase = `./assets/model/${modelName}`;
-      const modelUrl = params.get("model") || `${modelBase}/model.bin`;
+      const modelUrl = params.get("model");
       const vocabUrl = params.get("vocab") || `${modelBase}/vocab.json`;
       const configUrl = params.get("config") || `${modelBase}/config.json`;
       // Config JSON: { "block_size": 256, "max_tokens": -1, "overrides": { "n_layer": 6, ... } }
@@ -258,6 +258,13 @@
       const setStatus = (text) => {
         status.textContent = text;
       };
+
+      if (!modelUrl) {
+        setStatus("missing model url (?model=...)");
+        throw new Error(
+          "missing model url; provide ?model=<url-or-path> and, if needed, matching ?config=... and ?vocab=..."
+        );
+      }
 
       const parseNumber = (value, fallback) => {
         const num = Number(value);
